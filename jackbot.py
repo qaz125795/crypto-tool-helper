@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 import os
 from pathlib import Path
+import pandas as pd
 
 # 配置日誌
 logging.basicConfig(
@@ -53,6 +54,7 @@ if thread_ids_str:
             'funding_rate': 244,
             'long_term_index': 248,
             'liquidity_radar': 3,
+            'altseason_radar': 254,
         }
 else:
     TG_THREAD_IDS = {
@@ -64,6 +66,7 @@ else:
         'funding_rate': int(os.environ.get('TG_THREAD_FUNDING_RATE', 244)),
         'long_term_index': int(os.environ.get('TG_THREAD_LONG_TERM_INDEX', 248)),
         'liquidity_radar': int(os.environ.get('TG_THREAD_LIQUIDITY_RADAR', 3)),
+        'altseason_radar': int(os.environ.get('TG_THREAD_ALTSEASON_RADAR', 254)),
     }
 
 # 其他配置
@@ -1897,6 +1900,308 @@ def run_liquidity_radar_once():
     logger.info(f"流動性獵取雷達完成，推送 {len(events)} 個幣種的極端爆倉事件")
 
 
+# ==================== 9. 山寨爆發雷達（Altcoin Season + RSI + Buy Ratio） ====================
+
+def _coinglass_simple_get(path: str, params: Optional[Dict] = None) -> Optional[Dict]:
+    """簡化版 GET，主要給 Altseason / RSI 這類單次查詢用"""
+    if not CG_API_KEY:
+        logger.error("CG_API_KEY 未設定，無法呼叫 CoinGlass API")
+        return None
+    url = f"{CG_API_BASE}{path}"
+    headers = {
+        "accept": "application/json",
+        "CG-API-KEY": CG_API_KEY,
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params or {}, timeout=10)
+        if resp.status_code != 200:
+            logger.error(f"CoinGlass API HTTP 錯誤 {path}: {resp.status_code} - {resp.text[:200]}")
+            return None
+        data = resp.json()
+        if data.get("code") not in (0, "0", 200, "200", None) and not data.get("success", True):
+            logger.error(f"CoinGlass API 返回錯誤 {path}: {data}")
+            return None
+        return data
+    except Exception as e:
+        logger.error(f"CoinGlass API 請求失敗 {path}: {str(e)}")
+        return None
+
+
+def fetch_altseason_index() -> Optional[float]:
+    """取得山寨季指數 (0-100)"""
+    data = _coinglass_simple_get("/api/index/altcoin-season")
+    if not data:
+        return None
+
+    # 常見結構：data: { value: 52.xxx } 或 data: [ {...} ]
+    val = None
+    if isinstance(data.get("data"), dict):
+        inner = data["data"]
+        for key in ("value", "index", "altcoinSeasonIndex"):
+            if inner.get(key) is not None:
+                val = inner.get(key)
+                break
+    elif isinstance(data.get("data"), list) and data["data"]:
+        inner = data["data"][-1]
+        if isinstance(inner, dict):
+            for key in ("value", "index", "altcoinSeasonIndex"):
+                if inner.get(key) is not None:
+                    val = inner.get(key)
+                    break
+    else:
+        for key in ("value", "index", "altcoinSeasonIndex"):
+            if data.get(key) is not None:
+                val = data.get(key)
+                break
+
+    try:
+        return float(val) if val is not None else None
+    except (TypeError, ValueError):
+        logger.warning(f"Altseason 指數格式異常: {data}")
+        return None
+
+
+def describe_altseason(index_val: Optional[float]) -> str:
+    if index_val is None:
+        return "資料暫缺，暫時無法明確判斷是山寨季還是比特幣季。"
+    if index_val > 75:
+        return "🌋 山寨季狂歡：資金大幅流向山寨幣，波動與風險同步放大，小幣暴漲暴跌機率極高。"
+    if index_val < 25:
+        return "🛡 比特幣季：資金主要圍繞 BTC 等主流資產，山寨普漲可能還需要耐心等待。"
+    return "⚖ 資金在比特幣與山寨之間相對均衡，領頭羊個別表現更重要。"
+
+
+def fetch_rsi_list_df() -> Optional[pd.DataFrame]:
+    """取得 RSI 列表並轉成 DataFrame，方便篩選"""
+    data = _coinglass_simple_get("/api/futures/rsi/list")
+    if not data:
+        return None
+
+    raw = data.get("data") or data.get("list") or []
+    if not isinstance(raw, list) or not raw:
+        logger.warning("RSI 列表為空或格式異常")
+        return None
+
+    df = pd.DataFrame(raw)
+
+    # 嘗試標準欄位名稱
+    possible_symbol_cols = ["symbol", "pair", "coin", "symbolName"]
+    symbol_col = next((c for c in possible_symbol_cols if c in df.columns), None)
+    if not symbol_col:
+        logger.warning("RSI 列表中找不到 symbol 欄位")
+        return None
+    df = df.rename(columns={symbol_col: "symbol"})
+
+    # 嘗試 1h / 4h RSI 欄位
+    rsi_1h_col = next((c for c in df.columns if "1h" in c and "rsi" in c.lower()), None)
+    rsi_4h_col = next((c for c in df.columns if "4h" in c and "rsi" in c.lower()), None)
+
+    # 有些 API 可能用 rsi_h1 / rsi_h4 / rsi_4_hour 等命名，盡量捕捉
+    if not rsi_1h_col:
+        for c in df.columns:
+            cl = c.lower()
+            if "rsi" in cl and ("h1" in cl or "1h" in cl):
+                rsi_1h_col = c
+                break
+    if not rsi_4h_col:
+        for c in df.columns:
+            cl = c.lower()
+            if "rsi" in cl and ("h4" in cl or "4h" in cl):
+                rsi_4h_col = c
+                break
+
+    # 成交額/成交量欄位，用於挑前 50 大
+    vol_cols = [c for c in df.columns if "volume" in c.lower() or "turnover" in c.lower() or "amount" in c.lower()]
+    vol_col = vol_cols[0] if vol_cols else None
+
+    # 建立統一欄位
+    out = pd.DataFrame()
+    out["symbol"] = df["symbol"].astype(str)
+    if rsi_1h_col and rsi_1h_col in df.columns:
+        out["rsi_1h"] = pd.to_numeric(df[rsi_1h_col], errors="coerce")
+    else:
+        out["rsi_1h"] = pd.NA
+    if rsi_4h_col and rsi_4h_col in df.columns:
+        out["rsi_4h"] = pd.to_numeric(df[rsi_4h_col], errors="coerce")
+    else:
+        out["rsi_4h"] = pd.NA
+    if vol_col:
+        out["volume"] = pd.to_numeric(df[vol_col], errors="coerce")
+    else:
+        out["volume"] = pd.NA
+
+    return out
+
+
+def fetch_buy_ratio(symbol: str) -> Optional[float]:
+    """
+    近似計算某幣種的 Buy Ratio（由聚合掛單深度近似，bids / (bids + asks)）
+    使用 /api/futures/orderbook/aggregated-ask-bids-history
+    """
+    data = _coinglass_simple_get(
+        "/api/futures/orderbook/aggregated-ask-bids-history",
+        params={"exchange_list": "Binance", "symbol": symbol, "interval": "h1"},
+    )
+    if not data:
+        return None
+
+    arr = data.get("data") or data.get("list") or []
+    if not isinstance(arr, list) or not arr:
+        return None
+
+    last = arr[-1]
+    if isinstance(last, dict):
+        # 嘗試多種欄位名稱
+        bid_keys = [k for k in last.keys() if "bid" in k.lower()]
+        ask_keys = [k for k in last.keys() if "ask" in k.lower()]
+        bid_val = float(last.get(bid_keys[0]) or 0) if bid_keys else 0.0
+        ask_val = float(last.get(ask_keys[0]) or 0) if ask_keys else 0.0
+    elif isinstance(last, list):
+        # 假設結構 [bids, asks, time] 或 [asks, bids, time]，儘量容錯
+        numeric = [x for x in last if isinstance(x, (int, float))]
+        if len(numeric) >= 2:
+            # 假設第一個是 bids，第二個是 asks
+            bid_val, ask_val = float(numeric[0]), float(numeric[1])
+        else:
+            return None
+    else:
+        return None
+
+    total = bid_val + ask_val
+    if total <= 0:
+        return None
+    return bid_val / total * 100.0  # 轉成百分比
+
+
+def build_altseason_message() -> Optional[str]:
+    """組合山寨爆發雷達訊息"""
+    index_val = fetch_altseason_index()
+    rsi_df = fetch_rsi_list_df()
+    if rsi_df is None:
+        logger.error("無法取得 RSI 列表，放棄推播")
+        return None
+
+    # 只看成交額前 50 大，避免垃圾幣
+    if "volume" in rsi_df.columns and not rsi_df["volume"].isna().all():
+        rsi_df = rsi_df.sort_values("volume", ascending=False).head(50)
+
+    # 優先使用 4h RSI，小白較不容易被短線雜訊洗出去
+    rsi_df = rsi_df.copy()
+    rsi_df["rsi_base"] = pd.to_numeric(rsi_df["rsi_4h"], errors="coerce")
+    # 若 4h 缺失，才退而求其次用 1h
+    mask_missing = rsi_df["rsi_base"].isna() & rsi_df["rsi_1h"].notna()
+    rsi_df.loc[mask_missing, "rsi_base"] = pd.to_numeric(rsi_df.loc[mask_missing, "rsi_1h"], errors="coerce")
+
+    rsi_df = rsi_df.dropna(subset=["rsi_base"])
+
+    # 強勢突破：RSI > 70
+    strong_df = rsi_df[rsi_df["rsi_base"] >= 70].copy()
+    # 超賣反彈：RSI < 30
+    oversold_df = rsi_df[rsi_df["rsi_base"] <= 30].copy()
+
+    # 加入 Buy Ratio 過濾（>55%）
+    def attach_buy_ratio(df: pd.DataFrame) -> pd.DataFrame:
+        ratios = []
+        for sym in df["symbol"]:
+            # Coinglass RSI 列表裡 symbol 可能是 "BTC" 或 "BTCUSDT"，我們先嘗試裸幣，再嘗試去掉 USDT
+            base = sym.replace("USDT", "")
+            ratio = fetch_buy_ratio(base)
+            if ratio is None:
+                ratio = fetch_buy_ratio(sym)
+            ratios.append(ratio)
+            # 控制頻率，避免 API 過載
+            time.sleep(0.8)
+        df = df.copy()
+        df["buy_ratio"] = ratios
+        return df
+
+    if not strong_df.empty:
+        strong_df = attach_buy_ratio(strong_df)
+        strong_df = strong_df.dropna(subset=["buy_ratio"])
+        strong_df = strong_df[strong_df["buy_ratio"] >= 55.0]
+        strong_df = strong_df.sort_values(["rsi_base", "buy_ratio"], ascending=False).head(5)
+
+    if not oversold_df.empty:
+        oversold_df = attach_buy_ratio(oversold_df)
+        oversold_df = oversold_df.dropna(subset=["buy_ratio"])
+        # 超賣反彈可以稍微放寬到 52%
+        oversold_df = oversold_df[oversold_df["buy_ratio"] >= 52.0]
+        oversold_df = oversold_df.sort_values(["rsi_base", "buy_ratio"], ascending=[True, False]).head(5)
+
+    now_str = format_datetime(datetime.now())
+
+    lines: List[str] = []
+    lines.append("🛰️ *【區塊鏈船長 - 山寨爆發雷達】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+
+    # 山寨季指數
+    if index_val is not None:
+        season = "山寨季" if index_val > 50 else "比特幣季"
+        lines.append(f"📅 *當前週期*：{season}")
+        lines.append(f"📈 *山寨季指數*：{index_val:.2f}（0-100）")
+    else:
+        lines.append("📅 *當前週期*：資料暫缺")
+        lines.append("📈 *山寨季指數*：暫無法取得")
+
+    lines.append("")
+    lines.append(describe_altseason(index_val))
+    lines.append("")
+
+    # 強勢突破區
+    lines.append("🔥 *潛力領頭羊（強勢突破）*：")
+    if strong_df is None or strong_df.empty:
+        lines.append("目前沒有符合條件的強勢突破山寨幣。")
+    else:
+        for idx, row in strong_df.iterrows():
+            s = str(row["symbol"])
+            rsi_v = float(row["rsi_base"])
+            br = float(row["buy_ratio"])
+            lines.append(f"{len(lines)-6}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
+    lines.append("")
+
+    # 超賣反彈區
+    lines.append("💎 *超賣反彈機會（抄底參考）*：")
+    if oversold_df is None or oversold_df.empty:
+        lines.append("目前沒有明顯的超賣反彈候選。")
+    else:
+        count = 1
+        for idx, row in oversold_df.iterrows():
+            s = str(row["symbol"])
+            rsi_v = float(row["rsi_base"])
+            br = float(row["buy_ratio"])
+            lines.append(f"{count}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
+            count += 1
+    lines.append("")
+
+    # 提示
+    lines.append("💡 *船長提示*：")
+    if index_val is not None and index_val > 60:
+        lines.append("山寨季指數正在抬升，資金開始加速流向小幣，建議重點關注領頭羊二測與放量突破。")
+    elif index_val is not None and index_val < 40:
+        lines.append("目前仍偏向比特幣季，山寨波動相對受限，建議以主流幣與現貨為主，耐心等待資金輪動。")
+    else:
+        lines.append("資金尚未明顯偏向任何一方，選擇山寨時更要搭配成交量與買入比率，避免追在假突破上。")
+
+    lines.append("")
+    lines.append(f"⏰ 更新時間：{now_str}")
+
+    return "\n".join(lines)
+
+
+def run_altseason_radar_once():
+    """每小時執行一次的山寨爆發雷達主流程"""
+    logger.info("開始執行山寨爆發雷達...")
+    msg = build_altseason_message()
+    if not msg:
+        logger.warning("本次山寨爆發雷達未能產生有效訊息")
+        return
+    thread_id = TG_THREAD_IDS.get("altseason_radar", 0)
+    if not thread_id:
+        logger.warning("未設定 TG_THREAD_ALTSEASON_RADAR，將發送到預設聊天而非特定話題")
+    send_telegram_message(msg, thread_id or int(CHAT_ID or 0), parse_mode="Markdown")
+    logger.info("山寨爆發雷達推播完成")
+
+
 # ==================== 主程序 ====================
 
 if __name__ == "__main__":
@@ -1923,6 +2228,8 @@ if __name__ == "__main__":
             run_long_term_once()
         elif function_name == "liquidity_radar":
             run_liquidity_radar_once()
+        elif function_name == "altseason_radar":
+            run_altseason_radar_once()
         else:
             print("可用的功能:")
             print("  sector_ranking   - 主流板塊排行榜推播")
@@ -1934,6 +2241,7 @@ if __name__ == "__main__":
             print("  long_term_index       - 長線牛熊導航儀（24 小時每 4 小時更新）")
             print("  long_term_index_once  - 長線牛熊導航儀（只執行一次，適合排程）")
             print("  liquidity_radar       - 流動性獵取雷達（極端爆倉彙整）")
+            print("  altseason_radar       - 山寨爆發雷達（Altseason + RSI + Buy Ratio）")
     else:
         print("請指定要執行的功能，例如: python jackbot.py sector_ranking")
 
