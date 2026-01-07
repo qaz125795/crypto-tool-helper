@@ -51,7 +51,8 @@ if thread_ids_str:
             'economic_data': 13,
             'news': 7,
             'funding_rate': 244,
-            'long_term_index': 248
+            'long_term_index': 248,
+            'liquidity_radar': 3,
         }
 else:
     TG_THREAD_IDS = {
@@ -61,7 +62,8 @@ else:
         'economic_data': int(os.environ.get('TG_THREAD_ECONOMIC_DATA', 13)),
         'news': int(os.environ.get('TG_THREAD_NEWS', 7)),
         'funding_rate': int(os.environ.get('TG_THREAD_FUNDING_RATE', 244)),
-        'long_term_index': int(os.environ.get('TG_THREAD_LONG_TERM_INDEX', 248))
+        'long_term_index': int(os.environ.get('TG_THREAD_LONG_TERM_INDEX', 248)),
+        'liquidity_radar': int(os.environ.get('TG_THREAD_LIQUIDITY_RADAR', 3)),
     }
 
 # 其他配置
@@ -1674,6 +1676,215 @@ def run_long_term_once():
     send_telegram_message(message, thread_id, parse_mode="Markdown")
 
 
+# ==================== 8. 流動性獵取雷達（極端清算監控） ====================
+
+LIQ_SYMBOLS = [
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ADA", "TRX", "AVAX", "DOT",
+    "LINK", "NEAR", "MATIC", "SUI", "APT",
+]
+LIQ_EXCHANGE_LIST = "Binance"
+LIQ_REQUEST_DELAY = 1.2  # 秒
+
+
+def get_liquidation_threshold(symbol: str) -> float:
+    """根據幣種回傳極端爆倉門檻（USD）"""
+    if symbol in ("BTC", "ETH"):
+        return 5_000_000.0
+    if symbol in ("SOL", "XRP", "DOGE"):
+        return 1_500_000.0
+    return 800_000.0
+
+
+def fetch_liquidation_data(symbol: str) -> Optional[List[Dict]]:
+    """從 CoinGlass 抓取單一幣種的清算彙總歷史"""
+    if not CG_API_KEY:
+        logger.error("CG_API_KEY 未設定，無法呼叫清算 API")
+        return None
+
+    url = f"{CG_API_BASE}/api/futures/liquidation/aggregated-history"
+    params = {
+        "symbol": symbol,
+        "interval": "1h",
+        "exchange_list": LIQ_EXCHANGE_LIST,
+    }
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json",
+    }
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            logger.warning(f"{symbol} 清算 API 請求失敗，狀態碼: {resp.status_code}")
+            return None
+
+        data = resp.json()
+        if not (data.get("success") is True or data.get("code") in (0, "0")):
+            logger.warning(
+                f"{symbol} 清算 API 返回失敗 - code: {data.get('code')}, msg: {data.get('msg')}"
+            )
+            return None
+
+        data_array = data.get("data") or []
+        if not isinstance(data_array, list):
+            logger.warning(f"{symbol} 清算數據格式異常: {type(data_array)}")
+            return None
+        return data_array
+    except Exception as e:
+        logger.error(f"獲取 {symbol} 清算數據時發生異常: {str(e)}")
+        return None
+
+
+def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Dict]:
+    """處理清算數據，判斷是否達到極端爆倉門檻，返回事件描述"""
+    try:
+        if not data_array:
+            logger.debug(f"{symbol} 清算數據為空")
+            return None
+
+        now_ms = int(time.time() * 1000)
+        twenty_four_hours_ago = now_ms - 24 * 60 * 60 * 1000
+        one_hour_ago = now_ms - 60 * 60 * 1000
+
+        buy_vol_usd_24h = 0.0
+        sell_vol_usd_24h = 0.0
+        buy_vol_usd_1h = 0.0
+        sell_vol_usd_1h = 0.0
+
+        # 從後往前遍歷，累加最近 24 小時與 1 小時的清算
+        for item in reversed(data_array):
+            try:
+                item_time = int(item.get("time") or 0)
+            except (TypeError, ValueError):
+                continue
+
+            long_liq = float(item.get("aggregated_long_liquidation_usd") or 0)
+            short_liq = float(item.get("aggregated_short_liquidation_usd") or 0)
+
+            if item_time >= twenty_four_hours_ago:
+                buy_vol_usd_24h += long_liq
+                sell_vol_usd_24h += short_liq
+
+                if item_time >= one_hour_ago:
+                    buy_vol_usd_1h += long_liq
+                    sell_vol_usd_1h += short_liq
+            else:
+                break
+
+        # 如果 24h 沒數據，用最新一筆頂上
+        if buy_vol_usd_24h == 0 and sell_vol_usd_24h == 0 and data_array:
+            latest = data_array[-1]
+            buy_vol_usd_24h = float(latest.get("aggregated_long_liquidation_usd") or 0)
+            sell_vol_usd_24h = float(latest.get("aggregated_short_liquidation_usd") or 0)
+            buy_vol_usd_1h = buy_vol_usd_24h
+            sell_vol_usd_1h = sell_vol_usd_24h
+
+            logger.debug(f"{symbol} 未找到 24 小時內數據，改用最新一筆清算資料")
+
+        total_vol_usd_24h = buy_vol_usd_24h + sell_vol_usd_24h
+        threshold = get_liquidation_threshold(symbol)
+
+        if total_vol_usd_24h < threshold:
+            logger.debug(
+                f"{symbol} 24h 總清算 {total_vol_usd_24h/10000:.2f} 萬 未達門檻 {threshold/10000:.2f} 萬"
+            )
+            return None
+
+        # 判斷主導清算方向（以過去 1 小時為主）
+        is_long_dom = buy_vol_usd_1h > sell_vol_usd_1h
+        dominant_side = "多單" if is_long_dom else "空單"
+        dominant_amount_1h = buy_vol_usd_1h if is_long_dom else sell_vol_usd_1h
+
+        logger.info(
+            f"{symbol} - 過去1h 清算總額: {(buy_vol_usd_1h + sell_vol_usd_1h)/10000:.2f} 萬 | "
+            f"24h 總額: {total_vol_usd_24h/10000:.2f} 萬"
+        )
+
+        return {
+            "symbol": symbol,
+            "dominantSide": dominant_side,
+            "dominantAmount1h": dominant_amount_1h,
+            "totalVolUsd24h": total_vol_usd_24h,
+            "buyVolUsd24h": buy_vol_usd_24h,
+            "sellVolUsd24h": sell_vol_usd_24h,
+            "buyVolUsd1h": buy_vol_usd_1h,
+            "sellVolUsd1h": sell_vol_usd_1h,
+        }
+    except Exception as e:
+        logger.error(f"處理 {symbol} 清算數據時發生錯誤: {str(e)}")
+        return None
+
+
+def generate_liq_symbol_analysis(event: Dict) -> str:
+    """根據 24h 多空清算對比產出一句分析"""
+    is_long_dominant_24h = event.get("buyVolUsd24h", 0) > event.get("sellVolUsd24h", 0)
+    if is_long_dominant_24h:
+        return "多頭已被大幅清洗，留意技術性反彈與短線抄底機會。"
+    return "空頭已被大幅清洗，留意反向回落與高位補跌風險。"
+
+
+def format_liquidity_consolidated_message(events: List[Dict]) -> str:
+    """將多個清算事件整理成一則 Telegram 推播文字"""
+    now = datetime.now()
+    time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+    lines: List[str] = []
+    lines.append("🎯 *【巨鯨獵殺告警 - 極端爆倉彙整】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📊 本次監控共有 *{len(events)}* 個幣種達到極端爆倉門檻\n")
+
+    # 依 24h 清算額由大到小排序
+    events_sorted = sorted(events, key=lambda e: e.get("totalVolUsd24h", 0), reverse=True)
+
+    for ev in events_sorted:
+        amount_1h = ev["dominantAmount1h"] / 10_000
+        total_24h = ev["totalVolUsd24h"] / 10_000
+        analysis = generate_liq_symbol_analysis(ev)
+
+        lines.append(f"🥊 *【{ev['symbol']}】*")
+        lines.append(
+            f"過去 1 小時內約有 *${amount_1h:.2f} 萬* 美元的 *{ev['dominantSide']}* 被強制平倉（爆倉）。"
+        )
+        lines.append(f"過去 24 小時內總清算金額：約 *${total_24h:.2f} 萬* 美元。")
+        lines.append(f"💡 {analysis}\n")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⏰ 更新時間：{time_str}")
+
+    return "\n".join(lines)
+
+
+def run_liquidity_radar_once():
+    """主流程：流動性獵取雷達（執行一次，適合排程或 HTTP 觸發）"""
+    logger.info(f"開始執行流動性獵取雷達，共 {len(LIQ_SYMBOLS)} 個幣種...")
+
+    events: List[Dict] = []
+
+    for idx, symbol in enumerate(LIQ_SYMBOLS):
+        try:
+            data_array = fetch_liquidation_data(symbol)
+            if data_array is None:
+                continue
+            event = process_liquidation_data(symbol, data_array)
+            if event:
+                events.append(event)
+            # 控制請求節奏，避免觸發頻率限制
+            if idx < len(LIQ_SYMBOLS) - 1:
+                time.sleep(LIQ_REQUEST_DELAY)
+        except Exception as e:
+            logger.error(f"處理 {symbol} 流動性數據時發生錯誤: {str(e)}")
+
+    if not events:
+        logger.info("本次監控無幣種達到極端爆倉門檻")
+        return
+
+    msg = format_liquidity_consolidated_message(events)
+    thread_id = TG_THREAD_IDS.get("liquidity_radar", 3)
+    send_telegram_message(msg, thread_id, parse_mode="Markdown")
+
+    logger.info(f"流動性獵取雷達完成，推送 {len(events)} 個幣種的極端爆倉事件")
+
+
 # ==================== 主程序 ====================
 
 if __name__ == "__main__":
@@ -1698,6 +1909,8 @@ if __name__ == "__main__":
             run_long_term_monitor()
         elif function_name == "long_term_index_once":
             run_long_term_once()
+        elif function_name == "liquidity_radar":
+            run_liquidity_radar_once()
         else:
             print("可用的功能:")
             print("  sector_ranking   - 主流板塊排行榜推播")
@@ -1708,6 +1921,7 @@ if __name__ == "__main__":
             print("  funding_rate     - 資金費率排行榜")
             print("  long_term_index       - 長線牛熊導航儀（24 小時每 4 小時更新）")
             print("  long_term_index_once  - 長線牛熊導航儀（只執行一次，適合排程）")
+            print("  liquidity_radar       - 流動性獵取雷達（極端爆倉彙整）")
     else:
         print("請指定要執行的功能，例如: python jackbot.py sector_ranking")
 
