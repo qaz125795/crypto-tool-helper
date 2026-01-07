@@ -965,23 +965,30 @@ def fetch_tree_news():
         response = requests.get(url, params=params, headers=headers, timeout=10)
         news_list = response.json()
         
+        # 取得前一次發送的最晚時間，避免重複
         last_time = load_json_file(LAST_NEWS_TIME_FILE, 0)
         newest_time = last_time
         
+        # 由舊到新排列發送
         for news in reversed(news_list):
             if news.get('time', 0) > last_time:
                 process_and_send(news, "Tree of Alpha")
                 if news.get('time', 0) > newest_time:
                     newest_time = news.get('time', 0)
         
+        # 更新時間紀錄
         save_json_file(LAST_NEWS_TIME_FILE, newest_time)
         
     except Exception as e:
-        logger.error(f"Tree of Alpha 新聞抓取失敗: {str(e)}")
+        logger.warning(f"Tree of Alpha 新聞抓取失敗: {str(e)}")
 
 
 def fetch_coinglass_articles():
     """抓取 CoinGlass 新聞"""
+    if not CG_API_KEY:
+        logger.warning("請先設定 CoinGlass API 金鑰")
+        return
+    
     url = "https://open-api-v4.coinglass.com/api/article/list"
     headers = {
         "accept": "application/json",
@@ -993,13 +1000,21 @@ def fetch_coinglass_articles():
         result = response.json()
         
         if result.get('code') != '0':
-            logger.error(f"CoinGlass 新聞 API 錯誤: {result}")
+            error_msg = result.get('msg', '')
+            # 如果是速率限制錯誤，只記錄警告，不報錯
+            if 'Too Many Requests' in error_msg or '429' in str(result.get('code')):
+                logger.warning(f"CoinGlass 新聞 API 速率限制，稍後再試: {error_msg}")
+            else:
+                logger.warning(f"CoinGlass 新聞 API 錯誤: {result}")
             return
         
         article_list = result.get('data', [])
+        
+        # 取得已發送的新聞 ID 列表
         sent_ids = load_json_file(COINGLASS_ARTICLE_IDS_FILE, [])
         new_sent_ids = sent_ids.copy()
         
+        # 處理新聞列表（由舊到新）
         for article in reversed(article_list):
             article_id = article.get('id') or article.get('articleId') or article.get('url')
             
@@ -1007,17 +1022,23 @@ def fetch_coinglass_articles():
                 process_and_send_coinglass(article, "article")
                 new_sent_ids.append(article_id)
                 
+                # 只保留最近 1000 條 ID，避免儲存過多
                 if len(new_sent_ids) > 1000:
                     new_sent_ids = new_sent_ids[-1000:]
         
+        # 更新已發送 ID 列表
         save_json_file(COINGLASS_ARTICLE_IDS_FILE, new_sent_ids)
         
     except Exception as e:
-        logger.error(f"CoinGlass 新聞抓取失敗: {str(e)}")
+        logger.warning(f"CoinGlass 新聞抓取失敗: {str(e)}")
 
 
 def fetch_coinglass_newsflash():
     """抓取 CoinGlass 快訊"""
+    if not CG_API_KEY:
+        logger.warning("請先設定 CoinGlass API 金鑰")
+        return
+    
     url = "https://open-api-v4.coinglass.com/api/newsflash/list"
     headers = {
         "accept": "application/json",
@@ -1026,19 +1047,30 @@ def fetch_coinglass_newsflash():
     
     try:
         response = requests.get(url, headers=headers, timeout=10)
+        
+        # 檢查 HTTP 狀態碼
         if response.status_code != 200:
-            logger.error(f"CoinGlass 快訊 API HTTP 錯誤: {response.status_code}")
+            logger.warning(f"CoinGlass 快訊 API HTTP 錯誤: {response.status_code} - {response.text[:200]}")
             return
         
         result = response.json()
+        
         if result.get('code') != '0':
-            logger.error(f"CoinGlass 快訊 API 錯誤: {result}")
+            error_msg = result.get('msg', '')
+            # 如果是速率限制錯誤，只記錄警告，不報錯
+            if 'Too Many Requests' in error_msg or '429' in str(result.get('code')):
+                logger.warning(f"CoinGlass 快訊 API 速率限制，稍後再試: {error_msg}")
+            else:
+                logger.warning(f"CoinGlass 快訊 API 錯誤: {result}")
             return
         
         newsflash_list = result.get('data', [])
+        
+        # 取得已發送的快訊 ID 列表
         sent_ids = load_json_file(COINGLASS_NEWSFLASH_IDS_FILE, [])
         new_sent_ids = sent_ids.copy()
         
+        # 處理快訊列表（由舊到新）
         for newsflash in reversed(newsflash_list):
             newsflash_id = newsflash.get('id') or newsflash.get('newsflashId') or newsflash.get('url')
             
@@ -1046,13 +1078,15 @@ def fetch_coinglass_newsflash():
                 process_and_send_coinglass(newsflash, "newsflash")
                 new_sent_ids.append(newsflash_id)
                 
+                # 只保留最近 1000 條 ID，避免儲存過多
                 if len(new_sent_ids) > 1000:
                     new_sent_ids = new_sent_ids[-1000:]
         
+        # 更新已發送 ID 列表
         save_json_file(COINGLASS_NEWSFLASH_IDS_FILE, new_sent_ids)
         
     except Exception as e:
-        logger.error(f"CoinGlass 快訊抓取失敗: {str(e)}")
+        logger.warning(f"CoinGlass 快訊抓取失敗: {str(e)}")
 
 
 def process_and_send(news: Dict, source: str):
@@ -1109,9 +1143,15 @@ def process_and_send_coinglass(item: Dict, type_str: str):
 
 def fetch_all_news():
     """整合執行函數：同時抓取所有來源的新聞"""
+    # 抓取 Tree of Alpha 新聞
     fetch_tree_news()
+    
+    # 抓取 CoinGlass 新聞（如果遇到速率限制會優雅處理）
     fetch_coinglass_articles()
+    
+    # 抓取 CoinGlass 快訊（如果遇到速率限制會優雅處理）
     fetch_coinglass_newsflash()
+    
     logger.info("所有新聞來源抓取完成")
 
 
