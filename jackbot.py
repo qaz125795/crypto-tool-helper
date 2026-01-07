@@ -1332,23 +1332,78 @@ def fetch_ahr999_index() -> Optional[float]:
     return None
 
 
+def get_rainbow_stage(price: Optional[float], levels: Optional[List[float]]) -> str:
+    """
+    根據當前價格與彩虹圖價格閾值，回傳文字描述。
+    levels: 由低到高的價格閾值列表（通常 9 個）。
+    """
+    if price is None or not levels or len(levels) < 3:
+        return "資料不足，暫無法判斷"
+
+    # 確保升冪排序
+    levels = sorted(levels)
+
+    # 嚴重低估
+    if price < levels[0]:
+        return "基本上是火熱大特價（極度低估區）"
+
+    # 嚴重高估
+    if price > levels[-1]:
+        return "最大泡沫區，建議分批逃頂、降低槓桿"
+
+    # 落在區間中，找到對應區段
+    idx = 0
+    for i in range(len(levels) - 1):
+        if levels[i] <= price < levels[i + 1]:
+            idx = i
+            break
+
+    # 依照所在區段粗分為「低位 / 中位 / 高位」
+    n = len(levels) - 1  # 有 n 個區間
+    low_border = n // 3
+    high_border = (2 * n) // 3
+
+    if idx <= low_border:
+        return "價格位於彩虹圖低位區，適合長線累積/分批加倉"
+    elif idx <= high_border:
+        return "價格位於彩虹圖中間區，屬於合理區間，偏向持有/觀望"
+    else:
+        return "價格位於彩虹圖高位區，市場偏 FOMO/泡沫，需謹慎控管風險"
+
+
 def fetch_rainbow_zone() -> Optional[str]:
-    """取得比特幣彩虹圖當前區間描述"""
+    """取得比特幣彩虹圖當前區間描述（轉成小白友善文字）"""
     result = _coinglass_get("/api/index/bitcoin/rainbow-chart")
-    point = _get_latest_from_data(result) if result else None
-    if not point:
+    if not result:
         return None
-    # 確保 point 是 dict
-    if not isinstance(point, dict):
-        logger.warning(f"彩虹圖資料格式錯誤，預期 dict 但得到 {type(point)}: {point}")
-        return None
-    # 嘗試多種欄位作為「所在區間」名稱
-    for key in ("currentZone", "current_zone", "currentBand", "current_band", "zone", "label", "level"):
-        name = point.get(key)
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-    logger.warning(f"彩虹圖結構未知，原始資料: {point}")
-    return None
+
+    # 嘗試從回應中取得當前 BTC 價格
+    price = None
+    for key in ("current_price", "btc_price", "price"):
+        val = result.get(key)
+        if isinstance(val, (int, float)):
+            price = float(val)
+            break
+
+    data = result.get("data") or result.get("list")
+    levels: Optional[List[float]] = None
+
+    if isinstance(data, list) and data:
+        last_row = data[-1]
+        # 典型結構：一列為 [v1, v2, ..., vN, timestamp] 或 [level1..level9]
+        if isinstance(last_row, list) and len(last_row) >= 4:
+            # 嘗試視最後一個元素為時間戳，其餘為價格閾值
+            numeric_parts = [x for x in last_row if isinstance(x, (int, float))]
+            if len(numeric_parts) >= 4:
+                # 若尚未取得價格，使用最大值當前價格作為近似
+                if price is None:
+                    price = max(numeric_parts)
+                # 取除當前價格外較小的那些作為「層級」，避免把極端最大值當作區間
+                # 這裡簡化為去掉數列中的最大值，其餘視為彩虹層級
+                max_val = max(numeric_parts)
+                levels = [v for v in numeric_parts if v != max_val] or numeric_parts
+
+    return get_rainbow_stage(price, levels)
 
 
 def fetch_pi_cycle_signal() -> bool:
@@ -1375,8 +1430,19 @@ def fetch_pi_cycle_signal() -> bool:
                 return True
 
     # 2) 如果有兩條均線數值，可以粗略判斷是否剛交叉
-    short_ma = point.get("short_ma") or point.get("shortMA") or point.get("fast_ma")
-    long_ma = point.get("long_ma") or point.get("longMA") or point.get("slow_ma")
+    # 你的日誌顯示結構為: {'ma_110': ..., 'ma_350_mu_2': ..., 'price': ..., 'timestamp': ...}
+    short_ma = (
+        point.get("short_ma")
+        or point.get("shortMA")
+        or point.get("fast_ma")
+        or point.get("ma_110")
+    )
+    long_ma = (
+        point.get("long_ma")
+        or point.get("longMA")
+        or point.get("slow_ma")
+        or point.get("ma_350_mu_2")
+    )
     if short_ma is not None and long_ma is not None:
         try:
             short_ma = float(short_ma)
@@ -1396,17 +1462,27 @@ def fetch_latest_fear_greed() -> Optional[int]:
     point = _get_latest_from_data(result) if result else None
     if not point:
         return None
-    # 確保 point 是 dict
-    if not isinstance(point, dict):
-        logger.warning(f"恐懼與貪婪指數資料格式錯誤，預期 dict 但得到 {type(point)}: {point}")
-        return None
-    for key in ("value", "fear_greed", "score", "index"):
-        val = point.get(key)
-        if val is not None:
+
+    # 1) 新版結構：{'data_list': [ ... 整數列表 ... ]}
+    if isinstance(point, dict) and "data_list" in point:
+        data_list = point.get("data_list")
+        if isinstance(data_list, list) and data_list:
             try:
-                return int(float(val))
+                return int(float(data_list[-1]))
             except (TypeError, ValueError):
-                continue
+                logger.warning(f"無法解析恐懼與貪婪 data_list 最後一筆數值: {data_list[-1]}")
+                return None
+
+    # 2) 傳統結構：每筆是一個 dict，含 value / score 等欄位
+    if isinstance(point, dict):
+        for key in ("value", "fear_greed", "score", "index"):
+            val = point.get(key)
+            if val is not None:
+                try:
+                    return int(float(val))
+                except (TypeError, ValueError):
+                    continue
+
     logger.warning(f"恐懼與貪婪指數結構未知，原始資料: {point}")
     return None
 
@@ -1423,6 +1499,19 @@ def _classify_fear_greed(value: Optional[int]) -> str:
     if value <= 80:
         return "貪婪"
     return "極度貪婪"
+
+
+def _describe_fear_greed(value: Optional[int]) -> str:
+    """將恐懼與貪婪指數轉成更有畫面的描述文字"""
+    if value is None:
+        return "指標暫缺，請先觀察 Ahr999 與價格位置。"
+    if value < 25:
+        return "😱 大家都在逃命，情緒極度恐懼，往往是長線投資人慢慢撿便宜的區域。"
+    if 45 <= value <= 55:
+        return "😐 市場情緒接近中性，適合按兵不動、照原本節奏紀律操作即可。"
+    if value > 75:
+        return "🔥 市場極度貪婪，資金情緒瘋狂，請繫好安全帶並隨時準備減倉。"
+    return "情緒尚未到極端區間，建議搭配 Ahr999 與彩虹圖一起綜合判斷。"
 
 
 def _interpret_rainbow_zone(zone: Optional[str]) -> str:
@@ -1511,7 +1600,9 @@ def build_long_term_message() -> Optional[str]:
 
     # 市場情緒
     if fg is not None:
+        mood_desc = _describe_fear_greed(fg)
         msg_lines.append(f"🌡️ *當前市場情緒*：{fg_mood}（指數 {fg}）")
+        msg_lines.append(f"   {mood_desc}")
     else:
         msg_lines.append("🌡️ *當前市場情緒*：資料暫缺")
 
