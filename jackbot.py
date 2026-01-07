@@ -1287,14 +1287,26 @@ def _coinglass_get(path: str, params: Optional[Dict] = None) -> Optional[Dict]:
 
 
 def _get_latest_from_data(result: Dict) -> Optional[Dict]:
-    """從 CoinGlass 回應中取出最新一筆 data"""
+    """從 CoinGlass 回應中取出最新一筆 data，確保返回 dict"""
     if not result:
         return None
     data = result.get("data", result)
     if isinstance(data, list):
-        return data[-1] if data else None
+        if not data:
+            return None
+        # 取最後一個元素，但確保它是 dict
+        last_item = data[-1]
+        if isinstance(last_item, dict):
+            return last_item
+        # 如果最後一個元素不是 dict，嘗試往前找
+        for item in reversed(data):
+            if isinstance(item, dict):
+                return item
+        logger.warning(f"列表中沒有找到 dict 類型的資料: {data}")
+        return None
     if isinstance(data, dict):
         return data
+    logger.warning(f"未知的資料格式: {type(data)} - {data}")
     return None
 
 
@@ -1304,8 +1316,12 @@ def fetch_ahr999_index() -> Optional[float]:
     point = _get_latest_from_data(result) if result else None
     if not point:
         return None
-    # 嘗試多個常見欄位名稱
-    for key in ("ahr999", "ahr999_index", "ahrIndex", "ahr_value"):
+    # 確保 point 是 dict，不是 list
+    if not isinstance(point, dict):
+        logger.warning(f"Ahr999 資料格式錯誤，預期 dict 但得到 {type(point)}: {point}")
+        return None
+    # 嘗試多個常見欄位名稱（包含實際 API 回傳的 ahr999_value）
+    for key in ("ahr999_value", "ahr999", "ahr999_index", "ahrIndex", "ahr_value"):
         val = point.get(key)
         if val is not None:
             try:
@@ -1322,6 +1338,10 @@ def fetch_rainbow_zone() -> Optional[str]:
     point = _get_latest_from_data(result) if result else None
     if not point:
         return None
+    # 確保 point 是 dict
+    if not isinstance(point, dict):
+        logger.warning(f"彩虹圖資料格式錯誤，預期 dict 但得到 {type(point)}: {point}")
+        return None
     # 嘗試多種欄位作為「所在區間」名稱
     for key in ("currentZone", "current_zone", "currentBand", "current_band", "zone", "label", "level"):
         name = point.get(key)
@@ -1336,6 +1356,10 @@ def fetch_pi_cycle_signal() -> bool:
     result = _coinglass_get("/api/index/pi-cycle-indicator")
     point = _get_latest_from_data(result) if result else None
     if not point:
+        return False
+    # 確保 point 是 dict
+    if not isinstance(point, dict):
+        logger.warning(f"Pi 循環指標資料格式錯誤，預期 dict 但得到 {type(point)}: {point}")
         return False
 
     # 1) 直接的布林欄位
@@ -1371,6 +1395,10 @@ def fetch_latest_fear_greed() -> Optional[int]:
     result = _coinglass_get("/api/index/fear-greed-history")
     point = _get_latest_from_data(result) if result else None
     if not point:
+        return None
+    # 確保 point 是 dict
+    if not isinstance(point, dict):
+        logger.warning(f"恐懼與貪婪指數資料格式錯誤，預期 dict 但得到 {type(point)}: {point}")
         return None
     for key in ("value", "fear_greed", "score", "index"):
         val = point.get(key)
