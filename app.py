@@ -19,7 +19,8 @@ from jackbot import (
     fetch_position_change,
     fetch_and_push_economic_data,
     fetch_all_news,
-    fetch_funding_fortune_list
+    fetch_funding_fortune_list,
+    run_long_term_once
 )
 
 app = Flask(__name__)
@@ -38,7 +39,8 @@ def health_check():
             '/economic_data': '重要經濟數據推播',
             '/news': '新聞快訊推播',
             '/funding_rate': '資金費率排行榜',
-            '/run/<task>': '執行指定任務 (sector_ranking, whale_position, etc.)'
+            '/long_term_index': '長線牛熊導航儀',
+            '/run/<task>': '執行指定任務 (sector_ranking, whale_position, long_term_index_once, etc.)'
         }
     }), 200
 
@@ -96,6 +98,15 @@ def run_funding_rate():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/long_term_index', methods=['GET', 'POST'])
+def run_long_term_index():
+    """執行長線牛熊導航儀"""
+    try:
+        run_long_term_once()
+        return jsonify({'status': 'success', 'message': '長線牛熊導航儀執行成功'}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/run/<task>', methods=['GET', 'POST'])
 def run_task(task):
     """通用任務執行端點"""
@@ -105,7 +116,8 @@ def run_task(task):
         'position_change': fetch_position_change,
         'economic_data': fetch_and_push_economic_data,
         'news': fetch_all_news,
-        'funding_rate': fetch_funding_fortune_list
+        'funding_rate': fetch_funding_fortune_list,
+        'long_term_index_once': run_long_term_once
     }
     
     if task not in task_map:
@@ -123,5 +135,6 @@ def run_task(task):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
+    # 在生產環境應該使用 gunicorn，這裡只是開發環境
     app.run(host='0.0.0.0', port=port, debug=False)
 
