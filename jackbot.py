@@ -22,21 +22,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 配置設定 ====================
-# 從環境變量讀取配置，如果不存在則使用預設值（開發環境）
+# 一律從環境變量讀取，避免在程式碼中硬編 API 金鑰等敏感資訊
 
 # CoinGecko API
-CG_GECKO_API_KEY = os.environ.get('CG_GECKO_API_KEY', "CG-RR9dam92RCAGpdV5VF7km59o")
+CG_GECKO_API_KEY = os.getenv('CG_GECKO_API_KEY')
 
 # CoinGlass API
-CG_API_KEY = os.environ.get('CG_API_KEY', "4a2fd6ee6d2e49b091d81f1cfdf6315c")
+CG_API_KEY = os.getenv('CG_API_KEY')
 CG_API_BASE = "https://open-api-v4.coinglass.com"
 
 # Tree of Alpha API
-TREE_API_KEY = os.environ.get('TREE_API_KEY', "131c5449bc84d0b1f9cb17f399c62c21f9f4c06a70d0911e76cfbfa8cdbc070d")
+TREE_API_KEY = os.getenv('TREE_API_KEY')
 
 # Telegram 配置
-TG_TOKEN = os.environ.get('TG_TOKEN', "8522999860:AAEIxFmxNWMCMZSzGJPwHF3JZaIDLbUs2BE")
-CHAT_ID = os.environ.get('CHAT_ID', "-1003611242392")
+TG_TOKEN = os.getenv('TG_TOKEN')
+CHAT_ID = os.getenv('CHAT_ID')
 
 # Telegram Thread IDs (從環境變量讀取 JSON，或使用預設值)
 thread_ids_str = os.environ.get('TG_THREAD_IDS', '')
@@ -50,7 +50,8 @@ if thread_ids_str:
             'position_change': 250,
             'economic_data': 13,
             'news': 7,
-            'funding_rate': 244
+            'funding_rate': 244,
+            'long_term_index': 248
         }
 else:
     TG_THREAD_IDS = {
@@ -59,7 +60,8 @@ else:
         'position_change': int(os.environ.get('TG_THREAD_POSITION_CHANGE', 250)),
         'economic_data': int(os.environ.get('TG_THREAD_ECONOMIC_DATA', 13)),
         'news': int(os.environ.get('TG_THREAD_NEWS', 7)),
-        'funding_rate': int(os.environ.get('TG_THREAD_FUNDING_RATE', 244))
+        'funding_rate': int(os.environ.get('TG_THREAD_FUNDING_RATE', 244)),
+        'long_term_index': int(os.environ.get('TG_THREAD_LONG_TERM_INDEX', 248))
     }
 
 # 其他配置
@@ -1255,6 +1257,304 @@ def fetch_funding_fortune_list():
         logger.error(f"資費榜執行失敗: {str(e)}")
 
 
+# ==================== 7. 長線指標：牛熊導航儀 ====================
+
+def _coinglass_get(path: str, params: Optional[Dict] = None) -> Optional[Dict]:
+    """通用的 CoinGlass GET 請求工具"""
+    if not CG_API_KEY:
+        logger.error("CG_API_KEY 未設定，無法呼叫 CoinGlass API")
+        return None
+    url = f"{CG_API_BASE}{path}"
+    headers = {
+        "accept": "application/json",
+        "CG-API-KEY": CG_API_KEY,
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params or {}, timeout=10)
+        if resp.status_code != 200:
+            logger.error(f"CoinGlass API HTTP 錯誤 {path}: {resp.status_code} - {resp.text[:200]}")
+            return None
+        data = resp.json()
+        # 多數 CoinGlass 介面 code 為 '0' 代表成功
+        code = data.get("code", 0)
+        if code not in [0, "0", 200, "200"]:
+            logger.error(f"CoinGlass API 返回錯誤 {path}: {data}")
+            return None
+        return data
+    except Exception as e:
+        logger.error(f"CoinGlass API 請求失敗 {path}: {str(e)}")
+        return None
+
+
+def _get_latest_from_data(result: Dict) -> Optional[Dict]:
+    """從 CoinGlass 回應中取出最新一筆 data"""
+    if not result:
+        return None
+    data = result.get("data", result)
+    if isinstance(data, list):
+        return data[-1] if data else None
+    if isinstance(data, dict):
+        return data
+    return None
+
+
+def fetch_ahr999_index() -> Optional[float]:
+    """取得比特幣 Ahr999 指標數值"""
+    result = _coinglass_get("/api/index/ahr999")
+    point = _get_latest_from_data(result) if result else None
+    if not point:
+        return None
+    # 嘗試多個常見欄位名稱
+    for key in ("ahr999", "ahr999_index", "ahrIndex", "ahr_value"):
+        val = point.get(key)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+    logger.warning(f"Ahr999 結構未知，原始資料: {point}")
+    return None
+
+
+def fetch_rainbow_zone() -> Optional[str]:
+    """取得比特幣彩虹圖當前區間描述"""
+    result = _coinglass_get("/api/index/bitcoin/rainbow-chart")
+    point = _get_latest_from_data(result) if result else None
+    if not point:
+        return None
+    # 嘗試多種欄位作為「所在區間」名稱
+    for key in ("currentZone", "current_zone", "currentBand", "current_band", "zone", "label", "level"):
+        name = point.get(key)
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    logger.warning(f"彩虹圖結構未知，原始資料: {point}")
+    return None
+
+
+def fetch_pi_cycle_signal() -> bool:
+    """取得 Pi 循環頂部指標是否觸發（均線交叉）"""
+    result = _coinglass_get("/api/index/pi-cycle-indicator")
+    point = _get_latest_from_data(result) if result else None
+    if not point:
+        return False
+
+    # 1) 直接的布林欄位
+    for key in ("isCross", "cross", "signal", "topSignal", "top_signal"):
+        val = point.get(key)
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)) and val in (0, 1):
+            return bool(val)
+        if isinstance(val, str):
+            low = val.lower()
+            if low in ("true", "yes", "y", "1", "cross", "top", "sell"):
+                return True
+
+    # 2) 如果有兩條均線數值，可以粗略判斷是否剛交叉
+    short_ma = point.get("short_ma") or point.get("shortMA") or point.get("fast_ma")
+    long_ma = point.get("long_ma") or point.get("longMA") or point.get("slow_ma")
+    if short_ma is not None and long_ma is not None:
+        try:
+            short_ma = float(short_ma)
+            long_ma = float(long_ma)
+            # 只要短均線高於長均線，視為有頂部風險
+            return short_ma >= long_ma
+        except (TypeError, ValueError):
+            pass
+
+    logger.warning(f"Pi 循環指標結構未知，原始資料: {point}")
+    return False
+
+
+def fetch_latest_fear_greed() -> Optional[int]:
+    """取得最新一筆恐懼與貪婪指數"""
+    result = _coinglass_get("/api/index/fear-greed-history")
+    point = _get_latest_from_data(result) if result else None
+    if not point:
+        return None
+    for key in ("value", "fear_greed", "score", "index"):
+        val = point.get(key)
+        if val is not None:
+            try:
+                return int(float(val))
+            except (TypeError, ValueError):
+                continue
+    logger.warning(f"恐懼與貪婪指數結構未知，原始資料: {point}")
+    return None
+
+
+def _classify_fear_greed(value: Optional[int]) -> str:
+    if value is None:
+        return "未知"
+    if value <= 20:
+        return "極度恐懼"
+    if value <= 40:
+        return "恐懼"
+    if value < 60:
+        return "中性"
+    if value <= 80:
+        return "貪婪"
+    return "極度貪婪"
+
+
+def _interpret_rainbow_zone(zone: Optional[str]) -> str:
+    """把彩虹圖的英文區間翻成小白友善描述"""
+    if not zone:
+        return "資料不足，暫無法判斷"
+    z = zone.lower()
+    if any(k in z for k in ["buy", "cheap", "accumulate", "bargain", "btfd"]):
+        return f"{zone}（還在加倉區，長線偏便宜）"
+    if any(k in z for k in ["hodl", "hold"]):
+        return f"{zone}（長線持有區，耐心抱緊）"
+    if any(k in z for k in ["fomo", "sell", "bubble", "maximum", "overvalued"]):
+        return f"{zone}（偏泡沫/高估區，適合減倉風險控管）"
+    return zone
+
+
+def build_long_term_message() -> Optional[str]:
+    """抓取並分析長線指標，組成 Telegram Markdown 推播內容"""
+    ahr = fetch_ahr999_index()
+    rainbow_zone = fetch_rainbow_zone()
+    pi_trigger = fetch_pi_cycle_signal()
+    fg = fetch_latest_fear_greed()
+
+    if ahr is None and fg is None and not rainbow_zone:
+        logger.error("長線指標資料皆取得失敗，放棄推播")
+        return None
+
+    # Ahr999 區間判斷
+    ahr_status = "未知"
+    ahr_state = "資料不足"
+    if ahr is not None:
+        if ahr < 0.45:
+            ahr_status = "特價抄底期"
+            ahr_state = "抄底中"
+        elif ahr <= 1.2:
+            ahr_status = "定投區"
+            ahr_state = "定投中"
+        else:
+            ahr_status = "高估區"
+            ahr_state = "謹慎觀望"
+
+    # 恐懼貪婪
+    fg_mood = _classify_fear_greed(fg)
+
+    # 彩虹圖中文說明
+    rainbow_desc = _interpret_rainbow_zone(rainbow_zone)
+
+    # 泡沫風險判斷：恐懼貪婪 > 80 且 Pi 觸發
+    bubble_risk = bool(fg is not None and fg > 80 and pi_trigger)
+
+    # 風險提示 / 船長建議
+    risk_text = "資料不足，暫無法評估風險。"
+    advice_text = "請先確認指標資料是否正常取得，再做決策。"
+
+    if ahr is not None:
+        if ahr < 0.45:
+            risk_text = "目前長線風險偏低，屬於「特價抄底期」，但仍需分批布局、嚴守風險。"
+            advice_text = "這裡屬於長線黃金區間，可以考慮分批逢低佈局，比特幣為主、山寨為輔。"
+        elif ahr <= 1.2:
+            risk_text = "目前估值合理偏便宜，「適合定投」區間，風險與報酬相對均衡。"
+            advice_text = "建議啟動/維持固定週期定投策略，不為短期波動情緒化。"
+        else:
+            risk_text = "目前估值偏貴，屬於高估區，若再疊加情緒過熱，需謹慎面對回撤風險。"
+            advice_text = "不建議重倉追高，可考慮只小額試單，或等待更友善的估值再進場。"
+
+    # 疊加情緒與 Pi 頂部信號調整建議
+    if fg is not None:
+        if fg <= 20:
+            risk_text += " 另外，市場處於「極度恐懼」，短線可能還有殺價，但長線通常是機會大於風險。"
+        elif fg >= 80:
+            risk_text += " 同時，市場處於「極度貪婪」，資金情緒過熱，追高風險極大。"
+
+    if bubble_risk:
+        risk_text = "⚠️ 市場進入「泡沫風險期」：情緒極度貪婪且 Pi 循環頂部指標觸發，需嚴防大幅回調。"
+        advice_text = "建議逐步減倉、鎖定獲利，避免高槓桿追高；保留現金與穩定幣，等待更好的風險回報區間。"
+    elif pi_trigger:
+        risk_text += " 另外，Pi 循環頂部指標已觸發，歷史上常對應中長期高位區。"
+        advice_text = "可以考慮調降整體倉位，將高風險山寨幣逐步換回主流或穩定幣。"
+
+    now_str = format_datetime(datetime.now())
+
+    msg_lines = []
+    msg_lines.append("📊 *【區塊鏈船長 - 牛熊導航儀】*")
+    msg_lines.append("━━━━━━━━━━━━━━━━━━━━")
+    msg_lines.append("")
+
+    # 市場情緒
+    if fg is not None:
+        msg_lines.append(f"🌡️ *當前市場情緒*：{fg_mood}（指數 {fg}）")
+    else:
+        msg_lines.append("🌡️ *當前市場情緒*：資料暫缺")
+
+    # Ahr999
+    if ahr is not None:
+        msg_lines.append(f"💰 *Ahr999 指標*：{ahr:.4f}（狀態：{ahr_status}/{ahr_state}）")
+    else:
+        msg_lines.append("💰 *Ahr999 指標*：資料暫缺")
+
+    # 彩虹圖
+    msg_lines.append(f"🌈 *彩虹圖位置*：{rainbow_desc}")
+
+    # 風險提示
+    msg_lines.append("")
+    msg_lines.append(f"🚨 *風險提示*：{risk_text}")
+
+    # 額外提醒
+    alert_parts = []
+    if ahr is not None and ahr < 0.45:
+        alert_parts.append("🔔 Ahr999 < 0.45：觸發「抄底警報」")
+    elif ahr is not None and ahr < 1.2:
+        alert_parts.append("📩 Ahr999 < 1.2：處於「適合定投」區間")
+    if fg is not None and (fg < 20 or fg > 80):
+        alert_parts.append(f"📊 恐懼與貪婪極端區：{fg_mood}（{fg}）")
+    if pi_trigger:
+        alert_parts.append("⏰ Pi 循環頂部指標：*均線交叉，逃頂預警啟動*")
+
+    if alert_parts:
+        msg_lines.append("")
+        msg_lines.append("⚡ *警報狀態一覽*：")
+        for line in alert_parts:
+            msg_lines.append(f"- {line}")
+
+    # 船長建議
+    msg_lines.append("")
+    msg_lines.append(f"💡 *船長建議*：{advice_text}")
+    msg_lines.append("")
+    msg_lines.append(f"⏰ 更新時間：{now_str}")
+
+    return "\n".join(msg_lines)
+
+
+def run_long_term_monitor(interval_hours: int = 4):
+    """24 小時常駐，每 interval_hours 小時抓取並推播一次"""
+    logger.info(f"啟動長線指標監控，每 {interval_hours} 小時更新一次...")
+    interval_sec = max(1, int(interval_hours * 3600))
+    while True:
+        try:
+            message = build_long_term_message()
+            if message:
+                thread_id = TG_THREAD_IDS.get("long_term_index", 0)
+                send_telegram_message(message, thread_id, parse_mode="Markdown")
+            else:
+                logger.warning("本輪長線指標分析失敗，未發送推播")
+        except Exception as e:
+            logger.error(f"長線指標監控執行錯誤: {str(e)}")
+        # 休息 interval
+        time.sleep(interval_sec)
+
+
+def run_long_term_once():
+    """只執行一次長線指標分析與推播（適合排程觸發）"""
+    logger.info("執行單次長線指標推播...")
+    message = build_long_term_message()
+    if not message:
+        logger.warning("本次長線指標分析失敗，未發送推播")
+        return
+    thread_id = TG_THREAD_IDS.get("long_term_index", 248)
+    send_telegram_message(message, thread_id, parse_mode="Markdown")
+
+
 # ==================== 主程序 ====================
 
 if __name__ == "__main__":
@@ -1275,6 +1575,10 @@ if __name__ == "__main__":
             fetch_all_news()
         elif function_name == "funding_rate":
             fetch_funding_fortune_list()
+        elif function_name == "long_term_index":
+            run_long_term_monitor()
+        elif function_name == "long_term_index_once":
+            run_long_term_once()
         else:
             print("可用的功能:")
             print("  sector_ranking   - 主流板塊排行榜推播")
@@ -1283,6 +1587,8 @@ if __name__ == "__main__":
             print("  economic_data    - 重要經濟數據推播")
             print("  news             - 新聞快訊推播")
             print("  funding_rate     - 資金費率排行榜")
+            print("  long_term_index       - 長線牛熊導航儀（24 小時每 4 小時更新）")
+            print("  long_term_index_once  - 長線牛熊導航儀（只執行一次，適合排程）")
     else:
         print("請指定要執行的功能，例如: python jackbot.py sector_ranking")
 
