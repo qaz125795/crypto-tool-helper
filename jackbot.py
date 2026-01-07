@@ -1782,11 +1782,13 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
             logger.debug(f"{symbol} 未找到 24 小時內數據，改用最新一筆清算資料")
 
         total_vol_usd_24h = buy_vol_usd_24h + sell_vol_usd_24h
+        total_vol_usd_1h = buy_vol_usd_1h + sell_vol_usd_1h
         threshold = get_liquidation_threshold(symbol)
 
-        if total_vol_usd_24h < threshold:
+        # 極端門檻以「過去一小時清算總額」為準
+        if total_vol_usd_1h < threshold:
             logger.debug(
-                f"{symbol} 24h 總清算 {total_vol_usd_24h/10000:.2f} 萬 未達門檻 {threshold/10000:.2f} 萬"
+                f"{symbol} 1h 總清算 {total_vol_usd_1h/10000:.2f} 萬 未達門檻 {threshold/10000:.2f} 萬"
             )
             return None
 
@@ -1805,6 +1807,7 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
             "dominantSide": dominant_side,
             "dominantAmount1h": dominant_amount_1h,
             "totalVolUsd24h": total_vol_usd_24h,
+            "totalVolUsd1h": total_vol_usd_1h,
             "buyVolUsd24h": buy_vol_usd_24h,
             "sellVolUsd24h": sell_vol_usd_24h,
             "buyVolUsd1h": buy_vol_usd_1h,
@@ -1833,18 +1836,27 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"📊 本次監控共有 *{len(events)}* 個幣種達到極端爆倉門檻\n")
 
-    # 依 24h 清算額由大到小排序
-    events_sorted = sorted(events, key=lambda e: e.get("totalVolUsd24h", 0), reverse=True)
+    # 依 1h 清算額由大到小排序（極端事件門檻是看 1h）
+    events_sorted = sorted(events, key=lambda e: e.get("totalVolUsd1h", 0), reverse=True)
 
     for ev in events_sorted:
-        amount_1h = ev["dominantAmount1h"] / 10_000
         total_24h = ev["totalVolUsd24h"] / 10_000
+        total_1h = ev.get("totalVolUsd1h", 0.0) / 10_000
+        amount_1h = ev["dominantAmount1h"] / 10_000
         analysis = generate_liq_symbol_analysis(ev)
 
         lines.append(f"🥊 *【{ev['symbol']}】*")
-        lines.append(
-            f"過去 1 小時內約有 *${amount_1h:.2f} 萬* 美元的 *{ev['dominantSide']}* 被強制平倉（爆倉）。"
-        )
+
+        # 若近 1 小時清算金額太小，就不要顯示像 0.00 萬 這種無感數字，改用文字描述
+        if total_1h < 10:  # 小於 10 萬 USD 視為訊號偏弱
+            lines.append(
+                "過去 1 小時內爆倉金額不顯著，主要清算壓力來自較早前的波動。"
+            )
+        else:
+            lines.append(
+                f"過去 1 小時內約有 *${amount_1h:.2f} 萬* 美元的 *{ev['dominantSide']}* 被強制平倉（爆倉）。"
+            )
+
         lines.append(f"過去 24 小時內總清算金額：約 *${total_24h:.2f} 萬* 美元。")
         lines.append(f"💡 {analysis}\n")
 
