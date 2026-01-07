@@ -467,14 +467,15 @@ def fetch_coins_price_change() -> List[Dict]:
         return []
 
 
-def fetch_oi_change_1h(symbol: str) -> Optional[float]:
-    """計算單一 symbol 1 小時 OI 變化%"""
+def fetch_oi_change_15m(symbol: str) -> Optional[float]:
+    """計算單一 symbol 15 分鐘 OI 變化%"""
+    # 直接使用 symbol+USDT 格式，只嘗試 m15 區間（根據實際測試，這樣成功率最高）
     sym = symbol + "USDT"
     url = f"{CG_API_BASE}/api/futures/open-interest/history"
     params = {
         "exchange": EXCHANGE,
         "symbol": sym,
-        "interval": "h1"
+        "interval": "m15"  # 使用 15 分鐘區間
     }
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -484,6 +485,7 @@ def fetch_oi_change_1h(symbol: str) -> Optional[float]:
     try:
         response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
+            # 只對前幾個幣種記錄錯誤，避免日誌過多
             if symbol in ["BTC", "ETH"]:
                 logger.warning(f"[{symbol}] OI API 錯誤: {response.status_code}")
             return None
@@ -497,8 +499,16 @@ def fetch_oi_change_1h(symbol: str) -> Optional[float]:
         last = data_list[-1]
         prev = data_list[-2]
         
+        # 實際欄位名稱：time, open, high, low, close（用 close 代表 OI 數值）
         last_oi = last.get('close') or last.get('open')
         prev_oi = prev.get('close') or prev.get('open')
+        
+        # 確保轉換為數字（處理字符串情況）
+        try:
+            last_oi = float(last_oi) if last_oi is not None else None
+            prev_oi = float(prev_oi) if prev_oi is not None else None
+        except (ValueError, TypeError):
+            return None
         
         if not last_oi or not prev_oi or prev_oi == 0:
             return None
@@ -515,18 +525,25 @@ def normalize_symbol(coin: Dict) -> Optional[str]:
     return coin.get('symbol') or coin.get('pair') or coin.get('name') or coin.get('coin') or coin.get('symbolName')
 
 
-def extract_price_change_1h(coin: Dict) -> float:
-    """提取 1 小時價格變化%"""
-    change = coin.get('price_change_percent_1h')
+def extract_price_change_15m(coin: Dict) -> float:
+    """提取 15 分鐘價格變化%"""
+    # 實際欄位名稱（根據日誌）
+    change = coin.get('price_change_percent_15m')
     if isinstance(change, (int, float)):
         return float(change)
     if isinstance(change, str) and change:
         try:
-            return float(change)
+            parsed = float(change)
+            if not (parsed != parsed):  # 檢查 NaN
+                return parsed
         except ValueError:
             pass
     
-    # 備用
+    # 備用：其他時間區間
+    change = coin.get('price_change_percent_1h')
+    if isinstance(change, (int, float)):
+        return float(change)
+    
     change = coin.get('price_change_percent_24h')
     if isinstance(change, (int, float)):
         return float(change)
@@ -536,7 +553,7 @@ def extract_price_change_1h(coin: Dict) -> float:
 
 def build_report_message(top_long_open: List, top_long_close: List, top_short_open: List, top_short_close: List) -> str:
     """組合推播文字"""
-    lines = ["💰 持倉異常偵測報告（最近 1 小時）", ""]
+    lines = ["💰 持倉異常偵測報告（最近 15 分鐘）", ""]
     
     def fmt(num):
         if num is None or (isinstance(num, float) and (num != num)):  # NaN check
@@ -550,7 +567,7 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     else:
         for idx, item in enumerate(top_long_open):
             lines.append(
-                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange1h'])}｜持倉 {fmt(item['oiChange1h'])}"
+                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
@@ -561,7 +578,7 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     else:
         for idx, item in enumerate(top_long_close):
             lines.append(
-                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange1h'])}｜持倉 {fmt(item['oiChange1h'])}"
+                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
@@ -572,7 +589,7 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     else:
         for idx, item in enumerate(top_short_open):
             lines.append(
-                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange1h'])}｜持倉 {fmt(item['oiChange1h'])}"
+                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
@@ -583,7 +600,7 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     else:
         for idx, item in enumerate(top_short_close):
             lines.append(
-                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange1h'])}｜持倉 {fmt(item['oiChange1h'])}"
+                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
             )
     
     return "\n".join(lines)
@@ -626,41 +643,37 @@ def fetch_position_change():
         if processed_count % progress_interval == 0:
             logger.info(f"處理進度: {processed_count}/{MAX_SYMBOLS} 個幣種 ({processed_count*100//MAX_SYMBOLS}%)")
         
-        price_change_1h = extract_price_change_1h(coin)
-        oi_change_1h = fetch_oi_change_1h(symbol)
+        price_change_15m = extract_price_change_15m(coin)
+        oi_change_15m = fetch_oi_change_15m(symbol)
         
-        if oi_change_1h is None:
+        if oi_change_15m is None:
             oi_fail_count += 1
-            # 避免請求過於頻繁，稍微延遲
-            time.sleep(0.1)
             continue
         
         oi_success_count += 1
         
         # 4 類分類邏輯
-        if price_change_1h > 0:
-            if oi_change_1h > 0:
-                long_open.append({'symbol': symbol, 'priceChange1h': price_change_1h, 'oiChange1h': oi_change_1h})
-            elif oi_change_1h < 0:
-                long_close.append({'symbol': symbol, 'priceChange1h': price_change_1h, 'oiChange1h': oi_change_1h})
-        elif price_change_1h < 0:
-            if oi_change_1h > 0:
-                short_open.append({'symbol': symbol, 'priceChange1h': price_change_1h, 'oiChange1h': oi_change_1h})
-            elif oi_change_1h < 0:
-                short_close.append({'symbol': symbol, 'priceChange1h': price_change_1h, 'oiChange1h': oi_change_1h})
-        
-        # 避免請求過於頻繁
-        if processed_count % 50 == 0:
-            time.sleep(0.5)
+        if price_change_15m > 0:
+            # 價格上漲
+            if oi_change_15m > 0:
+                long_open.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 多方開倉
+            elif oi_change_15m < 0:
+                long_close.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 多方平倉
+        elif price_change_15m < 0:
+            # 價格下跌
+            if oi_change_15m > 0:
+                short_open.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 空方開倉
+            elif oi_change_15m < 0:
+                short_close.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 空方平倉
     
     logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個")
     logger.info(f"分類結果: 多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}")
     
     # 排序與取前 3 名
-    long_open.sort(key=lambda x: x['oiChange1h'], reverse=True)
-    long_close.sort(key=lambda x: x['oiChange1h'])
-    short_open.sort(key=lambda x: x['oiChange1h'], reverse=True)
-    short_close.sort(key=lambda x: x['oiChange1h'])
+    long_open.sort(key=lambda x: x['oiChange15m'], reverse=True)      # OI 增加越多越好
+    long_close.sort(key=lambda x: x['oiChange15m'])                   # OI 減少越多越好（越負越好）
+    short_open.sort(key=lambda x: x['oiChange15m'], reverse=True)     # OI 增加越多越好
+    short_close.sort(key=lambda x: x['oiChange15m'])                  # OI 減少越多越好（越負越好）
     
     top_long_open = long_open[:3]
     top_long_close = long_close[:3]
