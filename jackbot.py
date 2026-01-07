@@ -66,6 +66,7 @@ else:
 EXCHANGE = "Binance"
 TIME_TYPE = "h1"
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+# 持倉變化篩選：抓取全部 904 個幣種
 MAX_SYMBOLS = 904
 
 # 數據存儲目錄
@@ -589,14 +590,17 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
 
 
 def fetch_position_change():
-    """主流程：持倉變化篩選"""
+    """主流程：持倉變化篩選（抓取全部 904 個幣種）"""
+    logger.info("開始執行持倉變化篩選，抓取全部 904 個幣種...")
+    
     all_symbols_data = fetch_coins_price_change()
     if not all_symbols_data:
         send_telegram_message("⚠️ 無法從 Coinglass 取得幣種漲跌資料，請稍後再試。", TG_THREAD_IDS['position_change'])
         return
     
-    logger.info(f"從 Coinglass API 取得 {len(all_symbols_data)} 個幣種")
+    logger.info(f"從 Coinglass API 取得 {len(all_symbols_data)} 個幣種，將處理前 {MAX_SYMBOLS} 個")
     
+    # 確保抓取全部 904 個幣種
     target_symbols = all_symbols_data[:MAX_SYMBOLS]
     
     long_open = []
@@ -608,17 +612,27 @@ def fetch_position_change():
     oi_success_count = 0
     oi_fail_count = 0
     
+    # 每處理 100 個幣種記錄一次進度
+    progress_interval = 100
+    
     for coin in target_symbols:
         symbol = normalize_symbol(coin)
         if not symbol:
             continue
         
         processed_count += 1
+        
+        # 進度日誌
+        if processed_count % progress_interval == 0:
+            logger.info(f"處理進度: {processed_count}/{MAX_SYMBOLS} 個幣種 ({processed_count*100//MAX_SYMBOLS}%)")
+        
         price_change_1h = extract_price_change_1h(coin)
         oi_change_1h = fetch_oi_change_1h(symbol)
         
         if oi_change_1h is None:
             oi_fail_count += 1
+            # 避免請求過於頻繁，稍微延遲
+            time.sleep(0.1)
             continue
         
         oi_success_count += 1
@@ -634,8 +648,13 @@ def fetch_position_change():
                 short_open.append({'symbol': symbol, 'priceChange1h': price_change_1h, 'oiChange1h': oi_change_1h})
             elif oi_change_1h < 0:
                 short_close.append({'symbol': symbol, 'priceChange1h': price_change_1h, 'oiChange1h': oi_change_1h})
+        
+        # 避免請求過於頻繁
+        if processed_count % 50 == 0:
+            time.sleep(0.5)
     
     logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個")
+    logger.info(f"分類結果: 多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}")
     
     # 排序與取前 3 名
     long_open.sort(key=lambda x: x['oiChange1h'], reverse=True)
@@ -650,6 +669,8 @@ def fetch_position_change():
     
     msg = build_report_message(top_long_open, top_long_close, top_short_open, top_short_close)
     send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="HTML")
+    
+    logger.info("持倉變化篩選執行完成")
 
 
 # ==================== 4. 重要經濟數據推播 ====================
