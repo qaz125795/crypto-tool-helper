@@ -1930,34 +1930,89 @@ def fetch_altseason_index() -> Optional[float]:
     """取得山寨季指數 (0-100)"""
     data = _coinglass_simple_get("/api/index/altcoin-season")
     if not data:
+        logger.warning("Altseason API 回傳為空")
         return None
 
-    # 常見結構：data: { value: 52.xxx } 或 data: [ {...} ]
+    # 記錄原始數據結構以便調試
+    logger.debug(f"Altseason API 原始回傳: {json.dumps(data, ensure_ascii=False)[:500]}")
+
+    # 嘗試多種可能的數據結構
     val = None
+    
+    # 1) 如果 data 是 dict
     if isinstance(data.get("data"), dict):
         inner = data["data"]
-        for key in ("value", "index", "altcoinSeasonIndex"):
+        # 嘗試更多可能的欄位名稱
+        for key in ("value", "index", "altcoinSeasonIndex", "altcoin_season_index", 
+                    "seasonIndex", "season_index", "altcoinIndex", "altcoin_index",
+                    "score", "ratio", "percentage"):
             if inner.get(key) is not None:
                 val = inner.get(key)
+                logger.debug(f"從 data[dict] 中找到欄位 {key}: {val}")
                 break
+    
+    # 2) 如果 data 是 list
     elif isinstance(data.get("data"), list) and data["data"]:
+        # 取最後一筆（最新的）
         inner = data["data"][-1]
         if isinstance(inner, dict):
-            for key in ("value", "index", "altcoinSeasonIndex"):
+            for key in ("value", "index", "altcoinSeasonIndex", "altcoin_season_index",
+                        "seasonIndex", "season_index", "altcoinIndex", "altcoin_index",
+                        "score", "ratio", "percentage"):
                 if inner.get(key) is not None:
                     val = inner.get(key)
+                    logger.debug(f"從 data[list][-1] 中找到欄位 {key}: {val}")
                     break
-    else:
-        for key in ("value", "index", "altcoinSeasonIndex"):
+    
+    # 3) 直接在頂層找
+    if val is None:
+        for key in ("value", "index", "altcoinSeasonIndex", "altcoin_season_index",
+                    "seasonIndex", "season_index", "altcoinIndex", "altcoin_index",
+                    "score", "ratio", "percentage"):
             if data.get(key) is not None:
                 val = data.get(key)
+                logger.debug(f"從頂層找到欄位 {key}: {val}")
                 break
+    
+    # 4) 如果還是找不到，嘗試遍歷所有數值欄位
+    if val is None:
+        def find_numeric_value(obj, depth=0):
+            if depth > 3:  # 避免遞迴太深
+                return None
+            if isinstance(obj, (int, float)):
+                if 0 <= obj <= 100:  # 山寨季指數應該在 0-100 之間
+                    return obj
+            elif isinstance(obj, dict):
+                for v in obj.values():
+                    result = find_numeric_value(v, depth + 1)
+                    if result is not None:
+                        return result
+            elif isinstance(obj, list):
+                for item in obj:
+                    result = find_numeric_value(item, depth + 1)
+                    if result is not None:
+                        return result
+            return None
+        
+        val = find_numeric_value(data)
+        if val is not None:
+            logger.debug(f"透過深度搜尋找到數值: {val}")
 
-    try:
-        return float(val) if val is not None else None
-    except (TypeError, ValueError):
-        logger.warning(f"Altseason 指數格式異常: {data}")
-        return None
+    # 轉換為 float
+    if val is not None:
+        try:
+            result = float(val)
+            # 驗證範圍
+            if 0 <= result <= 100:
+                logger.info(f"成功取得 Altseason 指數: {result}")
+                return result
+            else:
+                logger.warning(f"Altseason 指數超出範圍 (0-100): {result}")
+        except (TypeError, ValueError) as e:
+            logger.warning(f"Altseason 指數轉換失敗: {val} - {str(e)}")
+    
+    logger.warning(f"無法從 Altseason API 回傳中提取指數，原始數據: {json.dumps(data, ensure_ascii=False)[:500]}")
+    return None
 
 
 def describe_altseason(index_val: Optional[float]) -> str:
