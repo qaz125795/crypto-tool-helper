@@ -1970,72 +1970,69 @@ def describe_altseason(index_val: Optional[float]) -> str:
     return "⚖ 資金在比特幣與山寨之間相對均衡，領頭羊個別表現更重要。"
 
 
-def fetch_rsi_list_df():
-    """取得 RSI 列表並轉成 DataFrame，方便篩選"""
-    try:
-        import pandas as pd
-    except ImportError:
-        logger.error("pandas 未安裝，無法執行山寨爆發雷達功能。請執行: pip install pandas>=2.0.0")
-        return None
-    
+def fetch_rsi_list() -> List[Dict]:
+    """取得 RSI 列表並轉成標準化的 dict list，不依賴 pandas"""
     data = _coinglass_simple_get("/api/futures/rsi/list")
     if not data:
-        return None
+        return []
 
     raw = data.get("data") or data.get("list") or []
     if not isinstance(raw, list) or not raw:
         logger.warning("RSI 列表為空或格式異常")
-        return None
+        return []
 
-    df = pd.DataFrame(raw)
-
-    # 嘗試標準欄位名稱
-    possible_symbol_cols = ["symbol", "pair", "coin", "symbolName"]
-    symbol_col = next((c for c in possible_symbol_cols if c in df.columns), None)
-    if not symbol_col:
-        logger.warning("RSI 列表中找不到 symbol 欄位")
-        return None
-    df = df.rename(columns={symbol_col: "symbol"})
-
-    # 嘗試 1h / 4h RSI 欄位
-    rsi_1h_col = next((c for c in df.columns if "1h" in c and "rsi" in c.lower()), None)
-    rsi_4h_col = next((c for c in df.columns if "4h" in c and "rsi" in c.lower()), None)
-
-    # 有些 API 可能用 rsi_h1 / rsi_h4 / rsi_4_hour 等命名，盡量捕捉
-    if not rsi_1h_col:
-        for c in df.columns:
-            cl = c.lower()
-            if "rsi" in cl and ("h1" in cl or "1h" in cl):
-                rsi_1h_col = c
+    # 標準化欄位名稱
+    result = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        
+        # 找 symbol 欄位
+        symbol = None
+        for key in ["symbol", "pair", "coin", "symbolName"]:
+            if key in item:
+                symbol = str(item[key])
                 break
-    if not rsi_4h_col:
-        for c in df.columns:
-            cl = c.lower()
-            if "rsi" in cl and ("h4" in cl or "4h" in cl):
-                rsi_4h_col = c
-                break
+        if not symbol:
+            continue
 
-    # 成交額/成交量欄位，用於挑前 50 大
-    vol_cols = [c for c in df.columns if "volume" in c.lower() or "turnover" in c.lower() or "amount" in c.lower()]
-    vol_col = vol_cols[0] if vol_cols else None
+        # 找 RSI 欄位
+        rsi_1h = None
+        rsi_4h = None
+        for key, val in item.items():
+            kl = key.lower()
+            if "rsi" in kl:
+                if "1h" in kl or "h1" in kl:
+                    try:
+                        rsi_1h = float(val) if val is not None else None
+                    except (TypeError, ValueError):
+                        pass
+                elif "4h" in kl or "h4" in kl:
+                    try:
+                        rsi_4h = float(val) if val is not None else None
+                    except (TypeError, ValueError):
+                        pass
 
-    # 建立統一欄位
-    out = pd.DataFrame()
-    out["symbol"] = df["symbol"].astype(str)
-    if rsi_1h_col and rsi_1h_col in df.columns:
-        out["rsi_1h"] = pd.to_numeric(df[rsi_1h_col], errors="coerce")
-    else:
-        out["rsi_1h"] = pd.NA
-    if rsi_4h_col and rsi_4h_col in df.columns:
-        out["rsi_4h"] = pd.to_numeric(df[rsi_4h_col], errors="coerce")
-    else:
-        out["rsi_4h"] = pd.NA
-    if vol_col:
-        out["volume"] = pd.to_numeric(df[vol_col], errors="coerce")
-    else:
-        out["volume"] = pd.NA
+        # 找成交量欄位
+        volume = None
+        for key, val in item.items():
+            kl = key.lower()
+            if "volume" in kl or "turnover" in kl or "amount" in kl:
+                try:
+                    volume = float(val) if val is not None else None
+                except (TypeError, ValueError):
+                    pass
+                if volume is not None:
+                    break
 
-    return out
+        result.append({
+            "symbol": symbol,
+            "rsi_1h": rsi_1h,
+            "rsi_4h": rsi_4h,
+            "volume": volume
+        })
+
+    return result
 
 
 def fetch_buy_ratio(symbol: str) -> Optional[float]:
@@ -2079,65 +2076,62 @@ def fetch_buy_ratio(symbol: str) -> Optional[float]:
 
 
 def build_altseason_message() -> Optional[str]:
-    """組合山寨爆發雷達訊息"""
-    try:
-        import pandas as pd
-    except ImportError:
-        logger.error("pandas 未安裝，無法執行山寨爆發雷達功能。請執行: pip install pandas>=2.0.0")
-        return None
-    
+    """組合山寨爆發雷達訊息（不依賴 pandas）"""
     index_val = fetch_altseason_index()
-    rsi_df = fetch_rsi_list_df()
-    if rsi_df is None:
+    rsi_list = fetch_rsi_list()
+    if not rsi_list:
         logger.error("無法取得 RSI 列表，放棄推播")
         return None
 
     # 只看成交額前 50 大，避免垃圾幣
-    if "volume" in rsi_df.columns and not rsi_df["volume"].isna().all():
-        rsi_df = rsi_df.sort_values("volume", ascending=False).head(50)
+    rsi_with_vol = [r for r in rsi_list if r.get("volume") is not None]
+    if rsi_with_vol:
+        rsi_with_vol.sort(key=lambda x: x.get("volume") or 0, reverse=True)
+        rsi_list = rsi_with_vol[:50] + [r for r in rsi_list if r.get("volume") is None]
 
-    # 優先使用 4h RSI，小白較不容易被短線雜訊洗出去
-    rsi_df = rsi_df.copy()
-    rsi_df["rsi_base"] = pd.to_numeric(rsi_df["rsi_4h"], errors="coerce")
-    # 若 4h 缺失，才退而求其次用 1h
-    mask_missing = rsi_df["rsi_base"].isna() & rsi_df["rsi_1h"].notna()
-    rsi_df.loc[mask_missing, "rsi_base"] = pd.to_numeric(rsi_df.loc[mask_missing, "rsi_1h"], errors="coerce")
+    # 標準化 RSI：優先使用 4h，沒有才用 1h
+    for item in rsi_list:
+        rsi_base = item.get("rsi_4h")
+        if rsi_base is None:
+            rsi_base = item.get("rsi_1h")
+        item["rsi_base"] = rsi_base
 
-    rsi_df = rsi_df.dropna(subset=["rsi_base"])
+    # 過濾掉沒有 RSI 的項目
+    rsi_list = [r for r in rsi_list if r.get("rsi_base") is not None]
 
-    # 強勢突破：RSI > 70
-    strong_df = rsi_df[rsi_df["rsi_base"] >= 70].copy()
-    # 超賣反彈：RSI < 30
-    oversold_df = rsi_df[rsi_df["rsi_base"] <= 30].copy()
+    # 強勢突破：RSI >= 70
+    strong_list = [r for r in rsi_list if r.get("rsi_base", 0) >= 70]
+    # 超賣反彈：RSI <= 30
+    oversold_list = [r for r in rsi_list if r.get("rsi_base", 100) <= 30]
 
-    # 加入 Buy Ratio 過濾（>55%）
-    def attach_buy_ratio(df: pd.DataFrame) -> pd.DataFrame:
-        ratios = []
-        for sym in df["symbol"]:
-            # Coinglass RSI 列表裡 symbol 可能是 "BTC" 或 "BTCUSDT"，我們先嘗試裸幣，再嘗試去掉 USDT
+    # 加入 Buy Ratio 過濾
+    def attach_buy_ratio(items: List[Dict]) -> List[Dict]:
+        result = []
+        for item in items:
+            sym = item.get("symbol", "")
             base = sym.replace("USDT", "")
             ratio = fetch_buy_ratio(base)
             if ratio is None:
                 ratio = fetch_buy_ratio(sym)
-            ratios.append(ratio)
-            # 控制頻率，避免 API 過載
+            item["buy_ratio"] = ratio
+            if ratio is not None:
+                result.append(item)
             time.sleep(0.8)
-        df = df.copy()
-        df["buy_ratio"] = ratios
-        return df
+        return result
 
-    if not strong_df.empty:
-        strong_df = attach_buy_ratio(strong_df)
-        strong_df = strong_df.dropna(subset=["buy_ratio"])
-        strong_df = strong_df[strong_df["buy_ratio"] >= 55.0]
-        strong_df = strong_df.sort_values(["rsi_base", "buy_ratio"], ascending=False).head(5)
+    # 強勢突破：買入比 >= 55%
+    if strong_list:
+        strong_list = attach_buy_ratio(strong_list)
+        strong_list = [r for r in strong_list if r.get("buy_ratio", 0) >= 55.0]
+        strong_list.sort(key=lambda x: (x.get("rsi_base", 0), x.get("buy_ratio", 0)), reverse=True)
+        strong_list = strong_list[:5]
 
-    if not oversold_df.empty:
-        oversold_df = attach_buy_ratio(oversold_df)
-        oversold_df = oversold_df.dropna(subset=["buy_ratio"])
-        # 超賣反彈可以稍微放寬到 52%
-        oversold_df = oversold_df[oversold_df["buy_ratio"] >= 52.0]
-        oversold_df = oversold_df.sort_values(["rsi_base", "buy_ratio"], ascending=[True, False]).head(5)
+    # 超賣反彈：買入比 >= 52%
+    if oversold_list:
+        oversold_list = attach_buy_ratio(oversold_list)
+        oversold_list = [r for r in oversold_list if r.get("buy_ratio", 0) >= 52.0]
+        oversold_list.sort(key=lambda x: (x.get("rsi_base", 100), -x.get("buy_ratio", 0)))
+        oversold_list = oversold_list[:5]
 
     now_str = format_datetime(datetime.now())
 
@@ -2160,28 +2154,26 @@ def build_altseason_message() -> Optional[str]:
 
     # 強勢突破區
     lines.append("🔥 *潛力領頭羊（強勢突破）*：")
-    if strong_df is None or strong_df.empty:
+    if not strong_list:
         lines.append("目前沒有符合條件的強勢突破山寨幣。")
     else:
-        for idx, row in strong_df.iterrows():
-            s = str(row["symbol"])
-            rsi_v = float(row["rsi_base"])
-            br = float(row["buy_ratio"])
-            lines.append(f"{len(lines)-6}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
+        for idx, item in enumerate(strong_list, 1):
+            s = str(item.get("symbol", ""))
+            rsi_v = float(item.get("rsi_base", 0))
+            br = float(item.get("buy_ratio", 0))
+            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
     lines.append("")
 
     # 超賣反彈區
     lines.append("💎 *超賣反彈機會（抄底參考）*：")
-    if oversold_df is None or oversold_df.empty:
+    if not oversold_list:
         lines.append("目前沒有明顯的超賣反彈候選。")
     else:
-        count = 1
-        for idx, row in oversold_df.iterrows():
-            s = str(row["symbol"])
-            rsi_v = float(row["rsi_base"])
-            br = float(row["buy_ratio"])
-            lines.append(f"{count}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
-            count += 1
+        for idx, item in enumerate(oversold_list, 1):
+            s = str(item.get("symbol", ""))
+            rsi_v = float(item.get("rsi_base", 0))
+            br = float(item.get("buy_ratio", 0))
+            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
     lines.append("")
 
     # 提示
