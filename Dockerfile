@@ -12,7 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # 暴露端口（Zeabur 會自動設置 PORT 環境變量）
-EXPOSE 3000
+EXPOSE 8080
+
+ENV PORT=8080
 
 # 啟動應用
 CMD ["python", "app.py"]
