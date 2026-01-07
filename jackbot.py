@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 import os
 from pathlib import Path
-import pandas as pd
 
 # 配置日誌
 logging.basicConfig(
@@ -1971,8 +1970,14 @@ def describe_altseason(index_val: Optional[float]) -> str:
     return "⚖ 資金在比特幣與山寨之間相對均衡，領頭羊個別表現更重要。"
 
 
-def fetch_rsi_list_df() -> Optional[pd.DataFrame]:
+def fetch_rsi_list_df():
     """取得 RSI 列表並轉成 DataFrame，方便篩選"""
+    try:
+        import pandas as pd
+    except ImportError:
+        logger.error("pandas 未安裝，無法執行山寨爆發雷達功能。請執行: pip install pandas>=2.0.0")
+        return None
+    
     data = _coinglass_simple_get("/api/futures/rsi/list")
     if not data:
         return None
@@ -2075,6 +2080,12 @@ def fetch_buy_ratio(symbol: str) -> Optional[float]:
 
 def build_altseason_message() -> Optional[str]:
     """組合山寨爆發雷達訊息"""
+    try:
+        import pandas as pd
+    except ImportError:
+        logger.error("pandas 未安裝，無法執行山寨爆發雷達功能。請執行: pip install pandas>=2.0.0")
+        return None
+    
     index_val = fetch_altseason_index()
     rsi_df = fetch_rsi_list_df()
     if rsi_df is None:
