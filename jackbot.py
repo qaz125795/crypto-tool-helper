@@ -2361,16 +2361,44 @@ def fetch_hyperliquid_whale_position() -> List[Dict]:
         if not isinstance(data_list, list):
             return []
         
+        # 記錄第一個位置的數據結構以便調試（只在有數據時）
+        if data_list:
+            first_item = data_list[0]
+            logger.info(f"Hyperliquid Whale Position 數據結構示例（前 3 個欄位）: {list(first_item.keys())[:10]}")
+            logger.info(f"完整數據結構: {json.dumps(first_item, ensure_ascii=False, indent=2)[:1000]}")
+        
+        # 嘗試提取持倉價值的多種可能欄位
+        def get_position_value(item: Dict) -> float:
+            # 嘗試直接的值欄位
+            value = (
+                item.get('position_value') or 
+                item.get('positionValue') or 
+                item.get('value') or 
+                item.get('notional_value') or
+                item.get('notionalValue') or
+                item.get('size_usd') or
+                item.get('sizeUSD') or
+                item.get('usd_value') or
+                item.get('usdValue') or
+                0
+            )
+            
+            # 如果直接值不存在，嘗試用 size * price 計算
+            if value == 0 or (isinstance(value, (int, float)) and value == 0):
+                size = float(item.get('size') or item.get('position_size') or item.get('positionSize') or 0)
+                price = float(item.get('price') or item.get('mark_price') or item.get('markPrice') or 0)
+                if size > 0 and price > 0:
+                    value = abs(size * price)
+            
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+        
         # 排序並取前 5 名（按持倉價值）
         sorted_positions = sorted(
             data_list,
-            key=lambda x: float(
-                x.get('position_value') or 
-                x.get('positionValue') or 
-                x.get('value') or 
-                x.get('size') or 
-                0
-            ),
+            key=get_position_value,
             reverse=True
         )[:5]
         
@@ -2462,17 +2490,54 @@ def format_alert_message(alert: Dict) -> str:
 
 def format_whale_position_message(position: Dict, index: int) -> str:
     """格式化單個鯨魚持倉訊息"""
-    address = position.get('address') or position.get('user') or '未知'
-    symbol = position.get('symbol') or position.get('coin') or '未知'
-    side = position.get('side') or position.get('direction') or '未知'
-    size = float(position.get('position_value') or position.get('positionValue') or position.get('value') or 0)
-    leverage = float(position.get('leverage') or position.get('leverage_ratio') or 1)
+    address = position.get('address') or position.get('user') or position.get('user_address') or '未知'
+    symbol = position.get('symbol') or position.get('coin') or position.get('asset') or '未知'
+    side = position.get('side') or position.get('direction') or position.get('position_side') or '未知'
+    
+    # 嘗試多種方式獲取持倉價值
+    size = (
+        position.get('position_value') or 
+        position.get('positionValue') or 
+        position.get('value') or 
+        position.get('notional_value') or
+        position.get('notionalValue') or
+        position.get('size_usd') or
+        position.get('sizeUSD') or
+        position.get('usd_value') or
+        position.get('usdValue') or
+        0
+    )
+    
+    # 如果直接值不存在，嘗試用 size * price 計算
+    try:
+        size_float = float(size) if size else 0.0
+    except (TypeError, ValueError):
+        size_float = 0.0
+    
+    if size_float == 0:
+        position_size = float(position.get('size') or position.get('position_size') or position.get('positionSize') or 0)
+        price = float(position.get('price') or position.get('mark_price') or position.get('markPrice') or 0)
+        if position_size > 0 and price > 0:
+            size_float = abs(position_size * price)
+    
+    leverage = float(position.get('leverage') or position.get('leverage_ratio') or position.get('leverageRatio') or 1)
     
     # 簡化地址顯示（只顯示後 4 位）
     address_short = address[-4:] if len(address) > 4 else address
-    side_text = "Long" if str(side).lower() in ['long', 'buy', '多'] else "Short"
     
-    return f"{index}. 地址 `...{address_short}` | 倉位：${size/1000000:.2f}M [{symbol} {side_text}] | 槓桿：{leverage:.1f}x"
+    # 判斷多空方向
+    side_lower = str(side).lower()
+    side_text = "Long" if side_lower in ['long', 'buy', '多', 'l'] else "Short"
+    
+    # 格式化金額顯示
+    if size_float >= 1_000_000:
+        size_display = f"${size_float/1_000_000:.2f}M"
+    elif size_float >= 1_000:
+        size_display = f"${size_float/1_000:.2f}K"
+    else:
+        size_display = f"${size_float:.2f}"
+    
+    return f"{index}. 地址 `...{address_short}` | 倉位：{size_display} [{symbol} {side_text}] | 槓桿：{leverage:.1f}x"
 
 
 def build_hyperliquid_message() -> Optional[str]:
