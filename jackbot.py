@@ -1684,13 +1684,15 @@ LIQ_EXCHANGE_LIST = "Binance"
 LIQ_REQUEST_DELAY = 1.2  # 秒
 
 
-def get_liquidation_threshold(symbol: str) -> float:
-    """根據幣種回傳極端爆倉門檻（USD）"""
+def get_liquidation_threshold(symbol: str, time_window: str = "1h") -> tuple:
+    """根據幣種回傳極端爆倉門檻（USD）
+    返回 (1h阈值, 24h阈值) 的元組
+    """
     if symbol in ("BTC", "ETH"):
-        return 5_000_000.0
+        return (2_000_000.0, 15_000_000.0)  # 1h: 200萬, 24h: 1500萬
     if symbol in ("SOL", "XRP", "DOGE"):
-        return 1_500_000.0
-    return 800_000.0
+        return (800_000.0, 5_000_000.0)  # 1h: 80萬, 24h: 500萬
+    return (400_000.0, 3_000_000.0)  # 1h: 40萬, 24h: 300萬
 
 
 def fetch_liquidation_data(symbol: str) -> Optional[List[Dict]]:
@@ -1781,23 +1783,42 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
 
         total_vol_usd_24h = buy_vol_usd_24h + sell_vol_usd_24h
         total_vol_usd_1h = buy_vol_usd_1h + sell_vol_usd_1h
-        threshold = get_liquidation_threshold(symbol)
+        threshold_1h, threshold_24h = get_liquidation_threshold(symbol)
 
-        # 極端門檻以「過去一小時清算總額」為準
-        if total_vol_usd_1h < threshold:
+        # 記錄實際清算數據供調試
+        logger.info(
+            f"{symbol} 清算統計 - 1h: ${total_vol_usd_1h/10000:.2f}萬 (門檻: ${threshold_1h/10000:.2f}萬), "
+            f"24h: ${total_vol_usd_24h/10000:.2f}萬 (門檻: ${threshold_24h/10000:.2f}萬)"
+        )
+
+        # 改進判斷邏輯：1小時達到門檻 OR 24小時達到門檻（更寬鬆）
+        triggered_by_1h = total_vol_usd_1h >= threshold_1h
+        triggered_by_24h = total_vol_usd_24h >= threshold_24h
+        
+        if not (triggered_by_1h or triggered_by_24h):
             logger.debug(
-                f"{symbol} 1h 總清算 {total_vol_usd_1h/10000:.2f} 萬 未達門檻 {threshold/10000:.2f} 萬"
+                f"{symbol} 未達門檻 - 1h: {total_vol_usd_1h/10000:.2f}萬 < {threshold_1h/10000:.2f}萬, "
+                f"24h: {total_vol_usd_24h/10000:.2f}萬 < {threshold_24h/10000:.2f}萬"
             )
             return None
 
-        # 判斷主導清算方向（以過去 1 小時為主）
-        is_long_dom = buy_vol_usd_1h > sell_vol_usd_1h
-        dominant_side = "多單" if is_long_dom else "空單"
-        dominant_amount_1h = buy_vol_usd_1h if is_long_dom else sell_vol_usd_1h
+        # 判斷主導清算方向：如果1小時達標則用1小時，否則用24小時
+        if triggered_by_1h:
+            is_long_dom = buy_vol_usd_1h > sell_vol_usd_1h
+            dominant_side = "多單" if is_long_dom else "空單"
+            dominant_amount_1h = buy_vol_usd_1h if is_long_dom else sell_vol_usd_1h
+            trigger_reason = "1小時極端爆倉"
+        else:
+            # 24小時達標但1小時未達標，用24小時數據判斷
+            is_long_dom = buy_vol_usd_24h > sell_vol_usd_24h
+            dominant_side = "多單" if is_long_dom else "空單"
+            # 24小時觸發時，顯示24小時的總量（但標註為24小時累積）
+            dominant_amount_1h = buy_vol_usd_24h if is_long_dom else sell_vol_usd_24h
+            trigger_reason = "24小時累積爆倉"
 
         logger.info(
-            f"{symbol} - 過去1h 清算總額: {(buy_vol_usd_1h + sell_vol_usd_1h)/10000:.2f} 萬 | "
-            f"24h 總額: {total_vol_usd_24h/10000:.2f} 萬"
+            f"{symbol} ⚠️ 觸發警報 ({trigger_reason}) - 過去1h: ${(buy_vol_usd_1h + sell_vol_usd_1h)/10000:.2f}萬 | "
+            f"24h: ${total_vol_usd_24h/10000:.2f}萬"
         )
 
         return {
@@ -1810,6 +1831,7 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
             "sellVolUsd24h": sell_vol_usd_24h,
             "buyVolUsd1h": buy_vol_usd_1h,
             "sellVolUsd1h": sell_vol_usd_1h,
+            "triggerReason": trigger_reason,
         }
     except Exception as e:
         logger.error(f"處理 {symbol} 清算數據時發生錯誤: {str(e)}")
@@ -1834,8 +1856,15 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"📊 本次監控共有 *{len(events)}* 個幣種達到極端爆倉門檻\n")
 
-    # 依 1h 清算額由大到小排序（極端事件門檻是看 1h）
-    events_sorted = sorted(events, key=lambda e: e.get("totalVolUsd1h", 0), reverse=True)
+    # 依觸發總量排序：如果是1小時觸發用1小時數據，如果是24小時觸發用24小時數據
+    def get_sort_key(e):
+        trigger_reason = e.get("triggerReason", "1小時極端爆倉")
+        if trigger_reason == "1小時極端爆倉":
+            return e.get("totalVolUsd1h", 0)
+        else:
+            return e.get("totalVolUsd24h", 0)
+    
+    events_sorted = sorted(events, key=get_sort_key, reverse=True)
 
     for ev in events_sorted:
         total_24h = ev["totalVolUsd24h"] / 10_000
@@ -1845,17 +1874,24 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
 
         lines.append(f"🥊 *【{ev['symbol']}】*")
 
-        # 若近 1 小時清算金額太小，就不要顯示像 0.00 萬 這種無感數字，改用文字描述
-        if total_1h < 10:  # 小於 10 萬 USD 視為訊號偏弱
-            lines.append(
-                "過去 1 小時內爆倉金額不顯著，主要清算壓力來自較早前的波動。"
-            )
+        # 顯示觸發原因和清算數據
+        trigger_reason = ev.get("triggerReason", "極端爆倉")
+        if trigger_reason == "1小時極端爆倉":
+            if total_1h < 10:  # 小於 10 萬 USD 視為訊號偏弱
+                lines.append(
+                    "過去 1 小時內爆倉金額不顯著，主要清算壓力來自較早前的波動。"
+                )
+            else:
+                lines.append(
+                    f"🚨 *過去 1 小時內*約有 *${amount_1h:.2f} 萬* 美元的 *{ev['dominantSide']}* 被強制平倉（爆倉）。"
+                )
+            lines.append(f"過去 24 小時內總清算金額：約 *${total_24h:.2f} 萬* 美元。")
         else:
+            # 24小時累積觸發，amount_1h 實際上是 24h 的主導清算量
             lines.append(
-                f"過去 1 小時內約有 *${amount_1h:.2f} 萬* 美元的 *{ev['dominantSide']}* 被強制平倉（爆倉）。"
+                f"⚠️ *過去 24 小時內*累積約有 *${amount_1h:.2f} 萬* 美元的 *{ev['dominantSide']}* 被強制平倉。"
             )
-
-        lines.append(f"過去 24 小時內總清算金額：約 *${total_24h:.2f} 萬* 美元。")
+            lines.append(f"其中過去 1 小時內清算：約 *${total_1h:.2f} 萬* 美元。")
         lines.append(f"💡 {analysis}\n")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
