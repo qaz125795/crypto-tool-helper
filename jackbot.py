@@ -54,6 +54,7 @@ if thread_ids_str:
             'long_term_index': 248,
             'liquidity_radar': 3,
             'altseason_radar': 254,
+            'hyperliquid': 252,
         }
 else:
     TG_THREAD_IDS = {
@@ -66,6 +67,7 @@ else:
         'long_term_index': int(os.environ.get('TG_THREAD_LONG_TERM_INDEX', 248)),
         'liquidity_radar': int(os.environ.get('TG_THREAD_LIQUIDITY_RADAR', 3)),
         'altseason_radar': int(os.environ.get('TG_THREAD_ALTSEASON_RADAR', 254)),
+        'hyperliquid': int(os.environ.get('TG_THREAD_HYPERLIQUID', 252)),
     }
 
 # 其他配置
@@ -2254,6 +2256,357 @@ def run_altseason_radar_once():
     logger.info("山寨爆發雷達推播完成")
 
 
+# ==================== 10. Hyperliquid 聰明錢監控 ====================
+
+HYPERLIQUID_SENT_ALERTS_FILE = DATA_DIR / "hyperliquid_sent_alerts.json"
+WHALE_ALERT_THRESHOLD = 1_000_000  # $1M USD
+SMART_MONEY_PNL_MIN = 100_000  # $100k USD
+MONEY_PRINTER_PNL_MIN = 1_000_000  # $1M USD
+
+
+def fetch_hyperliquid_whale_alert() -> List[Dict]:
+    """獲取 Hyperliquid 鯨魚提醒（大額交易）"""
+    url = f"{CG_API_BASE}/api/hyperliquid/whale-alert"
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.error(f"Hyperliquid Whale Alert API 錯誤: {response.status_code}")
+            return []
+        
+        result = response.json()
+        if result.get('code') not in ['0', 0, 200, '200']:
+            logger.error(f"Hyperliquid Whale Alert API 返回錯誤: {result}")
+            return []
+        
+        data_list = result.get('data', [])
+        if not isinstance(data_list, list):
+            return []
+        
+        # 篩選名目價值 > $1M 的提醒
+        filtered_alerts = []
+        for alert in data_list:
+            # 嘗試多種可能的欄位名稱
+            value = (
+                alert.get('notional_value') or 
+                alert.get('notionalValue') or 
+                alert.get('value') or 
+                alert.get('size') or 
+                alert.get('amount') or
+                0
+            )
+            
+            try:
+                value_float = float(value)
+                if value_float >= WHALE_ALERT_THRESHOLD:
+                    filtered_alerts.append(alert)
+            except (TypeError, ValueError):
+                continue
+        
+        return filtered_alerts
+    except Exception as e:
+        logger.error(f"獲取 Hyperliquid Whale Alert 失敗: {str(e)}")
+        return []
+
+
+def fetch_hyperliquid_pnl_distribution() -> Optional[Dict]:
+    """獲取 Hyperliquid 錢包盈虧分佈"""
+    url = f"{CG_API_BASE}/api/hyperliquid/wallet/pnl-distribution"
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.error(f"Hyperliquid PNL Distribution API 錯誤: {response.status_code}")
+            return None
+        
+        result = response.json()
+        if result.get('code') not in ['0', 0, 200, '200']:
+            logger.error(f"Hyperliquid PNL Distribution API 返回錯誤: {result}")
+            return None
+        
+        return result.get('data', result)
+    except Exception as e:
+        logger.error(f"獲取 Hyperliquid PNL Distribution 失敗: {str(e)}")
+        return None
+
+
+def fetch_hyperliquid_whale_position() -> List[Dict]:
+    """獲取 Hyperliquid 鯨魚持倉（價值 > $100k）"""
+    url = f"{CG_API_BASE}/api/hyperliquid/whale-position"
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.error(f"Hyperliquid Whale Position API 錯誤: {response.status_code}")
+            return []
+        
+        result = response.json()
+        if result.get('code') not in ['0', 0, 200, '200']:
+            logger.error(f"Hyperliquid Whale Position API 返回錯誤: {result}")
+            return []
+        
+        data_list = result.get('data', [])
+        if not isinstance(data_list, list):
+            return []
+        
+        # 排序並取前 5 名（按持倉價值）
+        sorted_positions = sorted(
+            data_list,
+            key=lambda x: float(
+                x.get('position_value') or 
+                x.get('positionValue') or 
+                x.get('value') or 
+                x.get('size') or 
+                0
+            ),
+            reverse=True
+        )[:5]
+        
+        return sorted_positions
+    except Exception as e:
+        logger.error(f"獲取 Hyperliquid Whale Position 失敗: {str(e)}")
+        return []
+
+
+def process_smart_money_pnl(pnl_data: Dict) -> Dict:
+    """處理聰明錢 PNL 分佈數據"""
+    if not pnl_data or not isinstance(pnl_data, dict):
+        return {}
+    
+    smart_money_info = {
+        'money_printers': [],  # > $1M 獲利
+        'smart_money': [],     # $100k - $1M 獲利
+        'top_symbols': {}
+    }
+    
+    # 嘗試解析分層數據
+    # 可能的結構：分層列表或直接包含數據
+    distribution_list = (
+        pnl_data.get('distribution') or 
+        pnl_data.get('data') or 
+        pnl_data.get('list') or 
+        []
+    )
+    
+    if isinstance(distribution_list, list):
+        for item in distribution_list:
+            if not isinstance(item, dict):
+                continue
+            
+            # 獲取 PNL 範圍
+            pnl_min = float(item.get('pnl_min') or item.get('pnlMin') or item.get('min_pnl') or 0)
+            pnl_max = float(item.get('pnl_max') or item.get('pnlMax') or item.get('max_pnl') or float('inf'))
+            address_count = int(item.get('address_count') or item.get('addressCount') or item.get('count') or 0)
+            
+            # 判斷層級
+            if pnl_min >= MONEY_PRINTER_PNL_MIN:
+                smart_money_info['money_printers'].append({
+                    'pnl_range': f"${pnl_min/1000:.0f}k - ${pnl_max/1000:.0f}k" if pnl_max < float('inf') else f"> ${pnl_min/1000:.0f}k",
+                    'address_count': address_count
+                })
+            elif pnl_min >= SMART_MONEY_PNL_MIN and pnl_max <= MONEY_PRINTER_PNL_MIN:
+                smart_money_info['smart_money'].append({
+                    'pnl_range': f"${pnl_min/1000:.0f}k - ${pnl_max/1000:.0f}k",
+                    'address_count': address_count
+                })
+    
+    # 嘗試獲取持倉分佈（按幣種）
+    position_dist = pnl_data.get('position_distribution') or pnl_data.get('top_symbols') or {}
+    if isinstance(position_dist, dict):
+        # 排序並取前 3 個幣種
+        sorted_symbols = sorted(
+            position_dist.items(),
+            key=lambda x: float(x[1].get('value') or x[1].get('total_value') or 0) if isinstance(x[1], dict) else float(x[1] or 0),
+            reverse=True
+        )[:3]
+        
+        for symbol, data in sorted_symbols:
+            if isinstance(data, dict):
+                bias = data.get('bias') or data.get('long_ratio') or 0
+                smart_money_info['top_symbols'][symbol] = {
+                    'bias': float(bias) * 100 if bias < 1 else float(bias)
+                }
+    
+    return smart_money_info
+
+
+def format_alert_message(alert: Dict) -> str:
+    """格式化單個 Whale Alert 訊息"""
+    symbol = alert.get('symbol') or alert.get('coin') or '未知'
+    direction = alert.get('side') or alert.get('direction') or alert.get('type') or '未知'
+    value = float(
+        alert.get('notional_value') or 
+        alert.get('notionalValue') or 
+        alert.get('value') or 
+        0
+    )
+    
+    # 判斷方向 emoji
+    direction_emoji = "🟢" if str(direction).lower() in ['long', 'buy', '多', 'long'] else "🔴"
+    direction_text = "大額開多" if str(direction).lower() in ['long', 'buy', '多', 'long'] else "大額開空"
+    
+    return f"項目：`{symbol}`\n方向：{direction_emoji} {direction_text}\n規模：${value:,.0f} USD (名目價值)"
+
+
+def format_whale_position_message(position: Dict, index: int) -> str:
+    """格式化單個鯨魚持倉訊息"""
+    address = position.get('address') or position.get('user') or '未知'
+    symbol = position.get('symbol') or position.get('coin') or '未知'
+    side = position.get('side') or position.get('direction') or '未知'
+    size = float(position.get('position_value') or position.get('positionValue') or position.get('value') or 0)
+    leverage = float(position.get('leverage') or position.get('leverage_ratio') or 1)
+    
+    # 簡化地址顯示（只顯示後 4 位）
+    address_short = address[-4:] if len(address) > 4 else address
+    side_text = "Long" if str(side).lower() in ['long', 'buy', '多'] else "Short"
+    
+    return f"{index}. 地址 `...{address_short}` | 倉位：${size/1000000:.2f}M [{symbol} {side_text}] | 槓桿：{leverage:.1f}x"
+
+
+def build_hyperliquid_message() -> Optional[str]:
+    """組合 Hyperliquid 聰明錢監控訊息"""
+    logger.info("開始構建 Hyperliquid 聰明錢監控訊息...")
+    
+    # 1. 獲取 Whale Alert
+    alerts = fetch_hyperliquid_whale_alert()
+    logger.info(f"獲取到 {len(alerts)} 個 Whale Alert")
+    
+    # 檢查是否有新的 Alert（避免重複推播）
+    sent_alert_ids = load_json_file(HYPERLIQUID_SENT_ALERTS_FILE, [])
+    new_alerts = []
+    new_alert_ids = []
+    
+    for alert in alerts:
+        # 生成唯一 ID（使用時間戳 + symbol + value）
+        alert_id = f"{alert.get('time') or alert.get('timestamp')}_{alert.get('symbol')}_{alert.get('notional_value') or alert.get('notionalValue')}"
+        if alert_id not in sent_alert_ids:
+            new_alerts.append(alert)
+            new_alert_ids.append(alert_id)
+    
+    # 2. 獲取 PNL Distribution
+    pnl_data = fetch_hyperliquid_pnl_distribution()
+    smart_money_info = process_smart_money_pnl(pnl_data) if pnl_data else {}
+    
+    # 3. 獲取 Whale Position
+    whale_positions = fetch_hyperliquid_whale_position()
+    logger.info(f"獲取到 {len(whale_positions)} 個鯨魚持倉")
+    
+    # 如果完全沒有數據，不發送推播（但至少要有 whale positions 或其他信息）
+    has_smart_money_info = (
+        smart_money_info.get('money_printers') or 
+        smart_money_info.get('smart_money') or 
+        smart_money_info.get('top_symbols')
+    )
+    
+    if not new_alerts and not has_smart_money_info and not whale_positions:
+        logger.info("本次監控無有效數據，跳過推播")
+        return None
+    
+    # 構建訊息
+    lines = []
+    lines.append("🐳 *【區塊鏈船長 - Hyperliquid 鯨魚追蹤】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    
+    # Whale Alert 部分
+    if new_alerts:
+        lines.append("🚨 *巨鯨即時預警 (Whale Alert)*：")
+        for alert in new_alerts[:3]:  # 最多顯示 3 個
+            lines.append(format_alert_message(alert))
+            lines.append("")
+        
+        # 更新已發送 ID 列表
+        sent_alert_ids.extend(new_alert_ids)
+        # 只保留最近 500 條
+        if len(sent_alert_ids) > 500:
+            sent_alert_ids = sent_alert_ids[-500:]
+        save_json_file(HYPERLIQUID_SENT_ALERTS_FILE, sent_alert_ids)
+    else:
+        lines.append("🚨 *巨鯨即時預警 (Whale Alert)*：")
+        lines.append("本次監控期間無新的大額交易提醒（> $1M）")
+        lines.append("")
+    
+    # 聰明錢 PNL 分佈部分
+    has_smart_money_data = (
+        smart_money_info.get('money_printers') or 
+        smart_money_info.get('smart_money') or 
+        smart_money_info.get('top_symbols')
+    )
+    
+    if has_smart_money_data:
+        lines.append("💰 *聰明錢 PNL 分佈觀察*：")
+        
+        # 顯示層級統計
+        if smart_money_info.get('money_printers'):
+            printer_count = sum(mp.get('address_count', 0) for mp in smart_money_info['money_printers'])
+            if printer_count > 0:
+                lines.append(f"Money Printer (> $1M 獲利)：{printer_count} 個錢包")
+        
+        if smart_money_info.get('smart_money'):
+            smart_count = sum(sm.get('address_count', 0) for sm in smart_money_info['smart_money'])
+            if smart_count > 0:
+                lines.append(f"Smart Money ($100k - $1M 獲利)：{smart_count} 個錢包")
+        
+        # 顯示持倉集中度
+        top_symbols = smart_money_info.get('top_symbols', {})
+        if top_symbols:
+            symbol_list = []
+            for symbol, info in list(top_symbols.items())[:3]:
+                bias = info.get('bias', 0)
+                symbol_list.append(f"`{symbol}`")
+                if bias > 0:
+                    lines.append(f"其中 {symbol} 的看漲情緒 (Bias) 達 {bias:.1f}%")
+            
+            if symbol_list:
+                lines.append(f"目前獲利 > $100k 的錢包，主要持倉集中在：{', '.join(symbol_list)}")
+        
+        lines.append("")
+    
+    # 頂級鯨魚倉位部分
+    if whale_positions:
+        lines.append("📊 *頂級鯨魚倉位 (Top Positions)*：")
+        for idx, position in enumerate(whale_positions, 1):
+            lines.append(format_whale_position_message(position, idx))
+        lines.append("")
+    
+    # 船長提示
+    if new_alerts or smart_money_info.get('top_symbols'):
+        top_symbol = list(smart_money_info.get('top_symbols', {}).keys())[0] if smart_money_info.get('top_symbols') else new_alerts[0].get('symbol', '特定標的') if new_alerts else '特定標的'
+        lines.append(f"💡 *船長提示*：聰明錢正在關注 {top_symbol}，請注意該幣種的流動性變化！")
+        lines.append("")
+    
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⏰ 更新時間：{format_datetime(datetime.now())}")
+    
+    return "\n".join(lines)
+
+
+def run_hyperliquid_monitor_once():
+    """執行一次 Hyperliquid 聰明錢監控（適合排程觸發）"""
+    logger.info("開始執行 Hyperliquid 聰明錢監控...")
+    
+    message = build_hyperliquid_message()
+    if not message:
+        logger.info("本次 Hyperliquid 監控無有效數據，未發送推播")
+        return
+    
+    thread_id = TG_THREAD_IDS.get("hyperliquid", 252)
+    send_telegram_message(message, thread_id, parse_mode="Markdown")
+    logger.info("Hyperliquid 聰明錢監控推播完成")
+
+
 # ==================== 主程序 ====================
 
 if __name__ == "__main__":
@@ -2282,6 +2635,8 @@ if __name__ == "__main__":
             run_liquidity_radar_once()
         elif function_name == "altseason_radar":
             run_altseason_radar_once()
+        elif function_name == "hyperliquid":
+            run_hyperliquid_monitor_once()
         else:
             print("可用的功能:")
             print("  sector_ranking   - 主流板塊排行榜推播")
@@ -2294,6 +2649,7 @@ if __name__ == "__main__":
             print("  long_term_index_once  - 長線牛熊導航儀（只執行一次，適合排程）")
             print("  liquidity_radar       - 流動性獵取雷達（極端爆倉彙整）")
             print("  altseason_radar       - 山寨爆發雷達（Altseason + RSI + Buy Ratio）")
+            print("  hyperliquid           - Hyperliquid 聰明錢監控")
     else:
         print("請指定要執行的功能，例如: python jackbot.py sector_ranking")
 

@@ -23,6 +23,7 @@ from jackbot import (
     run_long_term_once,
     run_liquidity_radar_once,
     run_altseason_radar_once,
+    run_hyperliquid_monitor_once,
 )
 
 app = Flask(__name__)
@@ -44,6 +45,7 @@ def health_check():
             '/long_term_index': '長線牛熊導航儀',
             '/liquidity_radar': '流動性獵取雷達',
             '/altseason_radar': '山寨爆發雷達',
+            '/hyperliquid': 'Hyperliquid 聰明錢監控',
             '/run/<task>': '執行指定任務 (sector_ranking, whale_position, long_term_index_once, liquidity_radar, etc.)'
         }
     }), 200
@@ -122,6 +124,15 @@ def run_altseason_radar():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/hyperliquid', methods=['GET', 'POST'])
+def run_hyperliquid():
+    """執行 Hyperliquid 聰明錢監控"""
+    try:
+        run_hyperliquid_monitor_once()
+        return jsonify({'status': 'success', 'message': 'Hyperliquid 聰明錢監控執行成功'}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/long_term_index', methods=['GET', 'POST'])
 def run_long_term_index():
     """執行長線牛熊導航儀"""
@@ -144,6 +155,7 @@ def run_task(task):
         'long_term_index_once': run_long_term_once,
         'liquidity_radar': run_liquidity_radar_once,
         'altseason_radar': run_altseason_radar_once,
+        'hyperliquid': run_hyperliquid_monitor_once,
     }
     
     if task not in task_map:
