@@ -1,0 +1,36 @@
+name: 長線牛熊導航儀
+
+on:
+  schedule:
+    # 每 12 小時執行（UTC 時間：00:00, 12:00）
+    - cron: '0 0,12 * * *'
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run long term index task
+        env:
+          CG_API_KEY: ${{ secrets.CG_API_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
+          TG_THREAD_LONG_TERM_INDEX: ${{ secrets.TG_THREAD_LONG_TERM_INDEX }}
+        run: python jackbot.py long_term_index_once
+

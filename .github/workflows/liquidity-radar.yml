@@ -1,0 +1,36 @@
+name: 流動性獵取雷達
+
+on:
+  schedule:
+    # 每小時整點執行（UTC 時間）
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run liquidity radar task
+        env:
+          CG_API_KEY: ${{ secrets.CG_API_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
+          TG_THREAD_LIQUIDITY_RADAR: ${{ secrets.TG_THREAD_LIQUIDITY_RADAR }}
+        run: python jackbot.py liquidity_radar
+

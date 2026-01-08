@@ -1,0 +1,36 @@
+name: 山寨爆發雷達
+
+on:
+  schedule:
+    # 每 4 小時整點執行（UTC 時間：00:00, 04:00, 08:00, 12:00, 16:00, 20:00）
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run altseason radar task
+        env:
+          CG_API_KEY: ${{ secrets.CG_API_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
+          TG_THREAD_ALTSEASON_RADAR: ${{ secrets.TG_THREAD_ALTSEASON_RADAR }}
+        run: python jackbot.py altseason_radar
+
