@@ -1148,17 +1148,11 @@ def process_and_send_coinglass(item: Dict, type_str: str):
 
 
 def fetch_all_news():
-    """整合執行函數：同時抓取所有來源的新聞"""
+    """整合執行函數：只抓取 Tree of Alpha 新聞"""
     # 抓取 Tree of Alpha 新聞
     fetch_tree_news()
     
-    # 抓取 CoinGlass 新聞（如果遇到速率限制會優雅處理）
-    fetch_coinglass_articles()
-    
-    # 抓取 CoinGlass 快訊（如果遇到速率限制會優雅處理）
-    fetch_coinglass_newsflash()
-    
-    logger.info("所有新聞來源抓取完成")
+    logger.info("Tree of Alpha 新聞抓取完成")
 
 
 # ==================== 6. 資金費率 ====================
