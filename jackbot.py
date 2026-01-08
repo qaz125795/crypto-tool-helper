@@ -2525,9 +2525,9 @@ def format_whale_position_message(position: Dict, index: int) -> str:
     # 簡化地址顯示（只顯示後 4 位）
     address_short = address[-4:] if len(address) > 4 else address
     
-    # 判斷多空方向
+    # 判斷多空方向（白話文中文）
     side_lower = str(side).lower()
-    side_text = "Long" if side_lower in ['long', 'buy', '多', 'l'] else "Short"
+    side_text = "做多" if side_lower in ['long', 'buy', '多', 'l'] else "做空"
     
     # 格式化金額顯示
     if size_float >= 1_000_000:
