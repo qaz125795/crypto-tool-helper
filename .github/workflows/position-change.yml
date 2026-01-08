@@ -10,6 +10,9 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 30  # 處理 904 個幣種需要較長時間
+    permissions:
+      contents: read
+      actions: read
     
     steps:
       - name: Checkout code
