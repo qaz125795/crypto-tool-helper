@@ -713,61 +713,164 @@ def fetch_economic_data() -> List[Dict]:
         result = response.json()
         
         if result.get('code') in ['0', 0, 200, '200']:
-            return result.get('data', [])
+            data_list = result.get('data', [])
+            # 標記數據來源
+            for item in data_list:
+                item['_source'] = 'economic_data'
+            return data_list
         else:
-            logger.error(f"API 返回錯誤: {result.get('msg')} (錯誤碼: {result.get('code')})")
+            logger.error(f"Economic Data API 返回錯誤: {result.get('msg')} (錯誤碼: {result.get('code')})")
             return []
     except Exception as e:
         logger.error(f"獲取經濟數據失敗: {str(e)}")
         return []
 
 
+def fetch_financial_events() -> List[Dict]:
+    """從 CoinGlass API 抓取財經事件"""
+    url = "https://open-api-v4.coinglass.com/api/calendar/financial-events"
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "Accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        result = response.json()
+        
+        if result.get('code') in ['0', 0, 200, '200']:
+            data_list = result.get('data', [])
+            # 標記數據來源
+            for item in data_list:
+                item['_source'] = 'financial_events'
+            return data_list
+        else:
+            logger.warning(f"Financial Events API 返回錯誤: {result.get('msg')} (錯誤碼: {result.get('code')})")
+            return []
+    except Exception as e:
+        logger.warning(f"獲取財經事件失敗: {str(e)}")
+        return []
+
+
+def fetch_central_bank_activities() -> List[Dict]:
+    """從 CoinGlass API 抓取央行活動"""
+    url = "https://open-api-v4.coinglass.com/api/calendar/central-bank-activities"
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "Accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        result = response.json()
+        
+        if result.get('code') in ['0', 0, 200, '200']:
+            data_list = result.get('data', [])
+            # 標記數據來源
+            for item in data_list:
+                item['_source'] = 'central_bank'
+            return data_list
+        else:
+            logger.warning(f"Central Bank API 返回錯誤: {result.get('msg')} (錯誤碼: {result.get('code')})")
+            return []
+    except Exception as e:
+        logger.warning(f"獲取央行活動失敗: {str(e)}")
+        return []
+
+
+def parse_publish_time(item: Dict) -> Optional[datetime]:
+    """解析發布時間"""
+    publish_timestamp = item.get('publish_timestamp') or item.get('publish_time') or item.get('time')
+    if not publish_timestamp:
+        return None
+    
+    try:
+        if isinstance(publish_timestamp, (int, float)):
+            if publish_timestamp > 1e12:  # 毫秒時間戳
+                return datetime.fromtimestamp(publish_timestamp / 1000)
+            else:  # 秒時間戳
+                return datetime.fromtimestamp(publish_timestamp)
+        else:
+            # 嘗試 ISO 格式
+            time_str = str(publish_timestamp).replace('Z', '+00:00')
+            return datetime.fromisoformat(time_str)
+    except Exception as e:
+        logger.debug(f"時間解析失敗: {publish_timestamp}, 錯誤: {str(e)}")
+        return None
+
+
 def filter_important_data(data_array: List[Dict]) -> List[Dict]:
     """過濾重要經濟數據"""
     now = datetime.now()
     one_week_later = now + timedelta(days=7)
-    one_day_ago = now - timedelta(days=1)
+    two_hours_ago = now - timedelta(hours=2)  # 允許已發布2小時內的數據
     
     filtered = []
     for item in data_array:
         importance = item.get('importance_level') or item.get('importance') or 0
         
         # 解析發布時間
-        publish_timestamp = item.get('publish_timestamp') or item.get('publish_time')
-        if not publish_timestamp:
+        publish_time = parse_publish_time(item)
+        if not publish_time:
             continue
         
-        if isinstance(publish_timestamp, (int, float)):
-            if publish_timestamp > 1e12:  # 毫秒時間戳
-                publish_time = datetime.fromtimestamp(publish_timestamp / 1000)
-            else:  # 秒時間戳
-                publish_time = datetime.fromtimestamp(publish_timestamp)
-        else:
-            try:
-                publish_time = datetime.fromisoformat(str(publish_timestamp).replace('Z', '+00:00'))
-            except:
-                continue
-        
-        # 檢查是否已發布
+        # 檢查是否已發布（有實際發布值）
         is_published = item.get('published_value') not in [None, '']
         
-        time_valid = one_day_ago <= publish_time <= one_week_later
+        # 時間範圍：過去2小時到未來7天
+        time_valid = two_hours_ago <= publish_time <= one_week_later
         
-        if importance >= 2 and time_valid and not is_published:
+        # 重要性 >= 2，且在時間範圍內，且未發布或剛發布（2小時內）
+        if importance >= 2 and time_valid:
             filtered.append(item)
     
     return filtered
 
 
+def generate_data_id(item: Dict) -> str:
+    """生成唯一的數據 ID（用於去重）"""
+    # 優先使用 API 提供的唯一 ID
+    if item.get('id'):
+        return str(item['id'])
+    if item.get('calendar_id'):
+        return str(item['calendar_id'])
+    
+    # 如果沒有唯一 ID，使用組合鍵（來源 + 名稱 + 時間戳）
+    source = item.get('_source', 'unknown')
+    name = item.get('calendar_name') or item.get('name') or item.get('title') or 'unknown'
+    timestamp = item.get('publish_timestamp') or item.get('publish_time') or item.get('time') or '0'
+    
+    return f"{source}_{name}_{timestamp}"
+
+
 def get_unsent_data(data_array: List[Dict]) -> List[Dict]:
-    """獲取尚未推送的數據"""
+    """獲取尚未推送的數據（改進版：考慮發布時間和實際值）"""
     sent_ids = load_json_file(SENT_DATA_FILE, [])
     unsent = []
+    now = datetime.now()
     
     for item in data_array:
-        data_id = item.get('id') or item.get('calendar_id') or f"{item.get('calendar_name')}_{item.get('publish_timestamp')}"
-        if data_id not in sent_ids:
-            unsent.append(item)
+        data_id = generate_data_id(item)
+        
+        # 檢查是否在已推送列表中
+        if data_id in sent_ids:
+            continue
+        
+        # 額外檢查：如果數據已發布超過 2 小時，且已有實際值，則跳過
+        # 這可以防止在 GitHub Actions 環境中重複推送
+        publish_time = parse_publish_time(item)
+        if publish_time:
+            time_diff = (now - publish_time).total_seconds()
+            published_value = item.get('published_value') or item.get('actual')
+            
+            # 如果已發布超過 2 小時且有實際值，視為已處理過（避免重複）
+            if time_diff > 7200 and published_value:  # 2小時 = 7200秒
+                logger.debug(f"跳過已發布超過2小時的數據: {data_id}")
+                # 標記為已推送，避免下次再檢查
+                mark_as_sent(data_id)
+                continue
+        
+        unsent.append(item)
     
     return unsent
 
@@ -783,34 +886,44 @@ def mark_as_sent(data_id: str):
         save_json_file(SENT_DATA_FILE, sent_ids)
 
 
-def get_time_until(publish_time: datetime) -> str:
-    """計算距離發布時間還有多久"""
+def get_time_status(publish_time: datetime) -> tuple:
+    """計算時間狀態，返回 (狀態文字, 是否已發布, 時間差秒數)"""
     now = datetime.now()
-    diff = (publish_time - now).total_seconds()
+    diff_seconds = (publish_time - now).total_seconds()
     
-    if diff < 0:
-        return '已經發布過了'
+    is_past = diff_seconds < 0
+    abs_diff = abs(diff_seconds)
     
-    days = int(diff // 86400)
-    hours = int((diff % 86400) // 3600)
-    minutes = int((diff % 3600) // 60)
-    
-    if days > 7:
-        return f"還有 {days} 天"
-    elif days > 0:
-        if hours > 0:
-            return f"還有 {days} 天 {hours} 小時"
+    if is_past:
+        # 已發布時間
+        if abs_diff < 3600:  # 1小時內
+            minutes = int(abs_diff // 60)
+            return (f"已發布 {minutes} 分鐘前", True, diff_seconds)
+        elif abs_diff < 86400:  # 24小時內
+            hours = int(abs_diff // 3600)
+            return (f"已發布 {hours} 小時前", True, diff_seconds)
         else:
-            return f"還有 {days} 天"
-    elif hours > 0:
-        if minutes > 0:
-            return f"還有 {hours} 小時 {minutes} 分鐘"
-        else:
-            return f"還有 {hours} 小時"
-    elif minutes > 0:
-        return f"還有 {minutes} 分鐘"
+            days = int(abs_diff // 86400)
+            return (f"已發布 {days} 天前", True, diff_seconds)
     else:
-        return '即將發布'
+        # 未發布時間
+        if abs_diff < 3600:  # 1小時內
+            minutes = int(abs_diff // 60)
+            return (f"{minutes} 分鐘後發布", False, diff_seconds)
+        elif abs_diff < 86400:  # 24小時內
+            hours = int(abs_diff // 3600)
+            minutes = int((abs_diff % 3600) // 60)
+            if minutes > 0:
+                return (f"{hours} 小時 {minutes} 分鐘後", False, diff_seconds)
+            else:
+                return (f"{hours} 小時後", False, diff_seconds)
+        else:
+            days = int(abs_diff // 86400)
+            hours = int((abs_diff % 86400) // 3600)
+            if hours > 0:
+                return (f"{days} 天 {hours} 小時後", False, diff_seconds)
+            else:
+                return (f"{days} 天後", False, diff_seconds)
 
 
 def get_country_flag(country_name: str) -> str:
@@ -863,97 +976,201 @@ def get_effect_emoji(effect: str) -> str:
     return effect_map.get(effect, '📊')
 
 
+def get_category_info(data: Dict) -> tuple:
+    """獲取數據類別資訊，返回 (類別名稱, 類別emoji)"""
+    source = data.get('_source', 'economic_data')
+    category_map = {
+        'economic_data': ('經濟數據', '📊'),
+        'financial_events': ('財經事件', '💼'),
+        'central_bank': ('央行活動', '🏦')
+    }
+    return category_map.get(source, ('經濟事件', '📈'))
+
+
 def format_economic_data_message(data: Dict) -> str:
-    """格式化經濟數據訊息"""
-    publish_timestamp = data.get('publish_timestamp') or data.get('publish_time')
-    if isinstance(publish_timestamp, (int, float)):
-        if publish_timestamp > 1e12:
-            publish_time = datetime.fromtimestamp(publish_timestamp / 1000)
-        else:
-            publish_time = datetime.fromtimestamp(publish_timestamp)
-    else:
+    """格式化經濟數據訊息（全新設計）"""
+    publish_time = parse_publish_time(data)
+    if not publish_time:
         publish_time = datetime.now()
     
     time_str = format_datetime(publish_time)
-    time_until = get_time_until(publish_time)
+    time_status, is_published, _ = get_time_status(publish_time)
     
+    # 重要性
     importance_level = data.get('importance_level') or data.get('importance') or 0
-    importance_emoji = '🔴' if importance_level >= 3 else '🟡' if importance_level >= 2 else '🟢'
-    importance_text = '超高' if importance_level >= 3 else '高' if importance_level >= 2 else '中'
+    if importance_level >= 3:
+        importance_emoji = '🔴'
+        importance_text = '極高'
+        importance_badge = '⚠️ 極高重要性'
+    elif importance_level >= 2:
+        importance_emoji = '🟡'
+        importance_text = '高'
+        importance_badge = '⚡ 高重要性'
+    else:
+        importance_emoji = '🟢'
+        importance_text = '中'
+        importance_badge = '📌 中重要性'
     
+    # 類別資訊
+    category_name, category_emoji = get_category_info(data)
+    
+    # 國家資訊
     country_flag = get_country_flag(data.get('country_name') or data.get('country') or '')
+    country_name = data.get('country_name') or data.get('country') or '未知地區'
+    
+    # 事件名稱
+    event_name = data.get('calendar_name') or data.get('name') or data.get('title') or '經濟指標'
+    
+    # 市場影響
     effect_emoji = get_effect_emoji(data.get('data_effect') or data.get('effect') or '')
     effect_text = get_effect_text(data.get('data_effect') or data.get('effect') or '')
     
-    message = "區塊鏈船長傑克通知您\n\n"
-    message += "📊 *重要經濟數據來囉！*\n"
-    message += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    # 預測值與前值
+    forecast_value = data.get('forecast_value') or data.get('forecast')
+    previous_value = data.get('previous_value') or data.get('previous')
+    published_value = data.get('published_value') or data.get('actual')
     
-    calendar_name = data.get('calendar_name') or data.get('name') or '經濟指標'
-    country_name = data.get('country_name') or data.get('country') or '未知國家'
+    # 構建訊息
+    lines = []
     
-    message += f"{importance_emoji} *{calendar_name}*\n"
-    message += f"{country_flag} {country_name} 即將發布\n\n"
+    # 標題區域
+    lines.append(f"{category_emoji} *【{category_name}推播】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
     
-    message += "⏰ *什麼時候發布？*\n"
-    message += f"📅 {time_str}\n"
-    message += f"⏳ {time_until}就要發布了\n\n" if '還有' in time_until else f"⏳ {time_until}\n\n"
+    # 事件標題
+    lines.append(f"{importance_emoji} *{event_name}*")
+    lines.append(f"{country_flag} {country_name}")
+    lines.append("")
     
-    message += "📈 *市場怎麼看？*\n"
-    if data.get('forecast_value'):
-        message += f"專家預測: *{data['forecast_value']}*\n"
-    if data.get('previous_value'):
-        message += f"上次結果: {data['previous_value']}\n"
-    message += "\n"
+    # 時間資訊
+    lines.append("🕐 *發布時間*")
+    if is_published:
+        lines.append(f"✅ {time_str}")
+        lines.append(f"⏰ {time_status}")
+    else:
+        lines.append(f"📅 {time_str}")
+        lines.append(f"⏳ {time_status}")
+    lines.append("")
     
-    message += f"⚡ *重要程度*: {importance_text}重要性\n"
-    if effect_text:
-        message += f"{effect_emoji} *對市場影響*: {effect_text}\n"
-    message += "\n"
+    # 數據對比（如果已發布，顯示實際值；未發布顯示預測值）
+    has_data = False
+    if published_value:
+        lines.append("📈 *實際發布值*")
+        lines.append(f"`{published_value}`")
+        has_data = True
+        if forecast_value:
+            lines.append(f"預測值：`{forecast_value}`")
+        if previous_value:
+            lines.append(f"前值：`{previous_value}`")
+    elif forecast_value or previous_value:
+        lines.append("📊 *市場預期*")
+        if forecast_value:
+            lines.append(f"預測值：`{forecast_value}`")
+        if previous_value:
+            lines.append(f"前值：`{previous_value}`")
+        has_data = True
     
-    if data.get('remark') or data.get('note'):
-        message += f"📝 *補充說明*\n{data.get('remark') or data.get('note')}\n\n"
+    if has_data:
+        lines.append("")
     
-    message += "━━━━━━━━━━━━━━━━━━━━\n"
-    message += f"🤖 自動推播 | {format_datetime(datetime.now())}"
+    # 重要性與影響
+    lines.append(f"{importance_badge}")
+    if effect_text and effect_text != '待觀察':
+        lines.append(f"{effect_emoji} 市場影響：{effect_text}")
+    lines.append("")
     
-    return message
+    # 補充說明
+    remark = data.get('remark') or data.get('note') or data.get('description')
+    if remark:
+        lines.append(f"💡 *船長解讀*")
+        # 限制說明長度
+        if len(remark) > 200:
+            remark = remark[:200] + "..."
+        lines.append(f"{remark}")
+        lines.append("")
+    
+    # 底部資訊
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🤖 區塊鏈船長｜{format_datetime(datetime.now())}")
+    
+    return "\n".join(lines)
 
 
 def fetch_and_push_economic_data():
-    """主函數：抓取並推送經濟數據"""
+    """主函數：抓取並推送經濟數據（整合三個API）"""
     try:
+        all_data = []
+        
+        # 1. 抓取經濟數據
+        logger.info("正在抓取經濟數據...")
         economic_data = fetch_economic_data()
-        if not economic_data:
-            logger.info("沒有新的經濟數據")
+        all_data.extend(economic_data)
+        logger.info(f"經濟數據：{len(economic_data)} 條")
+        
+        # 2. 抓取財經事件
+        logger.info("正在抓取財經事件...")
+        financial_events = fetch_financial_events()
+        all_data.extend(financial_events)
+        logger.info(f"財經事件：{len(financial_events)} 條")
+        
+        # 3. 抓取央行活動
+        logger.info("正在抓取央行活動...")
+        central_bank = fetch_central_bank_activities()
+        all_data.extend(central_bank)
+        logger.info(f"央行活動：{len(central_bank)} 條")
+        
+        if not all_data:
+            logger.info("沒有獲取到任何數據")
             return
         
-        logger.info(f"總共獲取 {len(economic_data)} 條經濟數據")
+        logger.info(f"總共獲取 {len(all_data)} 條數據（經濟數據: {len(economic_data)}, 財經事件: {len(financial_events)}, 央行活動: {len(central_bank)}）")
         
-        important_data = filter_important_data(economic_data)
+        # 過濾重要數據
+        important_data = filter_important_data(all_data)
         logger.info(f"過濾後的重要數據: {len(important_data)} 條")
         
         if not important_data:
+            logger.info("沒有符合條件的重要數據")
             return
         
+        # 按發布時間排序（優先推送即將發布的）
+        important_data.sort(key=lambda x: parse_publish_time(x) or datetime.max)
+        
+        # 檢查哪些尚未推送
         new_data = get_unsent_data(important_data)
         logger.info(f"尚未推送的重要數據: {len(new_data)} 條")
         
         if not new_data:
+            logger.info("所有重要數據均已推送過")
             return
         
-        for data in new_data:
-            message = format_economic_data_message(data)
-            send_telegram_message(message, TG_THREAD_IDS['economic_data'])
-            
-            data_id = data.get('id') or data.get('calendar_id') or f"{data.get('calendar_name')}_{data.get('publish_timestamp')}"
-            mark_as_sent(data_id)
+        # 批量推送（避免過於頻繁）
+        success_count = 0
+        for idx, data in enumerate(new_data):
+            try:
+                message = format_economic_data_message(data)
+                send_telegram_message(message, TG_THREAD_IDS['economic_data'])
+                
+                data_id = generate_data_id(data)
+                mark_as_sent(data_id)
+                success_count += 1
+                
+                # 每條訊息間隔 1 秒，避免觸發速率限制
+                if idx < len(new_data) - 1:
+                    time.sleep(1)
+                    
+            except Exception as e:
+                logger.error(f"推送單條數據失敗: {str(e)}")
         
-        logger.info(f"成功推送 {len(new_data)} 條重要經濟數據")
+        logger.info(f"成功推送 {success_count}/{len(new_data)} 條重要經濟數據")
         
     except Exception as e:
-        logger.error(f"錯誤: {str(e)}")
-        send_telegram_message(f"⚠️ *經濟數據抓取錯誤*\n\n{str(e)}", TG_THREAD_IDS['economic_data'])
+        logger.error(f"經濟數據推播執行錯誤: {str(e)}")
+        send_telegram_message(
+            f"⚠️ *經濟數據抓取錯誤*\n\n錯誤訊息：{str(e)}\n\n請檢查 API 金鑰或網路連線。", 
+            TG_THREAD_IDS['economic_data']
+        )
 
 
 # ==================== 5. 新聞快訊推特中文推播 ====================
