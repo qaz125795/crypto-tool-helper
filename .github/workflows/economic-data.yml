@@ -2,14 +2,15 @@ name: 重要經濟數據推播
 
 on:
   schedule:
-    # 每天執行一次（UTC 時間 00:00）
-    - cron: '0 0 * * *'
+    # 每 10 分鐘執行一次（UTC 時間）
+    # 這樣可以及時捕捉經濟數據、財經事件和央行活動的發布
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
@@ -27,6 +28,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Create data directory
+        run: mkdir -p data
+
+      - name: Restore sent data cache
+        uses: actions/cache@v4
+        with:
+          path: data/
+          # 使用日期作為 key，同一天的所有執行共享同一個 cache
+          key: economic-data-sent-ids-${{ github.run_number }}
+          restore-keys: |
+            economic-data-sent-ids-
 
       - name: Run economic data task
         env:
