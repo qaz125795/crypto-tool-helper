@@ -321,7 +321,7 @@ def get_latest_data_point(data: Dict) -> Optional[Dict]:
 
 
 def analyze_data(all_data: Dict) -> Optional[Dict]:
-    """分析數據並判斷市場狀況"""
+    """分析數據並判斷市場狀況（改進版：更合理的閾值和白話描述）"""
     global_point = get_latest_data_point(all_data.get('global'))
     global_ratio = global_point.get('global_account_long_short_ratio') if global_point else None
     
@@ -335,55 +335,193 @@ def analyze_data(all_data: Dict) -> Optional[Dict]:
         logger.warning("無法提取必要的數據指標")
         return None
     
-    diagnosis = "勢力均衡"
+    # 改進的診斷邏輯：使用更合理的閾值，並提供更白話的描述
+    diagnosis = ""
     diagnosis_detail = ""
+    risk_level = "中等"
     
+    # 計算散戶和巨鯨的傾向
+    retail_bullish = global_ratio > 1.2 if global_ratio else False
+    retail_bearish = global_ratio < 0.9 if global_ratio else False
+    whale_bullish = top_position_ratio > 1.15 if top_position_ratio else False
+    whale_bearish = top_position_ratio < 0.9 if top_position_ratio else False
+    
+    # 判斷市場狀況
     if global_ratio is not None and top_position_ratio is not None:
-        if global_ratio > 1.8 and top_position_ratio < 1.0:
-            diagnosis = "巨鯨出貨中"
-            diagnosis_detail = "散戶瘋狂做多，但巨鯨正在減倉，警惕回調風險"
-        elif global_ratio < 0.8 and top_position_ratio > 1.2:
-            diagnosis = "巨鯨強勢掃貨"
-            diagnosis_detail = "散戶恐慌割肉，巨鯨大舉建倉，可能是底部信號"
-        elif top_position_ratio < 1 and global_ratio > 1.5:
-            diagnosis = "巨鯨誘多"
-            diagnosis_detail = "大戶開空，散戶瘋狂做多，價格可能迎來暴跌"
-        elif top_position_ratio > 1 and global_ratio < 0.8:
-            diagnosis = "巨鯨抄底"
-            diagnosis_detail = "大戶買進，散戶恐慌割肉，可能是抄底機會"
+        # 情況1：散戶極度看多，巨鯨看空（危險信號）
+        if global_ratio > 1.5 and top_position_ratio < 0.95:
+            diagnosis = "⚠️ 散戶狂熱，巨鯨撤退"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示極度看多，但巨鯨持倉比 {top_position_ratio:.2f} 顯示看空。這是典型的「散戶接盤，巨鯨出貨」信號，價格可能面臨大幅回調。"
+            risk_level = "高"
+        # 情況2：散戶恐慌，巨鯨抄底（機會信號）
+        elif global_ratio < 0.85 and top_position_ratio > 1.2:
+            diagnosis = "✅ 散戶恐慌，巨鯨抄底"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示極度看空，但巨鯨持倉比 {top_position_ratio:.2f} 顯示強勢看多。這是「散戶割肉，巨鯨掃貨」的底部信號，可能是抄底機會。"
+            risk_level = "低"
+        # 情況3：散戶看多，巨鯨也看多（健康上漲）
+        elif global_ratio > 1.1 and top_position_ratio > 1.1:
+            diagnosis = "📈 散戶與巨鯨同步看多"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 和巨鯨持倉比 {top_position_ratio:.2f} 都顯示看多。市場情緒一致，上漲動能較強，但需注意過熱風險。"
+            risk_level = "中低"
+        # 情況4：散戶看空，巨鯨也看空（下跌趨勢）
+        elif global_ratio < 0.95 and top_position_ratio < 0.95:
+            diagnosis = "📉 散戶與巨鯨同步看空"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 和巨鯨持倉比 {top_position_ratio:.2f} 都顯示看空。市場情緒一致看跌，下跌壓力較大，建議謹慎操作。"
+            risk_level = "高"
+        # 情況5：散戶看多，巨鯨中性（需觀察）
+        elif global_ratio > 1.15 and 0.95 <= top_position_ratio <= 1.15:
+            diagnosis = "🔍 散戶看多，巨鯨觀望"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示看多，但巨鯨持倉比 {top_position_ratio:.2f} 保持中性。巨鯨可能在等待更好的進場時機，需密切觀察。"
+            risk_level = "中"
+        # 情況6：散戶看空，巨鯨中性（需觀察）
+        elif global_ratio < 0.9 and 0.95 <= top_position_ratio <= 1.15:
+            diagnosis = "🔍 散戶看空，巨鯨觀望"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示看空，但巨鯨持倉比 {top_position_ratio:.2f} 保持中性。巨鯨可能在等待更好的進場時機，需密切觀察。"
+            risk_level = "中"
+        # 情況7：散戶中性，巨鯨看多（機會信號）
+        elif 0.95 <= global_ratio <= 1.15 and top_position_ratio > 1.15:
+            diagnosis = "💎 散戶中性，巨鯨看多"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 保持中性，但巨鯨持倉比 {top_position_ratio:.2f} 顯示強勢看多。巨鯨可能提前布局，這是較好的跟隨信號。"
+            risk_level = "中低"
+        # 情況8：散戶中性，巨鯨看空（警告信號）
+        elif 0.95 <= global_ratio <= 1.15 and top_position_ratio < 0.9:
+            diagnosis = "⚠️ 散戶中性，巨鯨看空"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 保持中性，但巨鯨持倉比 {top_position_ratio:.2f} 顯示看空。巨鯨可能提前減倉，需警惕下跌風險。"
+            risk_level = "中高"
+        # 情況9：雙方都接近中性（平衡狀態）
+        else:
+            diagnosis = "⚖️ 市場平衡"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 和巨鯨持倉比 {top_position_ratio:.2f} 都接近中性。市場處於平衡狀態，等待明確方向。"
+            risk_level = "中等"
     elif global_ratio is not None:
-        diagnosis = "散戶看多" if global_ratio > 1.5 else ("散戶看空" if global_ratio < 0.8 else "勢力均衡")
+        # 只有散戶數據
+        if global_ratio > 1.3:
+            diagnosis = "👤 散戶極度看多"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示極度看多，市場情緒過熱，需警惕回調風險。"
+            risk_level = "中高"
+        elif global_ratio > 1.1:
+            diagnosis = "👤 散戶看多"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示看多，市場情緒偏樂觀。"
+            risk_level = "中"
+        elif global_ratio < 0.8:
+            diagnosis = "👤 散戶極度看空"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示極度看空，市場情緒恐慌，可能是底部信號。"
+            risk_level = "中"
+        elif global_ratio < 0.95:
+            diagnosis = "👤 散戶看空"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示看空，市場情緒偏悲觀。"
+            risk_level = "中"
+        else:
+            diagnosis = "👤 散戶中性"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 接近中性，市場情緒平衡。"
+            risk_level = "中等"
     elif top_position_ratio is not None:
-        diagnosis = "巨鯨看多" if top_position_ratio > 1 else ("巨鯨看空" if top_position_ratio < 1 else "勢力均衡")
+        # 只有巨鯨數據
+        if top_position_ratio > 1.3:
+            diagnosis = "🐳 巨鯨強勢看多"
+            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 顯示強勢看多，大戶積極建倉，可能是上漲信號。"
+            risk_level = "低"
+        elif top_position_ratio > 1.1:
+            diagnosis = "🐳 巨鯨看多"
+            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 顯示看多，大戶傾向做多。"
+            risk_level = "中低"
+        elif top_position_ratio < 0.8:
+            diagnosis = "🐳 巨鯨強勢看空"
+            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 顯示強勢看空，大戶積極減倉，需警惕下跌風險。"
+            risk_level = "高"
+        elif top_position_ratio < 0.95:
+            diagnosis = "🐳 巨鯨看空"
+            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 顯示看空，大戶傾向做空。"
+            risk_level = "中高"
+        else:
+            diagnosis = "🐳 巨鯨中性"
+            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 接近中性，大戶保持觀望。"
+            risk_level = "中等"
+    else:
+        diagnosis = "❓ 數據不足"
+        diagnosis_detail = "無法獲取足夠的數據進行分析。"
+        risk_level = "未知"
     
     return {
         'globalRatio': global_ratio,
         'topAccountRatio': top_account_ratio,
         'topPositionRatio': top_position_ratio,
         'diagnosis': diagnosis,
-        'diagnosisDetail': diagnosis_detail
+        'diagnosisDetail': diagnosis_detail,
+        'riskLevel': risk_level
     }
 
 
 def format_symbol_message(symbol: str, analysis: Dict) -> str:
-    """格式化單個幣種的訊息片段"""
+    """格式化單個幣種的訊息片段（改進版：更白話、更直觀）"""
     coin_symbol = symbol.replace("USDT", "")
     message = f"\n🐋 【{coin_symbol}】\n"
     message += "━━━━━━━━━━━━━━━━━━━\n"
     
+    # 顯示數據指標（簡化顯示）
     if analysis.get('globalRatio') is not None:
-        message += f"👤 散戶情緒 (全局帳戶比)：{analysis['globalRatio']:.4f}\n"
+        gr = analysis['globalRatio']
+        # 用更直觀的方式顯示
+        if gr > 1.2:
+            emoji = "🔥"
+            status = "極度看多"
+        elif gr > 1.05:
+            emoji = "📈"
+            status = "看多"
+        elif gr < 0.85:
+            emoji = "❄️"
+            status = "極度看空"
+        elif gr < 0.95:
+            emoji = "📉"
+            status = "看空"
+        else:
+            emoji = "➡️"
+            status = "中性"
+        message += f"👤 散戶情緒：{emoji} {status} (多空比 {gr:.2f})\n"
     
     if analysis.get('topAccountRatio') is not None:
-        message += f"📊 大戶帳戶數比：{analysis['topAccountRatio']:.4f}\n"
+        tar = analysis['topAccountRatio']
+        message += f"📊 大戶帳戶比：{tar:.2f}\n"
     
     if analysis.get('topPositionRatio') is not None:
-        message += f"🐳 巨鯨部位 (大戶持倉比)：{analysis['topPositionRatio']:.4f}\n"
+        tpr = analysis['topPositionRatio']
+        # 用更直觀的方式顯示
+        if tpr > 1.2:
+            emoji = "🟢"
+            status = "強勢看多"
+        elif tpr > 1.05:
+            emoji = "🟡"
+            status = "看多"
+        elif tpr < 0.85:
+            emoji = "🔴"
+            status = "強勢看空"
+        elif tpr < 0.95:
+            emoji = "🟠"
+            status = "看空"
+        else:
+            emoji = "⚪"
+            status = "中性"
+        message += f"🐳 巨鯨部位：{emoji} {status} (持倉比 {tpr:.2f})\n"
     
-    message += f"\n🚩 深度診斷：{analysis['diagnosis']}\n"
+    # 顯示診斷結果（更突出）
+    message += f"\n🚩 市場診斷：\n"
+    message += f"   {analysis.get('diagnosis', '無法判斷')}\n"
     
     if analysis.get('diagnosisDetail'):
-        message += f"📝 {analysis['diagnosisDetail']}\n"
+        message += f"\n💡 解讀：\n"
+        message += f"   {analysis['diagnosisDetail']}\n"
+    
+    # 顯示風險等級
+    risk_level = analysis.get('riskLevel', '未知')
+    risk_emoji = {
+        '低': '🟢',
+        '中低': '🟡',
+        '中等': '🟠',
+        '中高': '🟠',
+        '高': '🔴',
+        '未知': '⚪'
+    }
+    message += f"\n⚠️ 風險等級：{risk_emoji.get(risk_level, '⚪')} {risk_level}\n"
     
     return message
 
@@ -430,12 +568,13 @@ def fetch_whale_position():
         logger.error("所有幣種數據獲取失敗，無法發送訊息")
         return
     
-    # 格式化合併訊息
+    # 格式化合併訊息（改進版：更白話、更實用）
     now = datetime.now()
     time_str = format_datetime(now)
     
-    message = "🐋 【巨鯨持倉異動監控】\n"
+    message = "🐋 *【巨鯨持倉異動監控】*\n"
     message += "━━━━━━━━━━━━━━━━━━━\n"
+    message += "\n"
     
     for i, symbol in enumerate(SYMBOLS):
         if all_analyses[i] is not None:
@@ -443,13 +582,26 @@ def fetch_whale_position():
             if i < len(SYMBOLS) - 1:
                 message += "\n"
     
-    message += "\n💡 船長提示：\n"
-    message += "散戶看多而巨鯨看空時，價格往往會迎來暴跌收割。\n"
-    message += "請留意「多空比」與價格的背離現象。\n"
+    # 改進的船長提示（更實用、更白話）
+    message += "\n━━━━━━━━━━━━━━━━━━━\n"
+    message += "💡 *船長實戰提醒*：\n"
+    message += "\n"
+    message += "📌 *關鍵原則*：\n"
+    message += "• 散戶狂熱 + 巨鯨撤退 = 危險信號 ⚠️\n"
+    message += "• 散戶恐慌 + 巨鯨抄底 = 機會信號 ✅\n"
+    message += "• 散戶與巨鯨同步 = 趨勢延續 📈\n"
+    message += "\n"
+    message += "🎯 *操作建議*：\n"
+    message += "• 當看到「散戶極度看多，巨鯨看空」時，要特別小心，價格可能面臨大幅回調\n"
+    message += "• 當看到「散戶恐慌，巨鯨抄底」時，可能是底部信號，可以考慮分批建倉\n"
+    message += "• 當散戶和巨鯨都看多時，上漲動能較強，但需注意過熱風險\n"
+    message += "\n"
+    message += "⚠️ *風險提示*：\n"
+    message += "多空比數據僅供參考，請結合技術分析和市場環境綜合判斷。\n"
     message += "━━━━━━━━━━━━━━━━━━━\n"
-    message += f"⏰ 更新：{time_str}"
+    message += f"⏰ 更新時間：{time_str}"
     
-    send_telegram_message(message, TG_THREAD_IDS['whale_position'])
+    send_telegram_message(message, TG_THREAD_IDS['whale_position'], parse_mode="Markdown")
 
 
 # ==================== 3. 持倉變化篩選器 ====================
@@ -2008,63 +2160,42 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
             f"24h: ${total_vol_usd_24h/10000:.2f}萬 (門檻: ${threshold_24h/10000:.2f}萬)"
         )
 
-        # 改進判斷邏輯：1小時達到門檻 OR 24小時達到門檻（更寬鬆）
+        # 只檢查1小時門檻：只有過去1小時達到門檻時才推播
         triggered_by_1h = total_vol_usd_1h >= threshold_1h
-        triggered_by_24h = total_vol_usd_24h >= threshold_24h
         
-        if not (triggered_by_1h or triggered_by_24h):
+        if not triggered_by_1h:
             logger.debug(
-                f"{symbol} 未達門檻 - 1h: {total_vol_usd_1h/10000:.2f}萬 < {threshold_1h/10000:.2f}萬, "
-                f"24h: {total_vol_usd_24h/10000:.2f}萬 < {threshold_24h/10000:.2f}萬"
+                f"{symbol} 未達1小時門檻 - 1h: {total_vol_usd_1h/10000:.2f}萬 < {threshold_1h/10000:.2f}萬"
             )
             return None
 
-        # 判斷主導清算方向：如果1小時達標則用1小時，否則用24小時
-        if triggered_by_1h:
-            is_long_dom = buy_vol_usd_1h > sell_vol_usd_1h
-            dominant_side = "多單" if is_long_dom else "空單"
-            dominant_amount_1h = buy_vol_usd_1h if is_long_dom else sell_vol_usd_1h
-            trigger_reason = "1小時極端爆倉"
-        else:
-            # 24小時達標但1小時未達標，用24小時數據判斷
-            is_long_dom = buy_vol_usd_24h > sell_vol_usd_24h
-            dominant_side = "多單" if is_long_dom else "空單"
-            # 24小時觸發時，顯示24小時的總量（但標註為24小時累積）
-            dominant_amount_1h = buy_vol_usd_24h if is_long_dom else sell_vol_usd_24h
-            trigger_reason = "24小時累積爆倉"
+        # 判斷主導清算方向（只用1小時數據）
+        is_long_dom = buy_vol_usd_1h > sell_vol_usd_1h
+        dominant_side = "多單" if is_long_dom else "空單"
+        dominant_amount_1h = buy_vol_usd_1h if is_long_dom else sell_vol_usd_1h
 
         logger.info(
-            f"{symbol} ⚠️ 觸發警報 ({trigger_reason}) - 過去1h: ${(buy_vol_usd_1h + sell_vol_usd_1h)/10000:.2f}萬 | "
-            f"24h: ${total_vol_usd_24h/10000:.2f}萬"
+            f"{symbol} ⚠️ 觸發警報 (1小時極端爆倉) - 過去1h: ${(buy_vol_usd_1h + sell_vol_usd_1h)/10000:.2f}萬"
         )
 
         return {
             "symbol": symbol,
             "dominantSide": dominant_side,
             "dominantAmount1h": dominant_amount_1h,
-            "totalVolUsd24h": total_vol_usd_24h,
             "totalVolUsd1h": total_vol_usd_1h,
-            "buyVolUsd24h": buy_vol_usd_24h,
-            "sellVolUsd24h": sell_vol_usd_24h,
             "buyVolUsd1h": buy_vol_usd_1h,
             "sellVolUsd1h": sell_vol_usd_1h,
-            "triggerReason": trigger_reason,
         }
     except Exception as e:
         logger.error(f"處理 {symbol} 清算數據時發生錯誤: {str(e)}")
         return None
 
 
-def generate_liq_symbol_analysis(event: Dict) -> str:
-    """根據 24h 多空清算對比產出一句分析"""
-    is_long_dominant_24h = event.get("buyVolUsd24h", 0) > event.get("sellVolUsd24h", 0)
-    if is_long_dominant_24h:
-        return "多頭已被大幅清洗，留意技術性反彈與短線抄底機會。"
-    return "空頭已被大幅清洗，留意反向回落與高位補跌風險。"
+# 移除 generate_liq_symbol_analysis 函數（不再需要診斷文字）
 
 
 def format_liquidity_consolidated_message(events: List[Dict]) -> str:
-    """將多個清算事件整理成一則 Telegram 推播文字"""
+    """將多個清算事件整理成一則 Telegram 推播文字（只顯示過去1小時數據）"""
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2073,43 +2204,17 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"📊 本次監控共有 *{len(events)}* 個幣種達到極端爆倉門檻\n")
 
-    # 依觸發總量排序：如果是1小時觸發用1小時數據，如果是24小時觸發用24小時數據
-    def get_sort_key(e):
-        trigger_reason = e.get("triggerReason", "1小時極端爆倉")
-        if trigger_reason == "1小時極端爆倉":
-            return e.get("totalVolUsd1h", 0)
-        else:
-            return e.get("totalVolUsd24h", 0)
-    
-    events_sorted = sorted(events, key=get_sort_key, reverse=True)
+    # 依1小時總量排序
+    events_sorted = sorted(events, key=lambda e: e.get("totalVolUsd1h", 0), reverse=True)
 
     for ev in events_sorted:
-        total_24h = ev["totalVolUsd24h"] / 10_000
         total_1h = ev.get("totalVolUsd1h", 0.0) / 10_000
         amount_1h = ev["dominantAmount1h"] / 10_000
-        analysis = generate_liq_symbol_analysis(ev)
 
         lines.append(f"🥊 *【{ev['symbol']}】*")
-
-        # 顯示觸發原因和清算數據
-        trigger_reason = ev.get("triggerReason", "極端爆倉")
-        if trigger_reason == "1小時極端爆倉":
-            if total_1h < 10:  # 小於 10 萬 USD 視為訊號偏弱
-                lines.append(
-                    "過去 1 小時內爆倉金額不顯著，主要清算壓力來自較早前的波動。"
-                )
-            else:
-                lines.append(
-                    f"🚨 *過去 1 小時內*約有 *${amount_1h:.2f} 萬* 美元的 *{ev['dominantSide']}* 被強制平倉（爆倉）。"
-                )
-            lines.append(f"過去 24 小時內總清算金額：約 *${total_24h:.2f} 萬* 美元。")
-        else:
-            # 24小時累積觸發，amount_1h 實際上是 24h 的主導清算量
-            lines.append(
-                f"⚠️ *過去 24 小時內*累積約有 *${amount_1h:.2f} 萬* 美元的 *{ev['dominantSide']}* 被強制平倉。"
-            )
-            lines.append(f"其中過去 1 小時內清算：約 *${total_1h:.2f} 萬* 美元。")
-        lines.append(f"💡 {analysis}\n")
+        lines.append(
+            f"⚠️ *過去 1 小時內*約有 *${amount_1h:.2f} 萬* 美元的 *{ev['dominantSide']}* 被強制平倉。\n"
+        )
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"⏰ 更新時間：{time_str}")
@@ -2794,7 +2899,7 @@ def format_whale_position_message(position: Dict, index: int) -> str:
 
 
 def build_hyperliquid_message() -> Optional[str]:
-    """組合 Hyperliquid 聰明錢監控訊息"""
+    """組合 Hyperliquid 聰明錢監控訊息（僅在有新的 Whale Alert 時推播）"""
     logger.info("開始構建 Hyperliquid 聰明錢監控訊息...")
     
     # 1. 獲取 Whale Alert
@@ -2813,50 +2918,39 @@ def build_hyperliquid_message() -> Optional[str]:
             new_alerts.append(alert)
             new_alert_ids.append(alert_id)
     
-    # 2. 獲取 PNL Distribution
+    # ⚠️ 重要：只在有新的 Whale Alert 時才推播，避免洗頻
+    if not new_alerts:
+        logger.info("本次監控期間無新的大額交易提醒（> $1M），跳過推播")
+        return None
+    
+    # 2. 獲取 PNL Distribution（僅作為補充資訊）
     pnl_data = fetch_hyperliquid_pnl_distribution()
     smart_money_info = process_smart_money_pnl(pnl_data) if pnl_data else {}
     
-    # 3. 獲取 Whale Position
+    # 3. 獲取 Whale Position（僅作為補充資訊）
     whale_positions = fetch_hyperliquid_whale_position()
     logger.info(f"獲取到 {len(whale_positions)} 個鯨魚持倉")
     
-    # 如果完全沒有數據，不發送推播（但至少要有 whale positions 或其他信息）
-    has_smart_money_info = (
-        smart_money_info.get('money_printers') or 
-        smart_money_info.get('smart_money') or 
-        smart_money_info.get('top_symbols')
-    )
-    
-    if not new_alerts and not has_smart_money_info and not whale_positions:
-        logger.info("本次監控無有效數據，跳過推播")
-        return None
-    
-    # 構建訊息
+    # 構建訊息（僅在有新的 Alert 時才構建）
     lines = []
     lines.append("🐳 *【區塊鏈船長 - Hyperliquid 鯨魚追蹤】*")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
     
-    # Whale Alert 部分
-    if new_alerts:
-        lines.append("🚨 *巨鯨即時預警 (Whale Alert)*：")
-        for alert in new_alerts[:3]:  # 最多顯示 3 個
-            lines.append(format_alert_message(alert))
-            lines.append("")
-        
-        # 更新已發送 ID 列表
-        sent_alert_ids.extend(new_alert_ids)
-        # 只保留最近 500 條
-        if len(sent_alert_ids) > 500:
-            sent_alert_ids = sent_alert_ids[-500:]
-        save_json_file(HYPERLIQUID_SENT_ALERTS_FILE, sent_alert_ids)
-    else:
-        lines.append("🚨 *巨鯨即時預警 (Whale Alert)*：")
-        lines.append("本次監控期間無新的大額交易提醒（> $1M）")
+    # Whale Alert 部分（主要內容）
+    lines.append("🚨 *巨鯨即時預警 (Whale Alert)*：")
+    for alert in new_alerts[:5]:  # 最多顯示 5 個
+        lines.append(format_alert_message(alert))
         lines.append("")
     
-    # 聰明錢 PNL 分佈部分
+    # 更新已發送 ID 列表
+    sent_alert_ids.extend(new_alert_ids)
+    # 只保留最近 500 條
+    if len(sent_alert_ids) > 500:
+        sent_alert_ids = sent_alert_ids[-500:]
+    save_json_file(HYPERLIQUID_SENT_ALERTS_FILE, sent_alert_ids)
+    
+    # 聰明錢 PNL 分佈部分（補充資訊）
     has_smart_money_data = (
         smart_money_info.get('money_printers') or 
         smart_money_info.get('smart_money') or 
@@ -2892,7 +2986,7 @@ def build_hyperliquid_message() -> Optional[str]:
         
         lines.append("")
     
-    # 頂級鯨魚倉位部分
+    # 頂級鯨魚倉位部分（補充資訊）
     if whale_positions:
         lines.append("📊 *頂級鯨魚倉位 (Top Positions)*：")
         for idx, position in enumerate(whale_positions, 1):
@@ -2900,8 +2994,8 @@ def build_hyperliquid_message() -> Optional[str]:
         lines.append("")
     
     # 船長提示
-    if new_alerts or smart_money_info.get('top_symbols'):
-        top_symbol = list(smart_money_info.get('top_symbols', {}).keys())[0] if smart_money_info.get('top_symbols') else new_alerts[0].get('symbol', '特定標的') if new_alerts else '特定標的'
+    if new_alerts:
+        top_symbol = new_alerts[0].get('symbol', '特定標的')
         lines.append(f"💡 *船長提示*：聰明錢正在關注 {top_symbol}，請注意該幣種的流動性變化！")
         lines.append("")
     
