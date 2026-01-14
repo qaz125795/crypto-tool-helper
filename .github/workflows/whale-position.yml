@@ -2,8 +2,8 @@ name: 巨鯨持倉動向
 
 on:
   schedule:
-    # 每小時整點執行（UTC 時間）
-    - cron: '0 * * * *'
+    # 每 8 小時執行一次（UTC 時間：00:00, 08:00, 16:00）
+    - cron: '0 */8 * * *'
   workflow_dispatch:
 
 jobs:
@@ -36,4 +36,3 @@ jobs:
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_WHALE_POSITION: ${{ secrets.TG_THREAD_WHALE_POSITION }}
         run: python jackbot.py whale_position
-
