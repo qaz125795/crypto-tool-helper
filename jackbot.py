@@ -951,8 +951,8 @@ def parse_publish_time(item: Dict) -> Optional[datetime]:
         return None
 
 
-def filter_important_data(data_array: List[Dict]) -> List[Dict]:
-    """過濾重要經濟數據"""
+def filter_important_data(data_array: List[Dict], min_importance: int = 2) -> List[Dict]:
+    """過濾重要經濟數據（可指定最低重要性）"""
     now = datetime.now()
     one_week_later = now + timedelta(days=7)
     two_hours_ago = now - timedelta(hours=2)  # 允許已發布2小時內的數據
@@ -972,8 +972,33 @@ def filter_important_data(data_array: List[Dict]) -> List[Dict]:
         # 時間範圍：過去2小時到未來7天
         time_valid = two_hours_ago <= publish_time <= one_week_later
         
-        # 重要性 >= 2，且在時間範圍內，且未發布或剛發布（2小時內）
-        if importance >= 2 and time_valid:
+        # 根據最低重要性過濾
+        if importance >= min_importance and time_valid:
+            filtered.append(item)
+    
+    return filtered
+
+
+def filter_today_events(data_array: List[Dict], min_importance: int = 4) -> List[Dict]:
+    """過濾今日事件（用於早上8點預告）"""
+    now = datetime.now()
+    today_start = datetime(now.year, now.month, now.day, 0, 0, 0)
+    today_end = datetime(now.year, now.month, now.day, 23, 59, 59)
+    
+    filtered = []
+    for item in data_array:
+        importance = item.get('importance_level') or item.get('importance') or 0
+        
+        # 解析發布時間
+        publish_time = parse_publish_time(item)
+        if not publish_time:
+            continue
+        
+        # 只取今日且未發布的事件
+        is_published = item.get('published_value') not in [None, '']
+        is_today = today_start <= publish_time <= today_end
+        
+        if importance >= min_importance and is_today and not is_published:
             filtered.append(item)
     
     return filtered
@@ -1249,8 +1274,97 @@ def format_economic_data_message(data: Dict) -> str:
     return "\n".join(lines)
 
 
+def format_today_preview_message(events: List[Dict]) -> str:
+    """格式化今日預告訊息"""
+    now = datetime.now()
+    time_str = format_datetime(now)
+    
+    lines = []
+    lines.append("📅 *【今日重要經濟數據預告】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    
+    # 分組：5星和4星
+    five_star = [e for e in events if (e.get('importance_level') or e.get('importance') or 0) >= 5]
+    four_star = [e for e in events if 4 <= (e.get('importance_level') or e.get('importance') or 0) < 5]
+    
+    # 按時間排序
+    five_star.sort(key=lambda x: parse_publish_time(x) or datetime.max)
+    four_star.sort(key=lambda x: parse_publish_time(x) or datetime.max)
+    
+    if five_star:
+        lines.append("🔴 *5星事件（將準時推播）*：")
+        lines.append("")
+        for event in five_star:
+            publish_time = parse_publish_time(event)
+            if publish_time:
+                time_display = publish_time.strftime("%H:%M")
+                event_name = event.get('calendar_name') or event.get('name') or event.get('title') or '經濟指標'
+                country_flag = get_country_flag(event.get('country_name') or event.get('country') or '')
+                lines.append(f"  • {time_display} | {country_flag} {event_name}")
+        lines.append("")
+    
+    if four_star:
+        lines.append("🟡 *4星事件（僅列出，不推播）*：")
+        lines.append("")
+        for event in four_star:
+            publish_time = parse_publish_time(event)
+            if publish_time:
+                time_display = publish_time.strftime("%H:%M")
+                event_name = event.get('calendar_name') or event.get('name') or event.get('title') or '經濟指標'
+                country_flag = get_country_flag(event.get('country_name') or event.get('country') or '')
+                lines.append(f"  • {time_display} | {country_flag} {event_name}")
+        lines.append("")
+    
+    if not five_star and not four_star:
+        lines.append("今日無重要經濟數據事件")
+        lines.append("")
+    
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⏰ 預告時間：{time_str}")
+    
+    return "\n".join(lines)
+
+
+def send_today_preview():
+    """早上8點發送今日預告（列出4星以上的事件）"""
+    try:
+        all_data = []
+        
+        # 抓取所有數據
+        logger.info("正在抓取經濟數據（預告模式）...")
+        economic_data = fetch_economic_data()
+        all_data.extend(economic_data)
+        
+        financial_events = fetch_financial_events()
+        all_data.extend(financial_events)
+        
+        central_bank = fetch_central_bank_activities()
+        all_data.extend(central_bank)
+        
+        if not all_data:
+            logger.info("沒有獲取到任何數據")
+            return
+        
+        # 過濾今日4星以上的事件
+        today_events = filter_today_events(all_data, min_importance=4)
+        logger.info(f"今日4星以上事件: {len(today_events)} 條")
+        
+        if not today_events:
+            logger.info("今日無重要事件")
+            return
+        
+        # 發送預告
+        message = format_today_preview_message(today_events)
+        send_telegram_message(message, TG_THREAD_IDS['economic_data'], parse_mode="Markdown")
+        logger.info("今日預告發送完成")
+        
+    except Exception as e:
+        logger.error(f"發送今日預告錯誤: {str(e)}")
+
+
 def fetch_and_push_economic_data():
-    """主函數：抓取並推送經濟數據（整合三個API）"""
+    """主函數：抓取並推送經濟數據（只推播5星事件，在事件發生時）"""
     try:
         all_data = []
         
@@ -1278,12 +1392,12 @@ def fetch_and_push_economic_data():
         
         logger.info(f"總共獲取 {len(all_data)} 條數據（經濟數據: {len(economic_data)}, 財經事件: {len(financial_events)}, 央行活動: {len(central_bank)}）")
         
-        # 過濾重要數據
-        important_data = filter_important_data(all_data)
-        logger.info(f"過濾後的重要數據: {len(important_data)} 條")
+        # 只過濾5星重要數據
+        important_data = filter_important_data(all_data, min_importance=5)
+        logger.info(f"過濾後的5星重要數據: {len(important_data)} 條")
         
         if not important_data:
-            logger.info("沒有符合條件的重要數據")
+            logger.info("沒有符合條件的5星重要數據")
             return
         
         # 按發布時間排序（優先推送即將發布的）
@@ -1291,10 +1405,10 @@ def fetch_and_push_economic_data():
         
         # 檢查哪些尚未推送
         new_data = get_unsent_data(important_data)
-        logger.info(f"尚未推送的重要數據: {len(new_data)} 條")
+        logger.info(f"尚未推送的5星重要數據: {len(new_data)} 條")
         
         if not new_data:
-            logger.info("所有重要數據均已推送過")
+            logger.info("所有5星重要數據均已推送過")
             return
         
         # 批量推送（避免過於頻繁）
@@ -1302,7 +1416,7 @@ def fetch_and_push_economic_data():
         for idx, data in enumerate(new_data):
             try:
                 message = format_economic_data_message(data)
-                send_telegram_message(message, TG_THREAD_IDS['economic_data'])
+                send_telegram_message(message, TG_THREAD_IDS['economic_data'], parse_mode="Markdown")
                 
                 data_id = generate_data_id(data)
                 mark_as_sent(data_id)
@@ -1315,7 +1429,7 @@ def fetch_and_push_economic_data():
             except Exception as e:
                 logger.error(f"推送單條數據失敗: {str(e)}")
         
-        logger.info(f"成功推送 {success_count}/{len(new_data)} 條重要經濟數據")
+        logger.info(f"成功推送 {success_count}/{len(new_data)} 條5星重要經濟數據")
         
     except Exception as e:
         logger.error(f"經濟數據推播執行錯誤: {str(e)}")
@@ -3035,6 +3149,8 @@ if __name__ == "__main__":
             fetch_position_change()
         elif function_name == "economic_data":
             fetch_and_push_economic_data()
+        elif function_name == "economic_data_preview":
+            send_today_preview()
         elif function_name == "news":
             fetch_all_news()
         elif function_name == "funding_rate":
