@@ -2203,7 +2203,7 @@ def get_liquidation_threshold(symbol: str, time_window: str = "1h") -> tuple:
 
 
 def fetch_liquidation_data(symbol: str) -> Optional[List[Dict]]:
-    """從 CoinGlass 抓取單一幣種的清算彙總歷史"""
+    """從 CoinGlass 抓取單一幣種的清算彙總歷史（改進版：添加調試信息）"""
     if not CG_API_KEY:
         logger.error("CG_API_KEY 未設定，無法呼叫清算 API")
         return None
@@ -2232,10 +2232,16 @@ def fetch_liquidation_data(symbol: str) -> Optional[List[Dict]]:
             )
             return None
 
-        data_array = data.get("data") or []
+        data_array = data.get("data") or data.get("list") or []
         if not isinstance(data_array, list):
             logger.warning(f"{symbol} 清算數據格式異常: {type(data_array)}")
             return None
+        
+        # 調試：檢查數據結構（只對前幾個幣種）
+        if symbol in ["BTC", "ETH", "SOL"] and data_array:
+            sample = data_array[-1] if data_array else {}
+            logger.debug(f"{symbol} API返回 - 數據筆數: {len(data_array)}, 最新一筆時間戳: {sample.get('time')}, 欄位: {list(sample.keys())[:8]}")
+        
         return data_array
     except Exception as e:
         logger.error(f"獲取 {symbol} 清算數據時發生異常: {str(e)}")
@@ -2243,7 +2249,7 @@ def fetch_liquidation_data(symbol: str) -> Optional[List[Dict]]:
 
 
 def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Dict]:
-    """處理清算數據，判斷是否達到極端爆倉門檻，返回事件描述"""
+    """處理清算數據，判斷是否達到極端爆倉門檻，返回事件描述（改進版：修復時間戳處理）"""
     try:
         if not data_array:
             logger.debug(f"{symbol} 清算數據為空")
@@ -2258,31 +2264,57 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
         buy_vol_usd_1h = 0.0
         sell_vol_usd_1h = 0.0
 
+        # 調試：檢查數據結構（只對前幾個幣種）
+        if symbol in ["BTC", "ETH", "SOL"] and data_array:
+            sample_item = data_array[-1] if data_array else {}
+            logger.debug(f"{symbol} 數據樣本 - 時間戳: {sample_item.get('time')}, 欄位: {list(sample_item.keys())[:5]}")
+
         # 從後往前遍歷，累加最近 24 小時與 1 小時的清算
+        items_in_24h = 0
+        items_in_1h = 0
+        
         for item in reversed(data_array):
             try:
-                item_time = int(item.get("time") or 0)
-            except (TypeError, ValueError):
+                item_time_raw = item.get("time") or item.get("timestamp") or 0
+                
+                # 處理時間戳：可能是毫秒或秒
+                if isinstance(item_time_raw, str):
+                    item_time = int(float(item_time_raw))
+                else:
+                    item_time = int(item_time_raw)
+                
+                # 如果時間戳看起來是秒（小於 1e12），轉換為毫秒
+                if item_time < 1e12:
+                    item_time = item_time * 1000
+                
+            except (TypeError, ValueError) as e:
+                logger.debug(f"{symbol} 時間戳解析失敗: {item_time_raw}, 錯誤: {str(e)}")
                 continue
 
-            long_liq = float(item.get("aggregated_long_liquidation_usd") or 0)
-            short_liq = float(item.get("aggregated_short_liquidation_usd") or 0)
+            long_liq = float(item.get("aggregated_long_liquidation_usd") or item.get("long_liquidation_usd") or item.get("long") or 0)
+            short_liq = float(item.get("aggregated_short_liquidation_usd") or item.get("short_liquidation_usd") or item.get("short") or 0)
 
             if item_time >= twenty_four_hours_ago:
+                items_in_24h += 1
                 buy_vol_usd_24h += long_liq
                 sell_vol_usd_24h += short_liq
 
                 if item_time >= one_hour_ago:
+                    items_in_1h += 1
                     buy_vol_usd_1h += long_liq
                     sell_vol_usd_1h += short_liq
             else:
                 break
 
-        # 如果 24h 沒數據，用最新一筆頂上
+        # 調試日誌（只對前幾個幣種或當數據異常時）
+        if symbol in ["BTC", "ETH", "SOL"] or (items_in_1h == 0 and items_in_24h > 0):
+            logger.debug(f"{symbol} 時間範圍統計 - 24h內: {items_in_24h} 筆, 1h內: {items_in_1h} 筆, 總數據: {len(data_array)} 筆")
+
+        # 如果 24h 沒數據，用最新一筆頂上（備用邏輯）
         if buy_vol_usd_24h == 0 and sell_vol_usd_24h == 0 and data_array:
             latest = data_array[-1]
-            buy_vol_usd_24h = float(latest.get("aggregated_long_liquidation_usd") or 0)
-            sell_vol_usd_24h = float(latest.get("aggregated_short_liquidation_usd") or 0)
+            buy_vol_usd_24h = float(latest.get("aggregated_long_liquidation_usd") or latest.get("long_liquidation_usd") or latest.get("long") or 0)
+            sell_vol_usd_24h = float(latest.get("aggregated_short_liquidation_usd") or latest.get("short_liquidation_usd") or latest.get("short") or 0)
             buy_vol_usd_1h = buy_vol_usd_24h
             sell_vol_usd_1h = sell_vol_usd_24h
 
