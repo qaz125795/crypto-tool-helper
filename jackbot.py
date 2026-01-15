@@ -711,9 +711,15 @@ def extract_price_change_15m(coin: Dict) -> float:
     return 0.0
 
 
-def build_report_message(top_long_open: List, top_long_close: List, top_short_open: List, top_short_close: List) -> str:
-    """組合推播文字"""
-    lines = ["💰 持倉異常偵測報告（最近 15 分鐘）", ""]
+def build_report_message(top_long_open: List, top_long_close: List, top_short_open: List, top_short_close: List, processed_count: int = 0, oi_success_count: int = 0) -> str:
+    """組合推播文字（改進版：添加統計信息和時間戳）"""
+    now = datetime.now()
+    time_str = format_datetime(now)
+    
+    lines = []
+    lines.append("💰 *【持倉異常偵測報告 - 15分鐘循環監控】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
     
     def fmt(num):
         if num is None or (isinstance(num, float) and (num != num)):  # NaN check
@@ -721,47 +727,58 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
     
     # 多方開倉 TOP 3
-    lines.append("📈 多方開倉 TOP 3")
+    lines.append("📈 *多方開倉 TOP 3*")
     if not top_long_open:
         lines.append("  無明顯多方開倉標的")
     else:
         for idx, item in enumerate(top_long_open):
             lines.append(
-                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
+                f"  {idx + 1}) *{item['symbol']}*｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
     # 多方平倉 TOP 3
-    lines.append("📉 多方平倉 TOP 3")
+    lines.append("📉 *多方平倉 TOP 3*")
     if not top_long_close:
         lines.append("  無明顯多方平倉標的")
     else:
         for idx, item in enumerate(top_long_close):
             lines.append(
-                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
+                f"  {idx + 1}) *{item['symbol']}*｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
     # 空方開倉 TOP 3
-    lines.append("📉 空方開倉 TOP 3")
+    lines.append("📉 *空方開倉 TOP 3*")
     if not top_short_open:
         lines.append("  無明顯空方開倉標的")
     else:
         for idx, item in enumerate(top_short_open):
             lines.append(
-                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
+                f"  {idx + 1}) *{item['symbol']}*｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
     # 空方平倉 TOP 3
-    lines.append("📉 空方平倉 TOP 3")
+    lines.append("📉 *空方平倉 TOP 3*")
     if not top_short_close:
         lines.append("  無明顯空方平倉標的")
     else:
         for idx, item in enumerate(top_short_close):
             lines.append(
-                f"{idx + 1}) {item['symbol']}｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
+                f"  {idx + 1}) *{item['symbol']}*｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
             )
+    lines.append("")
+    
+    # 添加統計信息
+    if processed_count > 0:
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"📊 *監控統計*：已掃描 {processed_count} 個交易對，成功獲取 {oi_success_count} 個持倉數據")
+        lines.append("")
+    
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⏰ 更新時間：{time_str}")
+    lines.append("🔄 推播頻率：每 15 分鐘自動更新")
     
     return "\n".join(lines)
 
@@ -864,10 +881,11 @@ def fetch_position_change():
     top_short_open = short_open[:3]
     top_short_close = short_close[:3]
     
-    msg = build_report_message(top_long_open, top_long_close, top_short_open, top_short_close)
-    send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="HTML")
+    # 確保每次都會推播（即使沒有異常，也要推播報告）
+    msg = build_report_message(top_long_open, top_long_close, top_short_open, top_short_close, processed_count, oi_success_count)
+    send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
     
-    logger.info("持倉變化篩選執行完成")
+    logger.info("持倉變化篩選執行完成並已推播")
 
 
 # ==================== 4. 重要經濟數據推播 ====================
