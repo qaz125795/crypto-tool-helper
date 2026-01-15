@@ -767,7 +767,7 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
 
 
 def fetch_position_change():
-    """主流程：持倉變化篩選（抓取全部 904 個幣種）"""
+    """主流程：持倉變化篩選（抓取全部 904 個幣種，改進版：添加請求間隔和錯誤處理）"""
     logger.info("開始執行持倉變化篩選，抓取全部 904 個幣種...")
     
     all_symbols_data = fetch_coins_price_change()
@@ -789,10 +789,23 @@ def fetch_position_change():
     oi_success_count = 0
     oi_fail_count = 0
     
+    # 請求間隔控制（避免 API 速率限制）
+    REQUEST_DELAY = 0.15  # 每個請求間隔 150ms，904 個幣種約需 2.5 分鐘
+    
     # 每處理 100 個幣種記錄一次進度
     progress_interval = 100
     
+    # 記錄開始時間（用於超時檢查）
+    start_time = time.time()
+    MAX_EXECUTION_TIME = 25 * 60  # 25 分鐘（留 5 分鐘緩衝）
+    
     for coin in target_symbols:
+        # 檢查是否超時（避免超過 GitHub Actions 的 timeout）
+        elapsed_time = time.time() - start_time
+        if elapsed_time > MAX_EXECUTION_TIME:
+            logger.warning(f"執行時間已超過 {MAX_EXECUTION_TIME/60:.1f} 分鐘，提前結束處理")
+            break
+        
         symbol = normalize_symbol(coin)
         if not symbol:
             continue
@@ -801,32 +814,43 @@ def fetch_position_change():
         
         # 進度日誌
         if processed_count % progress_interval == 0:
-            logger.info(f"處理進度: {processed_count}/{MAX_SYMBOLS} 個幣種 ({processed_count*100//MAX_SYMBOLS}%)")
+            elapsed_min = elapsed_time / 60
+            logger.info(f"處理進度: {processed_count}/{MAX_SYMBOLS} 個幣種 ({processed_count*100//MAX_SYMBOLS}%) | 已用時: {elapsed_min:.1f} 分鐘")
         
-        price_change_15m = extract_price_change_15m(coin)
-        oi_change_15m = fetch_oi_change_15m(symbol)
-        
-        if oi_change_15m is None:
+        try:
+            price_change_15m = extract_price_change_15m(coin)
+            oi_change_15m = fetch_oi_change_15m(symbol)
+            
+            # 請求間隔控制（避免 API 速率限制）
+            if processed_count < len(target_symbols):  # 最後一個不需要延遲
+                time.sleep(REQUEST_DELAY)
+            
+            if oi_change_15m is None:
+                oi_fail_count += 1
+                continue
+            
+            oi_success_count += 1
+            
+            # 4 類分類邏輯
+            if price_change_15m > 0:
+                # 價格上漲
+                if oi_change_15m > 0:
+                    long_open.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 多方開倉
+                elif oi_change_15m < 0:
+                    long_close.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 多方平倉
+            elif price_change_15m < 0:
+                # 價格下跌
+                if oi_change_15m > 0:
+                    short_open.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 空方開倉
+                elif oi_change_15m < 0:
+                    short_close.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 空方平倉
+        except Exception as e:
+            logger.error(f"處理 {symbol} 時發生錯誤: {str(e)}")
             oi_fail_count += 1
             continue
-        
-        oi_success_count += 1
-        
-        # 4 類分類邏輯
-        if price_change_15m > 0:
-            # 價格上漲
-            if oi_change_15m > 0:
-                long_open.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 多方開倉
-            elif oi_change_15m < 0:
-                long_close.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 多方平倉
-        elif price_change_15m < 0:
-            # 價格下跌
-            if oi_change_15m > 0:
-                short_open.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 空方開倉
-            elif oi_change_15m < 0:
-                short_close.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 空方平倉
     
-    logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個")
+    total_time = time.time() - start_time
+    logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個 | 總用時: {total_time/60:.1f} 分鐘")
     logger.info(f"分類結果: 多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}")
     
     # 排序與取前 3 名
