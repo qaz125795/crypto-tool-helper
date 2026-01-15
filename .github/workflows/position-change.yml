@@ -3,13 +3,14 @@ name: 持倉變化篩選
 on:
   schedule:
     # 每 15 分鐘執行（UTC 時間）
+    # 注意：GitHub Actions 的 cron 可能有延遲，但會盡量準時執行
     - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # 處理 904 個幣種需要較長時間
+    timeout-minutes: 30  # 處理 904 個幣種需要較長時間（已優化：添加請求間隔控制）
     permissions:
       contents: read
       actions: read
