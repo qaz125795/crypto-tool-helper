@@ -1317,7 +1317,7 @@ def format_economic_data_message(data: Dict) -> str:
 
 
 def format_today_preview_message(events: List[Dict]) -> str:
-    """格式化今日預告訊息（改進版：4星以上都會推播）"""
+    """格式化今日預告訊息（改進版：取消星級，改為高重要性和極高重要性）"""
     now = datetime.now()
     time_str = format_datetime(now)
     
@@ -1326,18 +1326,18 @@ def format_today_preview_message(events: List[Dict]) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
     
-    # 分組：5星（極高重要性）和4星（高重要性）
-    five_star = [e for e in events if (e.get('importance_level') or e.get('importance') or 0) >= 5]
-    four_star = [e for e in events if 4 <= (e.get('importance_level') or e.get('importance') or 0) < 5]
+    # 分組：極高重要性（>= 3）和高重要性（>= 2 且 < 3）
+    very_high = [e for e in events if (e.get('importance_level') or e.get('importance') or 0) >= 3]
+    high = [e for e in events if 2 <= (e.get('importance_level') or e.get('importance') or 0) < 3]
     
     # 按時間排序
-    five_star.sort(key=lambda x: parse_publish_time(x) or datetime.max)
-    four_star.sort(key=lambda x: parse_publish_time(x) or datetime.max)
+    very_high.sort(key=lambda x: parse_publish_time(x) or datetime.max)
+    high.sort(key=lambda x: parse_publish_time(x) or datetime.max)
     
-    if five_star:
-        lines.append("🔴 *5星事件（極高重要性，將準時推播）*：")
+    if very_high:
+        lines.append("🔴 *極高重要性（將準時推播）*：")
         lines.append("")
-        for event in five_star:
+        for event in very_high:
             publish_time = parse_publish_time(event)
             if publish_time:
                 time_display = publish_time.strftime("%H:%M")
@@ -1346,10 +1346,10 @@ def format_today_preview_message(events: List[Dict]) -> str:
                 lines.append(f"  • {time_display} | {country_flag} {event_name}")
         lines.append("")
     
-    if four_star:
-        lines.append("🟡 *4星事件（高重要性，將準時推播）*：")
+    if high:
+        lines.append("🟡 *高重要性（僅列出清單）*：")
         lines.append("")
-        for event in four_star:
+        for event in high:
             publish_time = parse_publish_time(event)
             if publish_time:
                 time_display = publish_time.strftime("%H:%M")
@@ -1358,7 +1358,7 @@ def format_today_preview_message(events: List[Dict]) -> str:
                 lines.append(f"  • {time_display} | {country_flag} {event_name}")
         lines.append("")
     
-    if not five_star and not four_star:
+    if not very_high and not high:
         lines.append("今日無重要經濟數據事件")
         lines.append("")
     
@@ -1369,7 +1369,7 @@ def format_today_preview_message(events: List[Dict]) -> str:
 
 
 def send_today_preview():
-    """早上8點發送今日預告（列出4星以上的事件）"""
+    """早上8點發送今日預告（列出高重要性以上的事件）"""
     try:
         all_data = []
         
@@ -1388,9 +1388,9 @@ def send_today_preview():
             logger.info("沒有獲取到任何數據")
             return
         
-        # 過濾今日4星以上的事件
-        today_events = filter_today_events(all_data, min_importance=4)
-        logger.info(f"今日4星以上事件: {len(today_events)} 條")
+        # 過濾今日高重要性以上的事件（>= 2）
+        today_events = filter_today_events(all_data, min_importance=2)
+        logger.info(f"今日高重要性以上事件: {len(today_events)} 條")
         
         if not today_events:
             logger.info("今日無重要事件")
@@ -1406,7 +1406,7 @@ def send_today_preview():
 
 
 def fetch_and_push_economic_data():
-    """主函數：抓取並推送經濟數據（推播4星以上事件，在事件發生時）"""
+    """主函數：抓取並推送經濟數據（只推播極高重要性事件，在事件發生時）"""
     try:
         all_data = []
         
@@ -1434,12 +1434,12 @@ def fetch_and_push_economic_data():
         
         logger.info(f"總共獲取 {len(all_data)} 條數據（經濟數據: {len(economic_data)}, 財經事件: {len(financial_events)}, 央行活動: {len(central_bank)}）")
         
-        # 過濾4星以上重要數據（高重要性和極高重要性都會推播）
-        important_data = filter_important_data(all_data, min_importance=4)
-        logger.info(f"過濾後的4星以上重要數據: {len(important_data)} 條")
+        # 只過濾極高重要性數據（>= 3），高重要性（>= 2 且 < 3）不推播
+        important_data = filter_important_data(all_data, min_importance=3)
+        logger.info(f"過濾後的極高重要性數據: {len(important_data)} 條")
         
         if not important_data:
-            logger.info("沒有符合條件的4星以上重要數據")
+            logger.info("沒有符合條件的極高重要性數據")
             return
         
         # 按發布時間排序（優先推送即將發布的）
@@ -1447,10 +1447,10 @@ def fetch_and_push_economic_data():
         
         # 檢查哪些尚未推送
         new_data = get_unsent_data(important_data)
-        logger.info(f"尚未推送的4星以上重要數據: {len(new_data)} 條")
+        logger.info(f"尚未推送的極高重要性數據: {len(new_data)} 條")
         
         if not new_data:
-            logger.info("所有4星以上重要數據均已推送過")
+            logger.info("所有極高重要性數據均已推送過")
             return
         
         # 批量推送（避免過於頻繁）
@@ -1471,7 +1471,7 @@ def fetch_and_push_economic_data():
             except Exception as e:
                 logger.error(f"推送單條數據失敗: {str(e)}")
         
-        logger.info(f"成功推送 {success_count}/{len(new_data)} 條4星以上重要經濟數據")
+        logger.info(f"成功推送 {success_count}/{len(new_data)} 條極高重要性經濟數據")
         
     except Exception as e:
         logger.error(f"經濟數據推播執行錯誤: {str(e)}")

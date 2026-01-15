@@ -1,22 +1,20 @@
-name: 持倉變化篩選（15分鐘循環）
+name: 流動性獵取雷達
 
 on:
   schedule:
-    # 每 15 分鐘執行一次（UTC 時間）
-    # 執行時間：00:00, 00:15, 00:30, 00:45, 01:00, 01:15...（每小時的 0, 15, 30, 45 分）
-    # 注意：GitHub Actions 的 cron 可能有 1-5 分鐘延遲，但會盡量準時執行
-    - cron: '*/15 * * * *'
+    # 每小時整點執行（UTC 時間）
+    - cron: '0 * * * *'
   workflow_dispatch:
 
-# 防止並發執行：如果前一個執行還在運行，取消它並運行新的
+# 防止並發執行
 concurrency:
-  group: position-change
+  group: liquidity-radar
   cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25  # 縮短超時時間，避免卡死（處理 904 個幣種約需 2.5-3 分鐘）
+    timeout-minutes: 15
     permissions:
       contents: read
       actions: read
@@ -36,15 +34,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run position change task (15min cycle)
+      - name: Run liquidity radar task
         env:
           CG_API_KEY: ${{ secrets.CG_API_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
-          TG_THREAD_POSITION_CHANGE: ${{ secrets.TG_THREAD_POSITION_CHANGE }}
+          TG_THREAD_LIQUIDITY_RADAR: ${{ secrets.TG_THREAD_LIQUIDITY_RADAR }}
         run: |
-          # 設置超時保護，確保不會卡死（20分鐘 = 1200秒）
-          timeout 1200 python jackbot.py position_change || exit 0
+          # 設置超時保護
+          timeout 600 python jackbot.py liquidity_radar || exit 0
           echo "任務執行完成"
 
