@@ -1317,7 +1317,7 @@ def format_economic_data_message(data: Dict) -> str:
 
 
 def format_today_preview_message(events: List[Dict]) -> str:
-    """格式化今日預告訊息"""
+    """格式化今日預告訊息（改進版：4星以上都會推播）"""
     now = datetime.now()
     time_str = format_datetime(now)
     
@@ -1326,7 +1326,7 @@ def format_today_preview_message(events: List[Dict]) -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
     
-    # 分組：5星和4星
+    # 分組：5星（極高重要性）和4星（高重要性）
     five_star = [e for e in events if (e.get('importance_level') or e.get('importance') or 0) >= 5]
     four_star = [e for e in events if 4 <= (e.get('importance_level') or e.get('importance') or 0) < 5]
     
@@ -1335,7 +1335,7 @@ def format_today_preview_message(events: List[Dict]) -> str:
     four_star.sort(key=lambda x: parse_publish_time(x) or datetime.max)
     
     if five_star:
-        lines.append("🔴 *5星事件（將準時推播）*：")
+        lines.append("🔴 *5星事件（極高重要性，將準時推播）*：")
         lines.append("")
         for event in five_star:
             publish_time = parse_publish_time(event)
@@ -1347,7 +1347,7 @@ def format_today_preview_message(events: List[Dict]) -> str:
         lines.append("")
     
     if four_star:
-        lines.append("🟡 *4星事件（僅列出，不推播）*：")
+        lines.append("🟡 *4星事件（高重要性，將準時推播）*：")
         lines.append("")
         for event in four_star:
             publish_time = parse_publish_time(event)
@@ -1406,7 +1406,7 @@ def send_today_preview():
 
 
 def fetch_and_push_economic_data():
-    """主函數：抓取並推送經濟數據（只推播5星事件，在事件發生時）"""
+    """主函數：抓取並推送經濟數據（推播4星以上事件，在事件發生時）"""
     try:
         all_data = []
         
@@ -1434,12 +1434,12 @@ def fetch_and_push_economic_data():
         
         logger.info(f"總共獲取 {len(all_data)} 條數據（經濟數據: {len(economic_data)}, 財經事件: {len(financial_events)}, 央行活動: {len(central_bank)}）")
         
-        # 只過濾5星重要數據
-        important_data = filter_important_data(all_data, min_importance=5)
-        logger.info(f"過濾後的5星重要數據: {len(important_data)} 條")
+        # 過濾4星以上重要數據（高重要性和極高重要性都會推播）
+        important_data = filter_important_data(all_data, min_importance=4)
+        logger.info(f"過濾後的4星以上重要數據: {len(important_data)} 條")
         
         if not important_data:
-            logger.info("沒有符合條件的5星重要數據")
+            logger.info("沒有符合條件的4星以上重要數據")
             return
         
         # 按發布時間排序（優先推送即將發布的）
@@ -1447,10 +1447,10 @@ def fetch_and_push_economic_data():
         
         # 檢查哪些尚未推送
         new_data = get_unsent_data(important_data)
-        logger.info(f"尚未推送的5星重要數據: {len(new_data)} 條")
+        logger.info(f"尚未推送的4星以上重要數據: {len(new_data)} 條")
         
         if not new_data:
-            logger.info("所有5星重要數據均已推送過")
+            logger.info("所有4星以上重要數據均已推送過")
             return
         
         # 批量推送（避免過於頻繁）
@@ -1471,7 +1471,7 @@ def fetch_and_push_economic_data():
             except Exception as e:
                 logger.error(f"推送單條數據失敗: {str(e)}")
         
-        logger.info(f"成功推送 {success_count}/{len(new_data)} 條5星重要經濟數據")
+        logger.info(f"成功推送 {success_count}/{len(new_data)} 條4星以上重要經濟數據")
         
     except Exception as e:
         logger.error(f"經濟數據推播執行錯誤: {str(e)}")
@@ -2212,12 +2212,13 @@ LIQ_REQUEST_DELAY = 1.2  # 秒
 def get_liquidation_threshold(symbol: str, time_window: str = "1h") -> tuple:
     """根據幣種回傳極端爆倉門檻（USD）
     返回 (1h阈值, 24h阈值) 的元組
+    注意：1小時門檻已大幅降低，以便捕捉更多極端爆倉事件
     """
     if symbol in ("BTC", "ETH"):
-        return (2_000_000.0, 15_000_000.0)  # 1h: 200萬, 24h: 1500萬
+        return (100_000.0, 15_000_000.0)  # 1h: 10萬（大幅降低）, 24h: 1500萬
     if symbol in ("SOL", "XRP", "DOGE"):
-        return (800_000.0, 5_000_000.0)  # 1h: 80萬, 24h: 500萬
-    return (400_000.0, 3_000_000.0)  # 1h: 40萬, 24h: 300萬
+        return (50_000.0, 5_000_000.0)  # 1h: 5萬（大幅降低）, 24h: 500萬
+    return (30_000.0, 3_000_000.0)  # 1h: 3萬（大幅降低）, 24h: 300萬
 
 
 def fetch_liquidation_data(symbol: str) -> Optional[List[Dict]]:
@@ -2805,13 +2806,13 @@ def run_altseason_radar_once():
 # ==================== 10. Hyperliquid 聰明錢監控 ====================
 
 HYPERLIQUID_SENT_ALERTS_FILE = DATA_DIR / "hyperliquid_sent_alerts.json"
-WHALE_ALERT_THRESHOLD = 1_000_000  # $1M USD
+WHALE_ALERT_THRESHOLD = 500_000  # $50萬 USD（降低門檻，捕捉更多大額交易）
 SMART_MONEY_PNL_MIN = 100_000  # $100k USD
 MONEY_PRINTER_PNL_MIN = 1_000_000  # $1M USD
 
 
 def fetch_hyperliquid_whale_alert() -> List[Dict]:
-    """獲取 Hyperliquid 鯨魚提醒（大額交易）"""
+    """獲取 Hyperliquid 鯨魚提醒（大額交易，改進版：降低門檻並添加調試）"""
     url = f"{CG_API_BASE}/api/hyperliquid/whale-alert"
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -2831,9 +2832,17 @@ def fetch_hyperliquid_whale_alert() -> List[Dict]:
         
         data_list = result.get('data', [])
         if not isinstance(data_list, list):
+            logger.warning(f"Hyperliquid Whale Alert 數據格式異常: {type(data_list)}")
             return []
         
-        # 篩選名目價值 > $1M 的提醒
+        # 調試：記錄原始數據
+        logger.info(f"Hyperliquid Whale Alert 原始數據: {len(data_list)} 條")
+        if data_list:
+            sample = data_list[0]
+            logger.debug(f"數據樣本欄位: {list(sample.keys())[:10]}")
+            logger.debug(f"數據樣本內容: {json.dumps(sample, ensure_ascii=False)[:500]}")
+        
+        # 篩選名目價值 >= 門檻的提醒（門檻已降低）
         filtered_alerts = []
         for alert in data_list:
             # 嘗試多種可能的欄位名稱
@@ -2850,9 +2859,14 @@ def fetch_hyperliquid_whale_alert() -> List[Dict]:
                 value_float = float(value)
                 if value_float >= WHALE_ALERT_THRESHOLD:
                     filtered_alerts.append(alert)
-            except (TypeError, ValueError):
+                    logger.debug(f"符合門檻的 Alert: {alert.get('symbol')} - ${value_float/10000:.2f}萬")
+                else:
+                    logger.debug(f"未達門檻的 Alert: {alert.get('symbol')} - ${value_float/10000:.2f}萬 < ${WHALE_ALERT_THRESHOLD/10000:.2f}萬")
+            except (TypeError, ValueError) as e:
+                logger.debug(f"Alert 數值解析失敗: {value}, 錯誤: {str(e)}")
                 continue
         
+        logger.info(f"符合門檻的 Whale Alert: {len(filtered_alerts)} 條（門檻: ${WHALE_ALERT_THRESHOLD/10000:.2f}萬）")
         return filtered_alerts
     except Exception as e:
         logger.error(f"獲取 Hyperliquid Whale Alert 失敗: {str(e)}")
