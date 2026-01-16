@@ -914,14 +914,15 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     return "\n".join(lines)
 
 
-def process_single_symbol(coin: Dict) -> Optional[Dict]:
-    """處理單個幣種（用於並行處理）"""
-    symbol = normalize_symbol(coin)
+def process_single_symbol(symbol: str, price_data_cache: Dict[str, float]) -> Optional[Dict]:
+    """處理單個幣種（用於並行處理，直接使用幣種名稱和價格數據緩存）"""
     if not symbol:
         return None
     
     try:
-        price_change_15m = extract_price_change_15m(coin)
+        # 從緩存中獲取價格變化（如果沒有則為 0）
+        price_change_15m = price_data_cache.get(symbol.upper(), 0.0)
+        # 查詢 CoinGlass 的 OI 數據
         oi_change_15m = fetch_oi_change_15m(symbol)
         
         if oi_change_15m is None:
@@ -961,18 +962,56 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
 
 
 def fetch_position_change():
-    """主流程：持倉變化篩選（只偵測 BingX 合約幣種，大幅減少數量，只採集持倉變化 >= 1% 的數據）"""
+    """主流程：持倉變化篩選（先獲取 BingX 交易對名單，再查詢 CoinGlass 的 OI 數據）"""
     logger.info("開始執行持倉變化篩選，只偵測 BingX 合約幣種（持倉變化 >= 1%）...")
     
-    all_symbols_data = fetch_coins_price_change()
-    if not all_symbols_data:
-        send_telegram_message("⚠️ 無法從 Coinglass 取得合約幣種資料，請稍後再試。", TG_THREAD_IDS['position_change'])
+    # 步驟1：先獲取 BingX 交易對名單
+    bingx_symbols = fetch_supported_futures_coins()
+    if not bingx_symbols:
+        send_telegram_message("⚠️ 無法從 API 取得 BingX 合約幣種名單，請稍後再試。", TG_THREAD_IDS['position_change'])
         return
     
-    logger.info(f"從 Coinglass API 取得 {len(all_symbols_data)} 個合約幣種，將處理前 {MAX_SYMBOLS} 個")
+    logger.info(f"獲取到 {len(bingx_symbols)} 個 BingX 合約幣種")
     
-    # 處理合約幣種（已過濾現貨）
-    target_symbols = all_symbols_data[:MAX_SYMBOLS]
+    # 步驟2：一次性獲取 CoinGlass 所有幣種的價格變化數據（建立緩存）
+    logger.info("正在獲取 CoinGlass 價格變化數據...")
+    url = f"{CG_API_BASE}/api/futures/coins-price-change"
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json"
+    }
+    
+    price_data_cache = {}  # {幣種名稱: 價格變化%}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            all_data = result.get('data', result if isinstance(result, list) else [])
+            
+            # 建立價格數據緩存（只保留 BingX 幣種）
+            bingx_symbols_upper = {s.upper() for s in bingx_symbols}
+            for item in all_data:
+                item_symbol = item.get('symbol') or item.get('coin') or ''
+                item_symbol_clean = item_symbol.replace('USDT', '').replace('USDT-PERP', '').upper()
+                if item_symbol_clean in bingx_symbols_upper:
+                    # 提取 15 分鐘價格變化
+                    change = item.get('price_change_percent_15m')
+                    if isinstance(change, (int, float)):
+                        price_data_cache[item_symbol_clean] = float(change)
+                    else:
+                        # 備用：其他時間區間
+                        change = item.get('price_change_percent_1h')
+                        if isinstance(change, (int, float)):
+                            price_data_cache[item_symbol_clean] = float(change)
+                        else:
+                            price_data_cache[item_symbol_clean] = 0.0
+    except Exception as e:
+        logger.warning(f"獲取價格數據失敗: {str(e)}，將繼續使用 OI 數據")
+    
+    logger.info(f"價格數據緩存建立完成，共 {len(price_data_cache)} 個 BingX 幣種有價格數據")
+    
+    # 處理 BingX 幣種（限制數量避免超時）
+    target_symbols = bingx_symbols[:MAX_SYMBOLS] if len(bingx_symbols) > MAX_SYMBOLS else bingx_symbols
     
     long_open = []
     long_close = []
@@ -991,21 +1030,21 @@ def fetch_position_change():
     start_time = time.time()
     MAX_EXECUTION_TIME = 25 * 60  # 25 分鐘（留 5 分鐘緩衝）
     
-    # 使用線程池並行處理
+    # 使用線程池並行處理（直接使用幣種名稱列表和價格緩存）
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # 提交所有任務
-        future_to_coin = {executor.submit(process_single_symbol, coin): coin for coin in target_symbols}
+        # 提交所有任務（傳入幣種名稱和價格緩存）
+        future_to_symbol = {executor.submit(process_single_symbol, symbol, price_data_cache): symbol for symbol in target_symbols}
         
         # 處理完成的任務
         completed = 0
-        for future in as_completed(future_to_coin):
+        for future in as_completed(future_to_symbol):
             # 檢查超時
             elapsed_time = time.time() - start_time
             if elapsed_time > MAX_EXECUTION_TIME:
                 logger.warning(f"執行時間已超過 {MAX_EXECUTION_TIME/60:.1f} 分鐘，提前結束處理")
                 # 取消未完成的任務
-                for f in future_to_coin:
+                for f in future_to_symbol:
                     f.cancel()
                 break
             
