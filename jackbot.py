@@ -650,86 +650,58 @@ def fetch_supported_futures_coins() -> List[str]:
             return []
         
         result = response.json()
-        data = result.get('data', result if isinstance(result, list) else [])
+        data = result.get('data', result)
         
-        # 調試：記錄數據樣本
-        if data:
-            sample = data[0] if isinstance(data, list) else data
-            logger.info(f"API 數據樣本欄位: {list(sample.keys()) if isinstance(sample, dict) else '非字典類型'}")
-            logger.info(f"API 數據樣本內容: {json.dumps(sample, ensure_ascii=False, indent=2)[:500] if isinstance(sample, dict) else str(sample)[:500]}")
+        # API 返回的是字典結構：{"BingX": [{"instrument_id": "BTCUSDT", "base_asset": "BTC", ...}, ...]}
+        if not isinstance(data, dict):
+            logger.error(f"API 返回數據格式錯誤，預期字典但得到: {type(data)}")
+            return []
         
-        # 提取 BingX 交易所的幣種符號
+        # 調試：記錄可用的交易所
+        exchanges = list(data.keys())
+        logger.info(f"API 返回的交易所: {exchanges[:10]}... (共 {len(exchanges)} 個)")
+        
+        # 查找 BingX（嘗試多種可能的鍵名）
+        bingx_data = None
+        for key in data.keys():
+            if 'bingx' in str(key).lower() or 'bing' in str(key).lower():
+                bingx_data = data[key]
+                logger.info(f"找到 BingX 數據，鍵名: {key}")
+                break
+        
+        if not bingx_data:
+            logger.error(f"未找到 BingX 數據，可用交易所: {exchanges}")
+            return []
+        
+        if not isinstance(bingx_data, list):
+            logger.error(f"BingX 數據格式錯誤，預期列表但得到: {type(bingx_data)}")
+            return []
+        
+        # 提取幣種符號
         symbols = []
-        bingx_count = 0
-        total_count = 0
-        
-        for item in data:
+        for item in bingx_data:
             if not isinstance(item, dict):
                 continue
             
-            total_count += 1
+            # 優先使用 base_asset（例如 "BTC"）
+            symbol = item.get('base_asset') or item.get('baseAsset') or item.get('base')
             
-            # 檢查是否為 BingX 交易所（嘗試多種可能的字段名稱和格式）
-            exchange = (
-                item.get('exchange') or 
-                item.get('exchange_name') or 
-                item.get('exchangeName') or 
-                item.get('exchange_id') or
-                item.get('exchangeId') or
-                item.get('platform') or
-                ''
-            )
-            
-            exchange_str = str(exchange).lower()
-            # 檢查多種可能的 BingX 名稱格式
-            is_bingx = (
-                'bingx' in exchange_str or 
-                'bing' in exchange_str or
-                exchange_str == 'bingx' or
-                exchange_str == 'bing'
-            )
-            
-            if not is_bingx:
-                continue
-            
-            bingx_count += 1
-            
-            # 獲取交易對符號（嘗試多種可能的字段名稱）
-            symbol = (
-                item.get('symbol') or 
-                item.get('pair') or 
-                item.get('coin') or 
-                item.get('name') or
-                item.get('symbolName') or
-                item.get('trading_pair') or
-                item.get('tradingPair')
-            )
-            
+            # 如果沒有 base_asset，從 instrument_id 提取（例如 "BTCUSDT" -> "BTC"）
             if not symbol:
-                continue
+                instrument_id = item.get('instrument_id') or item.get('instrumentId') or item.get('symbol') or item.get('pair') or ''
+                if instrument_id:
+                    # 移除 USDT 後綴
+                    symbol = instrument_id.replace('USDT', '').replace('USDT-PERP', '').replace('-PERP', '').replace('_USDT', '').upper()
             
-            # 移除USDT後綴，統一格式
-            symbol_clean = symbol.replace('USDT', '').replace('USDT-PERP', '').replace('-PERP', '').replace('_USDT', '').upper()
-            if symbol_clean and symbol_clean not in symbols:
-                symbols.append(symbol_clean)
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
         
-        logger.info(f"API 總數據: {total_count} 條, BingX 數據: {bingx_count} 條, 提取到 {len(symbols)} 個唯一幣種")
-        
-        # 如果獲取到的數量異常少，記錄警告
-        if len(symbols) < 100:
-            logger.warning(f"⚠️ 獲取到的 BingX 幣種數量異常少（{len(symbols)} 個），可能過濾邏輯有問題")
-            # 記錄前幾個交易所名稱以便調試
-            if data:
-                exchanges_found = set()
-                for item in data[:20]:
-                    if isinstance(item, dict):
-                        ex = item.get('exchange') or item.get('exchange_name') or item.get('exchangeName') or '未知'
-                        exchanges_found.add(str(ex))
-                logger.info(f"發現的交易所名稱（前20條）: {list(exchanges_found)}")
-        
+        logger.info(f"從 BingX API 獲取到 {len(symbols)} 個合約幣種")
         return symbols
     except Exception as e:
         logger.error(f"獲取 BingX 合約幣種列表失敗: {str(e)}")
+        import traceback
+        logger.error(f"錯誤詳情: {traceback.format_exc()}")
         return []
 
 
