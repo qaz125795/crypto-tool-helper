@@ -686,12 +686,12 @@ def fetch_supported_futures_coins() -> List[str]:
             # 優先使用 base_asset（例如 "BTC"）
             symbol = item.get('base_asset') or item.get('baseAsset') or item.get('base')
             
-            # 如果沒有 base_asset，從 instrument_id 提取（例如 "BTCUSDT" -> "BTC"）
+            # 如果沒有 base_asset，從 instrument_id 提取（例如 "BTCUSDT" 或 "BTC-USDT" -> "BTC"）
             if not symbol:
                 instrument_id = item.get('instrument_id') or item.get('instrumentId') or item.get('symbol') or item.get('pair') or ''
                 if instrument_id:
-                    # 移除 USDT 後綴
-                    symbol = instrument_id.replace('USDT', '').replace('USDT-PERP', '').replace('-PERP', '').replace('_USDT', '').upper()
+                    # 處理多種格式：BTCUSDT, BTC-USDT, BTC_USDT 等
+                    symbol = instrument_id.replace('USDT', '').replace('USDT-PERP', '').replace('-PERP', '').replace('_USDT', '').replace('-USDT', '').replace('_', '').upper()
             
             if symbol and symbol not in symbols:
                 symbols.append(symbol)
@@ -915,14 +915,14 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
 
 
 def process_single_symbol(symbol: str, price_data_cache: Dict[str, float]) -> Optional[Dict]:
-    """處理單個幣種（用於並行處理，直接使用幣種名稱和價格數據緩存）"""
+    """處理單個幣種（用於並行處理，使用 CoinGlass 全市場 OI 數據）"""
     if not symbol:
         return None
     
     try:
         # 從緩存中獲取價格變化（如果沒有則為 0）
         price_change_15m = price_data_cache.get(symbol.upper(), 0.0)
-        # 查詢 CoinGlass 的 OI 數據
+        # 查詢 CoinGlass 的 OI 數據（全市場整合數據，原本的邏輯）
         oi_change_15m = fetch_oi_change_15m(symbol)
         
         if oi_change_15m is None:
@@ -962,16 +962,16 @@ def process_single_symbol(symbol: str, price_data_cache: Dict[str, float]) -> Op
 
 
 def fetch_position_change():
-    """主流程：持倉變化篩選（先獲取 BingX 交易對名單，再查詢 CoinGlass 的 OI 數據）"""
+    """主流程：持倉變化篩選（先獲取 BingX 交易對名單，再用這些幣種查詢 CoinGlass 全市場 OI 數據）"""
     logger.info("開始執行持倉變化篩選，只偵測 BingX 合約幣種（持倉變化 >= 1%）...")
     
-    # 步驟1：先獲取 BingX 交易對名單
+    # 步驟1：先獲取 BingX 交易對名單（提取幣種名稱）
     bingx_symbols = fetch_supported_futures_coins()
     if not bingx_symbols:
         send_telegram_message("⚠️ 無法從 API 取得 BingX 合約幣種名單，請稍後再試。", TG_THREAD_IDS['position_change'])
         return
     
-    logger.info(f"獲取到 {len(bingx_symbols)} 個 BingX 合約幣種")
+    logger.info(f"獲取到 {len(bingx_symbols)} 個 BingX 合約幣種，將查詢 CoinGlass 全市場 OI 數據")
     
     # 步驟2：一次性獲取 CoinGlass 所有幣種的價格變化數據（建立緩存）
     logger.info("正在獲取 CoinGlass 價格變化數據...")
@@ -992,7 +992,7 @@ def fetch_position_change():
             bingx_symbols_upper = {s.upper() for s in bingx_symbols}
             for item in all_data:
                 item_symbol = item.get('symbol') or item.get('coin') or ''
-                item_symbol_clean = item_symbol.replace('USDT', '').replace('USDT-PERP', '').upper()
+                item_symbol_clean = item_symbol.replace('USDT', '').replace('USDT-PERP', '').replace('-USDT', '').upper()
                 if item_symbol_clean in bingx_symbols_upper:
                     # 提取 15 分鐘價格變化
                     change = item.get('price_change_percent_15m')
