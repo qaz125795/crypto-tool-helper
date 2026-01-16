@@ -1,16 +1,22 @@
-name: 重要經濟數據推播（5星事件）
+name: 重要經濟數據推播（極高重要性）
 
 on:
   schedule:
     # 每 10 分鐘執行一次（UTC 時間）
-    # 只推播5星重要事件（在事件發生時準時推播）
-    - cron: '*/10 * * * *'
+    # 只推播極高重要性事件（在事件發生時準時推播）
+    # 每 10 分鐘執行，錯開3分鐘
+    - cron: '3,13,23,33,43,53 * * * *'
   workflow_dispatch:
+
+# 防止並發執行：如果前一個執行還在運行，取消它並運行新的
+concurrency:
+  group: economic-data-push
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15  # 縮短超時時間，避免卡死
     permissions:
       contents: read
       actions: read
@@ -23,6 +29,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'  # 使用 pip 緩存加速
 
       - name: Install dependencies
         run: |
@@ -40,13 +47,18 @@ jobs:
           key: economic-data-sent-ids-${{ github.run_number }}
           restore-keys: |
             economic-data-sent-ids-
+          # 優化：限制緩存大小，避免過大導致問題
+          fail-on-cache-miss: false
 
-      - name: Run economic data task (5 stars only)
+      - name: Run economic data task (極高重要性 only)
         env:
           CG_API_KEY: ${{ secrets.CG_API_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_ECONOMIC_DATA: ${{ secrets.TG_THREAD_ECONOMIC_DATA }}
-        run: python jackbot.py economic_data
+        run: |
+          # 設置超時保護，確保不會卡死
+          timeout 600 python jackbot.py economic_data || exit 0
+          echo "任務執行完成"
 

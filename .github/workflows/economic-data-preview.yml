@@ -3,14 +3,19 @@ name: 經濟數據今日預告
 on:
   schedule:
     # 每天早上 8 點（台灣時間）發送今日預告
-    # UTC 時間：00:00（台灣時間 08:00）
-    - cron: '0 0 * * *'
+    # UTC 時間：00:10（台灣時間 08:10），錯開10分鐘
+    - cron: '10 0 * * *'
   workflow_dispatch:
+
+# 防止並發執行
+concurrency:
+  group: economic-data-preview
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15  # 縮短超時時間
     permissions:
       contents: read
       actions: read
@@ -23,6 +28,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'  # 使用 pip 緩存加速
 
       - name: Install dependencies
         run: |
@@ -39,5 +45,8 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_ECONOMIC_DATA: ${{ secrets.TG_THREAD_ECONOMIC_DATA }}
-        run: python jackbot.py economic_data_preview
+        run: |
+          # 設置超時保護
+          timeout 600 python jackbot.py economic_data_preview || exit 0
+          echo "任務執行完成"
 

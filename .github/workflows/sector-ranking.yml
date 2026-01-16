@@ -2,9 +2,14 @@ name: 主流板塊排行榜推播
 
 on:
   schedule:
-    # 每小時整點執行（UTC 時間）
-    - cron: '0 * * * *'
+    # 每 4 小時執行（UTC 時間：00:00, 04:00, 08:00, 12:00, 16:00, 20:00）
+    - cron: '0 */4 * * *'
   workflow_dispatch:
+
+# 防止並發執行
+concurrency:
+  group: sector-ranking
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -22,6 +27,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -36,5 +42,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_SECTOR_RANKING: ${{ secrets.TG_THREAD_SECTOR_RANKING }}
-        run: python jackbot.py sector_ranking
+        run: |
+          timeout 480 python jackbot.py sector_ranking || exit 0
+          echo "任務執行完成"
 

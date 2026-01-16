@@ -1,0 +1,18 @@
+name: Keep Repository Active
+
+on:
+  schedule:
+    # 每小時執行一次，保持 repository 活躍
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Keep Repository Active
+        run: |
+          echo "Repository keep-alive check at $(date)"
+          echo "This workflow ensures scheduled workflows continue to run"
+

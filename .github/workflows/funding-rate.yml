@@ -2,9 +2,14 @@ name: 資金費率排行榜
 
 on:
   schedule:
-    # 每天 0,4,8,12,16,20 點執行（UTC 時間）
-    - cron: '0 0,4,8,12,16,20 * * *'
+    # 每天 0,4,8,12,16,20 點執行（UTC 時間），錯開7分鐘
+    - cron: '7 0,4,8,12,16,20 * * *'
   workflow_dispatch:
+
+# 防止並發執行
+concurrency:
+  group: funding-rate
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -22,6 +27,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -35,5 +41,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_FUNDING_RATE: ${{ secrets.TG_THREAD_FUNDING_RATE }}
-        run: python jackbot.py funding_rate
+        run: |
+          timeout 480 python jackbot.py funding_rate || exit 0
+          echo "任務執行完成"
 

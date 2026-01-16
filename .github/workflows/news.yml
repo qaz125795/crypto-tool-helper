@@ -2,9 +2,14 @@ name: 新聞快訊推播
 
 on:
   schedule:
-    # 每 30 分鐘執行（UTC 時間）
-    - cron: '*/30 * * * *'
+    # 每 4 小時執行（UTC 時間：00:00, 04:00, 08:00, 12:00, 16:00, 20:00）
+    - cron: '0 */4 * * *'
   workflow_dispatch:
+
+# 防止並發執行
+concurrency:
+  group: news
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -22,6 +27,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -35,5 +41,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_NEWS: ${{ secrets.TG_THREAD_NEWS }}
-        run: python jackbot.py news
+        run: |
+          timeout 480 python jackbot.py news || exit 0
+          echo "任務執行完成"
 

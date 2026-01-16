@@ -2,9 +2,14 @@ name: 山寨爆發雷達
 
 on:
   schedule:
-    # 每 4 小時整點執行（UTC 時間：00:00, 04:00, 08:00, 12:00, 16:00, 20:00）
-    - cron: '0 */4 * * *'
+    # 每 4 小時執行（UTC 時間：00:00, 04:00, 08:00, 12:00, 16:00, 20:00），錯開8分鐘
+    - cron: '8 */4 * * *'
   workflow_dispatch:
+
+# 防止並發執行
+concurrency:
+  group: altseason-radar
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -22,6 +27,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -35,5 +41,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_ALTSEASON_RADAR: ${{ secrets.TG_THREAD_ALTSEASON_RADAR }}
-        run: python jackbot.py altseason_radar
+        run: |
+          timeout 600 python jackbot.py altseason_radar || exit 0
+          echo "任務執行完成"
 

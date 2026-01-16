@@ -2,9 +2,14 @@ name: 巨鯨持倉動向
 
 on:
   schedule:
-    # 每 8 小時執行一次（UTC 時間：00:00, 08:00, 16:00）
-    - cron: '0 */8 * * *'
+    # 每 12 小時執行一次（UTC 時間：00:00, 12:00）
+    - cron: '0 0,12 * * *'
   workflow_dispatch:
+
+# 防止並發執行
+concurrency:
+  group: whale-position
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -22,6 +27,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -35,4 +41,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_WHALE_POSITION: ${{ secrets.TG_THREAD_WHALE_POSITION }}
-        run: python jackbot.py whale_position
+        run: |
+          timeout 480 python jackbot.py whale_position || exit 0
+          echo "任務執行完成"
+

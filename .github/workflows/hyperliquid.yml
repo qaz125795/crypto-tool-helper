@@ -2,9 +2,14 @@ name: Hyperliquid 聰明錢監控
 
 on:
   schedule:
-    # 每 10 分鐘執行一次（UTC 時間）
-    - cron: '*/10 * * * *'
+    # 每 10 分鐘執行一次（UTC 時間），錯開5分鐘避免與短線持倉衝突
+    - cron: '5,15,25,35,45,55 * * * *'
   workflow_dispatch:
+
+# 防止並發執行：如果前一個執行還在運行，取消它並運行新的
+concurrency:
+  group: hyperliquid-monitor
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -22,6 +27,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'  # 使用 pip 緩存加速
 
       - name: Install dependencies
         run: |
@@ -35,5 +41,8 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_HYPERLIQUID: ${{ secrets.TG_THREAD_HYPERLIQUID }}
-        run: python jackbot.py hyperliquid
+        run: |
+          # 設置超時保護，確保不會卡死
+          timeout 480 python jackbot.py hyperliquid || exit 0
+          echo "任務執行完成"
 

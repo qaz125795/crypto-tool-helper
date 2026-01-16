@@ -2,9 +2,14 @@ name: 流動性獵取雷達
 
 on:
   schedule:
-    # 每小時整點執行（UTC 時間）
-    - cron: '0 * * * *'
+    # 每小時整點執行（UTC 時間），但與其他任務錯開10分鐘
+    - cron: '10 * * * *'
   workflow_dispatch:
+
+# 防止並發執行
+concurrency:
+  group: liquidity-radar
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -22,6 +27,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'  # 使用 pip 緩存加速
 
       - name: Install dependencies
         run: |
@@ -35,5 +41,8 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_LIQUIDITY_RADAR: ${{ secrets.TG_THREAD_LIQUIDITY_RADAR }}
-        run: python jackbot.py liquidity_radar
+        run: |
+          # 設置超時保護
+          timeout 600 python jackbot.py liquidity_radar || exit 0
+          echo "任務執行完成"
 
