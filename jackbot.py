@@ -861,8 +861,10 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
         lines.append("    無明顯多方開倉標的")
     else:
         for idx, item in enumerate(top_long_open):
+            price_change = fmt(item.get('priceChange15m', 0))
+            oi_change = fmt(item['oiChange15m'])
             lines.append(
-                f"    {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
+                f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}"
             )
     lines.append("")
     
@@ -872,8 +874,10 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
         lines.append("    無明顯空方開倉標的")
     else:
         for idx, item in enumerate(top_short_open):
+            price_change = fmt(item.get('priceChange15m', 0))
+            oi_change = fmt(item['oiChange15m'])
             lines.append(
-                f"    {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
+                f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}"
             )
     lines.append("")
     
@@ -887,8 +891,10 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
         lines.append("    無明顯多方平倉標的")
     else:
         for idx, item in enumerate(top_long_close):
+            price_change = fmt(item.get('priceChange15m', 0))
+            oi_change = fmt(item['oiChange15m'])
             lines.append(
-                f"    {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
+                f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}"
             )
     lines.append("")
     
@@ -898,8 +904,10 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
         lines.append("    無明顯空方平倉標的")
     else:
         for idx, item in enumerate(top_short_close):
+            price_change = fmt(item.get('priceChange15m', 0))
+            oi_change = fmt(item['oiChange15m'])
             lines.append(
-                f"    {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
+                f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}"
             )
     lines.append("")
     
