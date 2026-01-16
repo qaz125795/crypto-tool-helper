@@ -843,12 +843,9 @@ def extract_price_change_15m(coin: Dict) -> float:
 
 
 def build_report_message(top_long_open: List, top_long_close: List, top_short_open: List, top_short_close: List, processed_count: int = 0, oi_success_count: int = 0) -> str:
-    """組合推播文字（改進版：移除價格顯示，只顯示持倉和標的名稱，提升執行效率）"""
-    now = datetime.now()
-    time_str = format_datetime(now)
-    
+    """組合推播文字（優化版：簡潔標題，加入主力思維教學）"""
     lines = []
-    lines.append("💰 *【短線持倉異動 - 15分鐘循環監控】*")
+    lines.append("💰 *【傑克短線持倉異動排行榜】*")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
     
@@ -857,59 +854,67 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
     
-    # 多方開倉 TOP 3（只顯示標的名稱和持倉變化）
-    lines.append("📈 *多方開倉 TOP 3*")
+    # 開倉（包含多方開倉和空方開倉）
+    lines.append("📈 *開倉*")
+    lines.append("")
+    
+    # 多方開倉 TOP 3
+    lines.append("  *多方開倉 TOP 3*")
     if not top_long_open:
-        lines.append("  無明顯多方開倉標的")
+        lines.append("    無明顯多方開倉標的")
     else:
         for idx, item in enumerate(top_long_open):
             lines.append(
-                f"  {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
-            )
-    lines.append("")
-    
-    # 多方平倉 TOP 3
-    lines.append("📉 *多方平倉 TOP 3*")
-    if not top_long_close:
-        lines.append("  無明顯多方平倉標的")
-    else:
-        for idx, item in enumerate(top_long_close):
-            lines.append(
-                f"  {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
+                f"    {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
     # 空方開倉 TOP 3
-    lines.append("📉 *空方開倉 TOP 3*")
+    lines.append("  *空方開倉 TOP 3*")
     if not top_short_open:
-        lines.append("  無明顯空方開倉標的")
+        lines.append("    無明顯空方開倉標的")
     else:
         for idx, item in enumerate(top_short_open):
             lines.append(
-                f"  {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
+                f"    {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
+            )
+    lines.append("")
+    
+    # 平倉（包含多方平倉和空方平倉）
+    lines.append("📉 *平倉*")
+    lines.append("")
+    
+    # 多方平倉 TOP 3
+    lines.append("  *多方平倉 TOP 3*")
+    if not top_long_close:
+        lines.append("    無明顯多方平倉標的")
+    else:
+        for idx, item in enumerate(top_long_close):
+            lines.append(
+                f"    {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
     # 空方平倉 TOP 3
-    lines.append("📉 *空方平倉 TOP 3*")
+    lines.append("  *空方平倉 TOP 3*")
     if not top_short_close:
-        lines.append("  無明顯空方平倉標的")
+        lines.append("    無明顯空方平倉標的")
     else:
         for idx, item in enumerate(top_short_close):
             lines.append(
-                f"  {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
+                f"    {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
-    # 添加統計信息
-    if processed_count > 0:
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"📊 *監控統計*：已掃描 {processed_count} 個合約交易對，成功獲取 {oi_success_count} 個持倉數據")
-        lines.append("")
-    
+    # 主力思維教學（換位思考）
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"⏰ 更新時間：{time_str}")
-    lines.append("🔄 推播頻率：每 15 分鐘自動更新")
+    lines.append("💡 *【換位思考主力動機】*")
+    lines.append("")
+    lines.append("請先判斷 *15分K價格走勢趨勢* 去換位思考主力動機")
+    lines.append("")
+    lines.append("📈 *開倉動機*：為什麼在這個位置開倉？")
+    lines.append("")
+    lines.append("📉 *平倉動機*：停利還是停損？")
     
     return "\n".join(lines)
 
@@ -929,11 +934,7 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
         if oi_change_15m is None:
             return {'status': 'oi_failed', 'symbol': symbol}
         
-        # ⚠️ 重要：只採集持倉變化率 >= 1% 或 <= -1% 的數據，1%以下跳過（提升效率）
-        if abs(oi_change_15m) < 1.0:
-            return {'status': 'filtered', 'symbol': symbol, 'oi_change': oi_change_15m}
-        
-        # 4 類分類邏輯
+        # 4 類分類邏輯（恢復原本邏輯，不過濾持倉變化率）
         category = None
         if price_change_15m > 0:
             if oi_change_15m > 0:
@@ -964,7 +965,7 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
 
 def fetch_position_change():
     """主流程：持倉變化篩選（原本的邏輯，只是改成只偵測 BingX 的 554 個交易對）"""
-    logger.info("開始執行持倉變化篩選，只偵測 BingX 合約幣種（持倉變化 >= 1%）...")
+    logger.info("開始執行持倉變化篩選，只偵測 BingX 合約幣種...")
     
     # 步驟1：先獲取 BingX 交易對名單（提取幣種名稱）
     bingx_symbols = fetch_supported_futures_coins()
@@ -1003,7 +1004,6 @@ def fetch_position_change():
     processed_count = 0
     oi_success_count = 0
     oi_fail_count = 0
-    filtered_count = 0
     
     # 並行處理配置（BingX幣種較少，可以適當增加並發數）
     MAX_WORKERS = 20  # 同時處理20個請求（BingX幣種較少，可以更快）
@@ -1047,8 +1047,6 @@ def fetch_position_change():
             status = result.get('status')
             if status == 'oi_failed':
                 oi_fail_count += 1
-            elif status == 'filtered':
-                filtered_count += 1
             elif status == 'success':
                 oi_success_count += 1
                 category = result.get('category')
@@ -1068,9 +1066,8 @@ def fetch_position_change():
                     short_close.append(item)
     
     total_time = time.time() - start_time
-    significant_count = len(long_open) + len(long_close) + len(short_open) + len(short_close)
-    logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個, 過濾 {filtered_count} 個 | 總用時: {total_time/60:.1f} 分鐘")
-    logger.info(f"持倉變化 >= 1% 的標的: {significant_count} 個（多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}）")
+    logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個 | 總用時: {total_time/60:.1f} 分鐘")
+    logger.info(f"分類結果: 多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}")
     
     # 排序與取前 3 名
     long_open.sort(key=lambda x: x['oiChange15m'], reverse=True)      # OI 增加越多越好
