@@ -74,8 +74,8 @@ else:
 EXCHANGE = "Binance"
 TIME_TYPE = "h1"
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-# 持倉變化篩選：抓取全部 904 個幣種
-MAX_SYMBOLS = 904
+# 持倉變化篩選：改為只偵測合約幣種（使用 API 獲取）
+MAX_SYMBOLS = 904  # 將由 API 返回的合約幣種數量決定
 
 # 數據存儲目錄
 DATA_DIR = Path("data")
@@ -572,32 +572,59 @@ def fetch_whale_position():
     now = datetime.now()
     time_str = format_datetime(now)
     
-    message = "🐋 *【巨鯨持倉異動監控】*\n"
+    message = "🐋 *【巨鯨持倉動向】*\n"
     message += "━━━━━━━━━━━━━━━━━━━\n"
     message += "\n"
     
     for i, symbol in enumerate(SYMBOLS):
         if all_analyses[i] is not None:
-            message += format_symbol_message(symbol, all_analyses[i])
-            if i < len(SYMBOLS) - 1:
-                message += "\n"
+            analysis = all_analyses[i]
+            coin_symbol = symbol.replace("USDT", "")
+            
+            # 簡化顯示（白話簡短）
+            message += f"*【{coin_symbol}】*\n"
+            
+            # 散戶情緒（簡化）
+            if analysis.get('globalRatio') is not None:
+                gr = analysis['globalRatio']
+                if gr > 1.2:
+                    retail_status = "🔥 極度看多"
+                elif gr > 1.05:
+                    retail_status = "📈 看多"
+                elif gr < 0.85:
+                    retail_status = "❄️ 極度看空"
+                elif gr < 0.95:
+                    retail_status = "📉 看空"
+                else:
+                    retail_status = "➡️ 中性"
+                message += f"散戶：{retail_status}\n"
+            
+            # 巨鯨部位（簡化）
+            if analysis.get('topPositionRatio') is not None:
+                tpr = analysis['topPositionRatio']
+                if tpr > 1.2:
+                    whale_status = "🟢 強勢看多"
+                elif tpr > 1.05:
+                    whale_status = "🟡 看多"
+                elif tpr < 0.85:
+                    whale_status = "🔴 強勢看空"
+                elif tpr < 0.95:
+                    whale_status = "🟠 看空"
+                else:
+                    whale_status = "⚪ 中性"
+                message += f"巨鯨：{whale_status}\n"
+            
+            # 市場診斷（簡化）
+            diagnosis = analysis.get('diagnosis', '無法判斷')
+            message += f"診斷：{diagnosis}\n"
+            message += "\n"
     
-    # 改進的船長提示（更實用、更白話）
-    message += "\n━━━━━━━━━━━━━━━━━━━\n"
-    message += "💡 *船長實戰提醒*：\n"
-    message += "\n"
-    message += "📌 *關鍵原則*：\n"
-    message += "• 散戶狂熱 + 巨鯨撤退 = 危險信號 ⚠️\n"
-    message += "• 散戶恐慌 + 巨鯨抄底 = 機會信號 ✅\n"
-    message += "• 散戶與巨鯨同步 = 趨勢延續 📈\n"
-    message += "\n"
-    message += "🎯 *操作建議*：\n"
-    message += "• 當看到「散戶極度看多，巨鯨看空」時，要特別小心，價格可能面臨大幅回調\n"
-    message += "• 當看到「散戶恐慌，巨鯨抄底」時，可能是底部信號，可以考慮分批建倉\n"
-    message += "• 當散戶和巨鯨都看多時，上漲動能較強，但需注意過熱風險\n"
-    message += "\n"
-    message += "⚠️ *風險提示*：\n"
-    message += "多空比數據僅供參考，請結合技術分析和市場環境綜合判斷。\n"
+    # 簡化的操作建議（白話）
+    message += "━━━━━━━━━━━━━━━━━━━\n"
+    message += "💡 *操作建議*：\n"
+    message += "• 散戶狂熱+巨鯨撤退 = 危險⚠️\n"
+    message += "• 散戶恐慌+巨鯨抄底 = 機會✅\n"
+    message += "• 散戶與巨鯨同步 = 趨勢延續📈\n"
     message += "━━━━━━━━━━━━━━━━━━━\n"
     message += f"⏰ 更新時間：{time_str}"
     
@@ -606,8 +633,68 @@ def fetch_whale_position():
 
 # ==================== 3. 持倉變化篩選器 ====================
 
+def fetch_supported_futures_coins() -> List[str]:
+    """獲取支援的合約幣種列表（只返回合約幣種，不包含現貨）"""
+    url = "https://open-api-v4.coinglass.com/api/futures/supported-coins"
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.error(f"supported-coins API error: {response.status_code}")
+            return []
+        
+        result = response.json()
+        data = result.get('data', result if isinstance(result, list) else [])
+        
+        # 提取幣種符號（去掉USDT後綴，統一格式）
+        symbols = []
+        for item in data:
+            if isinstance(item, dict):
+                symbol = item.get('symbol') or item.get('coin') or item.get('name')
+            elif isinstance(item, str):
+                symbol = item
+            else:
+                continue
+            
+            if symbol:
+                # 移除USDT後綴，統一格式
+                symbol = symbol.replace('USDT', '').replace('USDT-PERP', '').upper()
+                if symbol and symbol not in symbols:
+                    symbols.append(symbol)
+        
+        logger.info(f"從 API 獲取到 {len(symbols)} 個合約幣種")
+        return symbols
+    except Exception as e:
+        logger.error(f"獲取合約幣種列表失敗: {str(e)}")
+        return []
+
+
 def fetch_coins_price_change() -> List[Dict]:
-    """獲取幣種漲跌幅列表"""
+    """獲取幣種漲跌幅列表（改為只返回合約幣種）"""
+    # 先獲取合約幣種列表
+    supported_coins = fetch_supported_futures_coins()
+    if not supported_coins:
+        logger.warning("無法獲取合約幣種列表，使用備用方法")
+        # 備用：使用原API，但會包含現貨
+        url = f"{CG_API_BASE}/api/futures/coins-price-change"
+        headers = {
+            "CG-API-KEY": CG_API_KEY,
+            "accept": "application/json"
+        }
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code != 200:
+                return []
+            result = response.json()
+            return result.get('data', result if isinstance(result, list) else [])
+        except:
+            return []
+    
+    # 獲取價格變化數據
     url = f"{CG_API_BASE}/api/futures/coins-price-change"
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -621,7 +708,19 @@ def fetch_coins_price_change() -> List[Dict]:
             return []
         
         result = response.json()
-        return result.get('data', result if isinstance(result, list) else [])
+        all_data = result.get('data', result if isinstance(result, list) else [])
+        
+        # 過濾：只保留合約幣種
+        filtered_data = []
+        for item in all_data:
+            symbol = item.get('symbol') or item.get('coin') or ''
+            # 移除USDT後綴進行比對
+            symbol_clean = symbol.replace('USDT', '').replace('USDT-PERP', '').upper()
+            if symbol_clean in supported_coins:
+                filtered_data.append(item)
+        
+        logger.info(f"過濾後剩餘 {len(filtered_data)} 個合約幣種（原始 {len(all_data)} 個）")
+        return filtered_data
     except Exception as e:
         logger.error(f"獲取幣種價格變化失敗: {str(e)}")
         return []
@@ -712,12 +811,12 @@ def extract_price_change_15m(coin: Dict) -> float:
 
 
 def build_report_message(top_long_open: List, top_long_close: List, top_short_open: List, top_short_close: List, processed_count: int = 0, oi_success_count: int = 0) -> str:
-    """組合推播文字（改進版：添加統計信息和時間戳）"""
+    """組合推播文字（改進版：移除價格顯示，只顯示持倉和標的名稱，提升執行效率）"""
     now = datetime.now()
     time_str = format_datetime(now)
     
     lines = []
-    lines.append("💰 *【持倉異常偵測報告 - 15分鐘循環監控】*")
+    lines.append("💰 *【短線持倉異動 - 15分鐘循環監控】*")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
     
@@ -726,14 +825,14 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
     
-    # 多方開倉 TOP 3
+    # 多方開倉 TOP 3（只顯示標的名稱和持倉變化）
     lines.append("📈 *多方開倉 TOP 3*")
     if not top_long_open:
         lines.append("  無明顯多方開倉標的")
     else:
         for idx, item in enumerate(top_long_open):
             lines.append(
-                f"  {idx + 1}) *{item['symbol']}*｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
+                f"  {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
@@ -744,7 +843,7 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     else:
         for idx, item in enumerate(top_long_close):
             lines.append(
-                f"  {idx + 1}) *{item['symbol']}*｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
+                f"  {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
@@ -755,7 +854,7 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     else:
         for idx, item in enumerate(top_short_open):
             lines.append(
-                f"  {idx + 1}) *{item['symbol']}*｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
+                f"  {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
@@ -766,14 +865,14 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     else:
         for idx, item in enumerate(top_short_close):
             lines.append(
-                f"  {idx + 1}) *{item['symbol']}*｜價格 {fmt(item['priceChange15m'])}｜持倉 {fmt(item['oiChange15m'])}"
+                f"  {idx + 1}) *{item['symbol']}*｜持倉 {fmt(item['oiChange15m'])}"
             )
     lines.append("")
     
     # 添加統計信息
     if processed_count > 0:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"📊 *監控統計*：已掃描 {processed_count} 個交易對，成功獲取 {oi_success_count} 個持倉數據")
+        lines.append(f"📊 *監控統計*：已掃描 {processed_count} 個合約交易對，成功獲取 {oi_success_count} 個持倉數據")
         lines.append("")
     
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -784,17 +883,17 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
 
 
 def fetch_position_change():
-    """主流程：持倉變化篩選（抓取全部 904 個幣種，改進版：添加請求間隔和錯誤處理）"""
-    logger.info("開始執行持倉變化篩選，抓取全部 904 個幣種...")
+    """主流程：持倉變化篩選（只偵測合約幣種，不包含現貨，改進版：添加請求間隔和錯誤處理）"""
+    logger.info("開始執行持倉變化篩選，只偵測合約幣種...")
     
     all_symbols_data = fetch_coins_price_change()
     if not all_symbols_data:
-        send_telegram_message("⚠️ 無法從 Coinglass 取得幣種漲跌資料，請稍後再試。", TG_THREAD_IDS['position_change'])
+        send_telegram_message("⚠️ 無法從 Coinglass 取得合約幣種資料，請稍後再試。", TG_THREAD_IDS['position_change'])
         return
     
-    logger.info(f"從 Coinglass API 取得 {len(all_symbols_data)} 個幣種，將處理前 {MAX_SYMBOLS} 個")
+    logger.info(f"從 Coinglass API 取得 {len(all_symbols_data)} 個合約幣種，將處理前 {MAX_SYMBOLS} 個")
     
-    # 確保抓取全部 904 個幣種
+    # 處理合約幣種（已過濾現貨）
     target_symbols = all_symbols_data[:MAX_SYMBOLS]
     
     long_open = []
@@ -1675,11 +1774,77 @@ def process_and_send_coinglass(item: Dict, type_str: str):
 
 
 def fetch_all_news():
-    """整合執行函數：只抓取 Tree of Alpha 新聞"""
-    # 抓取 Tree of Alpha 新聞
-    fetch_tree_news()
+    """整合執行函數：抓取所有新聞並濃縮成一個簡短訊息（每4小時推播一次）"""
+    all_news_items = []
     
-    logger.info("Tree of Alpha 新聞抓取完成")
+    # 抓取 Tree of Alpha 新聞
+    try:
+        url = "https://news.treeofalpha.com/api/news"
+        params = {"limit": 5}  # 只取最新5條
+        headers = {"Authorization": TREE_API_KEY}
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        news_list = response.json()
+        for news in news_list[:5]:  # 只取前5條
+            title = translate_text(news.get('title', ''))
+            if title:
+                all_news_items.append({
+                    'title': title,
+                    'source': 'Tree of Alpha',
+                    'url': news.get('url', '')
+                })
+    except Exception as e:
+        logger.warning(f"Tree of Alpha 新聞抓取失敗: {str(e)}")
+    
+    # 抓取 CoinGlass 新聞（只取最新3條）
+    if CG_API_KEY:
+        try:
+            url = "https://open-api-v4.coinglass.com/api/article/list"
+            headers = {
+                "accept": "application/json",
+                "CG-API-KEY": CG_API_KEY
+            }
+            response = requests.get(url, headers=headers, timeout=10)
+            result = response.json()
+            if result.get('code') == '0':
+                article_list = result.get('data', [])[:3]  # 只取前3條
+                for article in article_list:
+                    title = translate_text(article.get('title') or article.get('headline') or "")
+                    if title:
+                        all_news_items.append({
+                            'title': title,
+                            'source': 'CoinGlass',
+                            'url': article.get('url') or article.get('link') or ''
+                        })
+        except Exception as e:
+            logger.warning(f"CoinGlass 新聞抓取失敗: {str(e)}")
+    
+    # 如果沒有新聞，不推播
+    if not all_news_items:
+        logger.info("本次監控無新新聞，跳過推播")
+        return
+    
+    # 濃縮成一個簡短訊息
+    now = datetime.now()
+    time_str = format_datetime(now)
+    
+    lines = []
+    lines.append("📰 *【全球幣圈即時快訊】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    
+    # 只顯示標題，簡短格式
+    for idx, item in enumerate(all_news_items[:8], 1):  # 最多8條
+        lines.append(f"{idx}. {item['title']}")
+        if item.get('url'):
+            lines.append(f"   🔗 [查看詳情]({item['url']})")
+        lines.append("")
+    
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⏰ 更新時間：{time_str}")
+    
+    message = "\n".join(lines)
+    send_telegram_message(message, TG_THREAD_IDS['news'], parse_mode="Markdown")
+    logger.info(f"新聞快訊推播完成，共 {len(all_news_items)} 條新聞")
 
 
 # ==================== 6. 資金費率 ====================
@@ -2119,51 +2284,58 @@ def build_long_term_message() -> Optional[str]:
     now_str = format_datetime(datetime.now())
 
     msg_lines = []
-    msg_lines.append("📊 *【區塊鏈船長 - 牛熊導航儀】*")
+    msg_lines.append("📊 *【牛熊導航儀】*")
     msg_lines.append("━━━━━━━━━━━━━━━━━━━━")
     msg_lines.append("")
 
-    # 市場情緒
+    # 市場情緒（白話）
     if fg is not None:
-        mood_desc = _describe_fear_greed(fg)
-        msg_lines.append(f"🌡️ *當前市場情緒*：{fg_mood}（指數 {fg}）")
-        msg_lines.append(f"   {mood_desc}")
+        msg_lines.append(f"🌡️ *市場情緒*：{fg_mood}（{fg}分）")
     else:
-        msg_lines.append("🌡️ *當前市場情緒*：資料暫缺")
+        msg_lines.append("🌡️ *市場情緒*：資料暫缺")
 
-    # Ahr999
+    # Ahr999（白話）
     if ahr is not None:
-        msg_lines.append(f"💰 *Ahr999 指標*：{ahr:.4f}（狀態：{ahr_status}/{ahr_state}）")
+        msg_lines.append(f"💰 *Ahr999*：{ahr_status}")
     else:
-        msg_lines.append("💰 *Ahr999 指標*：資料暫缺")
+        msg_lines.append("💰 *Ahr999*：資料暫缺")
 
-    # 彩虹圖
-    msg_lines.append(f"🌈 *彩虹圖位置*：{rainbow_desc}")
+    # 彩虹圖（白話）
+    msg_lines.append(f"🌈 *彩虹圖*：{rainbow_desc}")
 
-    # 風險提示
+    # 今天操作方向建議（新增）
+    msg_lines.append("")
+    msg_lines.append("🎯 *今天操作方向建議*：")
+    
+    # 根據指標綜合判斷操作方向
+    if ahr is not None and fg is not None:
+        if ahr < 0.45 and fg < 30:
+            msg_lines.append("✅ 建議：分批做多，適合抄底")
+        elif ahr < 1.2 and fg < 60:
+            msg_lines.append("✅ 建議：可以考慮做多，但需謹慎")
+        elif ahr > 1.2 and fg > 70:
+            msg_lines.append("⚠️ 建議：謹慎做空，注意風險")
+        elif pi_trigger and fg > 75:
+            msg_lines.append("⚠️ 建議：減倉觀望，等待回調")
+        else:
+            msg_lines.append("➡️ 建議：保持觀望，等待明確信號")
+    elif ahr is not None:
+        if ahr < 0.45:
+            msg_lines.append("✅ 建議：可以考慮做多")
+        elif ahr > 1.2:
+            msg_lines.append("⚠️ 建議：謹慎做空")
+        else:
+            msg_lines.append("➡️ 建議：保持觀望")
+    else:
+        msg_lines.append("➡️ 建議：資料不足，保持觀望")
+
+    # 簡化的風險提示
     msg_lines.append("")
     msg_lines.append(f"🚨 *風險提示*：{risk_text}")
 
-    # 額外提醒
-    alert_parts = []
-    if ahr is not None and ahr < 0.45:
-        alert_parts.append("🔔 Ahr999 < 0.45：觸發「抄底警報」")
-    elif ahr is not None and ahr < 1.2:
-        alert_parts.append("📩 Ahr999 < 1.2：處於「適合定投」區間")
-    if fg is not None and (fg < 20 or fg > 80):
-        alert_parts.append(f"📊 恐懼與貪婪極端區：{fg_mood}（{fg}）")
-    if pi_trigger:
-        alert_parts.append("⏰ Pi 循環頂部指標：*均線交叉，逃頂預警啟動*")
-
-    if alert_parts:
-        msg_lines.append("")
-        msg_lines.append("⚡ *警報狀態一覽*：")
-        for line in alert_parts:
-            msg_lines.append(f"- {line}")
-
-    # 船長建議
+    # 簡化的船長建議
     msg_lines.append("")
-    msg_lines.append(f"💡 *船長建議*：{advice_text}")
+    msg_lines.append(f"💡 *操作建議*：{advice_text}")
     msg_lines.append("")
     msg_lines.append(f"⏰ 更新時間：{now_str}")
 
@@ -2202,8 +2374,7 @@ def run_long_term_once():
 # ==================== 8. 流動性獵取雷達（極端清算監控） ====================
 
 LIQ_SYMBOLS = [
-    "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ADA", "TRX", "AVAX", "DOT",
-    "LINK", "NEAR", "MATIC", "SUI", "APT",
+    "BTC", "ETH", "SOL",  # 只偵測這三個主流幣種
 ]
 LIQ_EXCHANGE_LIST = "Binance"
 LIQ_REQUEST_DELAY = 1.2  # 秒
@@ -2384,12 +2555,12 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
 
 
 def format_liquidity_consolidated_message(events: List[Dict]) -> str:
-    """將多個清算事件整理成一則 Telegram 推播文字（只顯示過去1小時數據）"""
+    """將多個清算事件整理成一則 Telegram 推播文字（只顯示過去1小時數據，白話+操作建議）"""
     now = datetime.now()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
     lines: List[str] = []
-    lines.append("🎯 *【巨鯨獵殺告警 - 極端爆倉彙整】*")
+    lines.append("🎯 *【清算爆倉雷達】*")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"📊 本次監控共有 *{len(events)}* 個幣種達到極端爆倉門檻\n")
 
@@ -2399,11 +2570,21 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
     for ev in events_sorted:
         total_1h = ev.get("totalVolUsd1h", 0.0) / 10_000
         amount_1h = ev["dominantAmount1h"] / 10_000
+        dominant_side = ev['dominantSide']
 
         lines.append(f"🥊 *【{ev['symbol']}】*")
-        lines.append(
-            f"⚠️ *過去 1 小時內*約有 *${amount_1h:.2f} 萬* 美元的 *{ev['dominantSide']}* 被強制平倉。\n"
-        )
+        lines.append(f"⚠️ 過去1小時內約有 *${amount_1h:.2f} 萬* 美元的 *{dominant_side}* 被強制平倉。\n")
+        
+        # 操作建議（白話）
+        if dominant_side == "多單":
+            lines.append("💡 *操作建議*：大量多單被爆倉，代表價格下跌壓力大。")
+            lines.append("   • 如果價格還在跌，可以考慮「摸頭」做空，但要設好止損")
+            lines.append("   • 如果價格已經跌很多，可以考慮「摸底」做多，但要分批進場")
+        else:  # 空單
+            lines.append("💡 *操作建議*：大量空單被爆倉，代表價格上漲動能強。")
+            lines.append("   • 如果價格還在漲，可以考慮「摸頭」做空，但要設好止損")
+            lines.append("   • 如果價格已經漲很多，可以考慮「摸底」做多，但要分批進場")
+        lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"⏰ 更新時間：{time_str}")
@@ -2806,9 +2987,9 @@ def run_altseason_radar_once():
 # ==================== 10. Hyperliquid 聰明錢監控 ====================
 
 HYPERLIQUID_SENT_ALERTS_FILE = DATA_DIR / "hyperliquid_sent_alerts.json"
-WHALE_ALERT_THRESHOLD = 500_000  # $50萬 USD（降低門檻，捕捉更多大額交易）
-SMART_MONEY_PNL_MIN = 100_000  # $100k USD
-MONEY_PRINTER_PNL_MIN = 1_000_000  # $1M USD
+WHALE_ALERT_THRESHOLD = 200_000  # $20萬 USD（放寬門檻，捕捉更多大額交易）
+SMART_MONEY_PNL_MIN = 50_000  # $50k USD（放寬）
+MONEY_PRINTER_PNL_MIN = 500_000  # $50萬 USD（放寬）
 
 
 def fetch_hyperliquid_whale_alert() -> List[Dict]:
@@ -3139,10 +3320,42 @@ def build_hyperliquid_message() -> Optional[str]:
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
     
-    # Whale Alert 部分（主要內容）
+    # Whale Alert 部分（主要內容，包含開倉時間、標的、方向）
     lines.append("🚨 *巨鯨即時預警 (Whale Alert)*：")
     for alert in new_alerts[:5]:  # 最多顯示 5 個
-        lines.append(format_alert_message(alert))
+        symbol = alert.get('symbol') or alert.get('coin') or '未知'
+        direction = alert.get('side') or alert.get('direction') or alert.get('type') or '未知'
+        value = float(
+            alert.get('notional_value') or 
+            alert.get('notionalValue') or 
+            alert.get('value') or 
+            0
+        )
+        
+        # 獲取開倉時間
+        alert_time = alert.get('time') or alert.get('timestamp') or alert.get('open_time')
+        time_str = "時間未知"
+        if alert_time:
+            try:
+                if isinstance(alert_time, (int, float)):
+                    if alert_time > 1e12:
+                        dt = datetime.fromtimestamp(alert_time / 1000)
+                    else:
+                        dt = datetime.fromtimestamp(alert_time)
+                    time_str = dt.strftime("%Y-%m-%d %H:%M")
+                else:
+                    time_str = str(alert_time)
+            except:
+                time_str = "時間未知"
+        
+        # 判斷方向 emoji
+        direction_emoji = "🟢" if str(direction).lower() in ['long', 'buy', '多', 'long'] else "🔴"
+        direction_text = "做多" if str(direction).lower() in ['long', 'buy', '多', 'long'] else "做空"
+        
+        lines.append(f"⏰ 時間：{time_str}")
+        lines.append(f"標的：`{symbol}`")
+        lines.append(f"方向：{direction_emoji} {direction_text}")
+        lines.append(f"規模：${value:,.0f} USD")
         lines.append("")
     
     # 更新已發送 ID 列表
