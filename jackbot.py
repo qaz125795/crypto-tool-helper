@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 import os
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # 配置日誌
 logging.basicConfig(
@@ -882,9 +884,55 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     return "\n".join(lines)
 
 
+def process_single_symbol(coin: Dict) -> Optional[Dict]:
+    """處理單個幣種（用於並行處理）"""
+    symbol = normalize_symbol(coin)
+    if not symbol:
+        return None
+    
+    try:
+        price_change_15m = extract_price_change_15m(coin)
+        oi_change_15m = fetch_oi_change_15m(symbol)
+        
+        if oi_change_15m is None:
+            return {'status': 'oi_failed', 'symbol': symbol}
+        
+        # ⚠️ 重要：只採集持倉變化率 >= 1% 或 <= -1% 的數據，1%以下跳過（提升效率）
+        if abs(oi_change_15m) < 1.0:
+            return {'status': 'filtered', 'symbol': symbol, 'oi_change': oi_change_15m}
+        
+        # 4 類分類邏輯
+        category = None
+        if price_change_15m > 0:
+            if oi_change_15m > 0:
+                category = 'long_open'
+            elif oi_change_15m < 0:
+                category = 'long_close'
+        elif price_change_15m < 0:
+            if oi_change_15m > 0:
+                category = 'short_open'
+            elif oi_change_15m < 0:
+                category = 'short_close'
+        
+        if category:
+            return {
+                'status': 'success',
+                'category': category,
+                'symbol': symbol,
+                'priceChange15m': price_change_15m,
+                'oiChange15m': oi_change_15m
+            }
+        else:
+            return {'status': 'no_category', 'symbol': symbol}
+            
+    except Exception as e:
+        logger.error(f"處理 {symbol} 時發生錯誤: {str(e)}")
+        return {'status': 'error', 'symbol': symbol, 'error': str(e)}
+
+
 def fetch_position_change():
-    """主流程：持倉變化篩選（只偵測合約幣種，不包含現貨，改進版：添加請求間隔和錯誤處理）"""
-    logger.info("開始執行持倉變化篩選，只偵測合約幣種...")
+    """主流程：持倉變化篩選（只偵測合約幣種，不包含現貨，只採集持倉變化 >= 1% 的數據，使用並行處理大幅提升速度）"""
+    logger.info("開始執行持倉變化篩選，只偵測合約幣種（持倉變化 >= 1%，並行處理）...")
     
     all_symbols_data = fetch_coins_price_change()
     if not all_symbols_data:
@@ -904,70 +952,74 @@ def fetch_position_change():
     processed_count = 0
     oi_success_count = 0
     oi_fail_count = 0
+    filtered_count = 0
     
-    # 請求間隔控制（避免 API 速率限制）
-    REQUEST_DELAY = 0.15  # 每個請求間隔 150ms，904 個幣種約需 2.5 分鐘
+    # 並行處理配置
+    MAX_WORKERS = 15  # 同時處理15個請求（避免觸發API速率限制）
     
-    # 每處理 100 個幣種記錄一次進度
-    progress_interval = 100
-    
-    # 記錄開始時間（用於超時檢查）
+    # 記錄開始時間
     start_time = time.time()
     MAX_EXECUTION_TIME = 25 * 60  # 25 分鐘（留 5 分鐘緩衝）
     
-    for coin in target_symbols:
-        # 檢查是否超時（避免超過 GitHub Actions 的 timeout）
-        elapsed_time = time.time() - start_time
-        if elapsed_time > MAX_EXECUTION_TIME:
-            logger.warning(f"執行時間已超過 {MAX_EXECUTION_TIME/60:.1f} 分鐘，提前結束處理")
-            break
+    # 使用線程池並行處理
+    results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # 提交所有任務
+        future_to_coin = {executor.submit(process_single_symbol, coin): coin for coin in target_symbols}
         
-        symbol = normalize_symbol(coin)
-        if not symbol:
-            continue
-        
-        processed_count += 1
-        
-        # 進度日誌
-        if processed_count % progress_interval == 0:
-            elapsed_min = elapsed_time / 60
-            logger.info(f"處理進度: {processed_count}/{MAX_SYMBOLS} 個幣種 ({processed_count*100//MAX_SYMBOLS}%) | 已用時: {elapsed_min:.1f} 分鐘")
-        
-        try:
-            price_change_15m = extract_price_change_15m(coin)
-            oi_change_15m = fetch_oi_change_15m(symbol)
+        # 處理完成的任務
+        completed = 0
+        for future in as_completed(future_to_coin):
+            # 檢查超時
+            elapsed_time = time.time() - start_time
+            if elapsed_time > MAX_EXECUTION_TIME:
+                logger.warning(f"執行時間已超過 {MAX_EXECUTION_TIME/60:.1f} 分鐘，提前結束處理")
+                # 取消未完成的任務
+                for f in future_to_coin:
+                    f.cancel()
+                break
             
-            # 請求間隔控制（避免 API 速率限制）
-            if processed_count < len(target_symbols):  # 最後一個不需要延遲
-                time.sleep(REQUEST_DELAY)
+            completed += 1
+            result = future.result()
             
-            if oi_change_15m is None:
-                oi_fail_count += 1
+            if result is None:
                 continue
             
-            oi_success_count += 1
+            processed_count += 1
             
-            # 4 類分類邏輯
-            if price_change_15m > 0:
-                # 價格上漲
-                if oi_change_15m > 0:
-                    long_open.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 多方開倉
-                elif oi_change_15m < 0:
-                    long_close.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 多方平倉
-            elif price_change_15m < 0:
-                # 價格下跌
-                if oi_change_15m > 0:
-                    short_open.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 空方開倉
-                elif oi_change_15m < 0:
-                    short_close.append({'symbol': symbol, 'priceChange15m': price_change_15m, 'oiChange15m': oi_change_15m})  # 空方平倉
-        except Exception as e:
-            logger.error(f"處理 {symbol} 時發生錯誤: {str(e)}")
-            oi_fail_count += 1
-            continue
+            # 進度日誌（每100個）
+            if completed % 100 == 0:
+                elapsed_min = elapsed_time / 60
+                logger.info(f"處理進度: {completed}/{len(target_symbols)} 個幣種 ({completed*100//len(target_symbols)}%) | 已用時: {elapsed_min:.1f} 分鐘")
+            
+            # 處理結果
+            status = result.get('status')
+            if status == 'oi_failed':
+                oi_fail_count += 1
+            elif status == 'filtered':
+                filtered_count += 1
+            elif status == 'success':
+                oi_success_count += 1
+                category = result.get('category')
+                symbol = result.get('symbol')
+                price_change = result.get('priceChange15m')
+                oi_change = result.get('oiChange15m')
+                
+                item = {'symbol': symbol, 'priceChange15m': price_change, 'oiChange15m': oi_change}
+                
+                if category == 'long_open':
+                    long_open.append(item)
+                elif category == 'long_close':
+                    long_close.append(item)
+                elif category == 'short_open':
+                    short_open.append(item)
+                elif category == 'short_close':
+                    short_close.append(item)
     
     total_time = time.time() - start_time
-    logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個 | 總用時: {total_time/60:.1f} 分鐘")
-    logger.info(f"分類結果: 多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}")
+    significant_count = len(long_open) + len(long_close) + len(short_open) + len(short_close)
+    logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個, 過濾 {filtered_count} 個 | 總用時: {total_time/60:.1f} 分鐘")
+    logger.info(f"持倉變化 >= 1% 的標的: {significant_count} 個（多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}）")
     
     # 排序與取前 3 名
     long_open.sort(key=lambda x: x['oiChange15m'], reverse=True)      # OI 增加越多越好
@@ -3020,32 +3072,86 @@ def fetch_hyperliquid_whale_alert() -> List[Dict]:
         logger.info(f"Hyperliquid Whale Alert 原始數據: {len(data_list)} 條")
         if data_list:
             sample = data_list[0]
-            logger.debug(f"數據樣本欄位: {list(sample.keys())[:10]}")
-            logger.debug(f"數據樣本內容: {json.dumps(sample, ensure_ascii=False)[:500]}")
+            logger.info(f"數據樣本欄位: {list(sample.keys())}")
+            logger.info(f"數據樣本完整內容: {json.dumps(sample, ensure_ascii=False, indent=2)}")
         
         # 篩選名目價值 >= 門檻的提醒（門檻已降低）
         filtered_alerts = []
-        for alert in data_list:
-            # 嘗試多種可能的欄位名稱
-            value = (
-                alert.get('notional_value') or 
-                alert.get('notionalValue') or 
-                alert.get('value') or 
-                alert.get('size') or 
-                alert.get('amount') or
-                0
-            )
+        value_stats = []  # 記錄所有數值用於調試
+        
+        for idx, alert in enumerate(data_list):
+            # 嘗試多種可能的欄位名稱（擴展更多可能性）
+            value = None
+            value_key = None
+            
+            # 按優先順序嘗試各種字段名稱
+            possible_keys = [
+                'notional_value', 'notionalValue', 'notional', 'notional_usd',
+                'value', 'value_usd', 'usd_value', 'usdValue',
+                'size', 'size_usd', 'sizeUSD',
+                'amount', 'amount_usd', 'amountUSD',
+                'volume', 'volume_usd', 'volumeUSD',
+                'trade_value', 'tradeValue', 'trade_value_usd',
+                'order_value', 'orderValue', 'order_value_usd',
+                'total_value', 'totalValue', 'total_value_usd'
+            ]
+            
+            for key in possible_keys:
+                if key in alert and alert[key] is not None:
+                    value = alert[key]
+                    value_key = key
+                    break
+            
+            # 如果還是找不到，嘗試遍歷所有數值字段
+            if value is None:
+                for key, val in alert.items():
+                    if isinstance(val, (int, float)) and val > 0:
+                        # 可能是數值字段，但需要判斷是否合理（通常交易金額 > 1000）
+                        if val >= 1000:
+                            value = val
+                            value_key = key
+                            break
+            
+            if value is None:
+                logger.warning(f"Alert #{idx} 無法找到數值字段，所有字段: {list(alert.keys())}")
+                continue
             
             try:
-                value_float = float(value)
+                # 處理字符串格式（可能包含逗號或單位）
+                if isinstance(value, str):
+                    # 移除逗號、空格、$符號等
+                    value_clean = value.replace(',', '').replace('$', '').replace(' ', '').replace('USD', '').replace('usd', '')
+                    value_float = float(value_clean)
+                else:
+                    value_float = float(value)
+                
+                # 記錄統計信息（前10條）
+                if idx < 10:
+                    symbol = alert.get('symbol') or alert.get('coin') or alert.get('asset') or '未知'
+                    value_stats.append({
+                        'symbol': symbol,
+                        'key': value_key,
+                        'value': value_float,
+                        'formatted': f"${value_float/10000:.2f}萬"
+                    })
+                
                 if value_float >= WHALE_ALERT_THRESHOLD:
                     filtered_alerts.append(alert)
-                    logger.debug(f"符合門檻的 Alert: {alert.get('symbol')} - ${value_float/10000:.2f}萬")
+                    symbol = alert.get('symbol') or alert.get('coin') or alert.get('asset') or '未知'
+                    logger.info(f"✅ 符合門檻的 Alert: {symbol} - ${value_float/10000:.2f}萬 (字段: {value_key})")
                 else:
-                    logger.debug(f"未達門檻的 Alert: {alert.get('symbol')} - ${value_float/10000:.2f}萬 < ${WHALE_ALERT_THRESHOLD/10000:.2f}萬")
+                    if idx < 5:  # 只記錄前5條未達門檻的
+                        symbol = alert.get('symbol') or alert.get('coin') or alert.get('asset') or '未知'
+                        logger.info(f"❌ 未達門檻: {symbol} - ${value_float/10000:.2f}萬 < ${WHALE_ALERT_THRESHOLD/10000:.2f}萬 (字段: {value_key})")
             except (TypeError, ValueError) as e:
-                logger.debug(f"Alert 數值解析失敗: {value}, 錯誤: {str(e)}")
+                logger.warning(f"Alert #{idx} 數值解析失敗: 字段={value_key}, 值={value}, 錯誤: {str(e)}")
                 continue
+        
+        # 輸出統計信息
+        if value_stats:
+            logger.info(f"前10條數據的數值統計:")
+            for stat in value_stats:
+                logger.info(f"  {stat['symbol']}: {stat['formatted']} (字段: {stat['key']})")
         
         logger.info(f"符合門檻的 Whale Alert: {len(filtered_alerts)} 條（門檻: ${WHALE_ALERT_THRESHOLD/10000:.2f}萬）")
         return filtered_alerts
