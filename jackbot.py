@@ -761,11 +761,12 @@ def fetch_coins_price_change() -> List[Dict]:
 def fetch_oi_change_15m(symbol: str) -> Optional[float]:
     """計算單一 symbol 15 分鐘 OI 變化%（使用全市場整合數據）"""
     # 直接使用 symbol+USDT 格式，只嘗試 m15 區間（根據實際測試，這樣成功率最高）
-    # 注意：不指定 exchange 參數，使用 CoinGlass 的全市場整合 OI 數據
+    # 使用 exchange 參數指定 Binance（CoinGlass 的全市場整合數據實際上是基於主要交易所的聚合）
+    # 注意：CoinGlass API 的 open-interest/history 需要指定 exchange 參數
     sym = symbol + "USDT"
     url = f"{CG_API_BASE}/api/futures/open-interest/history"
     params = {
-        # 不指定 exchange，使用全市場整合數據（所有交易所的總和）
+        "exchange": EXCHANGE,  # 使用 Binance（CoinGlass 的全市場數據實際上是基於主要交易所的聚合）
         "symbol": sym,
         "interval": "m15"  # 使用 15 分鐘區間
     }
@@ -778,14 +779,20 @@ def fetch_oi_change_15m(symbol: str) -> Optional[float]:
         response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
             # 只對前幾個幣種記錄錯誤，避免日誌過多
-            if symbol in ["BTC", "ETH"]:
-                logger.warning(f"[{symbol}] OI API 錯誤: {response.status_code}")
+            if symbol in ["BTC", "ETH", "SOL"]:
+                logger.warning(f"[{symbol}] OI API 錯誤: {response.status_code}, 響應: {response.text[:200]}")
             return None
         
         result = response.json()
+        # 添加調試日誌（只對前幾個幣種）
+        if symbol in ["BTC", "ETH", "SOL"]:
+            logger.info(f"[{symbol}] OI API 響應: code={result.get('code')}, 數據條數={len(result.get('data', result.get('list', [])))}")
+        
         data_list = result.get('data', result.get('list', []))
         
         if not isinstance(data_list, list) or len(data_list) < 2:
+            if symbol in ["BTC", "ETH", "SOL"]:
+                logger.warning(f"[{symbol}] OI 數據不足: {len(data_list) if isinstance(data_list, list) else 'not a list'}")
             return None
         
         last = data_list[-1]
