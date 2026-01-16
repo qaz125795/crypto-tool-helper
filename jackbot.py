@@ -636,8 +636,8 @@ def fetch_whale_position():
 # ==================== 3. 持倉變化篩選器 ====================
 
 def fetch_supported_futures_coins() -> List[str]:
-    """獲取支援的合約幣種列表（只返回合約幣種，不包含現貨）"""
-    url = "https://open-api-v4.coinglass.com/api/futures/supported-coins"
+    """獲取 BingX 交易所支援的合約幣種列表（大幅減少數量）"""
+    url = "https://open-api-v4.coinglass.com/api/futures/supported-exchange-pairs"
     headers = {
         "CG-API-KEY": CG_API_KEY,
         "accept": "application/json"
@@ -646,32 +646,37 @@ def fetch_supported_futures_coins() -> List[str]:
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
-            logger.error(f"supported-coins API error: {response.status_code}")
+            logger.error(f"supported-exchange-pairs API error: {response.status_code}")
             return []
         
         result = response.json()
         data = result.get('data', result if isinstance(result, list) else [])
         
-        # 提取幣種符號（去掉USDT後綴，統一格式）
+        # 提取 BingX 交易所的幣種符號
         symbols = []
         for item in data:
-            if isinstance(item, dict):
-                symbol = item.get('symbol') or item.get('coin') or item.get('name')
-            elif isinstance(item, str):
-                symbol = item
-            else:
+            if not isinstance(item, dict):
                 continue
             
-            if symbol:
-                # 移除USDT後綴，統一格式
-                symbol = symbol.replace('USDT', '').replace('USDT-PERP', '').upper()
-                if symbol and symbol not in symbols:
-                    symbols.append(symbol)
+            # 檢查是否為 BingX 交易所
+            exchange = item.get('exchange') or item.get('exchange_name') or ''
+            if 'bingx' not in str(exchange).lower() and 'bing' not in str(exchange).lower():
+                continue
+            
+            # 獲取交易對符號
+            symbol = item.get('symbol') or item.get('pair') or item.get('coin') or item.get('name')
+            if not symbol:
+                continue
+            
+            # 移除USDT後綴，統一格式
+            symbol_clean = symbol.replace('USDT', '').replace('USDT-PERP', '').replace('-PERP', '').upper()
+            if symbol_clean and symbol_clean not in symbols:
+                symbols.append(symbol_clean)
         
-        logger.info(f"從 API 獲取到 {len(symbols)} 個合約幣種")
+        logger.info(f"從 API 獲取到 {len(symbols)} 個 BingX 合約幣種")
         return symbols
     except Exception as e:
-        logger.error(f"獲取合約幣種列表失敗: {str(e)}")
+        logger.error(f"獲取 BingX 合約幣種列表失敗: {str(e)}")
         return []
 
 
@@ -931,8 +936,8 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
 
 
 def fetch_position_change():
-    """主流程：持倉變化篩選（只偵測合約幣種，不包含現貨，只採集持倉變化 >= 1% 的數據，使用並行處理大幅提升速度）"""
-    logger.info("開始執行持倉變化篩選，只偵測合約幣種（持倉變化 >= 1%，並行處理）...")
+    """主流程：持倉變化篩選（只偵測 BingX 合約幣種，大幅減少數量，只採集持倉變化 >= 1% 的數據）"""
+    logger.info("開始執行持倉變化篩選，只偵測 BingX 合約幣種（持倉變化 >= 1%）...")
     
     all_symbols_data = fetch_coins_price_change()
     if not all_symbols_data:
@@ -954,8 +959,8 @@ def fetch_position_change():
     oi_fail_count = 0
     filtered_count = 0
     
-    # 並行處理配置
-    MAX_WORKERS = 15  # 同時處理15個請求（避免觸發API速率限制）
+    # 並行處理配置（BingX幣種較少，可以適當增加並發數）
+    MAX_WORKERS = 20  # 同時處理20個請求（BingX幣種較少，可以更快）
     
     # 記錄開始時間
     start_time = time.time()
@@ -3084,11 +3089,12 @@ def fetch_hyperliquid_whale_alert() -> List[Dict]:
             value = None
             value_key = None
             
-            # 按優先順序嘗試各種字段名稱
+            # 按優先順序嘗試各種字段名稱（優先使用 position_value_usd，這是正確的USD價值）
             possible_keys = [
+                'position_value_usd', 'positionValueUsd', 'position_value', 'positionValue',  # 最優先：持倉USD價值
                 'notional_value', 'notionalValue', 'notional', 'notional_usd',
                 'value', 'value_usd', 'usd_value', 'usdValue',
-                'size', 'size_usd', 'sizeUSD',
+                'size_usd', 'sizeUSD', 'size',  # size 可能是數量，不是價值
                 'amount', 'amount_usd', 'amountUSD',
                 'volume', 'volume_usd', 'volumeUSD',
                 'trade_value', 'tradeValue', 'trade_value_usd',
@@ -3102,9 +3108,12 @@ def fetch_hyperliquid_whale_alert() -> List[Dict]:
                     value_key = key
                     break
             
-            # 如果還是找不到，嘗試遍歷所有數值字段
+            # 如果還是找不到，嘗試遍歷所有數值字段（排除明顯不是價值的字段）
             if value is None:
+                excluded_keys = ['entry_price', 'liq_price', 'mark_price', 'leverage', 'position_size', 'create_time', 'update_time']
                 for key, val in alert.items():
+                    if key.lower() in excluded_keys:
+                        continue  # 跳過明顯不是價值的字段
                     if isinstance(val, (int, float)) and val > 0:
                         # 可能是數值字段，但需要判斷是否合理（通常交易金額 > 1000）
                         if val >= 1000:
@@ -3430,20 +3439,26 @@ def build_hyperliquid_message() -> Optional[str]:
     lines.append("🚨 *巨鯨即時預警 (Whale Alert)*：")
     for alert in new_alerts[:5]:  # 最多顯示 5 個
         symbol = alert.get('symbol') or alert.get('coin') or '未知'
-        direction = alert.get('side') or alert.get('direction') or alert.get('type') or '未知'
+        
+        # 獲取USD價值（優先使用 position_value_usd）
         value = float(
+            alert.get('position_value_usd') or 
+            alert.get('positionValueUsd') or 
+            alert.get('position_value') or 
+            alert.get('positionValue') or 
             alert.get('notional_value') or 
             alert.get('notionalValue') or 
             alert.get('value') or 
             0
         )
         
-        # 獲取開倉時間
-        alert_time = alert.get('time') or alert.get('timestamp') or alert.get('open_time')
+        # 獲取開倉時間（create_time 是毫秒時間戳）
+        alert_time = alert.get('create_time') or alert.get('time') or alert.get('timestamp') or alert.get('open_time')
         time_str = "時間未知"
         if alert_time:
             try:
                 if isinstance(alert_time, (int, float)):
+                    # create_time 是毫秒時間戳（例如 1768536078000）
                     if alert_time > 1e12:
                         dt = datetime.fromtimestamp(alert_time / 1000)
                     else:
@@ -3451,17 +3466,49 @@ def build_hyperliquid_message() -> Optional[str]:
                     time_str = dt.strftime("%Y-%m-%d %H:%M")
                 else:
                     time_str = str(alert_time)
-            except:
+            except Exception as e:
+                logger.debug(f"時間解析失敗: {alert_time}, 錯誤: {str(e)}")
                 time_str = "時間未知"
         
-        # 判斷方向 emoji
-        direction_emoji = "🟢" if str(direction).lower() in ['long', 'buy', '多', 'long'] else "🔴"
-        direction_text = "做多" if str(direction).lower() in ['long', 'buy', '多', 'long'] else "做空"
+        # 判斷方向（根據 position_size 正負或 position_action）
+        position_size = alert.get('position_size') or alert.get('positionSize') or 0
+        position_action = alert.get('position_action') or alert.get('positionAction')
+        side = alert.get('side') or alert.get('direction') or alert.get('type')
+        
+        # 判斷方向邏輯：
+        # 1. 如果有 side/direction/type 字段，直接使用
+        # 2. 如果 position_size > 0，可能是做多；< 0 可能是做空
+        # 3. position_action: 1=開多, 2=開空, 3=平多, 4=平空
+        if side:
+            direction_text = "做多" if str(side).lower() in ['long', 'buy', '多', 'l', '1'] else "做空"
+        elif position_action is not None:
+            # position_action: 1=開多, 2=開空
+            if position_action == 1:
+                direction_text = "做多"
+            elif position_action == 2:
+                direction_text = "做空"
+            else:
+                direction_text = "未知"
+        elif isinstance(position_size, (int, float)):
+            # 根據 position_size 正負判斷（正數可能是做多，負數可能是做空）
+            direction_text = "做多" if position_size > 0 else "做空"
+        else:
+            direction_text = "未知"
+        
+        direction_emoji = "🟢" if "做多" in direction_text else "🔴"
+        
+        # 格式化價值顯示
+        if value >= 1_000_000:
+            value_display = f"${value/1_000_000:.2f}M"
+        elif value >= 1_000:
+            value_display = f"${value/1_000:.2f}K"
+        else:
+            value_display = f"${value:,.0f}"
         
         lines.append(f"⏰ 時間：{time_str}")
         lines.append(f"標的：`{symbol}`")
         lines.append(f"方向：{direction_emoji} {direction_text}")
-        lines.append(f"規模：${value:,.0f} USD")
+        lines.append(f"規模：{value_display} USD")
         lines.append("")
     
     # 更新已發送 ID 列表
