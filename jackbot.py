@@ -759,14 +759,13 @@ def fetch_coins_price_change() -> List[Dict]:
 
 
 def fetch_oi_change_15m(symbol: str) -> Optional[float]:
-    """計算單一 symbol 15 分鐘 OI 變化%（使用全市場整合數據）"""
-    # 直接使用 symbol+USDT 格式，只嘗試 m15 區間（根據實際測試，這樣成功率最高）
-    # 使用 exchange 參數指定 Binance（CoinGlass 的全市場整合數據實際上是基於主要交易所的聚合）
-    # 注意：CoinGlass API 的 open-interest/history 需要指定 exchange 參數
+    """計算單一 symbol 15 分鐘 OI 變化%（數據源：CoinGlass Binance，與 Google Apps Script 版本一致）"""
+    # 直接使用 symbol+USDT 格式，使用 m15 區間
+    # 使用 exchange 參數指定 Binance（確保數據源與 Google Apps Script 版本一致）
     sym = symbol + "USDT"
     url = f"{CG_API_BASE}/api/futures/open-interest/history"
     params = {
-        "exchange": EXCHANGE,  # 使用 Binance（CoinGlass 的全市場數據實際上是基於主要交易所的聚合）
+        "exchange": EXCHANGE,  # 使用 Binance（確保數據源與 Google Apps Script 版本一致）
         "symbol": sym,
         "interval": "m15"  # 使用 15 分鐘區間
     }
@@ -826,7 +825,7 @@ def normalize_symbol(coin: Dict) -> Optional[str]:
 
 def extract_price_change_15m(coin: Dict) -> float:
     """提取 15 分鐘價格變化%"""
-    # 實際欄位名稱（根據日誌）
+    # 優先使用 15 分鐘價格變化
     change = coin.get('price_change_percent_15m')
     if isinstance(change, (int, float)):
         return float(change)
