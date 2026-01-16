@@ -777,21 +777,12 @@ def fetch_oi_change_15m(symbol: str) -> Optional[float]:
     try:
         response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
-            # 只對前幾個幣種記錄錯誤，避免日誌過多
-            if symbol in ["BTC", "ETH", "SOL"]:
-                logger.warning(f"[{symbol}] OI API 錯誤: {response.status_code}, 響應: {response.text[:200]}")
             return None
         
         result = response.json()
-        # 添加調試日誌（只對前幾個幣種）
-        if symbol in ["BTC", "ETH", "SOL"]:
-            logger.info(f"[{symbol}] OI API 響應: code={result.get('code')}, 數據條數={len(result.get('data', result.get('list', [])))}")
-        
         data_list = result.get('data', result.get('list', []))
         
         if not isinstance(data_list, list) or len(data_list) < 2:
-            if symbol in ["BTC", "ETH", "SOL"]:
-                logger.warning(f"[{symbol}] OI 數據不足: {len(data_list) if isinstance(data_list, list) else 'not a list'}")
             return None
         
         last = data_list[-1]
@@ -814,7 +805,6 @@ def fetch_oi_change_15m(symbol: str) -> Optional[float]:
         change = ((last_oi - prev_oi) / prev_oi) * 100
         return change
     except Exception as e:
-        logger.error(f"獲取 {symbol} OI 變化失敗: {str(e)}")
         return None
 
 
