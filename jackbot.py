@@ -51,7 +51,7 @@ if thread_ids_str:
     except:
         TG_THREAD_IDS = {
             'sector_ranking': 5,
-            'whale_position': 246,
+            'buying_power_monitor': 246,  # 原 whale_position，已替換為購買力監控
             'position_change': 250,
             'economic_data': 13,
             'news': 7,
@@ -64,7 +64,7 @@ if thread_ids_str:
 else:
     TG_THREAD_IDS = {
         'sector_ranking': int(os.environ.get('TG_THREAD_SECTOR_RANKING', 5)),
-        'whale_position': int(os.environ.get('TG_THREAD_WHALE_POSITION', 246)),
+        'buying_power_monitor': int(os.environ.get('TG_THREAD_WHALE_POSITION', 246)),  # 使用原 whale_position 的 thread ID
         'position_change': int(os.environ.get('TG_THREAD_POSITION_CHANGE', 250)),
         'economic_data': int(os.environ.get('TG_THREAD_ECONOMIC_DATA', 13)),
         'news': int(os.environ.get('TG_THREAD_NEWS', 7)),
@@ -553,23 +553,51 @@ def fetch_stablecoin_marketcap_history() -> Optional[List[Dict]]:
     }
     
     try:
+        logger.info(f"正在調用穩定幣市值 API: {url}")
         response = requests.get(url, headers=headers, timeout=10)
+        logger.info(f"穩定幣市值 API 響應狀態碼: {response.status_code}")
+        
         if response.status_code != 200:
             logger.error(f"穩定幣市值 API 返回狀態碼: {response.status_code}")
+            logger.error(f"響應內容: {response.text[:500]}")
             return None
         
         data = response.json()
-        if data.get('code') not in ['0', 0, 200, '200']:
-            logger.error(f"穩定幣市值 API 返回錯誤: {data.get('msg')}")
+        logger.info(f"穩定幣市值 API 返回數據結構: code={data.get('code')}, msg={data.get('msg')}")
+        logger.debug(f"完整響應: {json.dumps(data, ensure_ascii=False)[:1000]}")
+        
+        # 檢查返回碼
+        if data.get('code') not in ['0', 0, 200, '200', None]:
+            error_msg = data.get('msg') or data.get('message') or '未知錯誤'
+            logger.error(f"穩定幣市值 API 返回錯誤: {error_msg} (code: {data.get('code')})")
             return None
         
-        # 返回數據列表
-        data_list = data.get('data', [])
-        if isinstance(data_list, list):
+        # 返回數據列表（嘗試多種可能的數據結構）
+        data_list = data.get('data') or data.get('result') or data.get('list') or []
+        if isinstance(data_list, list) and len(data_list) > 0:
+            logger.info(f"成功獲取穩定幣市值數據: {len(data_list)} 條記錄")
             return data_list
+        elif isinstance(data_list, dict):
+            # 如果 data 是字典，嘗試提取其中的列表
+            for key in ['list', 'items', 'history', 'data']:
+                if key in data_list and isinstance(data_list[key], list):
+                    logger.info(f"從 {key} 字段獲取數據: {len(data_list[key])} 條記錄")
+                    return data_list[key]
+        
+        logger.warning(f"穩定幣市值 API 返回的數據格式不符合預期: {type(data_list)}")
+        logger.debug(f"數據內容: {json.dumps(data, ensure_ascii=False)[:500]}")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"穩定幣市值 API 請求失敗: {str(e)}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.error(f"穩定幣市值 API 響應 JSON 解析失敗: {str(e)}")
+        logger.error(f"響應內容: {response.text[:500] if 'response' in locals() else 'N/A'}")
         return None
     except Exception as e:
         logger.error(f"獲取穩定幣市值歷史失敗: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 
@@ -850,12 +878,14 @@ def buying_power_monitor():
     lines.append(f"⏰ 更新時間：{time_str}")
     
     message = "\n".join(lines)
-    send_telegram_message(message, TG_THREAD_IDS.get('whale_position', 246), parse_mode="Markdown")
+    send_telegram_message(message, TG_THREAD_IDS.get('buying_power_monitor', 246), parse_mode="Markdown")
     logger.info("購買力監控推播完成")
 
 
+# 保留舊函數名稱以向後兼容
 def fetch_whale_position():
-    """主執行函數：巨鯨持倉監控（已替換為 buying_power_monitor）"""
+    """已廢棄：請使用 buying_power_monitor()"""
+    logger.warning("fetch_whale_position() 已廢棄，請使用 buying_power_monitor()")
     buying_power_monitor()
 
 
@@ -3306,9 +3336,14 @@ def fetch_buy_ratio(symbol: str) -> Optional[float]:
 
 
 def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict]]:
-    """獲取價格歷史數據（OHLC）"""
-    url = "https://open-api-v4.coinglass.com/api/futures/price/history"
+    """獲取價格歷史數據（OHLC）
+    注意：CoinGlass API v4 可能沒有直接的 price/history 端點
+    這裡嘗試使用多種可能的端點或從其他數據中提取價格信息
+    """
+    # 方法1：嘗試使用 OI history 端點（可能包含價格信息）
+    url = f"{CG_API_BASE}/api/futures/open-interest/history"
     params = {
+        "exchange": "Binance",
         "symbol": symbol,
         "interval": interval
     }
@@ -3319,18 +3354,20 @@ def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict
     
     try:
         response = requests.get(url, params=params, headers=headers, timeout=10)
-        if response.status_code != 200:
-            logger.debug(f"價格歷史 API 返回狀態碼: {response.status_code} for {symbol}")
-            return None
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('code') in ['0', 0, 200, '200']:
+                data_list = data.get('data', [])
+                if isinstance(data_list, list) and len(data_list) > 0:
+                    # 檢查數據結構，看是否有價格字段
+                    sample = data_list[0]
+                    # OI 數據可能包含 markPrice 或其他價格字段
+                    if any(key in sample for key in ['price', 'close', 'markPrice', 'mark_price', 'open', 'high', 'low']):
+                        return data_list
         
-        data = response.json()
-        if data.get('code') not in ['0', 0, 200, '200']:
-            logger.debug(f"價格歷史 API 返回錯誤: {data.get('msg')} for {symbol}")
-            return None
-        
-        data_list = data.get('data', [])
-        if isinstance(data_list, list):
-            return data_list
+        # 方法2：如果 OI 端點沒有價格，嘗試使用其他端點
+        # 注意：這裡可能需要根據實際 API 文檔調整
+        logger.debug(f"無法從 OI 端點獲取價格數據 for {symbol}，嘗試其他方法")
         return None
     except Exception as e:
         logger.debug(f"獲取價格歷史失敗 {symbol}: {str(e)}")
@@ -3378,12 +3415,14 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         # 獲取最近 4 小時的價格歷史（需要至少 5 個數據點來比較）
         price_data = fetch_price_history(symbol + "USDT", "1h")
         if not price_data or len(price_data) < 5:
+            logger.debug(f"CVD 背離檢測 {symbol}: 價格數據不足（{len(price_data) if price_data else 0} 個數據點）")
             return None
         
         # 獲取最近 4 小時的 CVD 歷史
         base_symbol = symbol.replace("USDT", "")
         cvd_data = fetch_aggregated_cvd_history(base_symbol, "1h")
         if not cvd_data or len(cvd_data) < 5:
+            logger.debug(f"CVD 背離檢測 {symbol}: CVD 數據不足（{len(cvd_data) if cvd_data else 0} 個數據點）")
             return None
         
         # 按時間戳排序
@@ -3394,22 +3433,42 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         recent_prices = price_sorted[-5:]
         recent_cvds = cvd_sorted[-5:]
         
-        # 提取價格高點和低點
+        # 提取價格高點和低點（嘗試多種字段名稱）
         price_highs = []
         price_lows = []
         for item in recent_prices:
-            high = item.get('high') or item.get('close')
-            low = item.get('low') or item.get('close')
+            # 嘗試多種可能的價格字段（優先使用 OHLC 數據）
+            high = (item.get('high') or item.get('markPrice') or item.get('mark_price') or 
+                   item.get('close') or item.get('price') or item.get('value'))
+            low = (item.get('low') or item.get('markPrice') or item.get('mark_price') or 
+                  item.get('close') or item.get('price') or item.get('value'))
+            
+            # 如果沒有 high/low，使用 close 作為備用
+            if not high or not low:
+                close_price = item.get('close') or item.get('markPrice') or item.get('mark_price') or item.get('price')
+                if close_price:
+                    high = close_price
+                    low = close_price
+            
             if high and low:
-                price_highs.append(float(high))
-                price_lows.append(float(low))
+                try:
+                    price_highs.append(float(high))
+                    price_lows.append(float(low))
+                except (ValueError, TypeError):
+                    continue
         
-        # 提取 CVD 值
+        # 提取 CVD 值（嘗試多種字段名稱）
         cvd_values = []
         for item in recent_cvds:
-            cvd = item.get('cvd') or item.get('value') or item.get('close')
+            # 嘗試多種可能的 CVD 字段
+            cvd = (item.get('cvd') or item.get('value') or 
+                  item.get('close') or item.get('cvdValue') or
+                  item.get('cumulativeVolumeDelta') or item.get('volumeDelta'))
             if cvd is not None:
-                cvd_values.append(float(cvd))
+                try:
+                    cvd_values.append(float(cvd))
+                except (ValueError, TypeError):
+                    continue
         
         if len(price_highs) < 5 or len(price_lows) < 5 or len(cvd_values) < 5:
             return None
@@ -3528,7 +3587,12 @@ def build_altseason_message() -> Optional[str]:
             
             # 檢測 CVD 背離
             base_symbol = s.replace("USDT", "")
-            divergence = detect_cvd_divergence(base_symbol)
+            try:
+                divergence = detect_cvd_divergence(base_symbol)
+                logger.info(f"CVD 背離檢測 {base_symbol}: {divergence}")
+            except Exception as e:
+                logger.warning(f"CVD 背離檢測失敗 {base_symbol}: {str(e)}")
+                divergence = None
             
             divergence_text = ""
             if divergence == 'bearish':
@@ -3555,7 +3619,12 @@ def build_altseason_message() -> Optional[str]:
             
             # 檢測 CVD 背離
             base_symbol = s.replace("USDT", "")
-            divergence = detect_cvd_divergence(base_symbol)
+            try:
+                divergence = detect_cvd_divergence(base_symbol)
+                logger.info(f"CVD 背離檢測 {base_symbol}: {divergence}")
+            except Exception as e:
+                logger.warning(f"CVD 背離檢測失敗 {base_symbol}: {str(e)}")
+                divergence = None
             
             divergence_text = ""
             if divergence == 'bearish':
@@ -4155,7 +4224,11 @@ if __name__ == "__main__":
         
         if function_name == "sector_ranking":
             fetch_sector_ranking()
-        elif function_name == "whale_position" or function_name == "buying_power_monitor":
+        elif function_name == "buying_power_monitor":
+            buying_power_monitor()
+        elif function_name == "whale_position":
+            # 向後兼容：舊名稱仍可使用
+            logger.info("使用舊函數名稱 whale_position，建議改用 buying_power_monitor")
             buying_power_monitor()
         elif function_name == "position_change":
             fetch_position_change()
@@ -4180,7 +4253,8 @@ if __name__ == "__main__":
         else:
             print("可用的功能:")
             print("  sector_ranking   - 主流板塊排行榜推播")
-            print("  whale_position / buying_power_monitor - 購買力監控（穩定幣市值 + OI 監控）")
+            print("  buying_power_monitor - 購買力監控（穩定幣市值 + OI 監控）")
+            print("  whale_position       - 已廢棄，請使用 buying_power_monitor")
             print("  position_change  - 持倉變化篩選")
             print("  economic_data    - 重要經濟數據推播")
             print("  news             - 新聞快訊推播")
