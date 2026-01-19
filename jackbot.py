@@ -682,8 +682,19 @@ def calculate_marketcap_change(data_list: List[Dict]) -> Optional[Dict]:
     if not data_list or len(data_list) < 2:
         return None
     
-    # 按時間戳排序（最新的在最後）
-    sorted_data = sorted(data_list, key=lambda x: x.get('time', 0) or x.get('timestamp', 0))
+    # 按時間戳或索引排序（最新的在最後）
+    def get_sort_key(item):
+        time_val = item.get('time') or item.get('timestamp')
+        if time_val is not None:
+            return time_val
+        # 如果沒有時間戳，使用索引
+        index_val = item.get('index')
+        if index_val is not None:
+            return index_val
+        # 如果都沒有，返回 0（保持原順序）
+        return 0
+    
+    sorted_data = sorted(data_list, key=get_sort_key)
     
     # 獲取最新值
     latest = sorted_data[-1]
@@ -3389,10 +3400,13 @@ def fetch_buy_ratio(symbol: str) -> Optional[float]:
 
 def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict]]:
     """獲取價格歷史數據（OHLC）
-    注意：CoinGlass API v4 可能沒有直接的 price/history 端點
-    這裡嘗試使用多種可能的端點或從其他數據中提取價格信息
+    注意：根據 CoinGlass API v4 文檔，可能需要使用特定的價格歷史端點
+    這裡嘗試多種方法獲取價格數據
     """
-    # 方法1：嘗試使用 OI history 端點（可能包含價格信息）
+    # 方法1：嘗試使用價格歷史端點（如果存在）
+    # 根據用戶提供的 API 文檔，可能需要使用不同的端點
+    # 暫時使用 OI history 端點，因為它可能包含價格信息
+    
     url = f"{CG_API_BASE}/api/futures/open-interest/history"
     params = {
         "exchange": "Binance",
@@ -3405,6 +3419,7 @@ def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict
     }
     
     try:
+        logger.debug(f"嘗試獲取價格歷史 {symbol}，使用 OI history 端點")
         response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
@@ -3413,13 +3428,16 @@ def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict
                 if isinstance(data_list, list) and len(data_list) > 0:
                     # 檢查數據結構，看是否有價格字段
                     sample = data_list[0]
+                    logger.debug(f"價格歷史數據樣本 {symbol}: {list(sample.keys())[:10]}")
                     # OI 數據可能包含 markPrice 或其他價格字段
                     if any(key in sample for key in ['price', 'close', 'markPrice', 'mark_price', 'open', 'high', 'low']):
+                        logger.debug(f"從 OI 端點獲取到價格數據 {symbol}: {len(data_list)} 條")
                         return data_list
+                    else:
+                        logger.debug(f"OI 端點數據 {symbol} 不包含價格字段，可用字段: {list(sample.keys())}")
         
-        # 方法2：如果 OI 端點沒有價格，嘗試使用其他端點
-        # 注意：這裡可能需要根據實際 API 文檔調整
-        logger.debug(f"無法從 OI 端點獲取價格數據 for {symbol}，嘗試其他方法")
+        # 如果 OI 端點沒有價格，返回 None（需要其他方法獲取價格）
+        logger.debug(f"無法從 OI 端點獲取價格數據 for {symbol}")
         return None
     except Exception as e:
         logger.debug(f"獲取價格歷史失敗 {symbol}: {str(e)}")
@@ -3440,6 +3458,7 @@ def fetch_aggregated_cvd_history(symbol: str, interval: str = "1h") -> Optional[
     }
     
     try:
+        logger.debug(f"嘗試獲取 CVD 歷史 {symbol}")
         response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
             logger.debug(f"聚合 CVD API 返回狀態碼: {response.status_code} for {symbol}")
@@ -3447,15 +3466,25 @@ def fetch_aggregated_cvd_history(symbol: str, interval: str = "1h") -> Optional[
         
         data = response.json()
         if data.get('code') not in ['0', 0, 200, '200']:
-            logger.debug(f"聚合 CVD API 返回錯誤: {data.get('msg')} for {symbol}")
+            error_msg = data.get('msg') or data.get('message') or '未知錯誤'
+            logger.debug(f"聚合 CVD API 返回錯誤: {error_msg} (code: {data.get('code')}) for {symbol}")
             return None
         
         data_list = data.get('data', [])
-        if isinstance(data_list, list):
+        if isinstance(data_list, list) and len(data_list) > 0:
+            logger.debug(f"成功獲取 CVD 歷史 {symbol}: {len(data_list)} 條")
+            # 輸出數據樣本以便調試
+            if len(data_list) > 0:
+                sample = data_list[0]
+                logger.debug(f"CVD 數據樣本 {symbol}: 字段 {list(sample.keys())[:10]}")
             return data_list
-        return None
+        else:
+            logger.debug(f"聚合 CVD API 返回空數據 for {symbol}")
+            return None
     except Exception as e:
         logger.debug(f"獲取聚合 CVD 歷史失敗 {symbol}: {str(e)}")
+        import traceback
+        logger.debug(traceback.format_exc())
         return None
 
 
@@ -3467,15 +3496,17 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         # 獲取最近 4 小時的價格歷史（需要至少 5 個數據點來比較）
         price_data = fetch_price_history(symbol + "USDT", "1h")
         if not price_data or len(price_data) < 5:
-            logger.debug(f"CVD 背離檢測 {symbol}: 價格數據不足（{len(price_data) if price_data else 0} 個數據點）")
+            logger.info(f"CVD 背離檢測 {symbol}: 價格數據不足（{len(price_data) if price_data else 0} 個數據點）")
             return None
         
         # 獲取最近 4 小時的 CVD 歷史
         base_symbol = symbol.replace("USDT", "")
         cvd_data = fetch_aggregated_cvd_history(base_symbol, "1h")
         if not cvd_data or len(cvd_data) < 5:
-            logger.debug(f"CVD 背離檢測 {symbol}: CVD 數據不足（{len(cvd_data) if cvd_data else 0} 個數據點）")
+            logger.info(f"CVD 背離檢測 {symbol}: CVD 數據不足（{len(cvd_data) if cvd_data else 0} 個數據點）")
             return None
+        
+        logger.info(f"CVD 背離檢測 {symbol}: 價格數據 {len(price_data)} 條, CVD 數據 {len(cvd_data)} 條")
         
         # 按時間戳排序
         price_sorted = sorted(price_data, key=lambda x: x.get('time', 0) or x.get('timestamp', 0))
@@ -3519,10 +3550,14 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
             if cvd is not None:
                 try:
                     cvd_values.append(float(cvd))
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"CVD 背離檢測 {symbol}: CVD 轉換失敗 {cvd}: {str(e)}")
                     continue
         
+        logger.debug(f"CVD 背離檢測 {symbol}: 提取到 {len(cvd_values)} 個 CVD 值")
+        
         if len(price_highs) < 5 or len(price_lows) < 5 or len(cvd_values) < 5:
+            logger.debug(f"CVD 背離檢測 {symbol}: 數據點不足 (價格高點: {len(price_highs)}, 價格低點: {len(price_lows)}, CVD: {len(cvd_values)})")
             return None
         
         # 當前值（最後一個）
@@ -3538,15 +3573,20 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         
         # 看跌背離：價格創高但 CVD 下降
         if current_price_high > previous_price_high and current_cvd < previous_cvd_max:
+            logger.debug(f"CVD 背離檢測 {symbol}: 檢測到看跌背離 (價格: {current_price_high} > {previous_price_high}, CVD: {current_cvd} < {previous_cvd_max})")
             return 'bearish'
         
         # 看漲背離：價格創低但 CVD 上升
         if current_price_low < previous_price_low and current_cvd > previous_cvd_min:
+            logger.debug(f"CVD 背離檢測 {symbol}: 檢測到看漲背離 (價格: {current_price_low} < {previous_price_low}, CVD: {current_cvd} > {previous_cvd_min})")
             return 'bullish'
         
+        logger.debug(f"CVD 背離檢測 {symbol}: 無背離 (價格高: {current_price_high}/{previous_price_high}, 價格低: {current_price_low}/{previous_price_low}, CVD: {current_cvd}/{previous_cvd_max}/{previous_cvd_min})")
         return None
     except Exception as e:
-        logger.debug(f"CVD 背離檢測失敗 {symbol}: {str(e)}")
+        logger.warning(f"CVD 背離檢測失敗 {symbol}: {str(e)}")
+        import traceback
+        logger.debug(traceback.format_exc())
         return None
 
 
