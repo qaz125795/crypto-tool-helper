@@ -849,30 +849,33 @@ def buying_power_monitor():
         logger.warning("無法計算穩定幣 OI 變化率")
         return
     
-    # 5. 判斷是否需要推播
+    # 5. 判斷是否需要推播（放寬條件）
     should_alert = False
     alert_type = []
     
-    # 市值增加 > 0.1%
-    if mcap_change.get('change_1h') and mcap_change['change_1h'] > 0.1:
+    # 市值增加 > 0.05%（放寬從 0.1% 到 0.05%）
+    if mcap_change.get('change_1h') is not None and mcap_change['change_1h'] > 0.05:
         should_alert = True
         alert_type.append("資金進場")
-    elif mcap_change.get('change_24h') and mcap_change['change_24h'] > 0.1:
+    elif mcap_change.get('change_24h') is not None and mcap_change['change_24h'] > 0.05:
         should_alert = True
         alert_type.append("資金進場")
     
-    # OI 暴增 > 2%
-    if oi_change.get('change_1h') and oi_change['change_1h'] > 2.0:
+    # OI 暴增 > 1%（放寬從 2% 到 1%）
+    if oi_change.get('change_1h') is not None and oi_change['change_1h'] > 1.0:
         should_alert = True
         alert_type.append("槓桿堆積")
-    elif oi_change.get('change_24h') and oi_change['change_24h'] > 2.0:
+    elif oi_change.get('change_24h') is not None and oi_change['change_24h'] > 1.0:
         should_alert = True
         alert_type.append("槓桿堆積")
     
-    # 如果沒有觸發警報條件，不推播
+    # 如果沒有觸發警報條件，仍然推播數據（但標註為正常狀態）
+    # 這樣用戶可以持續監控購買力變化
     if not should_alert:
-        logger.info("未觸發推播條件（市值變化 <= 0.1% 且 OI 變化 <= 2%）")
-        return
+        logger.info(f"未觸發警報條件，但仍推播當前數據供監控")
+        logger.info(f"市值變化: 1h={mcap_change.get('change_1h')}, 24h={mcap_change.get('change_24h')}")
+        logger.info(f"OI 變化: 1h={oi_change.get('change_1h')}, 24h={oi_change.get('change_24h')}")
+        # 不 return，繼續構建推播訊息
     
     # 6. 構建推播訊息
     now = get_taipei_time()
@@ -919,22 +922,29 @@ def buying_power_monitor():
     
     lines.append("")
     
-    # 警報提示
-    lines.append("🚨 *警報類型*：")
-    for alert in alert_type:
-        if alert == "資金進場":
-            lines.append("✅ 資金進場：場外資金（Fiat）兌換成穩定幣準備買入")
-        elif alert == "槓桿堆積":
-            lines.append("⚠️ 槓桿堆積：場內資金正在使用穩定幣作為保證金開多單")
+    # 警報提示（如果有觸發）
+    if alert_type:
+        lines.append("🚨 *警報類型*：")
+        for alert in alert_type:
+            if alert == "資金進場":
+                lines.append("✅ 資金進場：場外資金（Fiat）兌換成穩定幣準備買入")
+            elif alert == "槓桿堆積":
+                lines.append("⚠️ 槓桿堆積：場內資金正在使用穩定幣作為保證金開多單")
+        lines.append("")
     
-    lines.append("")
+    # 船長解讀
     lines.append("💡 *船長解讀*：")
-    if "資金進場" in alert_type and "槓桿堆積" in alert_type:
-        lines.append("市值上升 + OI 上升 = 雙重利好，市場資金充裕且槓桿活躍，上漲動能強勁。")
-    elif "資金進場" in alert_type:
-        lines.append("市值上升代表場外資金流入，這是長線利好信號，預示後續買盤支撐。")
-    elif "槓桿堆積" in alert_type:
-        lines.append("OI 暴增預示波動將至，需注意槓桿風險，可能出現劇烈波動。")
+    if alert_type:
+        if "資金進場" in alert_type and "槓桿堆積" in alert_type:
+            lines.append("市值上升 + OI 上升 = 雙重利好，市場資金充裕且槓桿活躍，上漲動能強勁。")
+        elif "資金進場" in alert_type:
+            lines.append("市值上升代表場外資金流入，這是長線利好信號，預示後續買盤支撐。")
+        elif "槓桿堆積" in alert_type:
+            lines.append("OI 暴增預示波動將至，需注意槓桿風險，可能出現劇烈波動。")
+    else:
+        # 沒有觸發警報時的提示
+        lines.append("目前購買力變化在正常範圍內（市值變化 <= 0.05%，OI 變化 <= 1%）。")
+        lines.append("持續監控中，如有異常變化將及時通知。")
     
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
@@ -3508,13 +3518,21 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         
         logger.info(f"CVD 背離檢測 {symbol}: 價格數據 {len(price_data)} 條, CVD 數據 {len(cvd_data)} 條")
         
-        # 按時間戳排序
-        price_sorted = sorted(price_data, key=lambda x: x.get('time', 0) or x.get('timestamp', 0))
-        cvd_sorted = sorted(cvd_data, key=lambda x: x.get('time', 0) or x.get('timestamp', 0))
+        # 按時間戳排序（處理 None 值）
+        def get_sort_key(item):
+            time_val = item.get('time') or item.get('timestamp')
+            if time_val is not None:
+                return time_val
+            return 0
+        
+        price_sorted = sorted(price_data, key=get_sort_key)
+        cvd_sorted = sorted(cvd_data, key=get_sort_key)
         
         # 取最近 5 個數據點（當前 + 前 4 個）
-        recent_prices = price_sorted[-5:]
-        recent_cvds = cvd_sorted[-5:]
+        recent_prices = price_sorted[-5:] if len(price_sorted) >= 5 else price_sorted
+        recent_cvds = cvd_sorted[-5:] if len(cvd_sorted) >= 5 else cvd_sorted
+        
+        logger.debug(f"CVD 背離檢測 {symbol}: 取最近 {len(recent_prices)} 個價格數據點, {len(recent_cvds)} 個 CVD 數據點")
         
         # 提取價格高點和低點（嘗試多種字段名稱）
         price_highs = []
@@ -3556,32 +3574,58 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         
         logger.debug(f"CVD 背離檢測 {symbol}: 提取到 {len(cvd_values)} 個 CVD 值")
         
-        if len(price_highs) < 5 or len(price_lows) < 5 or len(cvd_values) < 5:
-            logger.debug(f"CVD 背離檢測 {symbol}: 數據點不足 (價格高點: {len(price_highs)}, 價格低點: {len(price_lows)}, CVD: {len(cvd_values)})")
+        # 如果數據點不足，嘗試使用更少的數據點（至少需要 2 個點來比較）
+        min_points = 2  # 降低要求，至少需要 2 個點來比較
+        
+        if len(price_highs) < min_points or len(price_lows) < min_points or len(cvd_values) < min_points:
+            logger.info(f"CVD 背離檢測 {symbol}: 數據點不足 (價格高點: {len(price_highs)}, 價格低點: {len(price_lows)}, CVD: {len(cvd_values)})")
+            # 輸出樣本數據以便調試
+            if recent_prices:
+                logger.debug(f"價格數據樣本: {recent_prices[0]}")
+            if recent_cvds:
+                logger.debug(f"CVD 數據樣本: {recent_cvds[0]}")
             return None
+        
+        # 如果數據點不足 5 個，使用現有的數據點
+        if len(price_highs) < 5:
+            logger.debug(f"CVD 背離檢測 {symbol}: 價格數據點不足 5 個，使用 {len(price_highs)} 個點")
+        if len(cvd_values) < 5:
+            logger.debug(f"CVD 背離檢測 {symbol}: CVD 數據點不足 5 個，使用 {len(cvd_values)} 個點")
         
         # 當前值（最後一個）
         current_price_high = price_highs[-1]
         current_price_low = price_lows[-1]
         current_cvd = cvd_values[-1]
         
-        # 前 4 個數據點的最高/最低
-        previous_price_high = max(price_highs[:-1])
-        previous_price_low = min(price_lows[:-1])
-        previous_cvd_max = max(cvd_values[:-1])
-        previous_cvd_min = min(cvd_values[:-1])
+        # 前 N-1 個數據點的最高/最低（如果只有 2 個點，就比較第一個和最後一個）
+        if len(price_highs) >= 2:
+            previous_price_high = max(price_highs[:-1])
+            previous_price_low = min(price_lows[:-1])
+        else:
+            previous_price_high = price_highs[0] if len(price_highs) > 0 else current_price_high
+            previous_price_low = price_lows[0] if len(price_lows) > 0 else current_price_low
+        
+        if len(cvd_values) >= 2:
+            previous_cvd_max = max(cvd_values[:-1])
+            previous_cvd_min = min(cvd_values[:-1])
+        else:
+            previous_cvd_max = cvd_values[0] if len(cvd_values) > 0 else current_cvd
+            previous_cvd_min = cvd_values[0] if len(cvd_values) > 0 else current_cvd
+        
+        logger.debug(f"CVD 背離檢測 {symbol}: 當前價格高/低: {current_price_high}/{current_price_low}, 之前最高/最低: {previous_price_high}/{previous_price_low}")
+        logger.debug(f"CVD 背離檢測 {symbol}: 當前 CVD: {current_cvd}, 之前最大/最小: {previous_cvd_max}/{previous_cvd_min}")
         
         # 看跌背離：價格創高但 CVD 下降
         if current_price_high > previous_price_high and current_cvd < previous_cvd_max:
-            logger.debug(f"CVD 背離檢測 {symbol}: 檢測到看跌背離 (價格: {current_price_high} > {previous_price_high}, CVD: {current_cvd} < {previous_cvd_max})")
+            logger.info(f"CVD 背離檢測 {symbol}: ✅ 檢測到看跌背離 (價格: {current_price_high:.2f} > {previous_price_high:.2f}, CVD: {current_cvd:.2f} < {previous_cvd_max:.2f})")
             return 'bearish'
         
         # 看漲背離：價格創低但 CVD 上升
         if current_price_low < previous_price_low and current_cvd > previous_cvd_min:
-            logger.debug(f"CVD 背離檢測 {symbol}: 檢測到看漲背離 (價格: {current_price_low} < {previous_price_low}, CVD: {current_cvd} > {previous_cvd_min})")
+            logger.info(f"CVD 背離檢測 {symbol}: ✅ 檢測到看漲背離 (價格: {current_price_low:.2f} < {previous_price_low:.2f}, CVD: {current_cvd:.2f} > {previous_cvd_min:.2f})")
             return 'bullish'
         
-        logger.debug(f"CVD 背離檢測 {symbol}: 無背離 (價格高: {current_price_high}/{previous_price_high}, 價格低: {current_price_low}/{previous_price_low}, CVD: {current_cvd}/{previous_cvd_max}/{previous_cvd_min})")
+        logger.debug(f"CVD 背離檢測 {symbol}: 無背離 (價格高: {current_price_high:.2f}/{previous_price_high:.2f}, 價格低: {current_price_low:.2f}/{previous_price_low:.2f}, CVD: {current_cvd:.2f}/{previous_cvd_max:.2f}/{previous_cvd_min:.2f})")
         return None
     except Exception as e:
         logger.warning(f"CVD 背離檢測失敗 {symbol}: {str(e)}")
