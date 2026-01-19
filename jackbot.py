@@ -9,12 +9,15 @@ import requests
 import json
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+
+# 台灣台北時區（UTC+8）
+TAIPEI_TZ = timezone(timedelta(hours=8))
 
 # 配置日誌
 logging.basicConfig(
@@ -151,11 +154,24 @@ def translate_text(text: str, target_lang: str = 'zh-tw') -> str:
         return text
 
 
+def get_taipei_time(dt: Optional[datetime] = None) -> datetime:
+    """獲取台灣台北時間（UTC+8）"""
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    elif dt.tzinfo is None:
+        # 如果沒有時區資訊，假設是 UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+    # 轉換為台灣時間
+    return dt.astimezone(TAIPEI_TZ)
+
+
 def format_datetime(dt: datetime) -> str:
-    """格式化日期時間"""
+    """格式化日期時間（自動轉換為台灣時間）"""
+    # 轉換為台灣時間
+    dt_taipei = get_taipei_time(dt)
     weekdays = ['一', '二', '三', '四', '五', '六', '日']
-    weekday = weekdays[dt.weekday()]
-    return dt.strftime(f"%Y-%m-%d (週{weekday}) %H:%M")
+    weekday = weekdays[dt_taipei.weekday()]
+    return dt_taipei.strftime(f"%Y-%m-%d (週{weekday}) %H:%M")
 
 
 # ==================== 1. 主流板塊排行榜推播 ====================
@@ -528,8 +544,323 @@ def format_symbol_message(symbol: str, analysis: Dict) -> str:
     return message
 
 
+def fetch_stablecoin_marketcap_history() -> Optional[List[Dict]]:
+    """獲取穩定幣市值歷史數據"""
+    url = "https://open-api-v4.coinglass.com/api/index/stableCoin-marketCap-history"
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.error(f"穩定幣市值 API 返回狀態碼: {response.status_code}")
+            return None
+        
+        data = response.json()
+        if data.get('code') not in ['0', 0, 200, '200']:
+            logger.error(f"穩定幣市值 API 返回錯誤: {data.get('msg')}")
+            return None
+        
+        # 返回數據列表
+        data_list = data.get('data', [])
+        if isinstance(data_list, list):
+            return data_list
+        return None
+    except Exception as e:
+        logger.error(f"獲取穩定幣市值歷史失敗: {str(e)}")
+        return None
+
+
+def fetch_aggregated_stablecoin_oi_history(symbol: str = "BTC", interval: str = "1h") -> Optional[List[Dict]]:
+    """獲取聚合穩定幣保證金持倉歷史數據"""
+    url = "https://open-api-v4.coinglass.com/api/futures/open-interest/aggregated-stablecoin-history"
+    params = {
+        "exchange_list": "Binance",
+        "symbol": symbol,
+        "interval": interval
+    }
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.error(f"穩定幣 OI API 返回狀態碼: {response.status_code}")
+            return None
+        
+        data = response.json()
+        if data.get('code') not in ['0', 0, 200, '200']:
+            logger.error(f"穩定幣 OI API 返回錯誤: {data.get('msg')}")
+            return None
+        
+        # 返回數據列表
+        data_list = data.get('data', [])
+        if isinstance(data_list, list):
+            return data_list
+        return None
+    except Exception as e:
+        logger.error(f"獲取穩定幣 OI 歷史失敗: {str(e)}")
+        return None
+
+
+def calculate_marketcap_change(data_list: List[Dict]) -> Optional[Dict]:
+    """計算穩定幣市值變化率（1小時和24小時）"""
+    if not data_list or len(data_list) < 2:
+        return None
+    
+    # 按時間戳排序（最新的在最後）
+    sorted_data = sorted(data_list, key=lambda x: x.get('time', 0) or x.get('timestamp', 0))
+    
+    # 獲取最新值
+    latest = sorted_data[-1]
+    latest_mcap = latest.get('marketCap') or latest.get('market_cap') or latest.get('value')
+    
+    if latest_mcap is None:
+        return None
+    
+    # 計算1小時變化（需要找到1小時前的數據點）
+    now = get_taipei_time()
+    one_hour_ago = now - timedelta(hours=1)
+    one_hour_ago_ts = int(one_hour_ago.timestamp() * 1000)  # 轉換為毫秒時間戳
+    
+    # 找到最接近1小時前的數據點
+    one_hour_data = None
+    for item in sorted_data:
+        item_time = item.get('time') or item.get('timestamp', 0)
+        if item_time <= one_hour_ago_ts:
+            one_hour_data = item
+        else:
+            break
+    
+    # 計算24小時變化（需要找到24小時前的數據點）
+    twenty_four_hours_ago = now - timedelta(hours=24)
+    twenty_four_hours_ago_ts = int(twenty_four_hours_ago.timestamp() * 1000)
+    
+    twenty_four_hours_data = None
+    for item in sorted_data:
+        item_time = item.get('time') or item.get('timestamp', 0)
+        if item_time <= twenty_four_hours_ago_ts:
+            twenty_four_hours_data = item
+        else:
+            break
+    
+    result = {
+        'latest_mcap': float(latest_mcap),
+        'change_1h': None,
+        'change_24h': None
+    }
+    
+    # 計算1小時變化率
+    if one_hour_data:
+        one_hour_mcap = one_hour_data.get('marketCap') or one_hour_data.get('market_cap') or one_hour_data.get('value')
+        if one_hour_mcap and one_hour_mcap > 0:
+            result['change_1h'] = ((latest_mcap - one_hour_mcap) / one_hour_mcap) * 100
+    
+    # 計算24小時變化率
+    if twenty_four_hours_data:
+        twenty_four_hours_mcap = twenty_four_hours_data.get('marketCap') or twenty_four_hours_data.get('market_cap') or twenty_four_hours_data.get('value')
+        if twenty_four_hours_mcap and twenty_four_hours_mcap > 0:
+            result['change_24h'] = ((latest_mcap - twenty_four_hours_mcap) / twenty_four_hours_mcap) * 100
+    
+    return result
+
+
+def calculate_oi_change(data_list: List[Dict]) -> Optional[Dict]:
+    """計算穩定幣 OI 變化率（1小時和24小時）"""
+    if not data_list or len(data_list) < 2:
+        return None
+    
+    # 按時間戳排序
+    sorted_data = sorted(data_list, key=lambda x: x.get('time', 0) or x.get('timestamp', 0))
+    
+    # 獲取最新值（使用 close 或 value）
+    latest = sorted_data[-1]
+    latest_oi = latest.get('close') or latest.get('value') or latest.get('openInterest')
+    
+    if latest_oi is None:
+        return None
+    
+    # 計算1小時變化
+    now = get_taipei_time()
+    one_hour_ago = now - timedelta(hours=1)
+    one_hour_ago_ts = int(one_hour_ago.timestamp() * 1000)
+    
+    one_hour_data = None
+    for item in sorted_data:
+        item_time = item.get('time') or item.get('timestamp', 0)
+        if item_time <= one_hour_ago_ts:
+            one_hour_data = item
+        else:
+            break
+    
+    # 計算24小時變化
+    twenty_four_hours_ago = now - timedelta(hours=24)
+    twenty_four_hours_ago_ts = int(twenty_four_hours_ago.timestamp() * 1000)
+    
+    twenty_four_hours_data = None
+    for item in sorted_data:
+        item_time = item.get('time') or item.get('timestamp', 0)
+        if item_time <= twenty_four_hours_ago_ts:
+            twenty_four_hours_data = item
+        else:
+            break
+    
+    result = {
+        'latest_oi': float(latest_oi),
+        'change_1h': None,
+        'change_24h': None
+    }
+    
+    # 計算1小時變化率
+    if one_hour_data:
+        one_hour_oi = one_hour_data.get('close') or one_hour_data.get('value') or one_hour_data.get('openInterest')
+        if one_hour_oi and one_hour_oi > 0:
+            result['change_1h'] = ((latest_oi - one_hour_oi) / one_hour_oi) * 100
+    
+    # 計算24小時變化率
+    if twenty_four_hours_data:
+        twenty_four_hours_oi = twenty_four_hours_data.get('close') or twenty_four_hours_data.get('value') or twenty_four_hours_data.get('openInterest')
+        if twenty_four_hours_oi and twenty_four_hours_oi > 0:
+            result['change_24h'] = ((latest_oi - twenty_four_hours_oi) / twenty_four_hours_oi) * 100
+    
+    return result
+
+
+def buying_power_monitor():
+    """購買力監控：監控穩定幣市值和聚合穩定幣保證金持倉"""
+    logger.info("開始執行購買力監控...")
+    
+    # 1. 獲取穩定幣市值歷史
+    marketcap_data = fetch_stablecoin_marketcap_history()
+    if not marketcap_data:
+        logger.warning("無法獲取穩定幣市值數據")
+        return
+    
+    # 2. 計算市值變化率
+    mcap_change = calculate_marketcap_change(marketcap_data)
+    if not mcap_change:
+        logger.warning("無法計算穩定幣市值變化率")
+        return
+    
+    # 3. 獲取穩定幣 OI 歷史
+    oi_data = fetch_aggregated_stablecoin_oi_history("BTC", "1h")
+    if not oi_data:
+        logger.warning("無法獲取穩定幣 OI 數據")
+        return
+    
+    # 4. 計算 OI 變化率
+    oi_change = calculate_oi_change(oi_data)
+    if not oi_change:
+        logger.warning("無法計算穩定幣 OI 變化率")
+        return
+    
+    # 5. 判斷是否需要推播
+    should_alert = False
+    alert_type = []
+    
+    # 市值增加 > 0.1%
+    if mcap_change.get('change_1h') and mcap_change['change_1h'] > 0.1:
+        should_alert = True
+        alert_type.append("資金進場")
+    elif mcap_change.get('change_24h') and mcap_change['change_24h'] > 0.1:
+        should_alert = True
+        alert_type.append("資金進場")
+    
+    # OI 暴增 > 2%
+    if oi_change.get('change_1h') and oi_change['change_1h'] > 2.0:
+        should_alert = True
+        alert_type.append("槓桿堆積")
+    elif oi_change.get('change_24h') and oi_change['change_24h'] > 2.0:
+        should_alert = True
+        alert_type.append("槓桿堆積")
+    
+    # 如果沒有觸發警報條件，不推播
+    if not should_alert:
+        logger.info("未觸發推播條件（市值變化 <= 0.1% 且 OI 變化 <= 2%）")
+        return
+    
+    # 6. 構建推播訊息
+    now = get_taipei_time()
+    time_str = format_datetime(now)
+    
+    lines = []
+    lines.append("💰 *【購買力監控】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    
+    # 穩定幣市值
+    lines.append("📊 *穩定幣市值*：")
+    if mcap_change.get('latest_mcap'):
+        mcap_b = mcap_change['latest_mcap'] / 1_000_000_000  # 轉換為十億
+        lines.append(f"當前市值：*{mcap_b:.2f}B USD*")
+    
+    if mcap_change.get('change_1h') is not None:
+        change_1h = mcap_change['change_1h']
+        emoji = "📈" if change_1h > 0 else "📉"
+        lines.append(f"{emoji} 1小時變化：*{change_1h:+.2f}%*")
+    
+    if mcap_change.get('change_24h') is not None:
+        change_24h = mcap_change['change_24h']
+        emoji = "📈" if change_24h > 0 else "📉"
+        lines.append(f"{emoji} 24小時變化：*{change_24h:+.2f}%*")
+    
+    lines.append("")
+    
+    # 穩定幣 OI
+    lines.append("⚡ *聚合穩定幣保證金持倉*：")
+    if oi_change.get('latest_oi'):
+        oi_b = oi_change['latest_oi'] / 1_000_000_000  # 轉換為十億
+        lines.append(f"當前持倉：*{oi_b:.2f}B USD*")
+    
+    if oi_change.get('change_1h') is not None:
+        change_1h = oi_change['change_1h']
+        emoji = "📈" if change_1h > 0 else "📉"
+        lines.append(f"{emoji} 1小時變化：*{change_1h:+.2f}%*")
+    
+    if oi_change.get('change_24h') is not None:
+        change_24h = oi_change['change_24h']
+        emoji = "📈" if change_24h > 0 else "📉"
+        lines.append(f"{emoji} 24小時變化：*{change_24h:+.2f}%*")
+    
+    lines.append("")
+    
+    # 警報提示
+    lines.append("🚨 *警報類型*：")
+    for alert in alert_type:
+        if alert == "資金進場":
+            lines.append("✅ 資金進場：場外資金（Fiat）兌換成穩定幣準備買入")
+        elif alert == "槓桿堆積":
+            lines.append("⚠️ 槓桿堆積：場內資金正在使用穩定幣作為保證金開多單")
+    
+    lines.append("")
+    lines.append("💡 *船長解讀*：")
+    if "資金進場" in alert_type and "槓桿堆積" in alert_type:
+        lines.append("市值上升 + OI 上升 = 雙重利好，市場資金充裕且槓桿活躍，上漲動能強勁。")
+    elif "資金進場" in alert_type:
+        lines.append("市值上升代表場外資金流入，這是長線利好信號，預示後續買盤支撐。")
+    elif "槓桿堆積" in alert_type:
+        lines.append("OI 暴增預示波動將至，需注意槓桿風險，可能出現劇烈波動。")
+    
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⏰ 更新時間：{time_str}")
+    
+    message = "\n".join(lines)
+    send_telegram_message(message, TG_THREAD_IDS.get('whale_position', 246), parse_mode="Markdown")
+    logger.info("購買力監控推播完成")
+
+
 def fetch_whale_position():
-    """主執行函數：巨鯨持倉監控"""
+    """主執行函數：巨鯨持倉監控（已替換為 buying_power_monitor）"""
+    buying_power_monitor()
+
+
+def fetch_whale_position_old():
+    """主執行函數：巨鯨持倉監控（舊版本，保留作為備份）"""
     logger.info("開始執行巨鯨持倉監控...")
     
     all_analyses = []
@@ -571,7 +902,7 @@ def fetch_whale_position():
         return
     
     # 格式化合併訊息（改進版：更白話、更實用）
-    now = datetime.now()
+    now = get_taipei_time()
     time_str = format_datetime(now)
     
     message = "🐋 *【巨鯨持倉動向】*\n"
@@ -1177,7 +1508,7 @@ def fetch_central_bank_activities() -> List[Dict]:
 
 
 def parse_publish_time(item: Dict) -> Optional[datetime]:
-    """解析發布時間"""
+    """解析發布時間（返回 UTC datetime，後續會轉換為台灣時間）"""
     publish_timestamp = item.get('publish_timestamp') or item.get('publish_time') or item.get('time')
     if not publish_timestamp:
         return None
@@ -1185,13 +1516,17 @@ def parse_publish_time(item: Dict) -> Optional[datetime]:
     try:
         if isinstance(publish_timestamp, (int, float)):
             if publish_timestamp > 1e12:  # 毫秒時間戳
-                return datetime.fromtimestamp(publish_timestamp / 1000)
+                dt = datetime.fromtimestamp(publish_timestamp / 1000, tz=timezone.utc)
             else:  # 秒時間戳
-                return datetime.fromtimestamp(publish_timestamp)
+                dt = datetime.fromtimestamp(publish_timestamp, tz=timezone.utc)
+            return dt
         else:
             # 嘗試 ISO 格式
             time_str = str(publish_timestamp).replace('Z', '+00:00')
-            return datetime.fromisoformat(time_str)
+            dt = datetime.fromisoformat(time_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
     except Exception as e:
         logger.debug(f"時間解析失敗: {publish_timestamp}, 錯誤: {str(e)}")
         return None
@@ -1199,7 +1534,7 @@ def parse_publish_time(item: Dict) -> Optional[datetime]:
 
 def filter_important_data(data_array: List[Dict], min_importance: int = 2) -> List[Dict]:
     """過濾重要經濟數據（可指定最低重要性）"""
-    now = datetime.now()
+    now = get_taipei_time()
     one_week_later = now + timedelta(days=7)
     two_hours_ago = now - timedelta(hours=2)  # 允許已發布2小時內的數據
     
@@ -1227,9 +1562,9 @@ def filter_important_data(data_array: List[Dict], min_importance: int = 2) -> Li
 
 def filter_today_events(data_array: List[Dict], min_importance: int = 4) -> List[Dict]:
     """過濾今日事件（用於早上8點預告）"""
-    now = datetime.now()
-    today_start = datetime(now.year, now.month, now.day, 0, 0, 0)
-    today_end = datetime(now.year, now.month, now.day, 23, 59, 59)
+    now = get_taipei_time()
+    today_start = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=TAIPEI_TZ)
+    today_end = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=TAIPEI_TZ)
     
     filtered = []
     for item in data_array:
@@ -1270,7 +1605,7 @@ def get_unsent_data(data_array: List[Dict]) -> List[Dict]:
     """獲取尚未推送的數據（改進版：考慮發布時間和實際值）"""
     sent_ids = load_json_file(SENT_DATA_FILE, [])
     unsent = []
-    now = datetime.now()
+    now = get_taipei_time()
     
     for item in data_array:
         data_id = generate_data_id(item)
@@ -1311,8 +1646,10 @@ def mark_as_sent(data_id: str):
 
 def get_time_status(publish_time: datetime) -> tuple:
     """計算時間狀態，返回 (狀態文字, 是否已發布, 時間差秒數)"""
-    now = datetime.now()
-    diff_seconds = (publish_time - now).total_seconds()
+    # 確保兩個時間都在同一時區（台灣時間）
+    now = get_taipei_time()
+    publish_time_taipei = get_taipei_time(publish_time)
+    diff_seconds = (publish_time_taipei - now).total_seconds()
     
     is_past = diff_seconds < 0
     abs_diff = abs(diff_seconds)
@@ -1414,7 +1751,7 @@ def format_economic_data_message(data: Dict) -> str:
     """格式化經濟數據訊息（全新設計）"""
     publish_time = parse_publish_time(data)
     if not publish_time:
-        publish_time = datetime.now()
+        publish_time = get_taipei_time()
     
     time_str = format_datetime(publish_time)
     time_status, is_published, _ = get_time_status(publish_time)
@@ -1515,14 +1852,14 @@ def format_economic_data_message(data: Dict) -> str:
     
     # 底部資訊
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🤖 區塊鏈船長｜{format_datetime(datetime.now())}")
+    lines.append(f"🤖 區塊鏈船長｜{format_datetime(get_taipei_time())}")
     
     return "\n".join(lines)
 
 
 def format_today_preview_message(events: List[Dict]) -> str:
     """格式化今日預告訊息（改進版：取消星級，改為高重要性和極高重要性）"""
-    now = datetime.now()
+    now = get_taipei_time()
     time_str = format_datetime(now)
     
     lines = []
@@ -1534,9 +1871,10 @@ def format_today_preview_message(events: List[Dict]) -> str:
     very_high = [e for e in events if (e.get('importance_level') or e.get('importance') or 0) >= 3]
     high = [e for e in events if 2 <= (e.get('importance_level') or e.get('importance') or 0) < 3]
     
-    # 按時間排序
-    very_high.sort(key=lambda x: parse_publish_time(x) or datetime.max)
-    high.sort(key=lambda x: parse_publish_time(x) or datetime.max)
+    # 按時間排序（使用未來時間作為 fallback）
+    future_time = datetime(2099, 12, 31, 23, 59, 59, tzinfo=TAIPEI_TZ)
+    very_high.sort(key=lambda x: parse_publish_time(x) or future_time)
+    high.sort(key=lambda x: parse_publish_time(x) or future_time)
     
     if very_high:
         lines.append("🔴 *極高重要性（將準時推播）*：")
@@ -1544,7 +1882,9 @@ def format_today_preview_message(events: List[Dict]) -> str:
         for event in very_high:
             publish_time = parse_publish_time(event)
             if publish_time:
-                time_display = publish_time.strftime("%H:%M")
+                # 轉換為台灣時間並格式化
+                publish_time_taipei = get_taipei_time(publish_time)
+                time_display = publish_time_taipei.strftime("%H:%M")
                 event_name = event.get('calendar_name') or event.get('name') or event.get('title') or '經濟指標'
                 country_flag = get_country_flag(event.get('country_name') or event.get('country') or '')
                 lines.append(f"  • {time_display} | {country_flag} {event_name}")
@@ -1556,7 +1896,9 @@ def format_today_preview_message(events: List[Dict]) -> str:
         for event in high:
             publish_time = parse_publish_time(event)
             if publish_time:
-                time_display = publish_time.strftime("%H:%M")
+                # 轉換為台灣時間並格式化
+                publish_time_taipei = get_taipei_time(publish_time)
+                time_display = publish_time_taipei.strftime("%H:%M")
                 event_name = event.get('calendar_name') or event.get('name') or event.get('title') or '經濟指標'
                 country_flag = get_country_flag(event.get('country_name') or event.get('country') or '')
                 lines.append(f"  • {time_display} | {country_flag} {event_name}")
@@ -1647,7 +1989,8 @@ def fetch_and_push_economic_data():
             return
         
         # 按發布時間排序（優先推送即將發布的）
-        important_data.sort(key=lambda x: parse_publish_time(x) or datetime.max)
+        future_time = datetime(2099, 12, 31, 23, 59, 59, tzinfo=TAIPEI_TZ)
+        important_data.sort(key=lambda x: parse_publish_time(x) or future_time)
         
         # 檢查哪些尚未推送
         new_data = get_unsent_data(important_data)
@@ -1862,12 +2205,14 @@ def process_and_send_coinglass(item: Dict, type_str: str):
     if time_val:
         if isinstance(time_val, (int, float)):
             if time_val > 1e12:
-                date = datetime.fromtimestamp(time_val / 1000)
+                date = datetime.fromtimestamp(time_val / 1000, tz=timezone.utc)
             else:
-                date = datetime.fromtimestamp(time_val)
+                date = datetime.fromtimestamp(time_val, tz=timezone.utc)
         else:
-            date = datetime.now()
-        message += f"🕐 時間：{date.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            date = get_taipei_time()
+        # 轉換為台灣時間
+        date_taipei = get_taipei_time(date)
+        message += f"🕐 時間：{date_taipei.strftime('%Y-%m-%d %H:%M:%S')}\n"
     
     if item.get('source'):
         message += f"🔍 來源：{item.get('source')}\n"
@@ -1929,7 +2274,7 @@ def fetch_all_news():
         return
     
     # 濃縮成一個簡短訊息
-    now = datetime.now()
+    now = get_taipei_time()
     time_str = format_datetime(now)
     
     lines = []
@@ -2044,7 +2389,8 @@ def fetch_funding_fortune_list():
         message += "*正費率（+）*：做空永續 + 持有現貨，每 4 小時領取資金費率。\n"
         message += "*負費率（-）*：做多永續 + 賣出現貨，但需注意軋空風險。\n\n"
         message += "📊 數據來源：[幣安U本位](https://www.binance.com/zh-TC/futures/funding-history/perpetual/real-time-funding-rate)\n"
-        message += f"⏰ 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        now_taipei = get_taipei_time()
+        message += f"⏰ 更新時間：{now_taipei.strftime('%Y-%m-%d %H:%M:%S')}"
         
         send_telegram_message(message, TG_THREAD_IDS['funding_rate'])
         
@@ -2386,7 +2732,7 @@ def build_long_term_message() -> Optional[str]:
         risk_text += " 另外，Pi 循環頂部指標已觸發，歷史上常對應中長期高位區。"
         advice_text = "可以考慮調降整體倉位，將高風險山寨幣逐步換回主流或穩定幣。"
 
-    now_str = format_datetime(datetime.now())
+    now_str = format_datetime(get_taipei_time())
 
     msg_lines = []
     msg_lines.append("📊 *【牛熊導航儀】*")
@@ -2661,7 +3007,7 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
 
 def format_liquidity_consolidated_message(events: List[Dict]) -> str:
     """將多個清算事件整理成一則 Telegram 推播文字（只顯示過去1小時數據，白話+操作建議）"""
-    now = datetime.now()
+    now = get_taipei_time()
     time_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
     lines: List[str] = []
@@ -2959,8 +3305,142 @@ def fetch_buy_ratio(symbol: str) -> Optional[float]:
     return bid_val / total * 100.0  # 轉成百分比
 
 
+def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict]]:
+    """獲取價格歷史數據（OHLC）"""
+    url = "https://open-api-v4.coinglass.com/api/futures/price/history"
+    params = {
+        "symbol": symbol,
+        "interval": interval
+    }
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.debug(f"價格歷史 API 返回狀態碼: {response.status_code} for {symbol}")
+            return None
+        
+        data = response.json()
+        if data.get('code') not in ['0', 0, 200, '200']:
+            logger.debug(f"價格歷史 API 返回錯誤: {data.get('msg')} for {symbol}")
+            return None
+        
+        data_list = data.get('data', [])
+        if isinstance(data_list, list):
+            return data_list
+        return None
+    except Exception as e:
+        logger.debug(f"獲取價格歷史失敗 {symbol}: {str(e)}")
+        return None
+
+
+def fetch_aggregated_cvd_history(symbol: str, interval: str = "1h") -> Optional[List[Dict]]:
+    """獲取聚合累計成交量差值（CVD）歷史數據"""
+    url = "https://open-api-v4.coinglass.com/api/futures/aggregated-cvd/history"
+    params = {
+        "exchange_list": "Binance",
+        "symbol": symbol,
+        "interval": interval
+    }
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        if response.status_code != 200:
+            logger.debug(f"聚合 CVD API 返回狀態碼: {response.status_code} for {symbol}")
+            return None
+        
+        data = response.json()
+        if data.get('code') not in ['0', 0, 200, '200']:
+            logger.debug(f"聚合 CVD API 返回錯誤: {data.get('msg')} for {symbol}")
+            return None
+        
+        data_list = data.get('data', [])
+        if isinstance(data_list, list):
+            return data_list
+        return None
+    except Exception as e:
+        logger.debug(f"獲取聚合 CVD 歷史失敗 {symbol}: {str(e)}")
+        return None
+
+
+def detect_cvd_divergence(symbol: str) -> Optional[str]:
+    """檢測 CVD 背離（看漲/看跌）
+    返回: 'bullish' (看漲背離), 'bearish' (看跌背離), None (無背離)
+    """
+    try:
+        # 獲取最近 4 小時的價格歷史（需要至少 5 個數據點來比較）
+        price_data = fetch_price_history(symbol + "USDT", "1h")
+        if not price_data or len(price_data) < 5:
+            return None
+        
+        # 獲取最近 4 小時的 CVD 歷史
+        base_symbol = symbol.replace("USDT", "")
+        cvd_data = fetch_aggregated_cvd_history(base_symbol, "1h")
+        if not cvd_data or len(cvd_data) < 5:
+            return None
+        
+        # 按時間戳排序
+        price_sorted = sorted(price_data, key=lambda x: x.get('time', 0) or x.get('timestamp', 0))
+        cvd_sorted = sorted(cvd_data, key=lambda x: x.get('time', 0) or x.get('timestamp', 0))
+        
+        # 取最近 5 個數據點（當前 + 前 4 個）
+        recent_prices = price_sorted[-5:]
+        recent_cvds = cvd_sorted[-5:]
+        
+        # 提取價格高點和低點
+        price_highs = []
+        price_lows = []
+        for item in recent_prices:
+            high = item.get('high') or item.get('close')
+            low = item.get('low') or item.get('close')
+            if high and low:
+                price_highs.append(float(high))
+                price_lows.append(float(low))
+        
+        # 提取 CVD 值
+        cvd_values = []
+        for item in recent_cvds:
+            cvd = item.get('cvd') or item.get('value') or item.get('close')
+            if cvd is not None:
+                cvd_values.append(float(cvd))
+        
+        if len(price_highs) < 5 or len(price_lows) < 5 or len(cvd_values) < 5:
+            return None
+        
+        # 當前值（最後一個）
+        current_price_high = price_highs[-1]
+        current_price_low = price_lows[-1]
+        current_cvd = cvd_values[-1]
+        
+        # 前 4 個數據點的最高/最低
+        previous_price_high = max(price_highs[:-1])
+        previous_price_low = min(price_lows[:-1])
+        previous_cvd_max = max(cvd_values[:-1])
+        previous_cvd_min = min(cvd_values[:-1])
+        
+        # 看跌背離：價格創高但 CVD 下降
+        if current_price_high > previous_price_high and current_cvd < previous_cvd_max:
+            return 'bearish'
+        
+        # 看漲背離：價格創低但 CVD 上升
+        if current_price_low < previous_price_low and current_cvd > previous_cvd_min:
+            return 'bullish'
+        
+        return None
+    except Exception as e:
+        logger.debug(f"CVD 背離檢測失敗 {symbol}: {str(e)}")
+        return None
+
+
 def build_altseason_message() -> Optional[str]:
-    """組合山寨爆發雷達訊息（不依賴 pandas）"""
+    """組合山寨爆發雷達訊息（不依賴 pandas，加入 CVD 背離判斷）"""
     index_val = fetch_altseason_index()
     rsi_list = fetch_rsi_list()
     if not rsi_list:
@@ -3017,7 +3497,7 @@ def build_altseason_message() -> Optional[str]:
         oversold_list.sort(key=lambda x: (x.get("rsi_base", 100), -x.get("buy_ratio", 0)))
         oversold_list = oversold_list[:5]
 
-    now_str = format_datetime(datetime.now())
+    now_str = format_datetime(get_taipei_time())
 
     lines: List[str] = []
     lines.append("🛰️ *【區塊鏈船長 - 山寨爆發雷達】*")
@@ -3036,7 +3516,7 @@ def build_altseason_message() -> Optional[str]:
     lines.append(describe_altseason(index_val))
     lines.append("")
 
-    # 強勢突破區
+    # 強勢突破區（加入 CVD 背離判斷）
     lines.append("🔥 *潛力領頭羊（強勢突破）*：")
     if not strong_list:
         lines.append("目前沒有符合條件的強勢突破山寨幣。")
@@ -3045,10 +3525,25 @@ def build_altseason_message() -> Optional[str]:
             s = str(item.get("symbol", ""))
             rsi_v = float(item.get("rsi_base", 0))
             br = float(item.get("buy_ratio", 0))
-            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
+            
+            # 檢測 CVD 背離
+            base_symbol = s.replace("USDT", "")
+            divergence = detect_cvd_divergence(base_symbol)
+            
+            divergence_text = ""
+            if divergence == 'bearish':
+                divergence_text = " ⚠️ 看跌背離"
+            elif divergence == 'bullish':
+                divergence_text = " 🚀 看漲背離"
+            
+            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*{divergence_text}")
+            
+            # 避免請求過於頻繁
+            if idx < len(strong_list):
+                time.sleep(0.5)
     lines.append("")
-
-    # 超賣反彈區
+    
+    # 超賣反彈區（加入 CVD 背離判斷）
     lines.append("💎 *超賣反彈機會（抄底參考）*：")
     if not oversold_list:
         lines.append("目前沒有明顯的超賣反彈候選。")
@@ -3057,10 +3552,25 @@ def build_altseason_message() -> Optional[str]:
             s = str(item.get("symbol", ""))
             rsi_v = float(item.get("rsi_base", 0))
             br = float(item.get("buy_ratio", 0))
-            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
+            
+            # 檢測 CVD 背離
+            base_symbol = s.replace("USDT", "")
+            divergence = detect_cvd_divergence(base_symbol)
+            
+            divergence_text = ""
+            if divergence == 'bearish':
+                divergence_text = " ⚠️ 看跌背離"
+            elif divergence == 'bullish':
+                divergence_text = " 🚀 看漲背離"
+            
+            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*{divergence_text}")
+            
+            # 避免請求過於頻繁
+            if idx < len(oversold_list):
+                time.sleep(0.5)
     lines.append("")
 
-    # 提示
+    # 提示（加入 CVD 背離說明）
     lines.append("💡 *船長提示*：")
     if index_val is not None and index_val > 60:
         lines.append("山寨季指數正在抬升，資金開始加速流向小幣，建議重點關注領頭羊二測與放量突破。")
@@ -3068,6 +3578,11 @@ def build_altseason_message() -> Optional[str]:
         lines.append("目前仍偏向比特幣季，山寨波動相對受限，建議以主流幣與現貨為主，耐心等待資金輪動。")
     else:
         lines.append("資金尚未明顯偏向任何一方，選擇山寨時更要搭配成交量與買入比率，避免追在假突破上。")
+    
+    lines.append("")
+    lines.append("📊 *CVD 背離說明*：")
+    lines.append("• ⚠️ 看跌背離：價格創高但 CVD 下降（大戶派發），假突破風險高，不建議追高")
+    lines.append("• 🚀 看漲背離：價格創低但 CVD 上升（大戶吸籌），底部反轉勝率高，可關注")
 
     lines.append("")
     lines.append(f"⏰ 更新時間：{now_str}")
@@ -3508,10 +4023,12 @@ def build_hyperliquid_message() -> Optional[str]:
                 if isinstance(alert_time, (int, float)):
                     # create_time 是毫秒時間戳（例如 1768536078000）
                     if alert_time > 1e12:
-                        dt = datetime.fromtimestamp(alert_time / 1000)
+                        dt = datetime.fromtimestamp(alert_time / 1000, tz=timezone.utc)
                     else:
-                        dt = datetime.fromtimestamp(alert_time)
-                    time_str = dt.strftime("%Y-%m-%d %H:%M")
+                        dt = datetime.fromtimestamp(alert_time, tz=timezone.utc)
+                    # 轉換為台灣時間
+                    dt_taipei = get_taipei_time(dt)
+                    time_str = dt_taipei.strftime("%Y-%m-%d %H:%M")
                 else:
                     time_str = str(alert_time)
             except Exception as e:
@@ -3602,13 +4119,6 @@ def build_hyperliquid_message() -> Optional[str]:
         
         lines.append("")
     
-    # 頂級鯨魚倉位部分（補充資訊）
-    if whale_positions:
-        lines.append("📊 *頂級鯨魚倉位 (Top Positions)*：")
-        for idx, position in enumerate(whale_positions, 1):
-            lines.append(format_whale_position_message(position, idx))
-        lines.append("")
-    
     # 船長提示
     if new_alerts:
         top_symbol = new_alerts[0].get('symbol', '特定標的')
@@ -3616,7 +4126,7 @@ def build_hyperliquid_message() -> Optional[str]:
         lines.append("")
     
     lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"⏰ 更新時間：{format_datetime(datetime.now())}")
+    lines.append(f"⏰ 更新時間：{format_datetime(get_taipei_time())}")
     
     return "\n".join(lines)
 
@@ -3645,8 +4155,8 @@ if __name__ == "__main__":
         
         if function_name == "sector_ranking":
             fetch_sector_ranking()
-        elif function_name == "whale_position":
-            fetch_whale_position()
+        elif function_name == "whale_position" or function_name == "buying_power_monitor":
+            buying_power_monitor()
         elif function_name == "position_change":
             fetch_position_change()
         elif function_name == "economic_data":
@@ -3670,7 +4180,7 @@ if __name__ == "__main__":
         else:
             print("可用的功能:")
             print("  sector_ranking   - 主流板塊排行榜推播")
-            print("  whale_position   - 巨鯨持倉動向")
+            print("  whale_position / buying_power_monitor - 購買力監控（穩定幣市值 + OI 監控）")
             print("  position_change  - 持倉變化篩選")
             print("  economic_data    - 重要經濟數據推播")
             print("  news             - 新聞快訊推播")
