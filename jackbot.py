@@ -573,41 +573,49 @@ def fetch_stablecoin_marketcap_history() -> Optional[List[Dict]]:
             logger.error(f"穩定幣市值 API 返回錯誤: {error_msg} (code: {data.get('code')})")
             return None
         
-        # 返回數據列表（嘗試多種可能的數據結構）
-        # 首先檢查 data 字段
+        # 返回數據列表（根據實際 API 響應結構）
+        # API 返回結構: { "code": "0", "data": { "data_list": [...] } }
         data_content = data.get('data')
         
-        # 如果 data 是列表，直接返回
+        if isinstance(data_content, dict):
+            # 檢查 data_list 字段
+            data_list = data_content.get('data_list')
+            if isinstance(data_list, list) and len(data_list) > 0:
+                logger.info(f"成功獲取穩定幣市值數據: {len(data_list)} 條記錄")
+                # 轉換數據格式：將每個 { "USDT": value } 轉換為標準格式
+                formatted_list = []
+                for idx, item in enumerate(data_list):
+                    if isinstance(item, dict):
+                        # 計算總市值（加總所有穩定幣）
+                        total_mcap = sum(float(v) for v in item.values() if isinstance(v, (int, float)))
+                        # 或者只取 USDT（根據需求）
+                        usdt_mcap = item.get('USDT') or item.get('usdt') or 0
+                        
+                        # 使用總市值或 USDT 市值（優先使用總市值）
+                        mcap_value = total_mcap if total_mcap > 0 else float(usdt_mcap)
+                        
+                        # 構建標準格式的數據點
+                        # 注意：API 可能沒有時間戳，使用索引作為時間順序（最新的在最後）
+                        formatted_item = {
+                            'marketCap': mcap_value,
+                            'market_cap': mcap_value,
+                            'value': mcap_value,
+                            'time': None,  # 如果 API 沒有提供時間戳
+                            'timestamp': None,
+                            'index': idx  # 用於排序
+                        }
+                        formatted_list.append(formatted_item)
+                
+                logger.info(f"格式化後的數據: {len(formatted_list)} 條記錄")
+                return formatted_list
+        
+        # 如果 data 是列表，直接返回（但需要格式化）
         if isinstance(data_content, list) and len(data_content) > 0:
-            logger.info(f"成功獲取穩定幣市值數據: {len(data_content)} 條記錄")
+            logger.info(f"data 是列表，直接返回: {len(data_content)} 條記錄")
             return data_content
         
-        # 如果 data 是字典，嘗試提取其中的列表
-        if isinstance(data_content, dict):
-            logger.debug(f"data 是字典，嘗試提取列表字段。字典鍵: {list(data_content.keys())[:10]}")
-            for key in ['list', 'items', 'history', 'data', 'marketCap', 'market_cap', 'values', 'records']:
-                if key in data_content:
-                    value = data_content[key]
-                    if isinstance(value, list) and len(value) > 0:
-                        logger.info(f"從 data.{key} 字段獲取數據: {len(value)} 條記錄")
-                        return value
-                    elif isinstance(value, dict):
-                        # 如果值也是字典，繼續深入查找
-                        for sub_key in ['list', 'items', 'history', 'data', 'values']:
-                            if sub_key in value and isinstance(value[sub_key], list) and len(value[sub_key]) > 0:
-                                logger.info(f"從 data.{key}.{sub_key} 字段獲取數據: {len(value[sub_key])} 條記錄")
-                                return value[sub_key]
-        
-        # 如果 data 是字典但沒有列表，檢查是否整個響應就是數據
-        if isinstance(data, dict) and 'data' not in data:
-            # 可能整個響應就是數據列表（某些 API 直接返回列表）
-            if all(isinstance(v, (int, float, str)) for v in data.values()):
-                # 如果所有值都是基本類型，可能是單個數據點，轉換為列表
-                logger.info("檢測到單個數據點，轉換為列表")
-                return [data]
-        
         # 嘗試其他可能的字段
-        for key in ['result', 'list', 'items', 'history', 'marketCap', 'market_cap']:
+        for key in ['data_list', 'list', 'items', 'history', 'marketCap', 'market_cap', 'values', 'records']:
             if key in data:
                 value = data[key]
                 if isinstance(value, list) and len(value) > 0:
@@ -617,7 +625,9 @@ def fetch_stablecoin_marketcap_history() -> Optional[List[Dict]]:
         # 如果還是找不到，記錄完整的數據結構以便調試
         logger.warning(f"穩定幣市值 API 返回的數據格式不符合預期")
         logger.info(f"數據類型: {type(data_content)}")
-        logger.info(f"數據結構（前500字符）: {json.dumps(data, ensure_ascii=False, indent=2)[:1000]}")
+        if isinstance(data_content, dict):
+            logger.info(f"data 字典的鍵: {list(data_content.keys())}")
+        logger.info(f"數據結構（前1000字符）: {json.dumps(data, ensure_ascii=False, indent=2)[:1000]}")
         return None
     except requests.exceptions.RequestException as e:
         logger.error(f"穩定幣市值 API 請求失敗: {str(e)}")
@@ -682,31 +692,41 @@ def calculate_marketcap_change(data_list: List[Dict]) -> Optional[Dict]:
     if latest_mcap is None:
         return None
     
-    # 計算1小時變化（需要找到1小時前的數據點）
-    now = get_taipei_time()
-    one_hour_ago = now - timedelta(hours=1)
-    one_hour_ago_ts = int(one_hour_ago.timestamp() * 1000)  # 轉換為毫秒時間戳
-    
-    # 找到最接近1小時前的數據點
+    # 計算1小時和24小時變化
+    # 如果數據沒有時間戳，使用數據點索引來估算
+    # 假設數據是每小時一個點（或根據實際情況調整）
     one_hour_data = None
-    for item in sorted_data:
-        item_time = item.get('time') or item.get('timestamp', 0)
-        if item_time <= one_hour_ago_ts:
-            one_hour_data = item
-        else:
-            break
-    
-    # 計算24小時變化（需要找到24小時前的數據點）
-    twenty_four_hours_ago = now - timedelta(hours=24)
-    twenty_four_hours_ago_ts = int(twenty_four_hours_ago.timestamp() * 1000)
-    
     twenty_four_hours_data = None
-    for item in sorted_data:
-        item_time = item.get('time') or item.get('timestamp', 0)
-        if item_time <= twenty_four_hours_ago_ts:
-            twenty_four_hours_data = item
+    
+    if len(sorted_data) >= 2:
+        # 如果數據有時間戳，使用時間戳
+        if sorted_data[0].get('time') or sorted_data[0].get('timestamp'):
+            now = get_taipei_time()
+            one_hour_ago = now - timedelta(hours=1)
+            one_hour_ago_ts = int(one_hour_ago.timestamp() * 1000)
+            
+            twenty_four_hours_ago = now - timedelta(hours=24)
+            twenty_four_hours_ago_ts = int(twenty_four_hours_ago.timestamp() * 1000)
+            
+            for item in sorted_data:
+                item_time = item.get('time') or item.get('timestamp', 0)
+                if item_time <= one_hour_ago_ts:
+                    one_hour_data = item
+                if item_time <= twenty_four_hours_ago_ts:
+                    twenty_four_hours_data = item
+                else:
+                    break
         else:
-            break
+            # 如果沒有時間戳，使用索引來估算（假設數據是每小時一個點）
+            # 1小時前 = 倒數第2個點（如果有的話）
+            if len(sorted_data) >= 2:
+                one_hour_data = sorted_data[-2]
+            # 24小時前 = 倒數第25個點（如果有的話）
+            if len(sorted_data) >= 25:
+                twenty_four_hours_data = sorted_data[-25]
+            elif len(sorted_data) >= 2:
+                # 如果數據點不足24個，使用最早的數據點
+                twenty_four_hours_data = sorted_data[0]
     
     result = {
         'latest_mcap': float(latest_mcap),
