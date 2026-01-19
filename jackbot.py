@@ -3557,7 +3557,7 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         curr_p_low = extract_price(curr_item, 'low') or extract_price(curr_item, 'markPrice') or extract_price(curr_item, 'mark_price') or extract_price(curr_item, 'close') or extract_price(curr_item, 'price') or extract_price(curr_item, 'value')
         
         if not curr_p_high or not curr_p_low:
-            logger.debug(f"CVD 背離檢測 {symbol}: 無法提取當前價格（high/low）")
+            logger.info(f"CVD 背離檢測 {symbol}: 無法提取當前價格（high: {curr_p_high}, low: {curr_p_low}），數據樣本字段: {list(curr_item.keys())[:10]}")
             return None
         
         # 提取當前 K 線的 CVD
@@ -3568,10 +3568,11 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
                 val = curr_cvd_item[key]
                 if isinstance(val, (int, float)) and val != 0:
                     curr_cvd = float(val)
+                    logger.debug(f"CVD 背離檢測 {symbol}: 從字段 '{key}' 提取到當前 CVD: {curr_cvd}")
                     break
         
         if curr_cvd is None:
-            logger.debug(f"CVD 背離檢測 {symbol}: 無法提取當前 CVD 值")
+            logger.info(f"CVD 背離檢測 {symbol}: 無法提取當前 CVD 值，CVD 數據樣本字段: {list(curr_cvd_item.keys())[:10]}")
             return None
         
         # 找到過去 19 根 K 線的最高/最低價
@@ -3588,31 +3589,41 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
                 prev_prices_low.append(low)
         
         if not prev_prices_high or not prev_prices_low:
-            logger.debug(f"CVD 背離檢測 {symbol}: 無法提取過去價格數據")
+            logger.info(f"CVD 背離檢測 {symbol}: 無法提取過去價格數據（high: {len(prev_prices_high)}, low: {len(prev_prices_low)}）")
             return None
         
         prev_p_high = max(prev_prices_high)
         prev_p_low = min(prev_prices_low)
         
         # 獲取最高價與最低價對應的 CVD 值
-        # 找到最高價對應的索引
+        # 找到最高價對應的索引（使用更寬鬆的匹配，找到最接近的值）
         high_idx = None
+        min_diff = float('inf')
         for idx, item in enumerate(p_slice[:-1]):
             high = extract_price(item, 'high') or extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
-            if high and abs(high - prev_p_high) < 0.01:  # 允許小數誤差
-                high_idx = idx
-                break
+            if high:
+                diff = abs(high - prev_p_high)
+                if diff < min_diff:
+                    min_diff = diff
+                    high_idx = idx
+                    if diff < 0.01:  # 如果找到非常接近的值，直接使用
+                        break
         
-        # 找到最低價對應的索引
+        # 找到最低價對應的索引（使用更寬鬆的匹配，找到最接近的值）
         low_idx = None
+        min_diff = float('inf')
         for idx, item in enumerate(p_slice[:-1]):
             low = extract_price(item, 'low') or extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
-            if low and abs(low - prev_p_low) < 0.01:  # 允許小數誤差
-                low_idx = idx
-                break
+            if low:
+                diff = abs(low - prev_p_low)
+                if diff < min_diff:
+                    min_diff = diff
+                    low_idx = idx
+                    if diff < 0.01:  # 如果找到非常接近的值，直接使用
+                        break
         
         if high_idx is None or low_idx is None:
-            logger.debug(f"CVD 背離檢測 {symbol}: 無法找到對應的價格索引（high_idx: {high_idx}, low_idx: {low_idx}）")
+            logger.info(f"CVD 背離檢測 {symbol}: 無法找到對應的價格索引（high_idx: {high_idx}, low_idx: {low_idx}, 過去最高價: {prev_p_high:.4f}, 過去最低價: {prev_p_low:.4f}）")
             return None
         
         # 提取對應索引的 CVD 值
@@ -3638,7 +3649,7 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
                         break
         
         if cvd_at_p_high is None or cvd_at_p_low is None:
-            logger.debug(f"CVD 背離檢測 {symbol}: 無法提取對應的 CVD 值（high: {cvd_at_p_high}, low: {cvd_at_p_low}）")
+            logger.info(f"CVD 背離檢測 {symbol}: 無法提取對應的 CVD 值（high_idx: {high_idx}, low_idx: {low_idx}, cvd_at_p_high: {cvd_at_p_high}, cvd_at_p_low: {cvd_at_p_low}）")
             return None
         
         # 看跌背離：價格創高，但 CVD 低於當時高點的 CVD
