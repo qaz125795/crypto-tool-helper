@@ -3799,28 +3799,7 @@ def build_altseason_message() -> Optional[str]:
             rsi_v = float(item.get("rsi_base", 0))
             br = float(item.get("buy_ratio", 0))
             
-            # 檢測 CVD 背離（優雅處理失敗情況）
-            base_symbol = s.replace("USDT", "")
-            divergence = None
-            try:
-                divergence = detect_cvd_divergence(base_symbol)
-                # 記錄檢測結果
-                if divergence:
-                    logger.info(f"CVD 背離檢測 {base_symbol}: ✅ {divergence}")
-                else:
-                    logger.debug(f"CVD 背離檢測 {base_symbol}: 無背離")
-            except Exception as e:
-                # 失敗時記錄警告，方便排查問題
-                logger.warning(f"CVD 背離檢測 {base_symbol}: 檢測失敗（{str(e)[:100]}）")
-                divergence = None
-            
-            divergence_text = ""
-            if divergence == 'bearish':
-                divergence_text = " ⚠️ 看跌背離"
-            elif divergence == 'bullish':
-                divergence_text = " 🚀 看漲背離"
-            
-            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*{divergence_text}")
+            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
             
             # 避免請求過於頻繁
             if idx < len(strong_list):
@@ -3837,35 +3816,14 @@ def build_altseason_message() -> Optional[str]:
             rsi_v = float(item.get("rsi_base", 0))
             br = float(item.get("buy_ratio", 0))
             
-            # 檢測 CVD 背離（優雅處理失敗情況）
-            base_symbol = s.replace("USDT", "")
-            divergence = None
-            try:
-                divergence = detect_cvd_divergence(base_symbol)
-                # 記錄檢測結果
-                if divergence:
-                    logger.info(f"CVD 背離檢測 {base_symbol}: ✅ {divergence}")
-                else:
-                    logger.debug(f"CVD 背離檢測 {base_symbol}: 無背離")
-            except Exception as e:
-                # 失敗時記錄警告，方便排查問題
-                logger.warning(f"CVD 背離檢測 {base_symbol}: 檢測失敗（{str(e)[:100]}）")
-                divergence = None
-            
-            divergence_text = ""
-            if divergence == 'bearish':
-                divergence_text = " ⚠️ 看跌背離"
-            elif divergence == 'bullish':
-                divergence_text = " 🚀 看漲背離"
-            
-            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*{divergence_text}")
+            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
             
             # 避免請求過於頻繁
             if idx < len(oversold_list):
                 time.sleep(0.5)
     lines.append("")
 
-    # 提示（加入 CVD 背離說明）
+    # 提示
     lines.append("💡 *船長提示*：")
     if index_val is not None and index_val > 60:
         lines.append("山寨季指數正在抬升，資金開始加速流向小幣，建議重點關注領頭羊二測與放量突破。")
@@ -3873,11 +3831,6 @@ def build_altseason_message() -> Optional[str]:
         lines.append("目前仍偏向比特幣季，山寨波動相對受限，建議以主流幣與現貨為主，耐心等待資金輪動。")
     else:
         lines.append("資金尚未明顯偏向任何一方，選擇山寨時更要搭配成交量與買入比率，避免追在假突破上。")
-    
-    lines.append("")
-    lines.append("📊 *CVD 背離說明*：")
-    lines.append("• ⚠️ 看跌背離：價格創高但 CVD 下降（大戶派發），假突破風險高，不建議追高")
-    lines.append("• 🚀 看漲背離：價格創低但 CVD 上升（大戶吸籌），底部反轉勝率高，可關注")
 
     lines.append("")
     lines.append(f"⏰ 更新時間：{now_str}")
