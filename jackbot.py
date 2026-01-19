@@ -564,7 +564,8 @@ def fetch_stablecoin_marketcap_history() -> Optional[List[Dict]]:
         
         data = response.json()
         logger.info(f"穩定幣市值 API 返回數據結構: code={data.get('code')}, msg={data.get('msg')}")
-        logger.debug(f"完整響應: {json.dumps(data, ensure_ascii=False)[:1000]}")
+        # 輸出完整的數據結構以便調試
+        logger.info(f"完整響應結構（前2000字符）: {json.dumps(data, ensure_ascii=False, indent=2)[:2000]}")
         
         # 檢查返回碼
         if data.get('code') not in ['0', 0, 200, '200', None]:
@@ -573,19 +574,50 @@ def fetch_stablecoin_marketcap_history() -> Optional[List[Dict]]:
             return None
         
         # 返回數據列表（嘗試多種可能的數據結構）
-        data_list = data.get('data') or data.get('result') or data.get('list') or []
-        if isinstance(data_list, list) and len(data_list) > 0:
-            logger.info(f"成功獲取穩定幣市值數據: {len(data_list)} 條記錄")
-            return data_list
-        elif isinstance(data_list, dict):
-            # 如果 data 是字典，嘗試提取其中的列表
-            for key in ['list', 'items', 'history', 'data']:
-                if key in data_list and isinstance(data_list[key], list):
-                    logger.info(f"從 {key} 字段獲取數據: {len(data_list[key])} 條記錄")
-                    return data_list[key]
+        # 首先檢查 data 字段
+        data_content = data.get('data')
         
-        logger.warning(f"穩定幣市值 API 返回的數據格式不符合預期: {type(data_list)}")
-        logger.debug(f"數據內容: {json.dumps(data, ensure_ascii=False)[:500]}")
+        # 如果 data 是列表，直接返回
+        if isinstance(data_content, list) and len(data_content) > 0:
+            logger.info(f"成功獲取穩定幣市值數據: {len(data_content)} 條記錄")
+            return data_content
+        
+        # 如果 data 是字典，嘗試提取其中的列表
+        if isinstance(data_content, dict):
+            logger.debug(f"data 是字典，嘗試提取列表字段。字典鍵: {list(data_content.keys())[:10]}")
+            for key in ['list', 'items', 'history', 'data', 'marketCap', 'market_cap', 'values', 'records']:
+                if key in data_content:
+                    value = data_content[key]
+                    if isinstance(value, list) and len(value) > 0:
+                        logger.info(f"從 data.{key} 字段獲取數據: {len(value)} 條記錄")
+                        return value
+                    elif isinstance(value, dict):
+                        # 如果值也是字典，繼續深入查找
+                        for sub_key in ['list', 'items', 'history', 'data', 'values']:
+                            if sub_key in value and isinstance(value[sub_key], list) and len(value[sub_key]) > 0:
+                                logger.info(f"從 data.{key}.{sub_key} 字段獲取數據: {len(value[sub_key])} 條記錄")
+                                return value[sub_key]
+        
+        # 如果 data 是字典但沒有列表，檢查是否整個響應就是數據
+        if isinstance(data, dict) and 'data' not in data:
+            # 可能整個響應就是數據列表（某些 API 直接返回列表）
+            if all(isinstance(v, (int, float, str)) for v in data.values()):
+                # 如果所有值都是基本類型，可能是單個數據點，轉換為列表
+                logger.info("檢測到單個數據點，轉換為列表")
+                return [data]
+        
+        # 嘗試其他可能的字段
+        for key in ['result', 'list', 'items', 'history', 'marketCap', 'market_cap']:
+            if key in data:
+                value = data[key]
+                if isinstance(value, list) and len(value) > 0:
+                    logger.info(f"從 {key} 字段獲取數據: {len(value)} 條記錄")
+                    return value
+        
+        # 如果還是找不到，記錄完整的數據結構以便調試
+        logger.warning(f"穩定幣市值 API 返回的數據格式不符合預期")
+        logger.info(f"數據類型: {type(data_content)}")
+        logger.info(f"數據結構（前500字符）: {json.dumps(data, ensure_ascii=False, indent=2)[:1000]}")
         return None
     except requests.exceptions.RequestException as e:
         logger.error(f"穩定幣市值 API 請求失敗: {str(e)}")
