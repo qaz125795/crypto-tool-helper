@@ -3560,19 +3560,44 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         
         # 提取 CVD 值（嘗試多種字段名稱）
         cvd_values = []
+        if recent_cvds:
+            # 輸出 CVD 數據樣本以便調試
+            sample_cvd = recent_cvds[0]
+            logger.debug(f"CVD 背離檢測 {symbol}: CVD 數據樣本字段: {list(sample_cvd.keys())[:15]}")
+            logger.debug(f"CVD 背離檢測 {symbol}: CVD 數據樣本內容: {json.dumps(sample_cvd, ensure_ascii=False)[:300]}")
+        
         for item in recent_cvds:
-            # 嘗試多種可能的 CVD 字段
-            cvd = (item.get('cvd') or item.get('value') or 
-                  item.get('close') or item.get('cvdValue') or
-                  item.get('cumulativeVolumeDelta') or item.get('volumeDelta'))
+            # 嘗試多種可能的 CVD 字段（擴展更多可能的字段名稱）
+            cvd = None
+            # 優先嘗試常見的 CVD 字段
+            for key in ['cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta', 
+                       'cvd_value', 'cumulative_volume_delta', 'volume_delta', 'delta', 'netVolume',
+                       'net_volume', 'buyVolume', 'sellVolume', 'buy_volume', 'sell_volume']:
+                if key in item:
+                    cvd = item[key]
+                    break
+            
+            # 如果還是找不到，嘗試所有數值類型的字段
+            if cvd is None:
+                for key, val in item.items():
+                    if isinstance(val, (int, float)) and val != 0:
+                        # 跳過明顯不是 CVD 的字段（如時間戳）
+                        if 'time' not in key.lower() and 'timestamp' not in key.lower():
+                            cvd = val
+                            logger.debug(f"CVD 背離檢測 {symbol}: 使用字段 {key} 作為 CVD 值: {val}")
+                            break
+            
             if cvd is not None:
                 try:
-                    cvd_values.append(float(cvd))
+                    cvd_val = float(cvd)
+                    # 檢查是否為有效數值（不是 NaN 或 Inf）
+                    if cvd_val == cvd_val and abs(cvd_val) != float('inf'):
+                        cvd_values.append(cvd_val)
                 except (ValueError, TypeError) as e:
                     logger.debug(f"CVD 背離檢測 {symbol}: CVD 轉換失敗 {cvd}: {str(e)}")
                     continue
         
-        logger.debug(f"CVD 背離檢測 {symbol}: 提取到 {len(cvd_values)} 個 CVD 值")
+        logger.info(f"CVD 背離檢測 {symbol}: 提取到 {len(cvd_values)} 個 CVD 值（從 {len(recent_cvds)} 個數據點）")
         
         # 如果數據點不足，嘗試使用更少的數據點（至少需要 2 個點來比較）
         min_points = 2  # 降低要求，至少需要 2 個點來比較
