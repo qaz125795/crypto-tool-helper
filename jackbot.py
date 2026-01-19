@@ -3545,6 +3545,8 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         # 提取價格的輔助函數（嘗試多種字段）
         def extract_price(item: Dict, field: str) -> Optional[float]:
             """從數據項中提取價格字段"""
+            if not isinstance(item, dict):
+                return None
             if field in item:
                 val = item[field]
                 if isinstance(val, (int, float)) and val > 0:
@@ -3580,9 +3582,44 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         prev_prices_high = []
         prev_prices_low = []
         
-        for item in p_slice[:-1]:  # 過去 19 根
-            high = extract_price(item, 'high') or extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
-            low = extract_price(item, 'low') or extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
+        # 輸出第一個過去 K 線的字段以便調試
+        if len(p_slice) > 1:
+            sample_prev_item = p_slice[0]
+            logger.debug(f"CVD 背離檢測 {symbol}: 過去 K 線樣本字段: {list(sample_prev_item.keys())[:15]}")
+        
+        for idx, item in enumerate(p_slice[:-1]):  # 過去 19 根
+            if not isinstance(item, dict):
+                continue
+                
+            # 嘗試提取 high（優先使用 high，如果沒有則使用其他字段）
+            high = extract_price(item, 'high')
+            if not high:
+                # 如果沒有 high，嘗試使用其他價格字段
+                high = extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
+            
+            # 嘗試提取 low（優先使用 low，如果沒有則使用其他字段）
+            low = extract_price(item, 'low')
+            if not low:
+                # 如果沒有 low，嘗試使用其他價格字段
+                low = extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
+            
+            # 如果還是沒有，嘗試所有數值字段
+            if not high or not low:
+                for key, val in item.items():
+                    if isinstance(val, (int, float)) and val > 0:
+                        key_lower = key.lower()
+                        # 跳過明顯不是價格的字段
+                        if ('time' not in key_lower and 'timestamp' not in key_lower and 
+                            'volume' not in key_lower and 'openInterest' not in key_lower and
+                            'oi' not in key_lower and 'open_interest' not in key_lower and
+                            'funding' not in key_lower and 'rate' not in key_lower and
+                            'cvd' not in key_lower and 'delta' not in key_lower):
+                            if not high:
+                                high = float(val)
+                            if not low:
+                                low = float(val)
+                            if high and low:
+                                break
             
             if high:
                 prev_prices_high.append(high)
@@ -3590,7 +3627,7 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
                 prev_prices_low.append(low)
         
         if not prev_prices_high or not prev_prices_low:
-            logger.info(f"CVD 背離檢測 {symbol}: 無法提取過去價格數據（high: {len(prev_prices_high)}, low: {len(prev_prices_low)}）")
+            logger.info(f"CVD 背離檢測 {symbol}: 無法提取過去價格數據（high: {len(prev_prices_high)}, low: {len(prev_prices_low)}），當前 K 線字段: {list(p_slice[-1].keys())[:15] if p_slice else []}")
             return None
         
         prev_p_high = max(prev_prices_high)
