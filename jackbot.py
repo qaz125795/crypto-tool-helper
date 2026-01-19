@@ -3410,13 +3410,9 @@ def fetch_buy_ratio(symbol: str) -> Optional[float]:
 
 def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict]]:
     """獲取價格歷史數據（OHLC）
-    注意：根據 CoinGlass API v4 文檔，可能需要使用特定的價格歷史端點
-    這裡嘗試多種方法獲取價格數據
+    注意：CoinGlass API v4 可能沒有直接的 price/history 端點
+    這裡使用 OI history 端點，因為它通常包含 markPrice 等價格信息
     """
-    # 方法1：嘗試使用價格歷史端點（如果存在）
-    # 根據用戶提供的 API 文檔，可能需要使用不同的端點
-    # 暫時使用 OI history 端點，因為它可能包含價格信息
-    
     url = f"{CG_API_BASE}/api/futures/open-interest/history"
     params = {
         "exchange": "Binance",
@@ -3438,19 +3434,23 @@ def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict
                 if isinstance(data_list, list) and len(data_list) > 0:
                     # 檢查數據結構，看是否有價格字段
                     sample = data_list[0]
-                    logger.debug(f"價格歷史數據樣本 {symbol}: {list(sample.keys())[:10]}")
-                    # OI 數據可能包含 markPrice 或其他價格字段
-                    if any(key in sample for key in ['price', 'close', 'markPrice', 'mark_price', 'open', 'high', 'low']):
-                        logger.debug(f"從 OI 端點獲取到價格數據 {symbol}: {len(data_list)} 條")
-                        return data_list
-                    else:
-                        logger.debug(f"OI 端點數據 {symbol} 不包含價格字段，可用字段: {list(sample.keys())}")
+                    sample_keys = list(sample.keys()) if isinstance(sample, dict) else []
+                    logger.debug(f"價格歷史數據樣本 {symbol}: 字段 {sample_keys[:15]}")
+                    logger.debug(f"價格歷史數據樣本 {symbol}: 內容 {json.dumps(sample, ensure_ascii=False)[:200]}")
+                    
+                    # 返回數據列表（即使沒有標準價格字段也返回，讓後續邏輯處理）
+                    logger.debug(f"從 OI 端點獲取到數據 {symbol}: {len(data_list)} 條")
+                    # 輸出數據樣本以便調試
+                    if isinstance(sample, dict):
+                        logger.debug(f"數據樣本字段: {list(sample.keys())[:20]}")
+                    return data_list
         
-        # 如果 OI 端點沒有價格，返回 None（需要其他方法獲取價格）
-        logger.debug(f"無法從 OI 端點獲取價格數據 for {symbol}")
+        logger.debug(f"無法從 OI 端點獲取價格數據 for {symbol} (狀態碼: {response.status_code})")
         return None
     except Exception as e:
-        logger.debug(f"獲取價格歷史失敗 {symbol}: {str(e)}")
+        logger.warning(f"獲取價格歷史失敗 {symbol}: {str(e)}")
+        import traceback
+        logger.debug(traceback.format_exc())
         return None
 
 
@@ -3503,17 +3503,17 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
     返回: 'bullish' (看漲背離), 'bearish' (看跌背離), None (無背離)
     """
     try:
-        # 獲取最近 4 小時的價格歷史（需要至少 5 個數據點來比較）
+        # 獲取最近 4 小時的價格歷史（需要至少 2 個數據點來比較，降低要求）
         price_data = fetch_price_history(symbol + "USDT", "1h")
-        if not price_data or len(price_data) < 5:
-            logger.info(f"CVD 背離檢測 {symbol}: 價格數據不足（{len(price_data) if price_data else 0} 個數據點）")
+        if not price_data or len(price_data) < 2:
+            logger.debug(f"CVD 背離檢測 {symbol}: 價格數據不足（{len(price_data) if price_data else 0} 個數據點），跳過背離檢測")
             return None
         
-        # 獲取最近 4 小時的 CVD 歷史
+        # 獲取最近 4 小時的 CVD 歷史（需要至少 2 個數據點來比較，降低要求）
         base_symbol = symbol.replace("USDT", "")
         cvd_data = fetch_aggregated_cvd_history(base_symbol, "1h")
-        if not cvd_data or len(cvd_data) < 5:
-            logger.info(f"CVD 背離檢測 {symbol}: CVD 數據不足（{len(cvd_data) if cvd_data else 0} 個數據點）")
+        if not cvd_data or len(cvd_data) < 2:
+            logger.debug(f"CVD 背離檢測 {symbol}: CVD 數據不足（{len(cvd_data) if cvd_data else 0} 個數據點），跳過背離檢測")
             return None
         
         logger.info(f"CVD 背離檢測 {symbol}: 價格數據 {len(price_data)} 條, CVD 數據 {len(cvd_data)} 條")
@@ -3537,26 +3537,66 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         # 提取價格高點和低點（嘗試多種字段名稱）
         price_highs = []
         price_lows = []
+        
+        # 輸出價格數據樣本以便調試
+        if recent_prices:
+            sample_price = recent_prices[0]
+            logger.debug(f"CVD 背離檢測 {symbol}: 價格數據樣本字段: {list(sample_price.keys())[:15]}")
+            logger.debug(f"CVD 背離檢測 {symbol}: 價格數據樣本內容: {json.dumps(sample_price, ensure_ascii=False)[:300]}")
+        
         for item in recent_prices:
             # 嘗試多種可能的價格字段（優先使用 OHLC 數據）
-            high = (item.get('high') or item.get('markPrice') or item.get('mark_price') or 
-                   item.get('close') or item.get('price') or item.get('value'))
-            low = (item.get('low') or item.get('markPrice') or item.get('mark_price') or 
-                  item.get('close') or item.get('price') or item.get('value'))
+            high = None
+            low = None
             
-            # 如果沒有 high/low，使用 close 作為備用
+            # 優先嘗試標準 OHLC 字段
+            for key in ['high', 'markPrice', 'mark_price', 'close', 'price', 'value', 'openInterest']:
+                if key in item:
+                    val = item[key]
+                    if isinstance(val, (int, float)) and val > 0:
+                        if not high:
+                            high = val
+                        if not low:
+                            low = val
+                        # 如果找到 high 和 low，優先使用它們
+                        if 'high' in item and 'low' in item:
+                            high = item.get('high')
+                            low = item.get('low')
+                            break
+            
+            # 如果沒有 high/low，使用任何數值字段作為價格
             if not high or not low:
-                close_price = item.get('close') or item.get('markPrice') or item.get('mark_price') or item.get('price')
-                if close_price:
-                    high = close_price
-                    low = close_price
+                for key, val in item.items():
+                    if isinstance(val, (int, float)) and val > 0:
+                        # 跳過明顯不是價格的字段
+                        if 'time' not in key.lower() and 'timestamp' not in key.lower() and 'volume' not in key.lower():
+                            if not high:
+                                high = val
+                            if not low:
+                                low = val
+                            # 如果找到兩個數值，使用它們
+                            if high and low and high != low:
+                                break
+            
+            # 如果還是沒有，使用同一個值作為 high 和 low
+            if not high or not low:
+                for key, val in item.items():
+                    if isinstance(val, (int, float)) and val > 0:
+                        if 'time' not in key.lower() and 'timestamp' not in key.lower():
+                            price_val = val
+                            high = price_val
+                            low = price_val
+                            break
             
             if high and low:
                 try:
                     price_highs.append(float(high))
                     price_lows.append(float(low))
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"CVD 背離檢測 {symbol}: 價格轉換失敗 {high}/{low}: {str(e)}")
                     continue
+        
+        logger.info(f"CVD 背離檢測 {symbol}: 提取到 {len(price_highs)} 個價格高點, {len(price_lows)} 個價格低點")
         
         # 提取 CVD 值（嘗試多種字段名稱）
         cvd_values = []
@@ -3746,13 +3786,17 @@ def build_altseason_message() -> Optional[str]:
             rsi_v = float(item.get("rsi_base", 0))
             br = float(item.get("buy_ratio", 0))
             
-            # 檢測 CVD 背離
+            # 檢測 CVD 背離（優雅處理失敗情況）
             base_symbol = s.replace("USDT", "")
+            divergence = None
             try:
                 divergence = detect_cvd_divergence(base_symbol)
-                logger.info(f"CVD 背離檢測 {base_symbol}: {divergence}")
+                # 只在有背離時記錄，避免日誌過多
+                if divergence:
+                    logger.info(f"CVD 背離檢測 {base_symbol}: ✅ {divergence}")
             except Exception as e:
-                logger.warning(f"CVD 背離檢測失敗 {base_symbol}: {str(e)}")
+                # 失敗時不記錄警告，避免日誌過多（這是正常情況）
+                logger.debug(f"CVD 背離檢測 {base_symbol}: 跳過（{str(e)[:50]}）")
                 divergence = None
             
             divergence_text = ""
@@ -3778,13 +3822,17 @@ def build_altseason_message() -> Optional[str]:
             rsi_v = float(item.get("rsi_base", 0))
             br = float(item.get("buy_ratio", 0))
             
-            # 檢測 CVD 背離
+            # 檢測 CVD 背離（優雅處理失敗情況）
             base_symbol = s.replace("USDT", "")
+            divergence = None
             try:
                 divergence = detect_cvd_divergence(base_symbol)
-                logger.info(f"CVD 背離檢測 {base_symbol}: {divergence}")
+                # 只在有背離時記錄，避免日誌過多
+                if divergence:
+                    logger.info(f"CVD 背離檢測 {base_symbol}: ✅ {divergence}")
             except Exception as e:
-                logger.warning(f"CVD 背離檢測失敗 {base_symbol}: {str(e)}")
+                # 失敗時不記錄警告，避免日誌過多（這是正常情況）
+                logger.debug(f"CVD 背離檢測 {base_symbol}: 跳過（{str(e)[:50]}）")
                 divergence = None
             
             divergence_text = ""
