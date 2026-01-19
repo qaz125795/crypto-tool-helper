@@ -3563,7 +3563,8 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         # 提取當前 K 線的 CVD
         curr_cvd_item = c_slice[-1]
         curr_cvd = None
-        for key in ['cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta']:
+        # 添加實際的字段名稱：cum_vol_delta（累計成交量差值）
+        for key in ['cum_vol_delta', 'cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta', 'agg_taker_buy_vol', 'agg_taker_sell_vol']:
             if key in curr_cvd_item:
                 val = curr_cvd_item[key]
                 if isinstance(val, (int, float)) and val != 0:
@@ -3632,7 +3633,8 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         
         if high_idx < len(c_slice[:-1]):
             high_cvd_item = c_slice[high_idx]
-            for key in ['cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta']:
+            # 添加實際的字段名稱：cum_vol_delta（累計成交量差值）
+            for key in ['cum_vol_delta', 'cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta', 'agg_taker_buy_vol', 'agg_taker_sell_vol']:
                 if key in high_cvd_item:
                     val = high_cvd_item[key]
                     if isinstance(val, (int, float)) and val != 0:
@@ -3641,7 +3643,8 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         
         if low_idx < len(c_slice[:-1]):
             low_cvd_item = c_slice[low_idx]
-            for key in ['cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta']:
+            # 添加實際的字段名稱：cum_vol_delta（累計成交量差值）
+            for key in ['cum_vol_delta', 'cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta', 'agg_taker_buy_vol', 'agg_taker_sell_vol']:
                 if key in low_cvd_item:
                     val = low_cvd_item[key]
                     if isinstance(val, (int, float)) and val != 0:
