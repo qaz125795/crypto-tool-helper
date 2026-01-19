@@ -3509,16 +3509,19 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
     """
     try:
         # 獲取最近 24 小時的 1h 數據
+        logger.info(f"CVD 背離檢測 {symbol}: 開始檢測...")
         price_data = fetch_price_history(symbol + "USDT", "1h")
         base_symbol = symbol.replace("USDT", "")
         cvd_data = fetch_aggregated_cvd_history(base_symbol, "1h")
         
+        logger.info(f"CVD 背離檢測 {symbol}: 獲取到價格數據 {len(price_data) if price_data else 0} 條, CVD 數據 {len(cvd_data) if cvd_data else 0} 條")
+        
         if not price_data or not cvd_data:
-            logger.debug(f"CVD 背離檢測 {symbol}: 數據不足（價格: {len(price_data) if price_data else 0}, CVD: {len(cvd_data) if cvd_data else 0}）")
+            logger.info(f"CVD 背離檢測 {symbol}: 數據不足（價格: {len(price_data) if price_data else 0}, CVD: {len(cvd_data) if cvd_data else 0}）")
             return None
         
         if len(price_data) < 20 or len(cvd_data) < 20:
-            logger.debug(f"CVD 背離檢測 {symbol}: 數據點不足（需要至少 20 個，價格: {len(price_data)}, CVD: {len(cvd_data)}）")
+            logger.info(f"CVD 背離檢測 {symbol}: 數據點不足（需要至少 20 個，價格: {len(price_data)}, CVD: {len(cvd_data)}）")
             return None
         
         # 定義排序鍵函數（處理 None 值）
@@ -3648,7 +3651,7 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
             logger.info(f"CVD 背離檢測 {symbol}: ✅ 看漲背離 (價格: {curr_p_low:.4f} < {prev_p_low:.4f}, CVD: {curr_cvd:.2f} > {cvd_at_p_low:.2f})")
             return 'bullish'
         
-        logger.debug(f"CVD 背離檢測 {symbol}: 無背離信號 (當前價格: {curr_p_high:.4f}/{curr_p_low:.4f}, 過去高低: {prev_p_high:.4f}/{prev_p_low:.4f})")
+        logger.info(f"CVD 背離檢測 {symbol}: 無背離信號 (當前價格: {curr_p_high:.4f}/{curr_p_low:.4f}, 過去高低: {prev_p_high:.4f}/{prev_p_low:.4f}, 當前 CVD: {curr_cvd:.2f})")
         return None
         
     except Exception as e:
@@ -3750,12 +3753,14 @@ def build_altseason_message() -> Optional[str]:
             divergence = None
             try:
                 divergence = detect_cvd_divergence(base_symbol)
-                # 只在有背離時記錄，避免日誌過多
+                # 記錄檢測結果
                 if divergence:
                     logger.info(f"CVD 背離檢測 {base_symbol}: ✅ {divergence}")
+                else:
+                    logger.debug(f"CVD 背離檢測 {base_symbol}: 無背離")
             except Exception as e:
-                # 失敗時不記錄警告，避免日誌過多（這是正常情況）
-                logger.debug(f"CVD 背離檢測 {base_symbol}: 跳過（{str(e)[:50]}）")
+                # 失敗時記錄警告，方便排查問題
+                logger.warning(f"CVD 背離檢測 {base_symbol}: 檢測失敗（{str(e)[:100]}）")
                 divergence = None
             
             divergence_text = ""
@@ -3786,12 +3791,14 @@ def build_altseason_message() -> Optional[str]:
             divergence = None
             try:
                 divergence = detect_cvd_divergence(base_symbol)
-                # 只在有背離時記錄，避免日誌過多
+                # 記錄檢測結果
                 if divergence:
                     logger.info(f"CVD 背離檢測 {base_symbol}: ✅ {divergence}")
+                else:
+                    logger.debug(f"CVD 背離檢測 {base_symbol}: 無背離")
             except Exception as e:
-                # 失敗時不記錄警告，避免日誌過多（這是正常情況）
-                logger.debug(f"CVD 背離檢測 {base_symbol}: 跳過（{str(e)[:50]}）")
+                # 失敗時記錄警告，方便排查問題
+                logger.warning(f"CVD 背離檢測 {base_symbol}: 檢測失敗（{str(e)[:100]}）")
                 divergence = None
             
             divergence_text = ""
