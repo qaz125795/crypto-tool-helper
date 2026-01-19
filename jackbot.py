@@ -3501,199 +3501,158 @@ def fetch_aggregated_cvd_history(symbol: str, interval: str = "1h") -> Optional[
 def detect_cvd_divergence(symbol: str) -> Optional[str]:
     """檢測 CVD 背離（看漲/看跌）
     返回: 'bullish' (看漲背離), 'bearish' (看跌背離), None (無背離)
+    
+    優化版本：
+    - 擴大比較窗口到 20 根 K 線（約 24 小時數據）
+    - 對比當前價格與過去 20 根 K 線的高低點
+    - 對比當前 CVD 與對應價格高低點時的 CVD 值
     """
     try:
-        # 獲取最近 4 小時的價格歷史（需要至少 2 個數據點來比較，降低要求）
+        # 獲取最近 24 小時的 1h 數據
         price_data = fetch_price_history(symbol + "USDT", "1h")
-        if not price_data or len(price_data) < 2:
-            logger.debug(f"CVD 背離檢測 {symbol}: 價格數據不足（{len(price_data) if price_data else 0} 個數據點），跳過背離檢測")
-            return None
-        
-        # 獲取最近 4 小時的 CVD 歷史（需要至少 2 個數據點來比較，降低要求）
         base_symbol = symbol.replace("USDT", "")
         cvd_data = fetch_aggregated_cvd_history(base_symbol, "1h")
-        if not cvd_data or len(cvd_data) < 2:
-            logger.debug(f"CVD 背離檢測 {symbol}: CVD 數據不足（{len(cvd_data) if cvd_data else 0} 個數據點），跳過背離檢測")
+        
+        if not price_data or not cvd_data:
+            logger.debug(f"CVD 背離檢測 {symbol}: 數據不足（價格: {len(price_data) if price_data else 0}, CVD: {len(cvd_data) if cvd_data else 0}）")
             return None
         
-        logger.info(f"CVD 背離檢測 {symbol}: 價格數據 {len(price_data)} 條, CVD 數據 {len(cvd_data)} 條")
+        if len(price_data) < 20 or len(cvd_data) < 20:
+            logger.debug(f"CVD 背離檢測 {symbol}: 數據點不足（需要至少 20 個，價格: {len(price_data)}, CVD: {len(cvd_data)}）")
+            return None
         
-        # 按時間戳排序（處理 None 值）
-        def get_sort_key(item):
-            time_val = item.get('time') or item.get('timestamp')
-            if time_val is not None:
-                return time_val
-            return 0
+        # 定義排序鍵函數（處理 None 值）
+        def get_sort_key(x):
+            time_val = x.get('time') or x.get('timestamp') or x.get('t') or 0
+            if isinstance(time_val, str):
+                try:
+                    return int(time_val)
+                except:
+                    return 0
+            return int(time_val) if time_val else 0
         
+        # 確保數據按時間排序
         price_sorted = sorted(price_data, key=get_sort_key)
         cvd_sorted = sorted(cvd_data, key=get_sort_key)
         
-        # 取最近 5 個數據點（當前 + 前 4 個）
-        recent_prices = price_sorted[-5:] if len(price_sorted) >= 5 else price_sorted
-        recent_cvds = cvd_sorted[-5:] if len(cvd_sorted) >= 5 else cvd_sorted
+        # 取最近 20 根 K 線
+        p_slice = price_sorted[-20:]
+        c_slice = cvd_sorted[-20:]
         
-        logger.debug(f"CVD 背離檢測 {symbol}: 取最近 {len(recent_prices)} 個價格數據點, {len(recent_cvds)} 個 CVD 數據點")
-        
-        # 提取價格高點和低點（嘗試多種字段名稱）
-        price_highs = []
-        price_lows = []
-        
-        # 輸出價格數據樣本以便調試
-        if recent_prices:
-            sample_price = recent_prices[0]
-            logger.debug(f"CVD 背離檢測 {symbol}: 價格數據樣本字段: {list(sample_price.keys())[:15]}")
-            logger.debug(f"CVD 背離檢測 {symbol}: 價格數據樣本內容: {json.dumps(sample_price, ensure_ascii=False)[:300]}")
-        
-        for item in recent_prices:
-            # 嘗試多種可能的價格字段（優先使用 OHLC 數據）
-            high = None
-            low = None
-            
-            # 優先嘗試標準 OHLC 字段
-            for key in ['high', 'markPrice', 'mark_price', 'close', 'price', 'value', 'openInterest']:
-                if key in item:
-                    val = item[key]
-                    if isinstance(val, (int, float)) and val > 0:
-                        if not high:
-                            high = val
-                        if not low:
-                            low = val
-                        # 如果找到 high 和 low，優先使用它們
-                        if 'high' in item and 'low' in item:
-                            high = item.get('high')
-                            low = item.get('low')
-                            break
-            
-            # 如果沒有 high/low，使用任何數值字段作為價格
-            if not high or not low:
-                for key, val in item.items():
-                    if isinstance(val, (int, float)) and val > 0:
-                        # 跳過明顯不是價格的字段
-                        if 'time' not in key.lower() and 'timestamp' not in key.lower() and 'volume' not in key.lower():
-                            if not high:
-                                high = val
-                            if not low:
-                                low = val
-                            # 如果找到兩個數值，使用它們
-                            if high and low and high != low:
-                                break
-            
-            # 如果還是沒有，使用同一個值作為 high 和 low
-            if not high or not low:
-                for key, val in item.items():
-                    if isinstance(val, (int, float)) and val > 0:
-                        if 'time' not in key.lower() and 'timestamp' not in key.lower():
-                            price_val = val
-                            high = price_val
-                            low = price_val
-                            break
-            
-            if high and low:
-                try:
-                    price_highs.append(float(high))
-                    price_lows.append(float(low))
-                except (ValueError, TypeError) as e:
-                    logger.debug(f"CVD 背離檢測 {symbol}: 價格轉換失敗 {high}/{low}: {str(e)}")
-                    continue
-        
-        logger.info(f"CVD 背離檢測 {symbol}: 提取到 {len(price_highs)} 個價格高點, {len(price_lows)} 個價格低點")
-        
-        # 提取 CVD 值（嘗試多種字段名稱）
-        cvd_values = []
-        if recent_cvds:
-            # 輸出 CVD 數據樣本以便調試
-            sample_cvd = recent_cvds[0]
-            logger.debug(f"CVD 背離檢測 {symbol}: CVD 數據樣本字段: {list(sample_cvd.keys())[:15]}")
-            logger.debug(f"CVD 背離檢測 {symbol}: CVD 數據樣本內容: {json.dumps(sample_cvd, ensure_ascii=False)[:300]}")
-        
-        for item in recent_cvds:
-            # 嘗試多種可能的 CVD 字段（擴展更多可能的字段名稱）
-            cvd = None
-            # 優先嘗試常見的 CVD 字段
-            for key in ['cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta', 
-                       'cvd_value', 'cumulative_volume_delta', 'volume_delta', 'delta', 'netVolume',
-                       'net_volume', 'buyVolume', 'sellVolume', 'buy_volume', 'sell_volume']:
-                if key in item:
-                    cvd = item[key]
-                    break
-            
-            # 如果還是找不到，嘗試所有數值類型的字段
-            if cvd is None:
-                for key, val in item.items():
-                    if isinstance(val, (int, float)) and val != 0:
-                        # 跳過明顯不是 CVD 的字段（如時間戳）
-                        if 'time' not in key.lower() and 'timestamp' not in key.lower():
-                            cvd = val
-                            logger.debug(f"CVD 背離檢測 {symbol}: 使用字段 {key} 作為 CVD 值: {val}")
-                            break
-            
-            if cvd is not None:
-                try:
-                    cvd_val = float(cvd)
-                    # 檢查是否為有效數值（不是 NaN 或 Inf）
-                    if cvd_val == cvd_val and abs(cvd_val) != float('inf'):
-                        cvd_values.append(cvd_val)
-                except (ValueError, TypeError) as e:
-                    logger.debug(f"CVD 背離檢測 {symbol}: CVD 轉換失敗 {cvd}: {str(e)}")
-                    continue
-        
-        logger.info(f"CVD 背離檢測 {symbol}: 提取到 {len(cvd_values)} 個 CVD 值（從 {len(recent_cvds)} 個數據點）")
-        
-        # 如果數據點不足，嘗試使用更少的數據點（至少需要 2 個點來比較）
-        min_points = 2  # 降低要求，至少需要 2 個點來比較
-        
-        if len(price_highs) < min_points or len(price_lows) < min_points or len(cvd_values) < min_points:
-            logger.info(f"CVD 背離檢測 {symbol}: 數據點不足 (價格高點: {len(price_highs)}, 價格低點: {len(price_lows)}, CVD: {len(cvd_values)})")
-            # 輸出樣本數據以便調試
-            if recent_prices:
-                logger.debug(f"價格數據樣本: {recent_prices[0]}")
-            if recent_cvds:
-                logger.debug(f"CVD 數據樣本: {recent_cvds[0]}")
+        # 提取價格的輔助函數（嘗試多種字段）
+        def extract_price(item: Dict, field: str) -> Optional[float]:
+            """從數據項中提取價格字段"""
+            if field in item:
+                val = item[field]
+                if isinstance(val, (int, float)) and val > 0:
+                    return float(val)
             return None
         
-        # 如果數據點不足 5 個，使用現有的數據點
-        if len(price_highs) < 5:
-            logger.debug(f"CVD 背離檢測 {symbol}: 價格數據點不足 5 個，使用 {len(price_highs)} 個點")
-        if len(cvd_values) < 5:
-            logger.debug(f"CVD 背離檢測 {symbol}: CVD 數據點不足 5 個，使用 {len(cvd_values)} 個點")
+        # 提取當前 K 線的 high 和 low
+        curr_item = p_slice[-1]
+        curr_p_high = extract_price(curr_item, 'high') or extract_price(curr_item, 'markPrice') or extract_price(curr_item, 'mark_price') or extract_price(curr_item, 'close') or extract_price(curr_item, 'price') or extract_price(curr_item, 'value')
+        curr_p_low = extract_price(curr_item, 'low') or extract_price(curr_item, 'markPrice') or extract_price(curr_item, 'mark_price') or extract_price(curr_item, 'close') or extract_price(curr_item, 'price') or extract_price(curr_item, 'value')
         
-        # 當前值（最後一個）
-        current_price_high = price_highs[-1]
-        current_price_low = price_lows[-1]
-        current_cvd = cvd_values[-1]
+        if not curr_p_high or not curr_p_low:
+            logger.debug(f"CVD 背離檢測 {symbol}: 無法提取當前價格（high/low）")
+            return None
         
-        # 前 N-1 個數據點的最高/最低（如果只有 2 個點，就比較第一個和最後一個）
-        if len(price_highs) >= 2:
-            previous_price_high = max(price_highs[:-1])
-            previous_price_low = min(price_lows[:-1])
-        else:
-            previous_price_high = price_highs[0] if len(price_highs) > 0 else current_price_high
-            previous_price_low = price_lows[0] if len(price_lows) > 0 else current_price_low
+        # 提取當前 K 線的 CVD
+        curr_cvd_item = c_slice[-1]
+        curr_cvd = None
+        for key in ['cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta']:
+            if key in curr_cvd_item:
+                val = curr_cvd_item[key]
+                if isinstance(val, (int, float)) and val != 0:
+                    curr_cvd = float(val)
+                    break
         
-        if len(cvd_values) >= 2:
-            previous_cvd_max = max(cvd_values[:-1])
-            previous_cvd_min = min(cvd_values[:-1])
-        else:
-            previous_cvd_max = cvd_values[0] if len(cvd_values) > 0 else current_cvd
-            previous_cvd_min = cvd_values[0] if len(cvd_values) > 0 else current_cvd
+        if curr_cvd is None:
+            logger.debug(f"CVD 背離檢測 {symbol}: 無法提取當前 CVD 值")
+            return None
         
-        logger.debug(f"CVD 背離檢測 {symbol}: 當前價格高/低: {current_price_high}/{current_price_low}, 之前最高/最低: {previous_price_high}/{previous_price_low}")
-        logger.debug(f"CVD 背離檢測 {symbol}: 當前 CVD: {current_cvd}, 之前最大/最小: {previous_cvd_max}/{previous_cvd_min}")
+        # 找到過去 19 根 K 線的最高/最低價
+        prev_prices_high = []
+        prev_prices_low = []
         
-        # 看跌背離：價格創高但 CVD 下降
-        if current_price_high > previous_price_high and current_cvd < previous_cvd_max:
-            logger.info(f"CVD 背離檢測 {symbol}: ✅ 檢測到看跌背離 (價格: {current_price_high:.2f} > {previous_price_high:.2f}, CVD: {current_cvd:.2f} < {previous_cvd_max:.2f})")
+        for item in p_slice[:-1]:  # 過去 19 根
+            high = extract_price(item, 'high') or extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
+            low = extract_price(item, 'low') or extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
+            
+            if high:
+                prev_prices_high.append(high)
+            if low:
+                prev_prices_low.append(low)
+        
+        if not prev_prices_high or not prev_prices_low:
+            logger.debug(f"CVD 背離檢測 {symbol}: 無法提取過去價格數據")
+            return None
+        
+        prev_p_high = max(prev_prices_high)
+        prev_p_low = min(prev_prices_low)
+        
+        # 獲取最高價與最低價對應的 CVD 值
+        # 找到最高價對應的索引
+        high_idx = None
+        for idx, item in enumerate(p_slice[:-1]):
+            high = extract_price(item, 'high') or extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
+            if high and abs(high - prev_p_high) < 0.01:  # 允許小數誤差
+                high_idx = idx
+                break
+        
+        # 找到最低價對應的索引
+        low_idx = None
+        for idx, item in enumerate(p_slice[:-1]):
+            low = extract_price(item, 'low') or extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
+            if low and abs(low - prev_p_low) < 0.01:  # 允許小數誤差
+                low_idx = idx
+                break
+        
+        if high_idx is None or low_idx is None:
+            logger.debug(f"CVD 背離檢測 {symbol}: 無法找到對應的價格索引（high_idx: {high_idx}, low_idx: {low_idx}）")
+            return None
+        
+        # 提取對應索引的 CVD 值
+        cvd_at_p_high = None
+        cvd_at_p_low = None
+        
+        if high_idx < len(c_slice[:-1]):
+            high_cvd_item = c_slice[high_idx]
+            for key in ['cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta']:
+                if key in high_cvd_item:
+                    val = high_cvd_item[key]
+                    if isinstance(val, (int, float)) and val != 0:
+                        cvd_at_p_high = float(val)
+                        break
+        
+        if low_idx < len(c_slice[:-1]):
+            low_cvd_item = c_slice[low_idx]
+            for key in ['cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta']:
+                if key in low_cvd_item:
+                    val = low_cvd_item[key]
+                    if isinstance(val, (int, float)) and val != 0:
+                        cvd_at_p_low = float(val)
+                        break
+        
+        if cvd_at_p_high is None or cvd_at_p_low is None:
+            logger.debug(f"CVD 背離檢測 {symbol}: 無法提取對應的 CVD 值（high: {cvd_at_p_high}, low: {cvd_at_p_low}）")
+            return None
+        
+        # 看跌背離：價格創高，但 CVD 低於當時高點的 CVD
+        if curr_p_high > prev_p_high and curr_cvd < cvd_at_p_high:
+            logger.info(f"CVD 背離檢測 {symbol}: ✅ 看跌背離 (價格: {curr_p_high:.4f} > {prev_p_high:.4f}, CVD: {curr_cvd:.2f} < {cvd_at_p_high:.2f})")
             return 'bearish'
         
-        # 看漲背離：價格創低但 CVD 上升
-        if current_price_low < previous_price_low and current_cvd > previous_cvd_min:
-            logger.info(f"CVD 背離檢測 {symbol}: ✅ 檢測到看漲背離 (價格: {current_price_low:.2f} < {previous_price_low:.2f}, CVD: {current_cvd:.2f} > {previous_cvd_min:.2f})")
+        # 看漲背離：價格創低，但 CVD 高於當時低點的 CVD
+        if curr_p_low < prev_p_low and curr_cvd > cvd_at_p_low:
+            logger.info(f"CVD 背離檢測 {symbol}: ✅ 看漲背離 (價格: {curr_p_low:.4f} < {prev_p_low:.4f}, CVD: {curr_cvd:.2f} > {cvd_at_p_low:.2f})")
             return 'bullish'
         
-        logger.debug(f"CVD 背離檢測 {symbol}: 無背離 (價格高: {current_price_high:.2f}/{previous_price_high:.2f}, 價格低: {current_price_low:.2f}/{previous_price_low:.2f}, CVD: {current_cvd:.2f}/{previous_cvd_max:.2f}/{previous_cvd_min:.2f})")
+        logger.debug(f"CVD 背離檢測 {symbol}: 無背離信號 (當前價格: {curr_p_high:.4f}/{curr_p_low:.4f}, 過去高低: {prev_p_high:.4f}/{prev_p_low:.4f})")
         return None
+        
     except Exception as e:
-        logger.warning(f"CVD 背離檢測失敗 {symbol}: {str(e)}")
+        logger.error(f"CVD 背離檢測出錯 {symbol}: {str(e)}")
         import traceback
         logger.debug(traceback.format_exc())
         return None
