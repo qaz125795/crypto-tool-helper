@@ -3736,10 +3736,12 @@ def build_altseason_message() -> Optional[str]:
     # 過濾掉沒有 RSI 的項目
     rsi_list = [r for r in rsi_list if r.get("rsi_base") is not None]
 
-    # 強勢突破：RSI >= 70
+    # 強勢突破（做多）：RSI >= 70
     strong_list = [r for r in rsi_list if r.get("rsi_base", 0) >= 70]
-    # 超賣反彈：RSI <= 30
+    # 超賣反彈（做多）：RSI <= 30
     oversold_list = [r for r in rsi_list if r.get("rsi_base", 100) <= 30]
+    # 超買回調（做空）：RSI >= 70（與強勢突破相同，但買入比條件不同）
+    overbought_list = [r for r in rsi_list if r.get("rsi_base", 0) >= 70]
 
     # 加入 Buy Ratio 過濾
     def attach_buy_ratio(items: List[Dict]) -> List[Dict]:
@@ -3756,19 +3758,26 @@ def build_altseason_message() -> Optional[str]:
             time.sleep(0.8)
         return result
 
-    # 強勢突破：買入比 >= 55%
+    # 強勢突破（做多）：買入比 >= 55%
     if strong_list:
         strong_list = attach_buy_ratio(strong_list)
         strong_list = [r for r in strong_list if r.get("buy_ratio", 0) >= 55.0]
         strong_list.sort(key=lambda x: (x.get("rsi_base", 0), x.get("buy_ratio", 0)), reverse=True)
         strong_list = strong_list[:5]
 
-    # 超賣反彈：買入比 >= 52%
+    # 超賣反彈（做多）：買入比 >= 52%
     if oversold_list:
         oversold_list = attach_buy_ratio(oversold_list)
         oversold_list = [r for r in oversold_list if r.get("buy_ratio", 0) >= 52.0]
         oversold_list.sort(key=lambda x: (x.get("rsi_base", 100), -x.get("buy_ratio", 0)))
         oversold_list = oversold_list[:5]
+
+    # 超買回調（做空）：RSI >= 70 且買入比 < 45%（買盤力道不足，可能回調）
+    if overbought_list:
+        overbought_list = attach_buy_ratio(overbought_list)
+        overbought_list = [r for r in overbought_list if r.get("buy_ratio", 0) < 45.0]
+        overbought_list.sort(key=lambda x: (x.get("rsi_base", 0), x.get("buy_ratio", 0)), reverse=True)
+        overbought_list = overbought_list[:5]
 
     now_str = format_datetime(get_taipei_time())
 
@@ -3789,8 +3798,8 @@ def build_altseason_message() -> Optional[str]:
     lines.append(describe_altseason(index_val))
     lines.append("")
 
-    # 強勢突破區（加入 CVD 背離判斷）
-    lines.append("🔥 *潛力領頭羊（強勢突破）*：")
+    # 強勢突破區（做多）
+    lines.append("🔥 *潛力領頭羊（強勢突破 - 做多）*：")
     if not strong_list:
         lines.append("目前沒有符合條件的強勢突破山寨幣。")
     else:
@@ -3806,8 +3815,25 @@ def build_altseason_message() -> Optional[str]:
                 time.sleep(0.5)
     lines.append("")
     
-    # 超賣反彈區（加入 CVD 背離判斷）
-    lines.append("💎 *超賣反彈機會（抄底參考）*：")
+    # 超買回調區（做空）
+    lines.append("⚠️ *超買回調風險（做空參考）*：")
+    if not overbought_list:
+        lines.append("目前沒有明顯的超買回調候選。")
+    else:
+        for idx, item in enumerate(overbought_list, 1):
+            s = str(item.get("symbol", ""))
+            rsi_v = float(item.get("rsi_base", 0))
+            br = float(item.get("buy_ratio", 0))
+            
+            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
+            
+            # 避免請求過於頻繁
+            if idx < len(overbought_list):
+                time.sleep(0.5)
+    lines.append("")
+    
+    # 超賣反彈區（做多）
+    lines.append("💎 *超賣反彈機會（抄底參考 - 做多）*：")
     if not oversold_list:
         lines.append("目前沒有明顯的超賣反彈候選。")
     else:
