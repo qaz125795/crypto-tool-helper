@@ -3775,8 +3775,8 @@ def build_altseason_message() -> Optional[str]:
     # 超買回調（做空）：RSI >= 70 且買入比 < 45%（買盤力道不足，可能回調）
     if overbought_list:
         overbought_list = attach_buy_ratio(overbought_list)
-        overbought_list = [r for r in overbought_list if r.get("buy_ratio", 0) < 45.0]
-        overbought_list.sort(key=lambda x: (x.get("rsi_base", 0), x.get("buy_ratio", 0)), reverse=True)
+        overbought_list = [r for r in overbought_list if r.get("buy_ratio") is not None and r.get("buy_ratio", 0) < 45.0]
+        overbought_list.sort(key=lambda x: (x.get("rsi_base", 0), x.get("buy_ratio", 0) or 0), reverse=True)
         overbought_list = overbought_list[:5]
 
     now_str = format_datetime(get_taipei_time())
@@ -3805,8 +3805,9 @@ def build_altseason_message() -> Optional[str]:
     else:
         for idx, item in enumerate(strong_list, 1):
             s = str(item.get("symbol", ""))
-            rsi_v = float(item.get("rsi_base", 0))
-            br = float(item.get("buy_ratio", 0))
+            rsi_v = float(item.get("rsi_base", 0) or 0)
+            br_val = item.get("buy_ratio")
+            br = float(br_val) if br_val is not None else 0.0
             
             lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
             
@@ -3822,8 +3823,9 @@ def build_altseason_message() -> Optional[str]:
     else:
         for idx, item in enumerate(overbought_list, 1):
             s = str(item.get("symbol", ""))
-            rsi_v = float(item.get("rsi_base", 0))
-            br = float(item.get("buy_ratio", 0))
+            rsi_v = float(item.get("rsi_base", 0) or 0)
+            br_val = item.get("buy_ratio")
+            br = float(br_val) if br_val is not None else 0.0
             
             lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
             
@@ -3839,8 +3841,9 @@ def build_altseason_message() -> Optional[str]:
     else:
         for idx, item in enumerate(oversold_list, 1):
             s = str(item.get("symbol", ""))
-            rsi_v = float(item.get("rsi_base", 0))
-            br = float(item.get("buy_ratio", 0))
+            rsi_v = float(item.get("rsi_base", 0) or 0)
+            br_val = item.get("buy_ratio")
+            br = float(br_val) if br_val is not None else 0.0
             
             lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
             
