@@ -10,7 +10,7 @@ on:
 # 防止並發執行
 concurrency:
   group: economic-data-preview
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run:

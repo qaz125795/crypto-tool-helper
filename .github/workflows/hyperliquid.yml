@@ -6,10 +6,10 @@ on:
     - cron: '5,15,25,35,45,55 * * * *'
   workflow_dispatch:
 
-# 防止並發執行：如果前一個執行還在運行，取消它並運行新的
+# 不取消進行中任務，確保每次觸發都能推播
 concurrency:
   group: hyperliquid-monitor
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run:

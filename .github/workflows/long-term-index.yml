@@ -9,7 +9,7 @@ on:
 # 防止並發執行
 concurrency:
   group: long-term-index
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run:

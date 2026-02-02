@@ -2,21 +2,20 @@ name: 持倉變化篩選（15分鐘循環）
 
 on:
   schedule:
-    # 每 15 分鐘執行一次（UTC 時間），最優先執行
-    # 執行時間：00:00, 00:15, 00:30, 00:45, 01:00, 01:15...（每小時的 0, 15, 30, 45 分）
-    # 注意：這是最高優先級的任務，確保準時執行
-    - cron: '*/15 * * * *'
+    # 每 15 分鐘執行一次（UTC），錯開 1 分鐘減少與其他 workflow 搶 runner
+    # 執行時間：01, 16, 31, 46 分（每小時）
+    - cron: '1,16,31,46 * * * *'
   workflow_dispatch:
 
-# 防止並發執行：如果前一個執行還在運行，取消它並運行新的
+# 不取消進行中的任務：讓每次觸發都能跑完並推播，避免延遲或漏推
 concurrency:
   group: position-change
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25  # 縮短超時時間，避免卡死（處理 904 個幣種約需 2.5-3 分鐘）
+    timeout-minutes: 12  # 腳本會在 8 分鐘內強制結束並推播
     permissions:
       contents: read
       actions: read
@@ -44,7 +43,7 @@ jobs:
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_POSITION_CHANGE: ${{ secrets.TG_THREAD_POSITION_CHANGE }}
         run: |
-          # 設置超時保護，確保不會卡死（20分鐘 = 1200秒）
-          timeout 1200 python jackbot.py position_change || exit 0
+          # 腳本內建 8 分鐘強制結束，此處 10 分鐘為雙重保護
+          timeout 600 python jackbot.py position_change || exit 0
           echo "任務執行完成"
 

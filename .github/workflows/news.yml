@@ -9,7 +9,7 @@ on:
 # 防止並發執行
 concurrency:
   group: news
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run:

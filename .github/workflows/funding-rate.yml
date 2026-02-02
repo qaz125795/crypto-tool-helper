@@ -6,10 +6,10 @@ on:
     - cron: '7 0,4,8,12,16,20 * * *'
   workflow_dispatch:
 
-# 防止並發執行
+# 不取消進行中任務，確保每次觸發都能推播
 concurrency:
   group: funding-rate
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run:
