@@ -369,42 +369,42 @@ def analyze_data(all_data: Dict) -> Optional[Dict]:
         # 情況1：散戶極度看多，巨鯨看空（危險信號）
         if global_ratio > 1.5 and top_position_ratio < 0.95:
             diagnosis = "⚠️ 散戶狂熱，巨鯨撤退"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示極度看多，但巨鯨持倉比 {top_position_ratio:.2f} 顯示看空。這是典型的「散戶接盤，巨鯨出貨」信號，價格可能面臨大幅回調。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 極度偏多（做多），但巨鯨持倉比 {top_position_ratio:.2f} 偏空（做空）。這是典型的「散戶接盤，巨鯨出貨」信號，價格可能面臨大幅回調。"
             risk_level = "高"
         # 情況2：散戶恐慌，巨鯨抄底（機會信號）
         elif global_ratio < 0.85 and top_position_ratio > 1.2:
             diagnosis = "✅ 散戶恐慌，巨鯨抄底"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示極度看空，但巨鯨持倉比 {top_position_ratio:.2f} 顯示強勢看多。這是「散戶割肉，巨鯨掃貨」的底部信號，可能是抄底機會。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 極度偏空（做空），但巨鯨持倉比 {top_position_ratio:.2f} 強勢偏多（做多）。這是「散戶割肉，巨鯨掃貨」的底部信號，可能是抄底機會。"
             risk_level = "低"
         # 情況3：散戶看多，巨鯨也看多（健康上漲）
         elif global_ratio > 1.1 and top_position_ratio > 1.1:
             diagnosis = "📈 散戶與巨鯨同步看多"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 和巨鯨持倉比 {top_position_ratio:.2f} 都顯示看多。市場情緒一致，上漲動能較強，但需注意過熱風險。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 和巨鯨持倉比 {top_position_ratio:.2f} 都偏多（做多方向）。市場情緒一致看漲，上漲動能較強，但需注意過熱風險。"
             risk_level = "中低"
         # 情況4：散戶看空，巨鯨也看空（下跌趨勢）
         elif global_ratio < 0.95 and top_position_ratio < 0.95:
             diagnosis = "📉 散戶與巨鯨同步看空"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 和巨鯨持倉比 {top_position_ratio:.2f} 都顯示看空。市場情緒一致看跌，下跌壓力較大，建議謹慎操作。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 和巨鯨持倉比 {top_position_ratio:.2f} 都偏空（做空方向）。市場情緒一致看跌，下跌壓力較大，建議謹慎操作。"
             risk_level = "高"
         # 情況5：散戶看多，巨鯨中性（需觀察）
         elif global_ratio > 1.15 and 0.95 <= top_position_ratio <= 1.15:
             diagnosis = "🔍 散戶看多，巨鯨觀望"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示看多，但巨鯨持倉比 {top_position_ratio:.2f} 保持中性。巨鯨可能在等待更好的進場時機，需密切觀察。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 偏多（做多方向），但巨鯨持倉比 {top_position_ratio:.2f} 保持中性。巨鯨可能在等待更好的進場時機，需密切觀察。"
             risk_level = "中"
         # 情況6：散戶看空，巨鯨中性（需觀察）
         elif global_ratio < 0.9 and 0.95 <= top_position_ratio <= 1.15:
             diagnosis = "🔍 散戶看空，巨鯨觀望"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示看空，但巨鯨持倉比 {top_position_ratio:.2f} 保持中性。巨鯨可能在等待更好的進場時機，需密切觀察。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 偏空（做空方向），但巨鯨持倉比 {top_position_ratio:.2f} 保持中性。巨鯨可能在等待更好的進場時機，需密切觀察。"
             risk_level = "中"
         # 情況7：散戶中性，巨鯨看多（機會信號）
         elif 0.95 <= global_ratio <= 1.15 and top_position_ratio > 1.15:
             diagnosis = "💎 散戶中性，巨鯨看多"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 保持中性，但巨鯨持倉比 {top_position_ratio:.2f} 顯示強勢看多。巨鯨可能提前布局，這是較好的跟隨信號。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 保持中性，但巨鯨持倉比 {top_position_ratio:.2f} 偏多（做多方向）。巨鯨可能提前布局，這是較好的跟隨信號。"
             risk_level = "中低"
         # 情況8：散戶中性，巨鯨看空（警告信號）
         elif 0.95 <= global_ratio <= 1.15 and top_position_ratio < 0.9:
             diagnosis = "⚠️ 散戶中性，巨鯨看空"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 保持中性，但巨鯨持倉比 {top_position_ratio:.2f} 顯示看空。巨鯨可能提前減倉，需警惕下跌風險。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 保持中性，但巨鯨持倉比 {top_position_ratio:.2f} 偏空（做空方向）。巨鯨可能提前減倉，需警惕下跌風險。"
             risk_level = "中高"
         # 情況9：雙方都接近中性（平衡狀態）
         else:
@@ -415,19 +415,19 @@ def analyze_data(all_data: Dict) -> Optional[Dict]:
         # 只有散戶數據
         if global_ratio > 1.3:
             diagnosis = "👤 散戶極度看多"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示極度看多，市場情緒過熱，需警惕回調風險。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 極度偏多（做多方向），市場情緒過熱，需警惕回調風險。"
             risk_level = "中高"
         elif global_ratio > 1.1:
             diagnosis = "👤 散戶看多"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示看多，市場情緒偏樂觀。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 偏多（做多方向），市場情緒偏樂觀。"
             risk_level = "中"
         elif global_ratio < 0.8:
             diagnosis = "👤 散戶極度看空"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示極度看空，市場情緒恐慌，可能是底部信號。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 極度偏空（做空方向），市場情緒恐慌，可能是底部信號。"
             risk_level = "中"
         elif global_ratio < 0.95:
             diagnosis = "👤 散戶看空"
-            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 顯示看空，市場情緒偏悲觀。"
+            diagnosis_detail = f"散戶多空比 {global_ratio:.2f} 偏空（做空方向），市場情緒偏悲觀。"
             risk_level = "中"
         else:
             diagnosis = "👤 散戶中性"
@@ -437,19 +437,19 @@ def analyze_data(all_data: Dict) -> Optional[Dict]:
         # 只有巨鯨數據
         if top_position_ratio > 1.3:
             diagnosis = "🐳 巨鯨強勢看多"
-            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 顯示強勢看多，大戶積極建倉，可能是上漲信號。"
+            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 強勢偏多（做多方向），大戶積極建倉，可能是上漲信號。"
             risk_level = "低"
         elif top_position_ratio > 1.1:
             diagnosis = "🐳 巨鯨看多"
-            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 顯示看多，大戶傾向做多。"
+            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 偏多（做多方向），大戶傾向做多（看漲）。"
             risk_level = "中低"
         elif top_position_ratio < 0.8:
             diagnosis = "🐳 巨鯨強勢看空"
-            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 顯示強勢看空，大戶積極減倉，需警惕下跌風險。"
+            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 偏空（做空方向），大戶積極減倉，需警惕下跌風險。"
             risk_level = "高"
         elif top_position_ratio < 0.95:
             diagnosis = "🐳 巨鯨看空"
-            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 顯示看空，大戶傾向做空。"
+            diagnosis_detail = f"巨鯨持倉比 {top_position_ratio:.2f} 偏空（做空方向），大戶傾向做空（看跌）。"
             risk_level = "中高"
         else:
             diagnosis = "🐳 巨鯨中性"
@@ -482,16 +482,16 @@ def format_symbol_message(symbol: str, analysis: Dict) -> str:
         # 用更直觀的方式顯示
         if gr > 1.2:
             emoji = "🔥"
-            status = "極度看多"
+            status = "極度看多（偏做多／看漲）"
         elif gr > 1.05:
             emoji = "📈"
-            status = "看多"
+            status = "看多（做多方向）"
         elif gr < 0.85:
             emoji = "❄️"
-            status = "極度看空"
+            status = "極度看空（偏做空／看跌）"
         elif gr < 0.95:
             emoji = "📉"
-            status = "看空"
+            status = "看空（做空方向）"
         else:
             emoji = "➡️"
             status = "中性"
@@ -506,16 +506,16 @@ def format_symbol_message(symbol: str, analysis: Dict) -> str:
         # 用更直觀的方式顯示
         if tpr > 1.2:
             emoji = "🟢"
-            status = "強勢看多"
+            status = "強勢看多（做多方向）"
         elif tpr > 1.05:
             emoji = "🟡"
-            status = "看多"
+            status = "看多（做多方向）"
         elif tpr < 0.85:
             emoji = "🔴"
-            status = "強勢看空"
+            status = "強勢看空（做空方向）"
         elif tpr < 0.95:
             emoji = "🟠"
-            status = "看空"
+            status = "看空（做空方向）"
         else:
             emoji = "⚪"
             status = "中性"
@@ -929,7 +929,7 @@ def buying_power_monitor():
             if alert == "資金進場":
                 lines.append("✅ 資金進場：場外資金（Fiat）兌換成穩定幣準備買入")
             elif alert == "槓桿堆積":
-                lines.append("⚠️ 槓桿堆積：場內資金正在使用穩定幣作為保證金開多單")
+                lines.append("⚠️ 槓桿堆積：場內資金正在使用穩定幣作為保證金開立做多倉位（看漲）")
         lines.append("")
     
     # 船長解讀
@@ -1024,13 +1024,13 @@ def fetch_whale_position_old():
             if analysis.get('globalRatio') is not None:
                 gr = analysis['globalRatio']
                 if gr > 1.2:
-                    retail_status = "🔥 極度看多"
+                    retail_status = "🔥 極度看多（偏做多）"
                 elif gr > 1.05:
-                    retail_status = "📈 看多"
+                    retail_status = "📈 看多（做多方向）"
                 elif gr < 0.85:
-                    retail_status = "❄️ 極度看空"
+                    retail_status = "❄️ 極度看空（偏做空）"
                 elif gr < 0.95:
-                    retail_status = "📉 看空"
+                    retail_status = "📉 看空（做空方向）"
                 else:
                     retail_status = "➡️ 中性"
                 message += f"散戶：{retail_status}\n"
@@ -1039,13 +1039,13 @@ def fetch_whale_position_old():
             if analysis.get('topPositionRatio') is not None:
                 tpr = analysis['topPositionRatio']
                 if tpr > 1.2:
-                    whale_status = "🟢 強勢看多"
+                    whale_status = "🟢 強勢看多（做多方向）"
                 elif tpr > 1.05:
-                    whale_status = "🟡 看多"
+                    whale_status = "🟡 看多（做多方向）"
                 elif tpr < 0.85:
-                    whale_status = "🔴 強勢看空"
+                    whale_status = "🔴 強勢看空（做空方向）"
                 elif tpr < 0.95:
-                    whale_status = "🟠 看空"
+                    whale_status = "🟠 看空（做空方向）"
                 else:
                     whale_status = "⚪ 中性"
                 message += f"巨鯨：{whale_status}\n"
@@ -1055,12 +1055,12 @@ def fetch_whale_position_old():
             message += f"診斷：{diagnosis}\n"
             message += "\n"
     
-    # 簡化的操作建議（白話）
+    # 簡化的操作建議（白話，做多=看漲、做空=看跌）
     message += "━━━━━━━━━━━━━━━━━━━\n"
     message += "💡 *操作建議*：\n"
-    message += "• 散戶狂熱+巨鯨撤退 = 危險⚠️\n"
-    message += "• 散戶恐慌+巨鯨抄底 = 機會✅\n"
-    message += "• 散戶與巨鯨同步 = 趨勢延續📈\n"
+    message += "• 散戶狂熱(做多)+巨鯨撤退 = 危險⚠️\n"
+    message += "• 散戶恐慌(做空)+巨鯨抄底(做多) = 機會✅\n"
+    message += "• 散戶與巨鯨同步做多／同步做空 = 趨勢延續📈\n"
     message += "━━━━━━━━━━━━━━━━━━━\n"
     message += f"⏰ 更新時間：{time_str}"
     
@@ -1209,7 +1209,8 @@ def fetch_oi_change_15m(symbol: str) -> Optional[float]:
     }
     
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        # 使用較短 timeout（6 秒）以利 15 分鐘週期內完成，避免延遲推播
+        response = requests.get(url, params=params, headers=headers, timeout=6)
         if response.status_code != 200:
             return None
         
@@ -1286,11 +1287,11 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
     
     # 開倉（包含多方開倉和空方開倉）
-    lines.append("📈 *開倉*")
+    lines.append("📈 *開倉*（新建立倉位）")
     lines.append("")
     
-    # 多方開倉 TOP 3
-    lines.append("  *多方開倉 TOP 3*")
+    # 多方開倉 TOP 3（做多 = 看漲、買入方向）
+    lines.append("  *多方開倉 TOP 3*（做多方向，看漲）")
     if not top_long_open:
         lines.append("    無明顯多方開倉標的")
     else:
@@ -1302,8 +1303,8 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
             )
     lines.append("")
     
-    # 空方開倉 TOP 3
-    lines.append("  *空方開倉 TOP 3*")
+    # 空方開倉 TOP 3（做空 = 看跌、賣出方向）
+    lines.append("  *空方開倉 TOP 3*（做空方向，看跌）")
     if not top_short_open:
         lines.append("    無明顯空方開倉標的")
     else:
@@ -1316,11 +1317,11 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     lines.append("")
     
     # 平倉（包含多方平倉和空方平倉）
-    lines.append("📉 *平倉*")
+    lines.append("📉 *平倉*（結束既有倉位）")
     lines.append("")
     
-    # 多方平倉 TOP 3
-    lines.append("  *多方平倉 TOP 3*")
+    # 多方平倉 TOP 3（原本做多的人正在出場）
+    lines.append("  *多方平倉 TOP 3*（做多倉位減碼）")
     if not top_long_close:
         lines.append("    無明顯多方平倉標的")
     else:
@@ -1332,8 +1333,8 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
             )
     lines.append("")
     
-    # 空方平倉 TOP 3
-    lines.append("  *空方平倉 TOP 3*")
+    # 空方平倉 TOP 3（原本做空的人正在出場）
+    lines.append("  *空方平倉 TOP 3*（做空倉位減碼）")
     if not top_short_close:
         lines.append("    無明顯空方平倉標的")
     else:
@@ -1351,9 +1352,8 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     lines.append("")
     lines.append("請先判斷 *15分K價格走勢趨勢* 去換位思考主力動機")
     lines.append("")
-    lines.append("📈 *開倉動機*：為什麼在這個位置開倉？")
-    lines.append("")
-    lines.append("📉 *平倉動機*：停利還是停損？")
+    lines.append("📈 *開倉*：多方開倉＝看漲做多；空方開倉＝看跌做空。")
+    lines.append("📉 *平倉*：多方平倉＝做多減碼；空方平倉＝做空減碼。（停利或停損）")
     
     return "\n".join(lines)
 
@@ -1444,45 +1444,32 @@ def fetch_position_change():
     oi_success_count = 0
     oi_fail_count = 0
     
-    # 並行處理配置（BingX幣種較少，可以適當增加並發數）
-    MAX_WORKERS = 20  # 同時處理20個請求（BingX幣種較少，可以更快）
-    
-    # 記錄開始時間
+    # 並行處理配置：提高並發數並在 8 分鐘內強制結束，確保每 15 分鐘能準時推播
+    MAX_WORKERS = 35
     start_time = time.time()
-    MAX_EXECUTION_TIME = 25 * 60  # 25 分鐘（留 5 分鐘緩衝）
+    MAX_EXECUTION_TIME = 8 * 60  # 8 分鐘內必須結束並推播，避免被下一輪 schedule 取消
     
-    # 使用線程池並行處理（使用原本的邏輯，傳入 coin 字典）
-    results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # 提交所有任務（傳入 coin 字典，使用原本的邏輯）
+    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    broke_early = False
+    try:
         future_to_coin = {executor.submit(process_single_symbol, coin): coin for coin in target_symbols}
-        
-        # 處理完成的任務
         completed = 0
         for future in as_completed(future_to_coin):
-            # 檢查超時
             elapsed_time = time.time() - start_time
             if elapsed_time > MAX_EXECUTION_TIME:
-                logger.warning(f"執行時間已超過 {MAX_EXECUTION_TIME/60:.1f} 分鐘，提前結束處理")
-                # 取消未完成的任務
+                logger.warning(f"已達 {MAX_EXECUTION_TIME/60:.0f} 分鐘上限，提前結束並推播（已處理 {processed_count} 個）")
                 for f in future_to_coin:
                     f.cancel()
+                broke_early = True
                 break
             
             completed += 1
             result = future.result()
-            
             if result is None:
                 continue
-            
             processed_count += 1
-            
-            # 進度日誌（每100個）
             if completed % 100 == 0:
-                elapsed_min = elapsed_time / 60
-                logger.info(f"處理進度: {completed}/{len(target_symbols)} 個幣種 ({completed*100//len(target_symbols)}%) | 已用時: {elapsed_min:.1f} 分鐘")
-            
-            # 處理結果
+                logger.info(f"處理進度: {completed}/{len(target_symbols)} | 已用時: {elapsed_time/60:.1f} 分鐘")
             status = result.get('status')
             if status == 'oi_failed':
                 oi_fail_count += 1
@@ -1492,9 +1479,7 @@ def fetch_position_change():
                 symbol = result.get('symbol')
                 price_change = result.get('priceChange15m')
                 oi_change = result.get('oiChange15m')
-                
                 item = {'symbol': symbol, 'priceChange15m': price_change, 'oiChange15m': oi_change}
-                
                 if category == 'long_open':
                     long_open.append(item)
                 elif category == 'long_close':
@@ -1503,6 +1488,8 @@ def fetch_position_change():
                     short_open.append(item)
                 elif category == 'short_close':
                     short_close.append(item)
+    finally:
+        executor.shutdown(wait=not broke_early)  # 提前結束時不等待未完成任務，以利準時推播
     
     total_time = time.time() - start_time
     logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個 | 總用時: {total_time/60:.1f} 分鐘")
@@ -2488,9 +2475,9 @@ def fetch_funding_fortune_list():
             message += f"   💵 單次領取：`${single_pay}` USDT\n"
             message += "━━━━━━━━━━━━━━━━━━━━\n"
         
-        message += "\n💡 *套利策略*：\n"
-        message += "*正費率（+）*：做空永續 + 持有現貨，每 4 小時領取資金費率。\n"
-        message += "*負費率（-）*：做多永續 + 賣出現貨，但需注意軋空風險。\n\n"
+        message += "\n💡 *套利策略*（新手說明：做多=看漲買入，做空=看跌賣出）：\n"
+        message += "*正費率（+）*：做空永續合約（看跌）+ 持有現貨，每 4 小時領取資金費率。\n"
+        message += "*負費率（-）*：做多永續合約（看漲）+ 賣出現貨，但需注意軋空風險。\n\n"
         message += "📊 數據來源：[幣安U本位](https://www.binance.com/zh-TC/futures/funding-history/perpetual/real-time-funding-rate)\n"
         now_taipei = get_taipei_time()
         message += f"⏰ 更新時間：{now_taipei.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -2861,23 +2848,23 @@ def build_long_term_message() -> Optional[str]:
     msg_lines.append("")
     msg_lines.append("🎯 *今天操作方向建議*：")
     
-    # 根據指標綜合判斷操作方向
+    # 根據指標綜合判斷操作方向（做多=看漲買入，做空=看跌賣出）
     if ahr is not None and fg is not None:
         if ahr < 0.45 and fg < 30:
-            msg_lines.append("✅ 建議：分批做多，適合抄底")
+            msg_lines.append("✅ 建議：分批做多（看漲、買入），適合抄底")
         elif ahr < 1.2 and fg < 60:
-            msg_lines.append("✅ 建議：可以考慮做多，但需謹慎")
+            msg_lines.append("✅ 建議：可以考慮做多（看漲），但需謹慎")
         elif ahr > 1.2 and fg > 70:
-            msg_lines.append("⚠️ 建議：謹慎做空，注意風險")
+            msg_lines.append("⚠️ 建議：謹慎做空（看跌、賣出），注意風險")
         elif pi_trigger and fg > 75:
             msg_lines.append("⚠️ 建議：減倉觀望，等待回調")
         else:
             msg_lines.append("➡️ 建議：保持觀望，等待明確信號")
     elif ahr is not None:
         if ahr < 0.45:
-            msg_lines.append("✅ 建議：可以考慮做多")
+            msg_lines.append("✅ 建議：可以考慮做多（看漲）")
         elif ahr > 1.2:
-            msg_lines.append("⚠️ 建議：謹慎做空")
+            msg_lines.append("⚠️ 建議：謹慎做空（看跌）")
         else:
             msg_lines.append("➡️ 建議：保持觀望")
     else:
@@ -3085,7 +3072,7 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
 
         # 判斷主導清算方向（只用1小時數據）
         is_long_dom = buy_vol_usd_1h > sell_vol_usd_1h
-        dominant_side = "多單" if is_long_dom else "空單"
+        dominant_side = "多單（做多／看漲倉位）" if is_long_dom else "空單（做空／看跌倉位）"
         dominant_amount_1h = buy_vol_usd_1h if is_long_dom else sell_vol_usd_1h
 
         logger.info(
@@ -3129,15 +3116,15 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
         lines.append(f"🥊 *【{ev['symbol']}】*")
         lines.append(f"⚠️ 過去1小時內約有 *${amount_1h:.2f} 萬* 美元的 *{dominant_side}* 被強制平倉。\n")
         
-        # 操作建議（白話）
-        if dominant_side == "多單":
-            lines.append("💡 *操作建議*：大量多單被爆倉，代表價格下跌壓力大。")
-            lines.append("   • 如果價格還在跌，可以考慮「摸頭」做空，但要設好止損")
-            lines.append("   • 如果價格已經跌很多，可以考慮「摸底」做多，但要分批進場")
+        # 操作建議（白話，做多=看漲、做空=看跌）
+        if "多單" in dominant_side or dominant_side.startswith("多"):
+            lines.append("💡 *操作建議*：大量多單（做多倉位）被爆倉，代表價格下跌壓力大。")
+            lines.append("   • 價格還在跌：可考慮做空（看跌）摸頭，但要設好止損")
+            lines.append("   • 價格已跌很多：可考慮做多（看漲）摸底，但要分批進場")
         else:  # 空單
-            lines.append("💡 *操作建議*：大量空單被爆倉，代表價格上漲動能強。")
-            lines.append("   • 如果價格還在漲，可以考慮「摸頭」做空，但要設好止損")
-            lines.append("   • 如果價格已經漲很多，可以考慮「摸底」做多，但要分批進場")
+            lines.append("💡 *操作建議*：大量空單（做空倉位）被爆倉，代表價格上漲動能強。")
+            lines.append("   • 價格還在漲：可考慮做空（看跌）摸頭，但要設好止損")
+            lines.append("   • 價格已漲很多：可考慮做多（看漲）摸底，但要分批進場")
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
@@ -3798,8 +3785,8 @@ def build_altseason_message() -> Optional[str]:
     lines.append(describe_altseason(index_val))
     lines.append("")
 
-    # 強勢突破區（做多）
-    lines.append("🔥 *潛力領頭羊（強勢突破 - 做多）*：")
+    # 強勢突破區（做多 = 看漲、買入）
+    lines.append("🔥 *潛力領頭羊（強勢突破 - 做多／看漲）*：")
     if not strong_list:
         lines.append("目前沒有符合條件的強勢突破山寨幣。")
     else:
@@ -3816,8 +3803,8 @@ def build_altseason_message() -> Optional[str]:
                 time.sleep(0.5)
     lines.append("")
     
-    # 超買回調區（做空）
-    lines.append("⚠️ *超買回調風險（做空參考）*：")
+    # 超買回調區（做空 = 看跌、賣出）
+    lines.append("⚠️ *超買回調風險（做空參考／看跌）*：")
     if not overbought_list:
         lines.append("目前沒有明顯的超買回調候選。")
     else:
@@ -3834,8 +3821,8 @@ def build_altseason_message() -> Optional[str]:
                 time.sleep(0.5)
     lines.append("")
     
-    # 超賣反彈區（做多）
-    lines.append("💎 *超賣反彈機會（抄底參考 - 做多）*：")
+    # 超賣反彈區（做多 = 看漲、抄底）
+    lines.append("💎 *超賣反彈機會（抄底參考 - 做多／看漲）*：")
     if not oversold_list:
         lines.append("目前沒有明顯的超賣反彈候選。")
     else:
@@ -4177,9 +4164,9 @@ def format_alert_message(alert: Dict) -> str:
         0
     )
     
-    # 判斷方向 emoji
+    # 判斷方向 emoji（做多=看漲，做空=看跌）
     direction_emoji = "🟢" if str(direction).lower() in ['long', 'buy', '多', 'long'] else "🔴"
-    direction_text = "大額開多" if str(direction).lower() in ['long', 'buy', '多', 'long'] else "大額開空"
+    direction_text = "大額開多（看漲）" if str(direction).lower() in ['long', 'buy', '多', 'long'] else "大額開空（看跌）"
     
     return f"項目：`{symbol}`\n方向：{direction_emoji} {direction_text}\n規模：${value:,.0f} USD (名目價值)"
 
@@ -4221,9 +4208,9 @@ def format_whale_position_message(position: Dict, index: int) -> str:
     # 簡化地址顯示（只顯示後 4 位）
     address_short = address[-4:] if len(address) > 4 else address
     
-    # 判斷多空方向（白話文中文）
+    # 判斷多空方向（白話文：做多=看漲，做空=看跌）
     side_lower = str(side).lower()
-    side_text = "做多" if side_lower in ['long', 'buy', '多', 'l'] else "做空"
+    side_text = "做多（看漲）" if side_lower in ['long', 'buy', '多', 'l'] else "做空（看跌）"
     
     # 格式化金額顯示
     if size_float >= 1_000_000:
@@ -4322,18 +4309,18 @@ def build_hyperliquid_message() -> Optional[str]:
         # 2. 如果 position_size > 0，可能是做多；< 0 可能是做空
         # 3. position_action: 1=開多, 2=開空, 3=平多, 4=平空
         if side:
-            direction_text = "做多" if str(side).lower() in ['long', 'buy', '多', 'l', '1'] else "做空"
+            direction_text = "做多（看漲）" if str(side).lower() in ['long', 'buy', '多', 'l', '1'] else "做空（看跌）"
         elif position_action is not None:
             # position_action: 1=開多, 2=開空
             if position_action == 1:
-                direction_text = "做多"
+                direction_text = "做多（看漲）"
             elif position_action == 2:
-                direction_text = "做空"
+                direction_text = "做空（看跌）"
             else:
                 direction_text = "未知"
         elif isinstance(position_size, (int, float)):
             # 根據 position_size 正負判斷（正數可能是做多，負數可能是做空）
-            direction_text = "做多" if position_size > 0 else "做空"
+            direction_text = "做多（看漲）" if position_size > 0 else "做空（看跌）"
         else:
             direction_text = "未知"
         
