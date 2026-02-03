@@ -75,7 +75,9 @@ python jackbot.py funding_rate
 3. 啟用 GitHub Actions
 4. 完成！
 
-詳細設置指南請查看：[`GITHUB_ACTIONS_SETUP.md`](GITHUB_ACTIONS_SETUP.md)
+**📖 詳細設置指南**：
+- 🚀 **快速設置指南**（推薦新手）：[`GITHUB_ACTIONS_快速設置指南.md`](GITHUB_ACTIONS_快速設置指南.md)
+- 📚 **完整詳細文檔**：[`GITHUB_ACTIONS_SETUP.md`](GITHUB_ACTIONS_SETUP.md)
 
 ---
 
