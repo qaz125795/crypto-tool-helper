@@ -1071,77 +1071,101 @@ def fetch_whale_position_old():
 
 # ==================== 3. 持倉變化篩選器 ====================
 
+def _fetch_bingx_supported_coins_fallback() -> List[str]:
+    """CoinGlass 失敗時改由 BingX 官方 API 取得 USDT 永續合約列表（公開接口無需 key）。"""
+    # 常見路徑：v2/quote/contracts 或 v3/quote/symbols
+    urls = [
+        "https://open-api.bingx.com/openApi/swap/v2/quote/contracts",
+        "https://open-api.bingx.com/openApi/swap/v3/quote/symbols",
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            if j.get("code") not in (0, "0", None):
+                continue
+            raw = j.get("data") or j.get("contracts") or j.get("symbols") or []
+            if not isinstance(raw, list) or not raw:
+                continue
+            symbols = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                sym = (item.get("symbol") or item.get("contract") or item.get("contractType") or "").strip()
+                if not sym or "USDT" not in sym.upper():
+                    continue
+                base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+                if base and base not in symbols:
+                    if len(base) <= 12 and "2USD" not in base:
+                        symbols.append(base)
+            if symbols:
+                logger.info(f"CoinGlass 不可用，已從 BingX 官方 API 獲取 {len(symbols)} 個合約幣種")
+                return symbols
+        except Exception as e:
+            logger.debug(f"BingX 合約列表 {url}: {e}")
+            continue
+    logger.warning("BingX 合約列表 fallback 兩次嘗試均失敗")
+    return []
+
+
 def fetch_supported_futures_coins() -> List[str]:
-    """獲取 BingX 交易所支援的合約幣種列表（應該有 600+ 個）"""
+    """獲取 BingX 交易所支援的合約幣種列表。優先 CoinGlass，失敗則用 BingX 官方 API。"""
     url = "https://open-api-v4.coinglass.com/api/futures/supported-exchange-pairs"
-    headers = {
-        "CG-API-KEY": CG_API_KEY,
-        "accept": "application/json"
-    }
-    
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
-            logger.error(f"supported-exchange-pairs API error: {response.status_code}")
-            return []
-        
+            logger.warning(f"CoinGlass supported-exchange-pairs HTTP {response.status_code}，改用 BingX")
+            return _fetch_bingx_supported_coins_fallback()
         result = response.json()
-        data = result.get('data', result)
-        
-        # API 返回的是字典結構：{"BingX": [{"instrument_id": "BTCUSDT", "base_asset": "BTC", ...}, ...]}
+        # 若 API 回傳錯誤體 { code, msg }，不要當成 data
+        code = result.get("code")
+        if code not in (0, "0", 200, "200", None):
+            logger.warning(f"CoinGlass supported-exchange-pairs 返回錯誤 code={code} msg={result.get('msg')}，改用 BingX")
+            return _fetch_bingx_supported_coins_fallback()
+        data = result.get("data")
         if not isinstance(data, dict):
-            logger.error(f"API 返回數據格式錯誤，預期字典但得到: {type(data)}")
-            return []
-        
-        # 調試：記錄可用的交易所
+            logger.warning("CoinGlass 返回無 data 或非字典，改用 BingX")
+            return _fetch_bingx_supported_coins_fallback()
+        # 避免把錯誤體當成交易所列表（例如只有 code/msg 的 dict）
+        keys_ok = [k for k in data.keys() if str(k).lower() not in ("code", "msg", "message")]
+        if not keys_ok:
+            logger.warning("CoinGlass 返回無有效交易所鍵，改用 BingX")
+            return _fetch_bingx_supported_coins_fallback()
         exchanges = list(data.keys())
         logger.info(f"API 返回的交易所: {exchanges[:10]}... (共 {len(exchanges)} 個)")
-        
-        # 查找 BingX（嘗試多種可能的鍵名）
         bingx_data = None
         for key in data.keys():
-            if 'bingx' in str(key).lower() or 'bing' in str(key).lower():
+            if "bingx" in str(key).lower() or "bing" in str(key).lower():
                 bingx_data = data[key]
                 logger.info(f"找到 BingX 數據，鍵名: {key}")
                 break
-        
         if not bingx_data:
             logger.error(f"未找到 BingX 數據，可用交易所: {exchanges}")
-            return []
-        
+            return _fetch_bingx_supported_coins_fallback()
         if not isinstance(bingx_data, list):
             logger.error(f"BingX 數據格式錯誤，預期列表但得到: {type(bingx_data)}")
-            return []
-        
-        # 提取幣種符號
+            return _fetch_bingx_supported_coins_fallback()
         symbols = []
         for item in bingx_data:
             if not isinstance(item, dict):
                 continue
-            
-            # 優先使用 base_asset（例如 "BTC"）
-            symbol = item.get('base_asset') or item.get('baseAsset') or item.get('base')
-            
-            # 如果沒有 base_asset，從 instrument_id 提取（例如 "BTCUSDT" 或 "BTC-USDT" -> "BTC"）
+            symbol = item.get("base_asset") or item.get("baseAsset") or item.get("base")
             if not symbol:
-                instrument_id = item.get('instrument_id') or item.get('instrumentId') or item.get('symbol') or item.get('pair') or ''
+                instrument_id = item.get("instrument_id") or item.get("instrumentId") or item.get("symbol") or item.get("pair") or ""
                 if instrument_id:
-                    # 處理多種格式：BTCUSDT, BTC-USDT, BTC_USDT 等
-                    symbol = instrument_id.replace('USDT', '').replace('USDT-PERP', '').replace('-PERP', '').replace('_USDT', '').replace('-USDT', '').replace('_', '').upper()
-            
+                    symbol = instrument_id.replace("USDT", "").replace("USDT-PERP", "").replace("-PERP", "").replace("_USDT", "").replace("-USDT", "").replace("_", "").upper()
             if symbol and symbol not in symbols:
-                # 過濾無效符號（如 NCCONATURALGAS2USD 等導致 OI 無數據）
                 sym_upper = symbol.upper()
                 if len(symbol) <= 12 and "2USD" not in sym_upper:
                     symbols.append(symbol)
-        
-        logger.info(f"從 BingX API 獲取到 {len(symbols)} 個合約幣種")
+        logger.info(f"從 CoinGlass 取得 {len(symbols)} 個 BingX 合約幣種")
         return symbols
     except Exception as e:
-        logger.error(f"獲取 BingX 合約幣種列表失敗: {str(e)}")
-        import traceback
-        logger.error(f"錯誤詳情: {traceback.format_exc()}")
-        return []
+        logger.error(f"獲取合約幣種列表失敗: {str(e)}")
+        return _fetch_bingx_supported_coins_fallback()
 
 
 # Fallback 時僅記錄第一次 Binance 失敗原因，避免刷屏
