@@ -1214,7 +1214,7 @@ def fetch_coins_price_change() -> List[Dict]:
         if not all_data:
             code = result.get('code', '')
             msg = result.get('msg', result.get('message', ''))
-            logger.warning(f"CoinGlass 幣種漲跌幅返回空數據 code={code} msg={msg}（初創版可能不包含此接口，改用 Binance 公開 API）")
+            logger.warning(f"CoinGlass 幣種漲跌幅返回空數據 code={code} msg={msg}（初創版可能不包含此接口，改用 BingX 官方 API）")
             return _fetch_coins_price_change_fallback(supported_coins)
         filtered_data = []
         for item in all_data:
@@ -1229,26 +1229,58 @@ def fetch_coins_price_change() -> List[Dict]:
         return _fetch_coins_price_change_fallback(supported_coins)
 
 
+def fetch_price_change_15m_bingx(symbol: str) -> Optional[float]:
+    """
+    【BingX 官方數據源】
+    直接從 BingX 公開 API 獲取 15 分鐘 K 線數據。
+    優點：幣種完全對應（含獨家幣）、無須 API Key、免費且額度高（500 次/10 秒）。
+    """
+    clean_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    sym_formatted = f"{clean_symbol}-USDT"
+    url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
+    params = {"symbol": sym_formatted, "interval": "15m", "limit": 3}
+    try:
+        response = requests.get(url, params=params, timeout=5)
+        if response.status_code != 200:
+            return None
+        res_json = response.json()
+        if res_json.get("code") != 0:
+            return None
+        data = res_json.get("data", [])
+        if not isinstance(data, list) or len(data) < 2:
+            return None
+        # 假設 data 時間正序：data[-1] 為最新 K，data[-2] 為上一根
+        latest_k = data[-1]
+        # 本根 15m K 線：open=15 分鐘前價格，close=當前價格 → 漲跌幅 = (close - open) / open
+        current_price = float(latest_k.get("close") or 0)
+        open_price_15m_ago = float(latest_k.get("open") or 0)
+        if open_price_15m_ago == 0:
+            return None
+        change_percent = ((current_price - open_price_15m_ago) / open_price_15m_ago) * 100
+        return change_percent
+    except Exception:
+        return None
+
+
 def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: int = 99999) -> List[Dict]:
-    """初創版 fallback：用 Binance 合約 API 取得 15m 漲跌幅（降並發避免限流）。"""
-    global _binance_fallback_first_failure_logged
-    _binance_fallback_first_failure_logged = False  # 本輪 fallback 只記錄第一次失敗
+    """初創版 Fallback：使用 BingX 官方 API 獲取 15m 漲跌幅，與交易平台一致且無須 API Key。"""
     symbols = list(supported_coins)[:max_symbols]
     out = []
+    logger.info(f"正在使用 BingX 官方 API 獲取 {len(symbols)} 個幣種的價格數據...")
+
     def one(sym):
-        ch = fetch_price_change_15m_binance(sym)
+        ch = fetch_price_change_15m_bingx(sym)
         return {"symbol": sym, "coin": sym, "price_change_percent_15m": ch} if ch is not None else None
-    # 降並發（6）與略延遲，避免 Binance 429；Futures 限流較寬仍建議節制
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        for i, res in enumerate(as_completed([ex.submit(one, s) for s in symbols])):
+
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        futures = [ex.submit(one, s) for s in symbols]
+        for i, res in enumerate(as_completed(futures)):
             r = res.result()
             if r is not None:
                 out.append(r)
             if (i + 1) % 100 == 0:
-                logger.info(f"Fallback 價格進度: {i + 1}/{len(symbols)} (成功 {len(out)} 個)")
-    logger.info(f"Fallback 取得 {len(out)} 個幣種 15m 漲跌幅")
-    if len(out) == 0:
-        logger.warning("Fallback 全數失敗：請查看上方「Binance fallback 首次失敗」日誌；若為 429/403 可能為限流或地區限制（Zeabur/GitHub 機房 IP 可能被 Binance 限制）")
+                logger.info(f"BingX 價格獲取進度: {i + 1}/{len(symbols)} (成功 {len(out)} 個)")
+    logger.info(f"成功從 BingX 獲取 {len(out)} 個幣種的價格數據")
     return out
 
 
