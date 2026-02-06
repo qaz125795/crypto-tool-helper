@@ -1955,6 +1955,8 @@ def build_report_message_tiered(
     lines = []
     lines.append("💰 *【傑克短線戰術雷達】(30分)*")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    now_str = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+    lines.append(f"🕐 {now_str} (台灣)")
     lines.append("")
 
     has_any = False
@@ -1977,6 +1979,8 @@ def build_report_message_tiered(
             stars = x.get("stars", 1)
             signal = x.get("signal_label", "觀望")
             reason = x.get("reason", "數據異動")
+            price = x.get("current_price")
+            price_str = f"${price:,.4g}" if price is not None and isinstance(price, (int, float)) else "—"
 
             rsi_part = x.get("rsi_desc", "RSI —")
             oi_val = x.get("oiChange30m", 0)
@@ -2001,7 +2005,7 @@ def build_report_message_tiered(
             lines.append(f"{signal[:1]} *{sym}* ({star_str(stars)})")
             lines.append(f"   💡 *戰術：{signal[2:]}*")
             lines.append(f"   📝 *理由：{reason}*")
-            lines.append(f"   📊 數據：{rsi_part}｜持倉 {oi_str}{fee_str}")
+            lines.append(f"   📊 數據：價 {price_str}｜{rsi_part}｜持倉 {oi_str}{fee_str}")
             lines.append("")
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
