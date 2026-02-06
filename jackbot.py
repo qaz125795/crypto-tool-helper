@@ -16,6 +16,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import pandas as pd
+import pandas_ta as ta
 
 # 台灣台北時區（UTC+8）
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -1576,14 +1577,81 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
         return out
 
 
+def _fetch_bingx_klines_and_calc(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    本地計算 Fallback：用 BingX 30m K 線 + pandas_ta 算 RSI(14)、布林帶(20,2)。
+    回傳格式與 CoinGlass 統一：rsi, ub_value, lb_value, current_price, touch_upper, touch_lower, source='BingX'。
+    """
+    clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    sym_param = f"{clean}-USDT"
+    url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
+    params = {"symbol": sym_param, "interval": "30m", "limit": 50}
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        if j.get("code") != 0:
+            return None
+        raw = j.get("data", [])
+        if not isinstance(raw, list) or len(raw) < 30:
+            return None
+        closes = []
+        for row in raw:
+            if isinstance(row, dict):
+                c = row.get("close") or row.get("c")
+            elif isinstance(row, (list, tuple)) and len(row) >= 5:
+                c = row[4]
+            else:
+                continue
+            try:
+                closes.append(float(c))
+            except (TypeError, ValueError):
+                continue
+        if len(closes) < 20:
+            return None
+        df = pd.DataFrame({"close": closes})
+        rsi_series = ta.rsi(df["close"], length=14)
+        if rsi_series is None or rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
+            return None
+        rsi_val = float(rsi_series.iloc[-1])
+        bb = ta.bbands(df["close"], length=20, std=2)
+        if bb is None or bb.empty:
+            ub_value = lb_value = None
+        else:
+            ub_col = [c for c in bb.columns if "BBU" in c or "upper" in c.lower()]
+            lb_col = [c for c in bb.columns if "BBL" in c or "lower" in c.lower()]
+            ub_value = float(bb[ub_col[0]].iloc[-1]) if ub_col and not pd.isna(bb[ub_col[0]].iloc[-1]) else None
+            lb_value = float(bb[lb_col[0]].iloc[-1]) if lb_col and not pd.isna(bb[lb_col[0]].iloc[-1]) else None
+        current_price = float(closes[-1]) if closes else None
+        touch_upper = current_price is not None and ub_value is not None and current_price >= ub_value
+        touch_lower = current_price is not None and lb_value is not None and current_price <= lb_value
+        return {
+            "rsi": rsi_val,
+            "touch_upper": touch_upper,
+            "touch_lower": touch_lower,
+            "current_price": current_price,
+            "ub_value": ub_value,
+            "lb_value": lb_value,
+            "source": "BingX",
+        }
+    except Exception as e:
+        logger.debug(f"BingX 本地計算 {clean}: {e}")
+        return None
+
+
 def calculate_technicals(symbol: str) -> Optional[Dict[str, Any]]:
     """
-    使用 CoinGlass V4 API 取得 RSI 與布林帶（創業版）。
-    回傳: rsi, touch_upper, touch_lower, current_price, funding_rate；失敗回傳 None，並 log response.text。
+    先試 CoinGlass API；失敗則用 BingX K 線 + 本地 RSI/布林帶計算。
+    回傳含 source: 'CoinGlass' 或 'BingX'。
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    # 1) 先試 CoinGlass
     rsi_data = _fetch_coinglass_rsi(symbol)
     if rsi_data is None:
+        tech = _fetch_bingx_klines_and_calc(symbol)
+        if tech:
+            return tech
         return None
     boll_data = _fetch_coinglass_boll(symbol)
 
@@ -1646,6 +1714,7 @@ def calculate_technicals(symbol: str) -> Optional[Dict[str, Any]]:
         "current_price": current_price,
         "ub_value": ub_value,
         "lb_value": lb_value,
+        "source": "CoinGlass",
     }
 
 
@@ -1664,16 +1733,27 @@ def _classify_signal_and_tier(
     rsi = tech.get("rsi") if tech else None
     touch_upper = tech.get("touch_upper", False) if tech else False
     touch_lower = tech.get("touch_lower", False) if tech else False
-    rsi_desc = "無技術數據"
+    rsi_desc = "RSI —"
     if tech is None:
         label_by_cat = {"long_open": "📈 多方開倉", "long_close": "📉 多方平倉", "short_open": "📉 空方開倉", "short_close": "📈 空方平倉"}
         return (label_by_cat.get(category, "📊 異動"), 2, rsi_desc)
     if rsi is not None:
-        rsi_desc = f"RSI {rsi:.0f}"
-        if touch_upper:
+        overbought = rsi > 70
+        oversold = rsi < 30
+        if overbought and touch_upper:
+            rsi_desc = f"RSI {rsi:.0f}(超買)"
+        elif oversold and touch_lower:
+            rsi_desc = f"RSI {rsi:.0f}(超賣)"
+        elif overbought:
+            rsi_desc = f"RSI {rsi:.0f}(超買)"
+        elif oversold:
+            rsi_desc = f"RSI {rsi:.0f}(超賣)"
+        elif touch_upper:
             rsi_desc = f"RSI {rsi:.0f} 觸碰上軌"
         elif touch_lower:
             rsi_desc = f"RSI {rsi:.0f} 觸碰下軌"
+        else:
+            rsi_desc = f"RSI {rsi:.0f}"
 
     # (A) 鑽石：OI 異動 < -2% 且 (現價 > 上軌 或 RSI > 70) -> 主力出貨+過熱，摸頭做空
     if oi < -2.0 and (touch_upper or (rsi is not None and rsi > 70)):
@@ -1695,7 +1775,7 @@ def build_report_message_tiered(
     processed_count: int = 0,
     oi_success_count: int = 0,
 ) -> str:
-    """依等級 1（鑽石）與等級 2（黃金）組裝推播內容。"""
+    """依等級 1（狙擊訊號）與等級 2（異動觀察）組裝推播，排版優化、費率 2 位小數。"""
     def fmt(num):
         if num is None or (isinstance(num, float) and (num != num)):
             return "0.00%"
@@ -1711,17 +1791,26 @@ def build_report_message_tiered(
     lines.append("")
 
     def line_with_funding(x: Dict) -> str:
-        price_str = f"${x.get('current_price', 0):,.4g}" if x.get("current_price") is not None else "—"
+        price_val = x.get("current_price")
+        if price_val is not None and isinstance(price_val, (int, float)):
+            price_str = f"${price_val:,.4g}"
+        else:
+            price_str = "—"
         oi_str = fmt(x.get("oiChange30m"))
+        rsi_part = x.get("rsi_desc", "RSI —").strip()
+        if rsi_part == "無技術數據":
+            rsi_part = "RSI —"
         funding = x.get("funding_rate")
         if funding is not None and isinstance(funding, (int, float)):
-            fee = f"｜費率 {funding:.4%}" if funding != 0 else "｜費率 0%"
+            fee = f" | 費率 {funding*100:.2f}%"
         else:
-            fee = ""  # 無費率數據時不顯示
-        return f"{x.get('signal_label', '')} *{x['symbol']}*｜價 {price_str}｜OI {oi_str}｜{x.get('rsi_desc', '')}{fee}"
+            fee = ""
+        label = (x.get("signal_label") or "").strip()
+        sym = x.get("symbol", "")
+        return f"{label} *{sym}* | 價 {price_str} | OI {oi_str} | {rsi_part}{fee}"
 
     if tier1:
-        lines.append("💎 *強烈反轉訊號 (High Priority)*")
+        lines.append("💎 *狙擊訊號 (High Priority)*")
         for x in tier1:
             lines.append(line_with_funding(x))
         lines.append("")
@@ -1737,13 +1826,13 @@ def build_report_message_tiered(
         lines.append("")
 
     if not tier1 and not tier2 and not risk:
-        lines.append("本次無符合分級條件的標的，以下為原始分類摘要。")
+        lines.append("本次無符合分級條件的標的。")
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("💡 *【換位思考主力動機】*")
     lines.append("請先判斷 *30分K價格走勢* 再搭配 OI 與 RSI／布林帶。")
-    lines.append("💎 鑽石＝高勝率摸頭/抄底｜🟡 黃金＝一般異動觀察")
+    lines.append("💎 狙擊＝高勝率摸頭/抄底 | 🟡 異動＝一般觀察")
     return "\n".join(lines)
 
 
