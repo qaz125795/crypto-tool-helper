@@ -1071,101 +1071,77 @@ def fetch_whale_position_old():
 
 # ==================== 3. 持倉變化篩選器 ====================
 
-def _fetch_bingx_supported_coins_fallback() -> List[str]:
-    """CoinGlass 失敗時改由 BingX 官方 API 取得 USDT 永續合約列表（公開接口無需 key）。"""
-    # 常見路徑：v2/quote/contracts 或 v3/quote/symbols
-    urls = [
-        "https://open-api.bingx.com/openApi/swap/v2/quote/contracts",
-        "https://open-api.bingx.com/openApi/swap/v3/quote/symbols",
-    ]
-    for url in urls:
-        try:
-            r = requests.get(url, timeout=10)
-            if r.status_code != 200:
-                continue
-            j = r.json()
-            if j.get("code") not in (0, "0", None):
-                continue
-            raw = j.get("data") or j.get("contracts") or j.get("symbols") or []
-            if not isinstance(raw, list) or not raw:
-                continue
-            symbols = []
-            for item in raw:
-                if not isinstance(item, dict):
-                    continue
-                sym = (item.get("symbol") or item.get("contract") or item.get("contractType") or "").strip()
-                if not sym or "USDT" not in sym.upper():
-                    continue
-                base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
-                if base and base not in symbols:
-                    if len(base) <= 12 and "2USD" not in base:
-                        symbols.append(base)
-            if symbols:
-                logger.info(f"CoinGlass 不可用，已從 BingX 官方 API 獲取 {len(symbols)} 個合約幣種")
-                return symbols
-        except Exception as e:
-            logger.debug(f"BingX 合約列表 {url}: {e}")
-            continue
-    logger.warning("BingX 合約列表 fallback 兩次嘗試均失敗")
-    return []
-
-
 def fetch_supported_futures_coins() -> List[str]:
-    """獲取 BingX 交易所支援的合約幣種列表。優先 CoinGlass，失敗則用 BingX 官方 API。"""
+    """獲取 BingX 交易所支援的合約幣種列表（應該有 600+ 個）"""
     url = "https://open-api-v4.coinglass.com/api/futures/supported-exchange-pairs"
-    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    headers = {
+        "CG-API-KEY": CG_API_KEY,
+        "accept": "application/json"
+    }
+    
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
-            logger.warning(f"CoinGlass supported-exchange-pairs HTTP {response.status_code}，改用 BingX")
-            return _fetch_bingx_supported_coins_fallback()
+            logger.error(f"supported-exchange-pairs API error: {response.status_code}")
+            return []
+        
         result = response.json()
-        # 若 API 回傳錯誤體 { code, msg }，不要當成 data
-        code = result.get("code")
-        if code not in (0, "0", 200, "200", None):
-            logger.warning(f"CoinGlass supported-exchange-pairs 返回錯誤 code={code} msg={result.get('msg')}，改用 BingX")
-            return _fetch_bingx_supported_coins_fallback()
-        data = result.get("data")
+        data = result.get('data', result)
+        
+        # API 返回的是字典結構：{"BingX": [{"instrument_id": "BTCUSDT", "base_asset": "BTC", ...}, ...]}
         if not isinstance(data, dict):
-            logger.warning("CoinGlass 返回無 data 或非字典，改用 BingX")
-            return _fetch_bingx_supported_coins_fallback()
-        # 避免把錯誤體當成交易所列表（例如只有 code/msg 的 dict）
-        keys_ok = [k for k in data.keys() if str(k).lower() not in ("code", "msg", "message")]
-        if not keys_ok:
-            logger.warning("CoinGlass 返回無有效交易所鍵，改用 BingX")
-            return _fetch_bingx_supported_coins_fallback()
+            logger.error(f"API 返回數據格式錯誤，預期字典但得到: {type(data)}")
+            return []
+        
+        # 調試：記錄可用的交易所
         exchanges = list(data.keys())
         logger.info(f"API 返回的交易所: {exchanges[:10]}... (共 {len(exchanges)} 個)")
+        
+        # 查找 BingX（嘗試多種可能的鍵名）
         bingx_data = None
         for key in data.keys():
-            if "bingx" in str(key).lower() or "bing" in str(key).lower():
+            if 'bingx' in str(key).lower() or 'bing' in str(key).lower():
                 bingx_data = data[key]
                 logger.info(f"找到 BingX 數據，鍵名: {key}")
                 break
+        
         if not bingx_data:
             logger.error(f"未找到 BingX 數據，可用交易所: {exchanges}")
-            return _fetch_bingx_supported_coins_fallback()
+            return []
+        
         if not isinstance(bingx_data, list):
             logger.error(f"BingX 數據格式錯誤，預期列表但得到: {type(bingx_data)}")
-            return _fetch_bingx_supported_coins_fallback()
+            return []
+        
+        # 提取幣種符號
         symbols = []
         for item in bingx_data:
             if not isinstance(item, dict):
                 continue
-            symbol = item.get("base_asset") or item.get("baseAsset") or item.get("base")
+            
+            # 優先使用 base_asset（例如 "BTC"）
+            symbol = item.get('base_asset') or item.get('baseAsset') or item.get('base')
+            
+            # 如果沒有 base_asset，從 instrument_id 提取（例如 "BTCUSDT" 或 "BTC-USDT" -> "BTC"）
             if not symbol:
-                instrument_id = item.get("instrument_id") or item.get("instrumentId") or item.get("symbol") or item.get("pair") or ""
+                instrument_id = item.get('instrument_id') or item.get('instrumentId') or item.get('symbol') or item.get('pair') or ''
                 if instrument_id:
-                    symbol = instrument_id.replace("USDT", "").replace("USDT-PERP", "").replace("-PERP", "").replace("_USDT", "").replace("-USDT", "").replace("_", "").upper()
+                    # 處理多種格式：BTCUSDT, BTC-USDT, BTC_USDT 等
+                    symbol = instrument_id.replace('USDT', '').replace('USDT-PERP', '').replace('-PERP', '').replace('_USDT', '').replace('-USDT', '').replace('_', '').upper()
+            
             if symbol and symbol not in symbols:
+                # 過濾無效符號（如 NCCONATURALGAS2USD 等導致 OI 無數據）
                 sym_upper = symbol.upper()
                 if len(symbol) <= 12 and "2USD" not in sym_upper:
                     symbols.append(symbol)
-        logger.info(f"從 CoinGlass 取得 {len(symbols)} 個 BingX 合約幣種")
+        
+        logger.info(f"從 BingX API 獲取到 {len(symbols)} 個合約幣種")
         return symbols
     except Exception as e:
-        logger.error(f"獲取合約幣種列表失敗: {str(e)}")
-        return _fetch_bingx_supported_coins_fallback()
+        logger.error(f"獲取 BingX 合約幣種列表失敗: {str(e)}")
+        import traceback
+        logger.error(f"錯誤詳情: {traceback.format_exc()}")
+        return []
 
 
 # Fallback 時僅記錄第一次 Binance 失敗原因，避免刷屏
@@ -1525,18 +1501,16 @@ def _fetch_coinglass_boll(symbol: str) -> Optional[Dict]:
     return None
 
 
-def _fetch_coinglass_funding_list() -> Dict[str, float]:
+def _fetch_funding_rate_map() -> Dict[str, float]:
     """
-    呼叫一次資金費率 exchange-list（不帶 symbol），取得全量數據，回傳 base -> 費率(小數)。
-    與 fetch_funding_fortune_list 同結構：data[] 每項有 symbol、stablecoin_margin_list。
-    費率 API 回傳為百分比數值（如 0.01 表示 0.01%），轉成小數 0.0001 供 .4% 顯示。
+    一次取得 CoinGlass 全量資金費率（與排行榜同 API、同結構），回傳 symbol(base) -> 費率。
+    優先 Binance，無則 BingX。
     """
-    out = {}
+    out: Dict[str, float] = {}
     url = f"{CG_API_BASE}/api/futures/funding-rate/exchange-list"
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
     try:
-        r = requests.get(url, headers=headers, timeout=15)
-        time.sleep(0.2)
+        r = requests.get(url, headers=headers, timeout=12)
         if r.status_code != 200:
             return out
         data = r.json()
@@ -1545,56 +1519,48 @@ def _fetch_coinglass_funding_list() -> Dict[str, float]:
         lst = data.get("data", [])
         if not isinstance(lst, list):
             return out
-        for coin_data in lst:
-            if not isinstance(coin_data, dict):
+        for item in lst:
+            if not isinstance(item, dict):
                 continue
-            base = (coin_data.get("symbol") or "").strip().upper()
+            base = item.get("symbol") or item.get("coin") or item.get("base")
             if not base:
                 continue
+            base = str(base).strip().upper()
+            margin_list = item.get("stablecoin_margin_list") or item.get("margin_list") or []
             rate_binance = None
             rate_bingx = None
-            for margin_key in ("stablecoin_margin_list", "margin_list"):
-                margin_list = coin_data.get(margin_key) or []
-                for m in margin_list:
-                    if not isinstance(m, dict):
-                        continue
-                    ex = m.get("exchange")
-                    if ex not in ("Binance", "BingX"):
-                        continue
-                    raw = m.get("funding_rate") or m.get("fundingRate")
-                    if raw is None:
-                        continue
-                    try:
-                        v = float(raw)
-                    except (TypeError, ValueError):
-                        continue
-                    if ex == "Binance":
-                        rate_binance = v
-                    else:
-                        rate_bingx = v
-            chosen = rate_binance if rate_binance is not None else rate_bingx
-            if chosen is not None:
-                out[base] = chosen / 100.0
-    except Exception as e:
-        logger.debug(f"CoinGlass 資金費率全量獲取失敗: {e}")
-    return out
+            for m in margin_list:
+                if not isinstance(m, dict):
+                    continue
+                ex = m.get("exchange")
+                if ex not in ("Binance", "BingX"):
+                    continue
+                try:
+                    v = float(m.get("funding_rate"))
+                except (TypeError, ValueError):
+                    continue
+                if ex == "Binance":
+                    rate_binance = v
+                else:
+                    rate_bingx = v
+            rate = rate_binance if rate_binance is not None else rate_bingx
+            if rate is not None:
+                out[base] = rate
+        return out
+    except Exception:
+        return out
 
 
-def calculate_technicals(symbol: str, funding_cache: Optional[Dict[str, float]] = None) -> Optional[Dict[str, Any]]:
+def calculate_technicals(symbol: str) -> Optional[Dict[str, Any]]:
     """
     使用 CoinGlass V4 API 取得 RSI 與布林帶（創業版）。
-    funding_cache: 若提供則從中取費率（base -> 小數），避免每幣種打一次 API。
-    回傳: rsi, touch_upper, touch_lower, current_price, funding_rate；失敗回傳 None。
+    回傳: rsi, touch_upper, touch_lower, current_price, funding_rate；失敗回傳 None，並 log response.text。
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     rsi_data = _fetch_coinglass_rsi(symbol)
     if rsi_data is None:
         return None
     boll_data = _fetch_coinglass_boll(symbol)
-    if funding_cache is not None:
-        funding = funding_cache.get(base)
-    else:
-        funding = None
 
     rsi_val = None
     data_rsi = rsi_data.get("data", rsi_data.get("list", []))
@@ -1655,7 +1621,6 @@ def calculate_technicals(symbol: str, funding_cache: Optional[Dict[str, float]] 
         "current_price": current_price,
         "ub_value": ub_value,
         "lb_value": lb_value,
-        "funding_rate": funding,
     }
 
 
@@ -1677,11 +1642,11 @@ def _classify_signal_and_tier(
     is_short = category in ("short_open", "short_close")
     rsi_desc = "無技術數據"
     if rsi is not None:
-        rsi_desc = f"RSI {rsi:.0f} (Coinglass)"
+        rsi_desc = f"RSI {rsi:.0f}"
         if touch_upper:
-            rsi_desc = f"RSI {rsi:.0f} (Coinglass, 觸碰上軌)"
+            rsi_desc = f"RSI {rsi:.0f} 觸碰上軌"
         elif touch_lower:
-            rsi_desc = f"RSI {rsi:.0f} (Coinglass, 觸碰下軌)"
+            rsi_desc = f"RSI {rsi:.0f} 觸碰下軌"
 
     # (A) 鑽石：OI 異動 < -2% 且 (現價 > 上軌 或 RSI > 70) -> 主力出貨+過熱，摸頭做空
     if oi < -2.0 and (touch_upper or (rsi is not None and rsi > 70)):
@@ -1725,7 +1690,7 @@ def build_report_message_tiered(
         if funding is not None and isinstance(funding, (int, float)):
             fee = f"｜費率 {funding:.4%}" if funding != 0 else "｜費率 0%"
         else:
-            fee = ""
+            fee = ""  # 無費率數據時不顯示
         return f"{x.get('signal_label', '')} *{x['symbol']}*｜價 {price_str}｜OI {oi_str}｜{x.get('rsi_desc', '')}{fee}"
 
     if tier1:
@@ -1974,19 +1939,18 @@ def fetch_position_change():
     top_short_open = short_open[:3]
     top_short_close = short_close[:3]
 
-    # 資金費率一次拉全量，避免每幣種打 API 且解析錯誤導致全為 0
-    funding_cache = _fetch_coinglass_funding_list()
-    if funding_cache:
-        logger.info(f"CoinGlass 資金費率已取得 {len(funding_cache)} 個幣種")
-
+    # 一次取得全量資金費率（與排行榜同 API），供後續查表
+    funding_map = _fetch_funding_rate_map()
+    logger.info(f"資金費率表已取得 {len(funding_map)} 個幣種")
     # 對最終標的呼叫 CoinGlass RSI/布林帶（僅有有效數據才列入推播，無效數據刪掉）
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
         sym = item.get("symbol", "")
-        tech = calculate_technicals(sym, funding_cache=funding_cache)
+        tech = calculate_technicals(sym)
         if tech is None:
             continue
         signal_label, tier, rsi_desc = _classify_signal_and_tier(item, cat, tech)
+        funding_rate = funding_map.get(sym) or funding_map.get(sym.upper())
         all_top.append({
             **item,
             "category": cat,
@@ -1994,7 +1958,7 @@ def fetch_position_change():
             "signal_label": signal_label,
             "tier": tier,
             "rsi_desc": rsi_desc,
-            "funding_rate": tech.get("funding_rate"),
+            "funding_rate": funding_rate,
         })
     if all_top:
         msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
