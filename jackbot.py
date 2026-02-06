@@ -1130,7 +1130,10 @@ def fetch_supported_futures_coins() -> List[str]:
                     symbol = instrument_id.replace('USDT', '').replace('USDT-PERP', '').replace('-PERP', '').replace('_USDT', '').replace('-USDT', '').replace('_', '').upper()
             
             if symbol and symbol not in symbols:
-                symbols.append(symbol)
+                # 過濾無效符號（如 NCCONATURALGAS2USD 等導致 OI 無數據）
+                sym_upper = symbol.upper()
+                if len(symbol) <= 12 and "2USD" not in sym_upper:
+                    symbols.append(symbol)
         
         logger.info(f"從 BingX API 獲取到 {len(symbols)} 個合約幣種")
         return symbols
@@ -1429,72 +1432,157 @@ def extract_price_change_30m(coin: Dict) -> float:
     return 0.0
 
 
-def calculate_technicals(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    使用 BingX 30m K 線計算 RSI(14) 與布林帶(20,2)。
-    回傳: rsi, touch_upper, touch_lower, current_price；失敗回傳 None。
-    """
-    clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-    sym = f"{clean}-USDT"
-    url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
-    params = {"symbol": sym, "interval": "30m", "limit": 35}
+def _fetch_coinglass_rsi(symbol: str) -> Optional[Dict]:
+    """CoinGlass V4 RSI：exchange=Binance, interval=30m, symbol=幣種。失敗時 log response.text。"""
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    url = f"{CG_API_BASE}/api/futures/indicators/rsi"
+    params = {"exchange": "Binance", "interval": "30m", "symbol": base}
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
     try:
-        r = requests.get(url, params=params, timeout=5)
+        r = requests.get(url, params=params, headers=headers, timeout=8)
+        time.sleep(0.2)
+        if r.status_code != 200:
+            logger.warning(f"CoinGlass RSI {base}: status={r.status_code} body={r.text[:500]}")
+            return None
+        data = r.json()
+        if data.get("code") not in (0, "0", 200, "200", None):
+            msg = data.get("msg") or data.get("message") or ""
+            logger.warning(f"CoinGlass RSI {base}: code={data.get('code')} msg={msg} body={r.text[:500]}")
+            return None
+        return data
+    except Exception as e:
+        logger.debug(f"CoinGlass RSI {base}: {e}")
+        return None
+
+
+def _fetch_coinglass_boll(symbol: str) -> Optional[Dict]:
+    """CoinGlass V4 布林帶：取得 ub_value(上軌)、lb_value(下軌)。"""
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    url = f"{CG_API_BASE}/api/futures/indicators/boll"
+    params = {"exchange": "Binance", "interval": "30m", "symbol": base}
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=8)
+        time.sleep(0.2)
+        if r.status_code != 200:
+            logger.warning(f"CoinGlass BOLL {base}: status={r.status_code} body={r.text[:500]}")
+            return None
+        data = r.json()
+        if data.get("code") not in (0, "0", 200, "200", None):
+            msg = data.get("msg") or data.get("message") or ""
+            logger.warning(f"CoinGlass BOLL {base}: code={data.get('code')} msg={msg} body={r.text[:500]}")
+            return None
+        return data
+    except Exception as e:
+        logger.debug(f"CoinGlass BOLL {base}: {e}")
+        return None
+
+
+def _fetch_coinglass_funding(symbol: str) -> Optional[float]:
+    """CoinGlass 資金費率：exchange-list 取該幣種 Binance 費率。"""
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    url = f"{CG_API_BASE}/api/futures/funding-rate/exchange-list"
+    params = {"symbol": base}
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=6)
+        time.sleep(0.2)
         if r.status_code != 200:
             return None
         data = r.json()
-        if data.get("code") != 0:
+        if data.get("code") not in (0, "0", 200, "200", None):
             return None
-        rows = data.get("data", [])
-        if not isinstance(rows, list) or len(rows) < 25:
+        lst = data.get("data", [])
+        if not isinstance(lst, list):
             return None
-        closes = []
-        for bar in rows:
-            c = bar.get("close") if isinstance(bar, dict) else (bar[4] if isinstance(bar, (list, tuple)) and len(bar) > 4 else None)
-            if c is not None:
+        for item in lst:
+            if not isinstance(item, dict):
+                continue
+            margin_list = item.get("stablecoin_margin_list") or item.get("margin_list") or []
+            for m in margin_list:
+                if m.get("exchange") == "Binance" and m.get("funding_rate") is not None:
+                    try:
+                        return float(m.get("funding_rate", 0))
+                    except (TypeError, ValueError):
+                        pass
+        return None
+    except Exception:
+        return None
+
+
+def calculate_technicals(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    使用 CoinGlass V4 API 取得 RSI 與布林帶（創業版）。
+    回傳: rsi, touch_upper, touch_lower, current_price, funding_rate；失敗回傳 None，並 log response.text。
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    rsi_data = _fetch_coinglass_rsi(symbol)
+    if rsi_data is None:
+        return None
+    boll_data = _fetch_coinglass_boll(symbol)
+    funding = _fetch_coinglass_funding(symbol)
+
+    rsi_val = None
+    data_rsi = rsi_data.get("data", rsi_data.get("list", []))
+    if isinstance(data_rsi, list) and data_rsi:
+        last = data_rsi[-1] if isinstance(data_rsi[-1], dict) else None
+        if last is not None:
+            for k in ("rsi", "value", "rsi_value"):
+                if last.get(k) is not None:
+                    try:
+                        rsi_val = float(last[k])
+                        break
+                    except (TypeError, ValueError):
+                        pass
+    elif isinstance(data_rsi, dict):
+        for k in ("rsi", "value", "rsi_value"):
+            if data_rsi.get(k) is not None:
                 try:
-                    closes.append(float(c))
+                    rsi_val = float(data_rsi[k])
+                    break
                 except (TypeError, ValueError):
                     pass
-        if len(closes) < 25:
-            return None
-        df = pd.DataFrame({"close": closes})
-        # RSI(14)
-        delta = df["close"].diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-        last_ag = avg_gain.iloc[-1]
-        last_al = avg_loss.iloc[-1]
-        if last_al == 0 or pd.isna(last_al):
-            rsi = 100.0 if last_ag and last_ag > 0 else 50.0
-        else:
-            rs = last_ag / last_al
-            rsi = 100.0 if pd.isna(rs) or rs == float("inf") else float(100 - (100 / (1 + rs)))
-        # BB(20, 2)
-        mid = df["close"].rolling(20).mean()
-        std = df["close"].rolling(20).std()
-        upper = mid + 2 * std
-        lower = mid - 2 * std
-        last_close = float(df["close"].iloc[-1])
-        last_upper = upper.iloc[-1]
-        last_lower = lower.iloc[-1]
-        if pd.isna(last_upper):
-            last_upper = last_close
-        if pd.isna(last_lower):
-            last_lower = last_close
-        touch_upper = last_close >= last_upper if last_upper and not pd.isna(last_upper) else False
-        touch_lower = last_close <= last_lower if last_lower and not pd.isna(last_lower) else False
-        return {
-            "rsi": float(rsi) if rsi is not None and not pd.isna(rsi) else None,
-            "touch_upper": touch_upper,
-            "touch_lower": touch_lower,
-            "current_price": last_close,
-        }
-    except Exception as e:
-        logger.debug(f"calculate_technicals {symbol}: {e}")
+    if rsi_val is None:
         return None
+
+    ub_value = None
+    lb_value = None
+    current_price = None
+    data_boll = boll_data.get("data", boll_data.get("list", [])) if boll_data else []
+    if isinstance(data_boll, list) and data_boll:
+        last_b = data_boll[-1] if isinstance(data_boll[-1], dict) else None
+        if last_b:
+            ub_value = last_b.get("ub_value") or last_b.get("upper") or last_b.get("ub")
+            lb_value = last_b.get("lb_value") or last_b.get("lower") or last_b.get("lb")
+            current_price = last_b.get("price") or last_b.get("close") or last_b.get("c")
+    elif isinstance(data_boll, dict):
+        ub_value = data_boll.get("ub_value") or data_boll.get("upper")
+        lb_value = data_boll.get("lb_value") or data_boll.get("lower")
+        current_price = data_boll.get("price") or data_boll.get("close")
+    try:
+        ub_value = float(ub_value) if ub_value is not None else None
+        lb_value = float(lb_value) if lb_value is not None else None
+        current_price = float(current_price) if current_price is not None else None
+    except (TypeError, ValueError):
+        pass
+
+    touch_upper = touch_lower = False
+    if current_price is not None and ub_value is not None:
+        touch_upper = current_price >= ub_value
+    if current_price is not None and lb_value is not None:
+        touch_lower = current_price <= lb_value
+    if current_price is None and (ub_value is not None or lb_value is not None):
+        current_price = ub_value or lb_value
+
+    return {
+        "rsi": rsi_val,
+        "touch_upper": touch_upper,
+        "touch_lower": touch_lower,
+        "current_price": current_price,
+        "ub_value": ub_value,
+        "lb_value": lb_value,
+        "funding_rate": funding,
+    }
 
 
 def _classify_signal_and_tier(
@@ -1503,10 +1591,9 @@ def _classify_signal_and_tier(
     tech: Optional[Dict],
 ) -> Tuple[str, int, str]:
     """
-    依 OI + RSI + 布林帶分類訊號與等級。
-    回傳 (signal_label, tier, rsi_desc)。
-    等級1 鑽石: OI>2.5% 且 (RSI>70 或 <30) 且 觸碰布林軌。
-    等級2 黃金: OI>1.5% 且 (RSI>60 或 <40)。
+    依 CoinGlass 創業版規則分級。
+    (A) 💎 鑽石：OI < -2% 且 (現價 > 上軌 或 RSI > 70) -> 摸頭做空。
+    (B) 🟡 黃金：OI > 2% 且 30 < RSI < 70 -> 順勢觀察。
     """
     oi = item.get("oiChange30m") or 0
     rsi = tech.get("rsi") if tech else None
@@ -1514,38 +1601,27 @@ def _classify_signal_and_tier(
     touch_lower = tech.get("touch_lower", False) if tech else False
     is_long = category in ("long_open", "long_close")
     is_short = category in ("short_open", "short_close")
-    abs_oi = abs(oi)
     rsi_desc = "無技術數據"
     if rsi is not None:
+        rsi_desc = f"RSI {rsi:.0f} (Coinglass)"
         if touch_upper:
-            rsi_desc = f"RSI {rsi:.0f} (觸碰上軌)"
+            rsi_desc = f"RSI {rsi:.0f} (Coinglass, 觸碰上軌)"
         elif touch_lower:
-            rsi_desc = f"RSI {rsi:.0f} (觸碰下軌)"
-        elif rsi >= 60:
-            rsi_desc = f"RSI {rsi:.0f} (偏多)"
-        elif rsi <= 40:
-            rsi_desc = f"RSI {rsi:.0f} (偏空)"
-        else:
-            rsi_desc = f"RSI {rsi:.0f} (動能強勢)"
+            rsi_desc = f"RSI {rsi:.0f} (Coinglass, 觸碰下軌)"
+
+    # (A) 鑽石：OI 異動 < -2% 且 (現價 > 上軌 或 RSI > 70) -> 主力出貨+過熱，摸頭做空
+    if oi < -2.0 and (touch_upper or (rsi is not None and rsi > 70)):
+        return ("💎 摸頭做空", 1, rsi_desc)
+    # (B) 黃金：OI > 2% 且 30 < RSI < 70 -> 資金進場未過熱，順勢觀察
+    if oi > 2.0 and rsi is not None and 30 < rsi < 70:
+        return ("🟡 順勢觀察", 2, rsi_desc)
+    # 其餘歸類為一般異動
     if rsi is not None:
-        if is_short and rsi < 20:
-            return ("⚠️ 風險過高(觀望)", 0, rsi_desc)
-        if is_long and rsi > 80:
-            return ("⚠️ 風險過高(觀望)", 0, rsi_desc)
-    if is_short and touch_upper and rsi is not None and rsi > 70:
-        tier = 1 if (abs_oi > 2.5 and (touch_upper or touch_lower)) else 2
-        return ("🛑 摸頭做空", tier, rsi_desc)
-    if is_long and touch_lower and rsi is not None and rsi < 30:
-        tier = 1 if (abs_oi > 2.5 and (touch_upper or touch_lower)) else 2
-        return ("🟢 抄底做多", tier, rsi_desc)
-    if is_long and (rsi is None or rsi < 70) and not touch_upper:
-        tier = 1 if (abs_oi > 2.5 and rsi is not None and (rsi > 70 or rsi < 30) and (touch_upper or touch_lower)) else (2 if (abs_oi > 1.5 and rsi is not None and (rsi > 60 or rsi < 40)) else 2)
-        return ("🚀 強勢追多", tier, rsi_desc)
-    if is_short and (rsi is None or rsi > 30) and not touch_lower:
-        tier = 1 if (abs_oi > 2.5 and rsi is not None and (rsi > 70 or rsi < 30) and (touch_upper or touch_lower)) else (2 if (abs_oi > 1.5 and rsi is not None and (rsi > 60 or rsi < 40)) else 2)
-        return ("📉 順勢追空", tier, rsi_desc)
-    tier = 1 if (abs_oi > 2.5 and rsi is not None and (rsi > 70 or rsi < 30) and (touch_upper or touch_lower)) else (2 if (abs_oi > 1.5 and rsi is not None and (rsi > 60 or rsi < 40)) else 2)
-    return ("📊 異動", tier, rsi_desc)
+        if rsi > 70 or touch_upper:
+            return ("📉 偏空過熱", 2, rsi_desc)
+        if rsi < 30 or touch_lower:
+            return ("📈 偏多超賣", 2, rsi_desc)
+    return ("📊 異動", 2, rsi_desc)
 
 
 def build_report_message_tiered(
@@ -1568,26 +1644,27 @@ def build_report_message_tiered(
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
+    def line_with_funding(x: Dict) -> str:
+        price_str = f"${x.get('current_price', 0):,.4g}" if x.get("current_price") is not None else "—"
+        oi_str = fmt(x.get("oiChange30m"))
+        funding = x.get("funding_rate")
+        fee = f"｜費率 {funding:.4%}" if funding is not None and isinstance(funding, (int, float)) else ""
+        return f"{x.get('signal_label', '')} *{x['symbol']}*｜價 {price_str}｜OI {oi_str}｜{x.get('rsi_desc', '')}{fee}"
+
     if tier1:
         lines.append("💎 *強烈反轉訊號 (High Priority)*")
         for x in tier1:
-            price_str = f"${x.get('current_price', 0):,.4g}" if x.get("current_price") is not None else "—"
-            oi_str = fmt(x.get("oiChange30m"))
-            lines.append(f"• {x.get('signal_label', '')} *{x['symbol']}*｜價 {price_str}｜OI {oi_str}｜{x.get('rsi_desc', '')}")
+            lines.append(line_with_funding(x))
         lines.append("")
     if tier2:
         lines.append("🟡 *異動觀察 (Watchlist)*")
         for x in tier2:
-            price_str = f"${x.get('current_price', 0):,.4g}" if x.get("current_price") is not None else "—"
-            oi_str = fmt(x.get("oiChange30m"))
-            lines.append(f"• {x.get('signal_label', '')} *{x['symbol']}*｜價 {price_str}｜OI {oi_str}｜{x.get('rsi_desc', '')}")
+            lines.append(line_with_funding(x))
         lines.append("")
     if risk:
         lines.append("⚠️ *風險過高(觀望)*")
         for x in risk:
-            price_str = f"${x.get('current_price', 0):,.4g}" if x.get("current_price") is not None else "—"
-            oi_str = fmt(x.get("oiChange30m"))
-            lines.append(f"• *{x['symbol']}*｜價 {price_str}｜OI {oi_str}｜{x.get('rsi_desc', '')}")
+            lines.append(line_with_funding(x))
         lines.append("")
 
     if not tier1 and not tier2 and not risk:
@@ -1820,20 +1897,22 @@ def fetch_position_change():
     top_short_open = short_open[:3]
     top_short_close = short_close[:3]
 
-    # 對最終標的做技術分析並分級（僅對已篩選出的 top 名單請求 K 線）
+    # 對最終標的呼叫 CoinGlass RSI/布林帶（僅有有效數據才列入推播，無效數據刪掉）
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
         sym = item.get("symbol", "")
         tech = calculate_technicals(sym)
+        if tech is None:
+            continue
         signal_label, tier, rsi_desc = _classify_signal_and_tier(item, cat, tech)
-        current_price = tech.get("current_price") if tech else None
         all_top.append({
             **item,
             "category": cat,
-            "current_price": current_price,
+            "current_price": tech.get("current_price"),
             "signal_label": signal_label,
             "tier": tier,
             "rsi_desc": rsi_desc,
+            "funding_rate": tech.get("funding_rate"),
         })
     if all_top:
         msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
