@@ -1504,21 +1504,43 @@ def _fetch_coinglass_boll(symbol: str) -> Optional[Dict]:
 def _fetch_funding_rate_map() -> Dict[str, float]:
     """
     一次取得 CoinGlass 全量資金費率（與排行榜同 API、同結構），回傳 symbol(base) -> 費率。
-    優先 Binance，無則 BingX。
+    優先 Binance，無則 BingX。與 fetch_funding_fortune_list 同 URL、同解析邏輯。
     """
     out: Dict[str, float] = {}
     url = f"{CG_API_BASE}/api/futures/funding-rate/exchange-list"
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    for attempt in range(2):
+        try:
+            r = requests.get(url, headers=headers, timeout=12)
+            if r.status_code == 429:
+                logger.warning("資金費率 API 429 Too Many Requests，2 秒後重試一次")
+                time.sleep(2)
+                continue
+            if r.status_code != 200:
+                if len(out) == 0:
+                    logger.warning(f"資金費率 API status={r.status_code} body={r.text[:200]}")
+                return out
+            data = r.json()
+            # 與排行榜一致：接受 code 為 0 或 '0'
+            if data.get("code") not in (0, "0", 200, "200", None):
+                if len(out) == 0:
+                    logger.warning(f"資金費率 API code={data.get('code')} msg={data.get('msg')} body={r.text[:200]}")
+                return out
+            lst = data.get("data", [])
+            if not isinstance(lst, list):
+                if len(out) == 0:
+                    logger.warning(f"資金費率 API data 非列表 type={type(lst)}")
+                return out
+            break
+        except Exception as e:
+            if attempt == 0:
+                logger.warning(f"資金費率 API 請求異常: {e}，重試一次")
+                time.sleep(1)
+            else:
+                return out
+    else:
+        return out
     try:
-        r = requests.get(url, headers=headers, timeout=12)
-        if r.status_code != 200:
-            return out
-        data = r.json()
-        if data.get("code") not in (0, "0", 200, "200", None):
-            return out
-        lst = data.get("data", [])
-        if not isinstance(lst, list):
-            return out
         for item in lst:
             if not isinstance(item, dict):
                 continue
@@ -1546,8 +1568,11 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
             rate = rate_binance if rate_binance is not None else rate_bingx
             if rate is not None:
                 out[base] = rate
+        if len(out) == 0 and lst:
+            logger.warning(f"資金費率解析後為 0 筆，請檢查 API 回傳格式。首筆 keys={list(lst[0].keys()) if lst and isinstance(lst[0], dict) else 'n/a'}")
         return out
-    except Exception:
+    except Exception as e:
+        logger.warning(f"資金費率解析異常: {e}")
         return out
 
 
@@ -1633,14 +1658,16 @@ def _classify_signal_and_tier(
     依 CoinGlass 創業版規則分級。
     (A) 💎 鑽石：OI < -2% 且 (現價 > 上軌 或 RSI > 70) -> 摸頭做空。
     (B) 🟡 黃金：OI > 2% 且 30 < RSI < 70 -> 順勢觀察。
+    當 tech 為 None（API 失敗）時，依 category 回傳預設標籤，仍顯示在分級版。
     """
     oi = item.get("oiChange30m") or 0
     rsi = tech.get("rsi") if tech else None
     touch_upper = tech.get("touch_upper", False) if tech else False
     touch_lower = tech.get("touch_lower", False) if tech else False
-    is_long = category in ("long_open", "long_close")
-    is_short = category in ("short_open", "short_close")
     rsi_desc = "無技術數據"
+    if tech is None:
+        label_by_cat = {"long_open": "📈 多方開倉", "long_close": "📉 多方平倉", "short_open": "📉 空方開倉", "short_close": "📈 空方平倉"}
+        return (label_by_cat.get(category, "📊 異動"), 2, rsi_desc)
     if rsi is not None:
         rsi_desc = f"RSI {rsi:.0f}"
         if touch_upper:
@@ -1942,28 +1969,23 @@ def fetch_position_change():
     # 一次取得全量資金費率（與排行榜同 API），供後續查表
     funding_map = _fetch_funding_rate_map()
     logger.info(f"資金費率表已取得 {len(funding_map)} 個幣種")
-    # 對最終標的呼叫 CoinGlass RSI/布林帶（僅有有效數據才列入推播，無效數據刪掉）
+    # 一律使用分級版：對每個 top 標的取 RSI/布林帶，失敗時仍列入並顯示「無技術數據」
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
         sym = item.get("symbol", "")
         tech = calculate_technicals(sym)
-        if tech is None:
-            continue
         signal_label, tier, rsi_desc = _classify_signal_and_tier(item, cat, tech)
         funding_rate = funding_map.get(sym) or funding_map.get(sym.upper())
         all_top.append({
             **item,
             "category": cat,
-            "current_price": tech.get("current_price"),
+            "current_price": tech.get("current_price") if tech else None,
             "signal_label": signal_label,
             "tier": tier,
             "rsi_desc": rsi_desc,
             "funding_rate": funding_rate,
         })
-    if all_top:
-        msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
-    else:
-        msg = build_report_message(top_long_open, top_long_close, top_short_open, top_short_close, processed_count, oi_success_count)
+    msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
     send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
     logger.info("持倉變化篩選執行完成並已推播")
 
