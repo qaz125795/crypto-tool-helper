@@ -10,11 +10,12 @@ import json
 import time
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import pandas as pd
 
 # 台灣台北時區（UTC+8）
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -1428,6 +1429,178 @@ def extract_price_change_30m(coin: Dict) -> float:
     return 0.0
 
 
+def calculate_technicals(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    使用 BingX 30m K 線計算 RSI(14) 與布林帶(20,2)。
+    回傳: rsi, touch_upper, touch_lower, current_price；失敗回傳 None。
+    """
+    clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    sym = f"{clean}-USDT"
+    url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
+    params = {"symbol": sym, "interval": "30m", "limit": 35}
+    try:
+        r = requests.get(url, params=params, timeout=5)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if data.get("code") != 0:
+            return None
+        rows = data.get("data", [])
+        if not isinstance(rows, list) or len(rows) < 25:
+            return None
+        closes = []
+        for bar in rows:
+            c = bar.get("close") if isinstance(bar, dict) else (bar[4] if isinstance(bar, (list, tuple)) and len(bar) > 4 else None)
+            if c is not None:
+                try:
+                    closes.append(float(c))
+                except (TypeError, ValueError):
+                    pass
+        if len(closes) < 25:
+            return None
+        df = pd.DataFrame({"close": closes})
+        # RSI(14)
+        delta = df["close"].diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        last_ag = avg_gain.iloc[-1]
+        last_al = avg_loss.iloc[-1]
+        if last_al == 0 or pd.isna(last_al):
+            rsi = 100.0 if last_ag and last_ag > 0 else 50.0
+        else:
+            rs = last_ag / last_al
+            rsi = 100.0 if pd.isna(rs) or rs == float("inf") else float(100 - (100 / (1 + rs)))
+        # BB(20, 2)
+        mid = df["close"].rolling(20).mean()
+        std = df["close"].rolling(20).std()
+        upper = mid + 2 * std
+        lower = mid - 2 * std
+        last_close = float(df["close"].iloc[-1])
+        last_upper = upper.iloc[-1]
+        last_lower = lower.iloc[-1]
+        if pd.isna(last_upper):
+            last_upper = last_close
+        if pd.isna(last_lower):
+            last_lower = last_close
+        touch_upper = last_close >= last_upper if last_upper and not pd.isna(last_upper) else False
+        touch_lower = last_close <= last_lower if last_lower and not pd.isna(last_lower) else False
+        return {
+            "rsi": float(rsi) if rsi is not None and not pd.isna(rsi) else None,
+            "touch_upper": touch_upper,
+            "touch_lower": touch_lower,
+            "current_price": last_close,
+        }
+    except Exception as e:
+        logger.debug(f"calculate_technicals {symbol}: {e}")
+        return None
+
+
+def _classify_signal_and_tier(
+    item: Dict,
+    category: str,
+    tech: Optional[Dict],
+) -> Tuple[str, int, str]:
+    """
+    依 OI + RSI + 布林帶分類訊號與等級。
+    回傳 (signal_label, tier, rsi_desc)。
+    等級1 鑽石: OI>2.5% 且 (RSI>70 或 <30) 且 觸碰布林軌。
+    等級2 黃金: OI>1.5% 且 (RSI>60 或 <40)。
+    """
+    oi = item.get("oiChange30m") or 0
+    rsi = tech.get("rsi") if tech else None
+    touch_upper = tech.get("touch_upper", False) if tech else False
+    touch_lower = tech.get("touch_lower", False) if tech else False
+    is_long = category in ("long_open", "long_close")
+    is_short = category in ("short_open", "short_close")
+    abs_oi = abs(oi)
+    rsi_desc = "無技術數據"
+    if rsi is not None:
+        if touch_upper:
+            rsi_desc = f"RSI {rsi:.0f} (觸碰上軌)"
+        elif touch_lower:
+            rsi_desc = f"RSI {rsi:.0f} (觸碰下軌)"
+        elif rsi >= 60:
+            rsi_desc = f"RSI {rsi:.0f} (偏多)"
+        elif rsi <= 40:
+            rsi_desc = f"RSI {rsi:.0f} (偏空)"
+        else:
+            rsi_desc = f"RSI {rsi:.0f} (動能強勢)"
+    if rsi is not None:
+        if is_short and rsi < 20:
+            return ("⚠️ 風險過高(觀望)", 0, rsi_desc)
+        if is_long and rsi > 80:
+            return ("⚠️ 風險過高(觀望)", 0, rsi_desc)
+    if is_short and touch_upper and rsi is not None and rsi > 70:
+        tier = 1 if (abs_oi > 2.5 and (touch_upper or touch_lower)) else 2
+        return ("🛑 摸頭做空", tier, rsi_desc)
+    if is_long and touch_lower and rsi is not None and rsi < 30:
+        tier = 1 if (abs_oi > 2.5 and (touch_upper or touch_lower)) else 2
+        return ("🟢 抄底做多", tier, rsi_desc)
+    if is_long and (rsi is None or rsi < 70) and not touch_upper:
+        tier = 1 if (abs_oi > 2.5 and rsi is not None and (rsi > 70 or rsi < 30) and (touch_upper or touch_lower)) else (2 if (abs_oi > 1.5 and rsi is not None and (rsi > 60 or rsi < 40)) else 2)
+        return ("🚀 強勢追多", tier, rsi_desc)
+    if is_short and (rsi is None or rsi > 30) and not touch_lower:
+        tier = 1 if (abs_oi > 2.5 and rsi is not None and (rsi > 70 or rsi < 30) and (touch_upper or touch_lower)) else (2 if (abs_oi > 1.5 and rsi is not None and (rsi > 60 or rsi < 40)) else 2)
+        return ("📉 順勢追空", tier, rsi_desc)
+    tier = 1 if (abs_oi > 2.5 and rsi is not None and (rsi > 70 or rsi < 30) and (touch_upper or touch_lower)) else (2 if (abs_oi > 1.5 and rsi is not None and (rsi > 60 or rsi < 40)) else 2)
+    return ("📊 異動", tier, rsi_desc)
+
+
+def build_report_message_tiered(
+    enriched_items: List[Dict],
+    processed_count: int = 0,
+    oi_success_count: int = 0,
+) -> str:
+    """依等級 1（鑽石）與等級 2（黃金）組裝推播內容。"""
+    def fmt(num):
+        if num is None or (isinstance(num, float) and (num != num)):
+            return "0.00%"
+        return f"{'+' if num >= 0 else ''}{num:.2f}%"
+
+    tier1 = [x for x in enriched_items if x.get("tier") == 1]
+    tier2 = [x for x in enriched_items if x.get("tier") == 2]
+    risk = [x for x in enriched_items if x.get("tier") == 0]
+
+    lines = []
+    lines.append("💰 *【傑克短線持倉異動排行榜】(30分)*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    if tier1:
+        lines.append("💎 *強烈反轉訊號 (High Priority)*")
+        for x in tier1:
+            price_str = f"${x.get('current_price', 0):,.4g}" if x.get("current_price") is not None else "—"
+            oi_str = fmt(x.get("oiChange30m"))
+            lines.append(f"• {x.get('signal_label', '')} *{x['symbol']}*｜價 {price_str}｜OI {oi_str}｜{x.get('rsi_desc', '')}")
+        lines.append("")
+    if tier2:
+        lines.append("🟡 *異動觀察 (Watchlist)*")
+        for x in tier2:
+            price_str = f"${x.get('current_price', 0):,.4g}" if x.get("current_price") is not None else "—"
+            oi_str = fmt(x.get("oiChange30m"))
+            lines.append(f"• {x.get('signal_label', '')} *{x['symbol']}*｜價 {price_str}｜OI {oi_str}｜{x.get('rsi_desc', '')}")
+        lines.append("")
+    if risk:
+        lines.append("⚠️ *風險過高(觀望)*")
+        for x in risk:
+            price_str = f"${x.get('current_price', 0):,.4g}" if x.get("current_price") is not None else "—"
+            oi_str = fmt(x.get("oiChange30m"))
+            lines.append(f"• *{x['symbol']}*｜價 {price_str}｜OI {oi_str}｜{x.get('rsi_desc', '')}")
+        lines.append("")
+
+    if not tier1 and not tier2 and not risk:
+        lines.append("本次無符合分級條件的標的，以下為原始分類摘要。")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("💡 *【換位思考主力動機】*")
+    lines.append("請先判斷 *30分K價格走勢* 再搭配 OI 與 RSI／布林帶。")
+    lines.append("💎 鑽石＝高勝率摸頭/抄底｜🟡 黃金＝一般異動觀察")
+    return "\n".join(lines)
+
+
 def build_report_message(top_long_open: List, top_long_close: List, top_short_open: List, top_short_close: List, processed_count: int = 0, oi_success_count: int = 0) -> str:
     """組合推播文字（30m 版：價格與持倉皆為 30 分鐘）"""
     lines = []
@@ -1560,9 +1733,8 @@ def fetch_position_change():
     
     logger.info(f"過濾後剩餘 {len(target_symbols_data)} 個合約幣種")
     
-    # 【智慧過濾 Smart Filter - 30m 版】
-    # 價格 30m（BingX）+ OI 30m（CoinGlass 聚合，顆粒度 >= 30m）。
-    PRICE_GATEKEEPER = 0.8  # 30m 價格波動門檻 %
+    # 【智慧過濾 Smart Filter - 30m 版】放寬初選以確保足夠候選進入技術分析。
+    PRICE_GATEKEEPER = 1.2  # 30m 價格波動門檻 %
     OI_THRESHOLD = 1.5      # 30m 持倉異動門檻 %
     active_symbols = []
     for coin in target_symbols_data:
@@ -1647,11 +1819,27 @@ def fetch_position_change():
     top_long_close = long_close[:3]
     top_short_open = short_open[:3]
     top_short_close = short_close[:3]
-    
-    # 確保每次都會推播（即使沒有異常，也要推播報告）
-    msg = build_report_message(top_long_open, top_long_close, top_short_open, top_short_close, processed_count, oi_success_count)
+
+    # 對最終標的做技術分析並分級（僅對已篩選出的 top 名單請求 K 線）
+    all_top = []
+    for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
+        sym = item.get("symbol", "")
+        tech = calculate_technicals(sym)
+        signal_label, tier, rsi_desc = _classify_signal_and_tier(item, cat, tech)
+        current_price = tech.get("current_price") if tech else None
+        all_top.append({
+            **item,
+            "category": cat,
+            "current_price": current_price,
+            "signal_label": signal_label,
+            "tier": tier,
+            "rsi_desc": rsi_desc,
+        })
+    if all_top:
+        msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
+    else:
+        msg = build_report_message(top_long_open, top_long_close, top_short_open, top_short_close, processed_count, oi_success_count)
     send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
-    
     logger.info("持倉變化篩選執行完成並已推播")
 
 
