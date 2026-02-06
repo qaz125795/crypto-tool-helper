@@ -1,12 +1,12 @@
-name: 持倉變化篩選（15分鐘循環）
+name: 持倉變化篩選（30分鐘循環）
 
-# 重要：GitHub Actions 的 schedule 對「每 15 分鐘」常會延遲（30 分鐘～數小時才觸發一次）。
-# 若要「真正每 15 分鐘」推播，請用外部定時服務呼叫 workflow_dispatch，見：外部定時觸發推播_設定步驟.md
+# 數據為 30m 顆粒度（價格 + OI），觸發器改為每 30 分鐘與數據週期一致。
+# 若需更頻繁可改 cron 或使用外部定時呼叫 workflow_dispatch，見：外部定時觸發推播_設定步驟.md
 
 on:
   schedule:
-    # 每 15 分鐘（UTC）：00, 15, 30, 45 分。實際觸發時間由 GitHub 排程，可能延遲。
-    - cron: '0,15,30,45 * * * *'
+    # 每 30 分鐘（UTC）：00, 30 分
+    - cron: '0,30 * * * *'
   workflow_dispatch:
 
 # 不取消進行中的任務：讓每次觸發都能跑完並推播，避免延遲或漏推
@@ -37,7 +37,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run position change task (15min cycle)
+      - name: Run position change task (30min cycle)
         env:
           CG_API_KEY: ${{ secrets.CG_API_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
