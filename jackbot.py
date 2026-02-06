@@ -1433,13 +1433,14 @@ def extract_price_change_30m(coin: Dict) -> float:
 
 
 def _fetch_coinglass_rsi(symbol: str) -> Optional[Dict]:
-    """CoinGlass V4 RSI：優先 Binance，失敗則 fallback BingX（僅 BingX 上架幣種如 KABUTO）。"""
+    """CoinGlass V4 RSI：symbol 用交易對 BTCUSDT（與官方 API 一致），優先 Binance 再 fallback BingX。"""
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    symbol_pair = base + "USDT"
     url = f"{CG_API_BASE}/api/futures/indicators/rsi"
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
     last_error = None
     for exchange in ["Binance", "BingX"]:
-        params = {"exchange": exchange, "interval": "30m", "symbol": base}
+        params = {"exchange": exchange, "interval": "30m", "symbol": symbol_pair}
         try:
             r = requests.get(url, params=params, headers=headers, timeout=8)
             time.sleep(0.2)
@@ -1473,13 +1474,14 @@ def _fetch_coinglass_rsi(symbol: str) -> Optional[Dict]:
 
 
 def _fetch_coinglass_boll(symbol: str) -> Optional[Dict]:
-    """CoinGlass V4 布林帶：優先 Binance，失敗則 fallback BingX。"""
+    """CoinGlass V4 布林帶：symbol 用交易對 BTCUSDT（與官方 API 一致），優先 Binance 再 fallback BingX。"""
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    symbol_pair = base + "USDT"
     url = f"{CG_API_BASE}/api/futures/indicators/boll"
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
     last_error = None
     for exchange in ["Binance", "BingX"]:
-        params = {"exchange": exchange, "interval": "30m", "symbol": base}
+        params = {"exchange": exchange, "interval": "30m", "symbol": symbol_pair}
         try:
             r = requests.get(url, params=params, headers=headers, timeout=8)
             time.sleep(0.2)
@@ -1513,10 +1515,11 @@ def _fetch_coinglass_boll(symbol: str) -> Optional[Dict]:
 
 
 def _fetch_coinglass_funding(symbol: str) -> Optional[float]:
-    """CoinGlass 資金費率：exchange-list 取該幣種 Binance 費率。"""
+    """CoinGlass 資金費率：exchange-list，symbol 用交易對 BTCUSDT 與 API 一致。"""
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    symbol_pair = base + "USDT"
     url = f"{CG_API_BASE}/api/futures/funding-rate/exchange-list"
-    params = {"symbol": base}
+    params = {"symbol": symbol_pair}
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
     try:
         r = requests.get(url, params=params, headers=headers, timeout=6)
@@ -1529,17 +1532,25 @@ def _fetch_coinglass_funding(symbol: str) -> Optional[float]:
         lst = data.get("data", [])
         if not isinstance(lst, list):
             return None
+        rate_binance = None
+        rate_bingx = None
         for item in lst:
             if not isinstance(item, dict):
                 continue
             margin_list = item.get("stablecoin_margin_list") or item.get("margin_list") or []
             for m in margin_list:
-                if m.get("exchange") == "Binance" and m.get("funding_rate") is not None:
-                    try:
-                        return float(m.get("funding_rate", 0))
-                    except (TypeError, ValueError):
-                        pass
-        return None
+                ex = m.get("exchange")
+                if ex not in ("Binance", "BingX"):
+                    continue
+                try:
+                    v = float(m.get("funding_rate", 0))
+                except (TypeError, ValueError):
+                    continue
+                if ex == "Binance":
+                    rate_binance = v
+                else:
+                    rate_bingx = v
+        return rate_binance if rate_binance is not None else rate_bingx
     except Exception:
         return None
 
