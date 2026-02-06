@@ -1600,59 +1600,65 @@ def _bbands(close: pd.Series, length: int = 20, std_dev: float = 2.0) -> Tuple[p
 def _fetch_bingx_klines_and_calc(symbol: str) -> Optional[Dict[str, Any]]:
     """
     本地計算 Fallback：用 BingX 30m K 線 + 純 pandas 算 RSI(14)、布林帶(20,2)。
-    回傳格式與 CoinGlass 統一：rsi, ub_value, lb_value, current_price, touch_upper, touch_lower, source='BingX'。
+    新增功能：自動嘗試 '1000' 前綴，解決部分 Meme 幣抓不到數據的問題。
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-    sym_param = f"{clean}-USDT"
+    try_symbols = [f"{clean}-USDT", f"1000{clean}-USDT"]
     url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
-    params = {"symbol": sym_param, "interval": "30m", "limit": 50}
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
-            return None
-        j = r.json()
-        if j.get("code") != 0:
-            return None
-        raw = j.get("data", [])
-        if not isinstance(raw, list) or len(raw) < 30:
-            return None
-        closes = []
-        for row in raw:
-            if isinstance(row, dict):
-                c = row.get("close") or row.get("c")
-            elif isinstance(row, (list, tuple)) and len(row) >= 5:
-                c = row[4]
-            else:
-                continue
-            try:
-                closes.append(float(c))
-            except (TypeError, ValueError):
-                continue
-        if len(closes) < 20:
-            return None
-        series = pd.Series(closes)
-        rsi_series = _rsi(series, period=14)
-        if rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
-            return None
-        rsi_val = float(rsi_series.iloc[-1])
-        upper_bb, _, lower_bb = _bbands(series, length=20, std_dev=2.0)
-        ub_value = float(upper_bb.iloc[-1]) if not pd.isna(upper_bb.iloc[-1]) else None
-        lb_value = float(lower_bb.iloc[-1]) if not pd.isna(lower_bb.iloc[-1]) else None
-        current_price = float(closes[-1]) if closes else None
-        touch_upper = current_price is not None and ub_value is not None and current_price >= ub_value
-        touch_lower = current_price is not None and lb_value is not None and current_price <= lb_value
-        return {
-            "rsi": rsi_val,
-            "touch_upper": touch_upper,
-            "touch_lower": touch_lower,
-            "current_price": current_price,
-            "ub_value": ub_value,
-            "lb_value": lb_value,
-            "source": "BingX",
-        }
-    except Exception as e:
-        logger.debug(f"BingX 本地計算 {clean}: {e}")
+    raw = []
+    found_symbol = None
+    for sym_param in try_symbols:
+        params = {"symbol": sym_param, "interval": "30m", "limit": 50}
+        try:
+            r = requests.get(url, params=params, timeout=5)
+            if r.status_code == 200:
+                j = r.json()
+                if j.get("code") == 0:
+                    data = j.get("data", [])
+                    if isinstance(data, list) and len(data) >= 30:
+                        raw = data
+                        found_symbol = sym_param
+                        break
+        except Exception:
+            continue
+    if not raw:
+        logger.warning(f"BingX 本地計算失敗 {clean}: 嘗試了 {try_symbols} 皆無數據")
         return None
+    closes = []
+    for row in raw:
+        if isinstance(row, dict):
+            c = row.get("close") or row.get("c")
+        elif isinstance(row, (list, tuple)) and len(row) >= 5:
+            c = row[4]
+        else:
+            continue
+        try:
+            closes.append(float(c))
+        except (TypeError, ValueError):
+            continue
+    if len(closes) < 20:
+        return None
+    series = pd.Series(closes)
+    rsi_series = _rsi(series, period=14)
+    if rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
+        return None
+    rsi_val = float(rsi_series.iloc[-1])
+    upper_bb, _, lower_bb = _bbands(series, length=20, std_dev=2.0)
+    ub_value = float(upper_bb.iloc[-1]) if not pd.isna(upper_bb.iloc[-1]) else None
+    lb_value = float(lower_bb.iloc[-1]) if not pd.isna(lower_bb.iloc[-1]) else None
+    current_price = float(closes[-1]) if closes else None
+    touch_upper = current_price is not None and ub_value is not None and current_price >= ub_value
+    touch_lower = current_price is not None and lb_value is not None and current_price <= lb_value
+    return {
+        "rsi": rsi_val,
+        "touch_upper": touch_upper,
+        "touch_lower": touch_lower,
+        "current_price": current_price,
+        "ub_value": ub_value,
+        "lb_value": lb_value,
+        "source": "BingX",
+        "real_symbol": found_symbol,
+    }
 
 
 def calculate_technicals(symbol: str) -> Optional[Dict[str, Any]]:
@@ -1737,46 +1743,61 @@ def _classify_signal_and_tier(
     item: Dict,
     category: str,
     tech: Optional[Dict],
+    funding_rate: Optional[float] = None,
 ) -> Tuple[str, int, str]:
     """
-    依 CoinGlass 創業版規則分級。
-    (A) 💎 鑽石：OI < -2% 且 (現價 > 上軌 或 RSI > 70) -> 摸頭做空。
-    (B) 🟡 黃金：OI > 2% 且 30 < RSI < 70 -> 順勢觀察。
-    當 tech 為 None（API 失敗）時，依 category 回傳預設標籤，仍顯示在分級版。
+    分級邏輯 (增強版)：
+    1. 正常情況：用 RSI + 布林帶判斷。
+    2. 缺數據情況：如果 RSI 缺失，但資金費率極端 (>0.05% 或 <-0.05%)，視為強烈訊號。
     """
     oi = item.get("oiChange30m") or 0
     rsi = tech.get("rsi") if tech else None
     touch_upper = tech.get("touch_upper", False) if tech else False
     touch_lower = tech.get("touch_lower", False) if tech else False
+    EXTREME_FUNDING = 0.0005  # 0.05%
     rsi_desc = "RSI —"
     if tech is None:
         label_by_cat = {"long_open": "📈 多方開倉", "long_close": "📉 多方平倉", "short_open": "📉 空方開倉", "short_close": "📈 空方平倉"}
+        if funding_rate is not None:
+            if funding_rate > EXTREME_FUNDING:
+                rsi_desc = "費率過熱🔥"
+            elif funding_rate < -EXTREME_FUNDING:
+                rsi_desc = "費率過冷❄️"
         return (label_by_cat.get(category, "📊 異動"), 2, rsi_desc)
     if rsi is not None:
-        overbought = rsi > 70
-        oversold = rsi < 30
-        if overbought and touch_upper:
+        if rsi > 70:
             rsi_desc = f"RSI {rsi:.0f}(超買)"
-        elif oversold and touch_lower:
+        elif rsi < 30:
             rsi_desc = f"RSI {rsi:.0f}(超賣)"
-        elif overbought:
-            rsi_desc = f"RSI {rsi:.0f}(超買)"
-        elif oversold:
-            rsi_desc = f"RSI {rsi:.0f}(超賣)"
-        elif touch_upper:
-            rsi_desc = f"RSI {rsi:.0f} 觸碰上軌"
-        elif touch_lower:
-            rsi_desc = f"RSI {rsi:.0f} 觸碰下軌"
         else:
             rsi_desc = f"RSI {rsi:.0f}"
-
-    # (A) 鑽石：OI 異動 < -2% 且 (現價 > 上軌 或 RSI > 70) -> 主力出貨+過熱，摸頭做空
-    if oi < -2.0 and (touch_upper or (rsi is not None and rsi > 70)):
+        if touch_upper:
+            rsi_desc += " 觸頂"
+        if touch_lower:
+            rsi_desc += " 觸底"
+    elif funding_rate is not None:
+        if funding_rate > EXTREME_FUNDING:
+            rsi_desc = "費率過熱🔥"
+        elif funding_rate < -EXTREME_FUNDING:
+            rsi_desc = "費率過冷❄️"
+    # (A) 鑽石訊號
+    bearish_cond = touch_upper or (rsi is not None and rsi > 70)
+    if rsi is None and funding_rate is not None and funding_rate > EXTREME_FUNDING:
+        bearish_cond = True
+    if oi < -2.0 and bearish_cond:
         return ("💎 摸頭做空", 1, rsi_desc)
-    # (B) 黃金：OI > 2% 且 30 < RSI < 70 -> 資金進場未過熱，順勢觀察
-    if oi > 2.0 and rsi is not None and 30 < rsi < 70:
-        return ("🟡 順勢觀察", 2, rsi_desc)
-    # 其餘歸類為一般異動
+    bullish_cond = touch_lower or (rsi is not None and rsi < 30)
+    if rsi is None and funding_rate is not None and funding_rate < -EXTREME_FUNDING:
+        bullish_cond = True
+    if oi > 2.0 and funding_rate is not None and funding_rate < -0.001:
+        return ("💎 潛在嘎空", 1, rsi_desc)
+    if oi < -2.0 and bullish_cond:
+        return ("💎 抄底做多", 1, rsi_desc)
+    # (B) 黃金訊號
+    if oi > 2.0:
+        if rsi is None or (30 < rsi < 70):
+            return ("🟡 順勢觀察", 2, rsi_desc)
+    # (C) 其他
     if rsi is not None:
         if rsi > 70 or touch_upper:
             return ("📉 偏空過熱", 2, rsi_desc)
@@ -2073,13 +2094,13 @@ def fetch_position_change():
     # 一次取得全量資金費率（與排行榜同 API），供後續查表
     funding_map = _fetch_funding_rate_map()
     logger.info(f"資金費率表已取得 {len(funding_map)} 個幣種")
-    # 一律使用分級版：對每個 top 標的取 RSI/布林帶，失敗時仍列入並顯示「無技術數據」
+    # 一律使用分級版：對每個 top 標的取 RSI/布林帶，並傳入 funding_rate 供分類判斷
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
         sym = item.get("symbol", "")
         tech = calculate_technicals(sym)
-        signal_label, tier, rsi_desc = _classify_signal_and_tier(item, cat, tech)
         funding_rate = funding_map.get(sym) or funding_map.get(sym.upper())
+        signal_label, tier, rsi_desc = _classify_signal_and_tier(item, cat, tech, funding_rate)
         all_top.append({
             **item,
             "category": cat,
