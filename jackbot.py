@@ -2174,8 +2174,11 @@ def fetch_position_change():
         f"🔍 智慧過濾: 從 {len(target_symbols_data)} 個幣種中篩選出 {len(active_symbols)} 個活躍標的 "
         f"(價格 30m >= {PRICE_GATEKEEPER}%) 進行 30m OI 檢查..."
     )
-    
-    target_symbols = active_symbols
+    # 為在 16 分鐘內完成，OI 階段僅處理前 320 個（約 8 分鐘內跑完）
+    MAX_OI_SYMBOLS = 320
+    target_symbols = active_symbols[:MAX_OI_SYMBOLS]
+    if len(active_symbols) > MAX_OI_SYMBOLS:
+        logger.info(f"活躍標的共 {len(active_symbols)} 個，本輪僅處理前 {MAX_OI_SYMBOLS} 個以確保準時推播")
     
     long_open = []
     long_close = []
