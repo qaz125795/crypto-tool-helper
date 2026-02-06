@@ -16,7 +16,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 
 # 台灣台北時區（UTC+8）
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -1577,9 +1577,29 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
         return out
 
 
+def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    """RSI(period)，純 pandas 實作，與常見交易所一致。"""
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1.0 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def _bbands(close: pd.Series, length: int = 20, std_dev: float = 2.0) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """布林帶：middle=SMA(close), upper=middle+std*std(close), lower=middle-std*std(close)。回傳 (upper, middle, lower)。"""
+    middle = close.rolling(window=length).mean()
+    std = close.rolling(window=length).std()
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+    return upper, middle, lower
+
+
 def _fetch_bingx_klines_and_calc(symbol: str) -> Optional[Dict[str, Any]]:
     """
-    本地計算 Fallback：用 BingX 30m K 線 + pandas_ta 算 RSI(14)、布林帶(20,2)。
+    本地計算 Fallback：用 BingX 30m K 線 + 純 pandas 算 RSI(14)、布林帶(20,2)。
     回傳格式與 CoinGlass 統一：rsi, ub_value, lb_value, current_price, touch_upper, touch_lower, source='BingX'。
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
@@ -1610,19 +1630,14 @@ def _fetch_bingx_klines_and_calc(symbol: str) -> Optional[Dict[str, Any]]:
                 continue
         if len(closes) < 20:
             return None
-        df = pd.DataFrame({"close": closes})
-        rsi_series = ta.rsi(df["close"], length=14)
-        if rsi_series is None or rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
+        series = pd.Series(closes)
+        rsi_series = _rsi(series, period=14)
+        if rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
             return None
         rsi_val = float(rsi_series.iloc[-1])
-        bb = ta.bbands(df["close"], length=20, std=2)
-        if bb is None or bb.empty:
-            ub_value = lb_value = None
-        else:
-            ub_col = [c for c in bb.columns if "BBU" in c or "upper" in c.lower()]
-            lb_col = [c for c in bb.columns if "BBL" in c or "lower" in c.lower()]
-            ub_value = float(bb[ub_col[0]].iloc[-1]) if ub_col and not pd.isna(bb[ub_col[0]].iloc[-1]) else None
-            lb_value = float(bb[lb_col[0]].iloc[-1]) if lb_col and not pd.isna(bb[lb_col[0]].iloc[-1]) else None
+        upper_bb, _, lower_bb = _bbands(series, length=20, std_dev=2.0)
+        ub_value = float(upper_bb.iloc[-1]) if not pd.isna(upper_bb.iloc[-1]) else None
+        lb_value = float(lower_bb.iloc[-1]) if not pd.isna(lower_bb.iloc[-1]) else None
         current_price = float(closes[-1]) if closes else None
         touch_upper = current_price is not None and ub_value is not None and current_price >= ub_value
         touch_lower = current_price is not None and lb_value is not None and current_price <= lb_value
