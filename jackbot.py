@@ -1229,16 +1229,15 @@ def fetch_coins_price_change() -> List[Dict]:
         return _fetch_coins_price_change_fallback(supported_coins)
 
 
-def fetch_price_change_15m_bingx(symbol: str) -> Optional[float]:
+def fetch_price_change_30m_bingx(symbol: str) -> Optional[float]:
     """
-    【BingX 官方數據源】
-    直接從 BingX 公開 API 獲取 15 分鐘 K 線數據。
-    優點：幣種完全對應（含獨家幣）、無須 API Key、免費且額度高（500 次/10 秒）。
+    【BingX 官方數據源】30 分鐘 K 線漲跌幅。
+    與 CoinGlass 初創版 OI 顆粒度 >= 30m 一致，推播統一為 30m 版本。
     """
     clean_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     sym_formatted = f"{clean_symbol}-USDT"
     url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
-    params = {"symbol": sym_formatted, "interval": "15m", "limit": 3}
+    params = {"symbol": sym_formatted, "interval": "30m", "limit": 3}
     try:
         response = requests.get(url, params=params, timeout=5)
         if response.status_code != 200:
@@ -1251,7 +1250,7 @@ def fetch_price_change_15m_bingx(symbol: str) -> Optional[float]:
             return None
         # 假設 data 時間正序：data[-1] 為最新 K，data[-2] 為上一根
         latest_k = data[-1]
-        # 本根 15m K 線：open=15 分鐘前價格，close=當前價格 → 漲跌幅 = (close - open) / open
+        # 本根 30m K 線：open=30 分鐘前價格，close=當前價格 → 漲跌幅 = (close - open) / open
         current_price = float(latest_k.get("close") or 0)
         open_price_15m_ago = float(latest_k.get("open") or 0)
         if open_price_15m_ago == 0:
@@ -1263,14 +1262,14 @@ def fetch_price_change_15m_bingx(symbol: str) -> Optional[float]:
 
 
 def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: int = 99999) -> List[Dict]:
-    """初創版 Fallback：使用 BingX 官方 API 獲取 15m 漲跌幅，與交易平台一致且無須 API Key。"""
+    """初創版 Fallback：使用 BingX 官方 API 獲取 30m 漲跌幅（與 OI 顆粒度 >= 30m 一致）。"""
     symbols = list(supported_coins)[:max_symbols]
     out = []
-    logger.info(f"正在使用 BingX 官方 API 獲取 {len(symbols)} 個幣種的價格數據...")
+    logger.info(f"正在使用 BingX 官方 API 獲取 {len(symbols)} 個幣種的 30m 價格數據...")
 
     def one(sym):
-        ch = fetch_price_change_15m_bingx(sym)
-        return {"symbol": sym, "coin": sym, "price_change_percent_15m": ch} if ch is not None else None
+        ch = fetch_price_change_30m_bingx(sym)
+        return {"symbol": sym, "coin": sym, "price_change_percent_30m": ch} if ch is not None else None
 
     with ThreadPoolExecutor(max_workers=30) as ex:
         futures = [ex.submit(one, s) for s in symbols]
@@ -1325,10 +1324,10 @@ def _parse_oi_change_from_data_list(data_list: list) -> Optional[float]:
     return ((last_oi - prev_oi) / prev_oi) * 100
 
 
-def fetch_oi_change_15m(symbol: str) -> Optional[float]:
+def fetch_oi_change_30m(symbol: str) -> Optional[float]:
     """
-    計算單一 symbol 15 分鐘 OI 變化%
-    【初創版修復】1. Interval 修正為 "15m" (V4 標準)。2. 加入 Thread Lock 防止限速失效。3. 詳細錯誤日誌 (Debug Mode)。
+    計算單一 symbol 30 分鐘 OI 變化%
+    【初創版】CoinGlass 初創版限制聚合持倉顆粒度 >= 30m，使用 30m 符合權限。Thread Lock + Debug 日誌保留。
     """
     global _coinglass_oi_rate_limiter, _coinglass_oi_first_failure_logged
 
@@ -1343,7 +1342,7 @@ def fetch_oi_change_15m(symbol: str) -> Optional[float]:
 
     base_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     url = f"{CG_API_BASE}/api/futures/open-interest/aggregated-history"
-    params = {"symbol": base_symbol, "interval": "15m", "limit": 5}
+    params = {"symbol": base_symbol, "interval": "30m", "limit": 5}
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
     try:
@@ -1385,112 +1384,109 @@ def normalize_symbol(coin: Dict) -> Optional[str]:
 
 
 def extract_price_change_15m(coin: Dict) -> float:
-    """提取 15 分鐘價格變化%"""
-    # 優先使用 15 分鐘價格變化
+    """提取 15 分鐘價格變化%（其他模組用，持倉篩選已改 30m）"""
     change = coin.get('price_change_percent_15m')
     if isinstance(change, (int, float)):
         return float(change)
     if isinstance(change, str) and change:
         try:
             parsed = float(change)
-            if not (parsed != parsed):  # 檢查 NaN
+            if not (parsed != parsed):
                 return parsed
         except ValueError:
             pass
-    
-    # 備用：其他時間區間
     change = coin.get('price_change_percent_1h')
     if isinstance(change, (int, float)):
         return float(change)
-    
     change = coin.get('price_change_percent_24h')
     if isinstance(change, (int, float)):
         return float(change)
-    
+    return 0.0
+
+
+def extract_price_change_30m(coin: Dict) -> float:
+    """提取 30 分鐘價格變化%（持倉篩選 30m 版：價格與 OI 皆 30m）"""
+    change = coin.get('price_change_percent_30m')
+    if isinstance(change, (int, float)):
+        return float(change)
+    if isinstance(change, str) and change:
+        try:
+            parsed = float(change)
+            if not (parsed != parsed):
+                return parsed
+        except ValueError:
+            pass
+    change = coin.get('price_change_percent_15m')
+    if isinstance(change, (int, float)):
+        return float(change)
+    change = coin.get('price_change_percent_1h')
+    if isinstance(change, (int, float)):
+        return float(change)
+    change = coin.get('price_change_percent_24h')
+    if isinstance(change, (int, float)):
+        return float(change)
     return 0.0
 
 
 def build_report_message(top_long_open: List, top_long_close: List, top_short_open: List, top_short_close: List, processed_count: int = 0, oi_success_count: int = 0) -> str:
-    """組合推播文字（優化版：簡潔標題，加入主力思維教學）"""
+    """組合推播文字（30m 版：價格與持倉皆為 30 分鐘）"""
     lines = []
-    lines.append("💰 *【傑克短線持倉異動排行榜】*")
+    lines.append("💰 *【傑克短線持倉異動排行榜】(30分)*")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-    
+
     def fmt(num):
-        if num is None or (isinstance(num, float) and (num != num)):  # NaN check
+        if num is None or (isinstance(num, float) and (num != num)):
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
-    
-    # 開倉（包含多方開倉和空方開倉）
+
     lines.append("📈 *開倉*（新建立倉位）")
     lines.append("")
-    
-    # 多方開倉 TOP 3（做多 = 看漲、買入方向）
     lines.append("  *多方開倉 TOP 3*（做多方向，看漲）")
     if not top_long_open:
         lines.append("    無明顯多方開倉標的")
     else:
         for idx, item in enumerate(top_long_open):
-            price_change = fmt(item.get('priceChange15m', 0))
-            oi_change = fmt(item['oiChange15m'])
-            lines.append(
-                f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}"
-            )
+            price_change = fmt(item.get("priceChange30m", 0))
+            oi_change = fmt(item.get("oiChange30m", 0))
+            lines.append(f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}")
     lines.append("")
-    
-    # 空方開倉 TOP 3（做空 = 看跌、賣出方向）
     lines.append("  *空方開倉 TOP 3*（做空方向，看跌）")
     if not top_short_open:
         lines.append("    無明顯空方開倉標的")
     else:
         for idx, item in enumerate(top_short_open):
-            price_change = fmt(item.get('priceChange15m', 0))
-            oi_change = fmt(item['oiChange15m'])
-            lines.append(
-                f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}"
-            )
+            price_change = fmt(item.get("priceChange30m", 0))
+            oi_change = fmt(item.get("oiChange30m", 0))
+            lines.append(f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}")
     lines.append("")
-    
-    # 平倉（包含多方平倉和空方平倉）
     lines.append("📉 *平倉*（結束既有倉位）")
     lines.append("")
-    
-    # 多方平倉 TOP 3（原本做多的人正在出場）
     lines.append("  *多方平倉 TOP 3*（做多倉位減碼）")
     if not top_long_close:
         lines.append("    無明顯多方平倉標的")
     else:
         for idx, item in enumerate(top_long_close):
-            price_change = fmt(item.get('priceChange15m', 0))
-            oi_change = fmt(item['oiChange15m'])
-            lines.append(
-                f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}"
-            )
+            price_change = fmt(item.get("priceChange30m", 0))
+            oi_change = fmt(item.get("oiChange30m", 0))
+            lines.append(f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}")
     lines.append("")
-    
-    # 空方平倉 TOP 3（原本做空的人正在出場）
     lines.append("  *空方平倉 TOP 3*（做空倉位減碼）")
     if not top_short_close:
         lines.append("    無明顯空方平倉標的")
     else:
         for idx, item in enumerate(top_short_close):
-            price_change = fmt(item.get('priceChange15m', 0))
-            oi_change = fmt(item['oiChange15m'])
-            lines.append(
-                f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}"
-            )
+            price_change = fmt(item.get("priceChange30m", 0))
+            oi_change = fmt(item.get("oiChange30m", 0))
+            lines.append(f"    {idx + 1}) *{item['symbol']}*｜價格 {price_change}｜持倉 {oi_change}")
     lines.append("")
-    
-    # 主力思維教學（換位思考）
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("💡 *【換位思考主力動機】*")
     lines.append("")
-    lines.append("請先判斷 *15分K價格走勢趨勢* 去換位思考主力動機")
+    lines.append("請先判斷 *30分K價格走勢趨勢* 去換位思考主力動機")
     lines.append("")
     lines.append("📈 *開倉*：多方開倉＝看漲做多；空方開倉＝看跌做空。")
     lines.append("📉 *平倉*：多方平倉＝做多減碼；空方平倉＝做空減碼。（停利或停損）")
-    
     return "\n".join(lines)
 
 
@@ -1501,34 +1497,28 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
         return None
     
     try:
-        # 使用原本的邏輯：從 coin 字典提取價格變化
-        price_change_15m = extract_price_change_15m(coin)
-        # 查詢 CoinGlass 的 OI 數據（全市場整合數據，原本的邏輯）
-        oi_change_15m = fetch_oi_change_15m(symbol)
-        
-        if oi_change_15m is None:
+        price_change_30m = extract_price_change_30m(coin)
+        oi_change_30m = fetch_oi_change_30m(symbol)
+        if oi_change_30m is None:
             return {'status': 'oi_failed', 'symbol': symbol}
-        
-        # 4 類分類邏輯（恢復原本邏輯，不過濾持倉變化率）
         category = None
-        if price_change_15m > 0:
-            if oi_change_15m > 0:
+        if price_change_30m > 0:
+            if oi_change_30m > 0:
                 category = 'long_open'
-            elif oi_change_15m < 0:
+            elif oi_change_30m < 0:
                 category = 'long_close'
-        elif price_change_15m < 0:
-            if oi_change_15m > 0:
+        elif price_change_30m < 0:
+            if oi_change_30m > 0:
                 category = 'short_open'
-            elif oi_change_15m < 0:
+            elif oi_change_30m < 0:
                 category = 'short_close'
-        
         if category:
             return {
                 'status': 'success',
                 'category': category,
                 'symbol': symbol,
-                'priceChange15m': price_change_15m,
-                'oiChange15m': oi_change_15m
+                'priceChange30m': price_change_30m,
+                'oiChange30m': oi_change_30m
             }
         else:
             return {'status': 'no_category', 'symbol': symbol}
@@ -1570,22 +1560,18 @@ def fetch_position_change():
     
     logger.info(f"過濾後剩餘 {len(target_symbols_data)} 個合約幣種")
     
-    # 【智慧過濾 Smart Filter - 初創版專用】
-    # 策略：全市場掃描，但只對「價格有波動」的幣種查詢 OI，以節省 API 額度。
-    # 1. 價格門檻 (Gatekeeper): 15m 漲跌幅 >= 0.8% (過濾死魚盤)
-    # 2. 持倉門檻 (User Target): 15m OI 變化 >= 1.5% (只推播顯著異動)
-    PRICE_GATEKEEPER = 0.8  # 價格波動門檻 %
-    OI_THRESHOLD = 1.5      # 持倉異動門檻 %
-    
+    # 【智慧過濾 Smart Filter - 30m 版】
+    # 價格 30m（BingX）+ OI 30m（CoinGlass 聚合，顆粒度 >= 30m）。
+    PRICE_GATEKEEPER = 0.8  # 30m 價格波動門檻 %
+    OI_THRESHOLD = 1.5      # 30m 持倉異動門檻 %
     active_symbols = []
     for coin in target_symbols_data:
-        p_change = extract_price_change_15m(coin)
+        p_change = extract_price_change_30m(coin)
         if abs(p_change) >= PRICE_GATEKEEPER:
             active_symbols.append(coin)
-    
     logger.info(
         f"🔍 智慧過濾: 從 {len(target_symbols_data)} 個幣種中篩選出 {len(active_symbols)} 個活躍標的 "
-        f"(價格波動 >= {PRICE_GATEKEEPER}%) 進行 OI 檢查..."
+        f"(價格 30m >= {PRICE_GATEKEEPER}%) 進行 30m OI 檢查..."
     )
     
     target_symbols = active_symbols
@@ -1632,10 +1618,9 @@ def fetch_position_change():
                 oi_success_count += 1
                 category = result.get('category')
                 symbol = result.get('symbol')
-                price_change = result.get('priceChange15m')
-                oi_change = result.get('oiChange15m')
-                item = {'symbol': symbol, 'priceChange15m': price_change, 'oiChange15m': oi_change}
-                # 只推播持倉變化 >= OI_THRESHOLD 的標的（用戶指定 1.5%）
+                price_change = result.get('priceChange30m')
+                oi_change = result.get('oiChange30m')
+                item = {'symbol': symbol, 'priceChange30m': price_change, 'oiChange30m': oi_change}
                 if abs(oi_change) >= OI_THRESHOLD:
                     if category == 'long_open':
                         long_open.append(item)
@@ -1653,10 +1638,10 @@ def fetch_position_change():
     logger.info(f"分類結果: 多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}")
     
     # 排序與取前 3 名
-    long_open.sort(key=lambda x: x['oiChange15m'], reverse=True)      # OI 增加越多越好
-    long_close.sort(key=lambda x: x['oiChange15m'])                   # OI 減少越多越好（越負越好）
-    short_open.sort(key=lambda x: x['oiChange15m'], reverse=True)     # OI 增加越多越好
-    short_close.sort(key=lambda x: x['oiChange15m'])                  # OI 減少越多越好（越負越好）
+    long_open.sort(key=lambda x: x['oiChange30m'], reverse=True)
+    long_close.sort(key=lambda x: x['oiChange30m'])
+    short_open.sort(key=lambda x: x['oiChange30m'], reverse=True)
+    short_close.sort(key=lambda x: x['oiChange30m'])
     
     top_long_open = long_open[:3]
     top_long_close = long_close[:3]
