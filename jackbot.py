@@ -1072,26 +1072,28 @@ def fetch_whale_position_old():
 
 # ==================== 3. 持倉變化篩選器 ====================
 
-def fetch_bingx_contracts() -> Tuple[Set[str], Dict[str, str]]:
+def fetch_bingx_contracts() -> Tuple[Set[str], Dict[str, str], List[str]]:
     """
     開頭拉 BingX 有支援的合約交易對：GET /openApi/swap/v2/quote/contracts。
-    回傳 (allowed_base_set, base_to_symbol)。
-    - allowed_base_set: 用於過濾的 base 集合（含 PEPE、1000PEPE、BTC 等，可與價格數據對應）。
+    回傳 (allowed_base_set, base_to_symbol, bases_for_price)。
+    - allowed_base_set: 用於過濾的 base 集合。
     - base_to_symbol: base_upper -> 正確的 BingX symbol（如 1000PEPE-USDT），供 K 線/費率 API 使用。
+    - bases_for_price: 每個合約一個 asset（用於向 BingX 取 30m 價格），不重複。
     """
     allowed: Set[str] = set()
     base_to_symbol: Dict[str, str] = {}
+    bases_for_price: List[str] = []
     url = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
     try:
         r = requests.get(url, timeout=15)
         if r.status_code != 200:
-            return allowed, base_to_symbol
+            return allowed, base_to_symbol, bases_for_price
         j = r.json()
         if j.get("code") != 0:
-            return allowed, base_to_symbol
+            return allowed, base_to_symbol, bases_for_price
         data = j.get("data", [])
         if not isinstance(data, list):
-            return allowed, base_to_symbol
+            return allowed, base_to_symbol, bases_for_price
         for item in data:
             if not isinstance(item, dict):
                 continue
@@ -1105,14 +1107,15 @@ def fetch_bingx_contracts() -> Tuple[Set[str], Dict[str, str]]:
             asset_upper = asset.strip().upper()
             allowed.add(asset_upper)
             base_to_symbol[asset_upper] = sym.strip()
+            bases_for_price.append(asset_upper)
             if asset_upper.startswith("1000") and len(asset_upper) > 4:
                 short_base = asset_upper[4:]
                 allowed.add(short_base)
                 base_to_symbol[short_base] = sym.strip()
-        return allowed, base_to_symbol
+        return allowed, base_to_symbol, bases_for_price
     except Exception as e:
         logger.warning(f"BingX contracts API 失敗: {e}")
-        return allowed, base_to_symbol
+        return allowed, base_to_symbol, bases_for_price
 
 
 def fetch_supported_futures_coins() -> List[str]:
@@ -1551,6 +1554,8 @@ def _fetch_bingx_funding_rate(symbol: str, preferred_symbol: Optional[str] = Non
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     try_symbols = [preferred_symbol] if preferred_symbol else []
+    if preferred_symbol and "USDC" in preferred_symbol.upper():
+        try_symbols.append(preferred_symbol.upper().replace("-USDC", "-USDT"))
     try_symbols += [f"{clean}-USDT", f"1000{clean}-USDT"]
     try_symbols = list(dict.fromkeys(try_symbols))  # 去重且保留順序
     base_url = "https://open-api.bingx.com"
@@ -1695,6 +1700,8 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     try_symbols = [preferred_symbol] if preferred_symbol else []
+    if preferred_symbol and "USDC" in preferred_symbol.upper():
+        try_symbols.append(preferred_symbol.upper().replace("-USDC", "-USDT"))
     try_symbols += [f"{clean}-USDT", f"1000{clean}-USDT"]
     try_symbols = list(dict.fromkeys(try_symbols))
     url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
@@ -1933,7 +1940,10 @@ def build_report_message_tiered(
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
     def star_str(n: int) -> str:
-        return "★" * (n or 0) + "☆" * (5 - (n or 0))
+        return "⭐" * (n or 0) + "☆" * (5 - (n or 0))
+
+    def oi_plain(cat: str) -> str:
+        return {"long_open": "多方開倉", "long_close": "多方平倉", "short_open": "空方開倉", "short_close": "空方平倉"}.get(cat, "持倉異動")
 
     def line_with_funding(x: Dict) -> str:
         price_val = x.get("current_price")
@@ -1941,7 +1951,9 @@ def build_report_message_tiered(
             price_str = f"${price_val:,.4g}"
         else:
             price_str = "—"
-        oi_str = fmt(x.get("oiChange30m"))
+        oi_val = x.get("oiChange30m")
+        oi_str = fmt(oi_val)
+        oi_desc = oi_plain(x.get("category", ""))
         rsi_part = (x.get("rsi_desc") or "RSI —").strip()
         if rsi_part == "無技術數據":
             rsi_part = "RSI —"
@@ -1949,7 +1961,7 @@ def build_report_message_tiered(
         fee = f"｜費率 {funding*100:.2f}%" if funding is not None and isinstance(funding, (int, float)) else ""
         stars = x.get("stars", 0)
         sym = x.get("symbol", "")
-        return f"{star_str(stars)} *{sym}*｜價 {price_str}｜OI {oi_str}｜{rsi_part} {fee}".rstrip()
+        return f"{star_str(stars)} *{sym}*｜價 {price_str}｜持倉 {oi_str}（{oi_desc}）｜{rsi_part} {fee}".rstrip()
 
     zone_order = [ZONE_DIP, ZONE_TOP, ZONE_BREAKOUT_LONG, ZONE_BREAKOUT_SHORT]
     zone_title = {
@@ -1963,7 +1975,7 @@ def build_report_message_tiered(
     lines.append("💰 *【傑克短線持倉異動】(30分)*")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
-    lines.append("_推薦度：★★★★★ 最佳 ～ ☆☆☆☆☆ 最差_")
+    lines.append("_推薦度：⭐⭐⭐⭐⭐ 最佳 ～ ☆☆☆☆☆ 最差_")
     lines.append("")
 
     has_any = False
@@ -1983,6 +1995,12 @@ def build_report_message_tiered(
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📌 *持倉白話*")
+    lines.append("• 多方開倉＝有人加碼做多（看漲）")
+    lines.append("• 多方平倉＝多單減碼（獲利了結或停損）")
+    lines.append("• 空方開倉＝有人加碼做空（看跌）")
+    lines.append("• 空方平倉＝空單減碼（獲利了結或停損）")
+    lines.append("")
     lines.append("📌 *四區說明*")
     lines.append("• 抄底區：超賣／觸底，可考慮做多不追殺")
     lines.append("• 摸頭區：過熱／觸頂，可考慮做空嚴設停損")
@@ -2099,8 +2117,8 @@ def fetch_position_change():
     _coinglass_oi_first_failure_logged = False  # 本輪只記錄第一次 OI 失敗，方便診斷
     logger.info("開始執行持倉變化篩選，只偵測 BingX 合約幣種...")
 
-    # 步驟1：優先從 BingX 合約接口取得交易對（保證與 K 線/費率 API 一致）；失敗則用 CoinGlass 名單
-    allowed_bases, base_to_symbol = fetch_bingx_contracts()
+    # 步驟1：先抓 BingX 有支援的合約交易對；失敗則用 CoinGlass 名單
+    allowed_bases, base_to_symbol, bases_for_price = fetch_bingx_contracts()
     if allowed_bases:
         bingx_symbols_upper = allowed_bases
         logger.info(f"從 BingX contracts 取得 {len(allowed_bases)} 個合約交易對")
@@ -2111,16 +2129,20 @@ def fetch_position_change():
             return
         bingx_symbols_upper = {s.upper() for s in bingx_symbols}
         base_to_symbol = {}
+        bases_for_price = []
         logger.info(f"獲取到 {len(bingx_symbols)} 個 BingX 合約幣種（CoinGlass 名單）")
-    
-    # 步驟2：獲取幣種價格變化（CoinGlass；若為空則自動改用 Binance 公開 API，適合初創版）
-    all_symbols_data = fetch_coins_price_change()
+
+    # 步驟2：依「BingX 交易對」取得 30m 價格（有 contracts 則直接用 BingX 取價，不再依賴 CoinGlass 漲跌幅）
+    if bases_for_price:
+        all_symbols_data = _fetch_coins_price_change_fallback(bases_for_price)
+        logger.info(f"依 BingX 交易對取得 {len(all_symbols_data)} 個幣種的 30m 價格數據")
+    else:
+        all_symbols_data = fetch_coins_price_change()
+        logger.info(f"從 Coinglass API 取得 {len(all_symbols_data)} 個幣種的價格數據")
     if not all_symbols_data:
         send_telegram_message("⚠️ 無法取得幣種漲跌資料，請稍後再試。", TG_THREAD_IDS['position_change'])
         return
-    
-    logger.info(f"從 Coinglass API 取得 {len(all_symbols_data)} 個幣種的價格數據")
-    
+
     # 步驟3：只保留 BingX 名單中的幣種
     target_symbols_data = []
     for coin in all_symbols_data:
