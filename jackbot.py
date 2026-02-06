@@ -1313,22 +1313,23 @@ def fetch_price_change_30m_bingx(symbol: str) -> Optional[float]:
 
 
 def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: int = 99999) -> List[Dict]:
-    """初創版 Fallback：使用 BingX 官方 API 獲取 30m 漲跌幅（與 OI 顆粒度 >= 30m 一致）。"""
+    """初創版 Fallback：使用 BingX 官方 API 獲取 30m 漲跌幅（降速版，避免 429）。"""
     symbols = list(supported_coins)[:max_symbols]
     out = []
-    logger.info(f"正在使用 BingX 官方 API 獲取 {len(symbols)} 個幣種的 30m 價格數據...")
+    logger.info(f"正在使用 BingX 官方 API 獲取 {len(symbols)} 個幣種的 30m 價格數據 (降速模式)...")
 
     def one(sym):
+        time.sleep(0.05)
         ch = fetch_price_change_30m_bingx(sym)
         return {"symbol": sym, "coin": sym, "price_change_percent_30m": ch} if ch is not None else None
 
-    with ThreadPoolExecutor(max_workers=30) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         futures = [ex.submit(one, s) for s in symbols]
         for i, res in enumerate(as_completed(futures)):
             r = res.result()
             if r is not None:
                 out.append(r)
-            if (i + 1) % 100 == 0:
+            if (i + 1) % 50 == 0:
                 logger.info(f"BingX 價格獲取進度: {i + 1}/{len(symbols)} (成功 {len(out)} 個)")
     logger.info(f"成功從 BingX 獲取 {len(out)} 個幣種的價格數據")
     return out
@@ -1495,6 +1496,8 @@ def _fetch_coinglass_rsi(symbol: str) -> Optional[Dict]:
             time.sleep(0.2)
             if r.status_code != 200:
                 last_error = f"status={r.status_code} body={r.text[:300]}"
+                if r.status_code == 429:
+                    logger.warning(f"CoinGlass RSI 限流 429: {base} ({exchange} {sym_param})")
                 continue
             data = r.json()
             code = data.get("code")
@@ -1696,46 +1699,56 @@ def _bbands(close: pd.Series, length: int = 20, std_dev: float = 2.0) -> Tuple[p
 def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     本地計算 Fallback：用 BingX 30m K 線 + 純 pandas 算 RSI(14)、布林帶(20,2)。
-    若傳入 preferred_symbol（來自 contracts），優先使用；否則嘗試 1000 前綴。
+    包含重試機制，解決 Rate Limit (429) 問題。
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-    try_symbols = [preferred_symbol] if preferred_symbol else []
-    if preferred_symbol and "USDC" in preferred_symbol.upper():
-        try_symbols.append(preferred_symbol.upper().replace("-USDC", "-USDT"))
-    try_symbols += [f"{clean}-USDT", f"1000{clean}-USDT"]
+    try_symbols = []
+    if preferred_symbol:
+        try_symbols.append(preferred_symbol)
+        if "USDC" in preferred_symbol.upper():
+            try_symbols.append(preferred_symbol.upper().replace("-USDC", "-USDT"))
+    try_symbols += [f"{clean}-USDT", f"1000{clean}-USDT", f"{clean}USDT"]
     try_symbols = list(dict.fromkeys(try_symbols))
     url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
     raw = []
     found_symbol = None
     for sym_param in try_symbols:
-        params = {"symbol": sym_param, "interval": "30m", "limit": 50}
-        try:
-            r = requests.get(url, params=params, timeout=5)
-            if r.status_code == 200:
-                j = r.json()
-                if j.get("code") == 0:
-                    data = j.get("data", [])
-                    if isinstance(data, list) and len(data) >= 30:
-                        raw = data
-                        found_symbol = sym_param
-                        break
-        except Exception:
-            continue
+        for attempt in range(2):
+            params = {"symbol": sym_param, "interval": "30m", "limit": 60}
+            try:
+                r = requests.get(url, params=params, timeout=8)
+                if r.status_code == 429:
+                    logger.warning(f"BingX API 429 限流 ({sym_param})，休息 1 秒後重試...")
+                    time.sleep(1.5)
+                    continue
+                if r.status_code == 200:
+                    j = r.json()
+                    if j.get("code") == 0:
+                        data = j.get("data", [])
+                        if isinstance(data, list) and len(data) >= 30:
+                            raw = data
+                            found_symbol = sym_param
+                            break
+            except Exception as e:
+                logger.debug(f"K線請求異常 {sym_param}: {e}")
+                time.sleep(0.5)
+        if raw:
+            break
     if not raw:
         logger.warning(f"BingX 本地計算失敗 {clean}: 嘗試了 {try_symbols} 皆無數據")
         return None
     closes = []
     for row in raw:
+        c = None
         if isinstance(row, dict):
             c = row.get("close") or row.get("c")
         elif isinstance(row, (list, tuple)) and len(row) >= 5:
             c = row[4]
-        else:
-            continue
-        try:
-            closes.append(float(c))
-        except (TypeError, ValueError):
-            continue
+        if c is not None:
+            try:
+                closes.append(float(c))
+            except (TypeError, ValueError):
+                pass
     if len(closes) < 20:
         return None
     series = pd.Series(closes)
@@ -1773,6 +1786,7 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
         tech = _fetch_bingx_klines_and_calc(symbol, preferred_symbol=bingx_symbol_override)
         if tech:
             return tech
+        logger.info(f"RSI 無數據 {base}: CoinGlass 與 BingX 本地計算均失敗（可能限流 429 或該交易對 K 線不可用）")
         return None
     boll_data = _fetch_coinglass_boll(symbol)
 
@@ -2239,11 +2253,16 @@ def fetch_position_change():
     top_short_open = short_open[:3]
     top_short_close = short_close[:3]
 
-    # 一律使用分級版：對每個 top 標的取 RSI/布林帶，資金費率直接拉 BingX API 保證有值
+    # 對 top 標的取 RSI/布林帶（先休息 2 秒再打 CoinGlass，降低 429 機率）
+    time.sleep(2)
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
         sym = item.get("symbol", "")
-        preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
+        clean_base = sym.replace("USDT", "").replace("-", "").upper()
+        preferred = base_to_symbol.get(clean_base) if base_to_symbol else None
+        if not preferred:
+            preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
+        time.sleep(0.2)
         tech = calculate_technicals(sym, bingx_symbol_override=preferred)
         funding_rate = _fetch_bingx_funding_rate(sym, preferred_symbol=preferred)
         signal_label, zone, stars, rsi_desc = _classify_signal_and_tier(item, cat, tech, funding_rate)
