@@ -1433,49 +1433,83 @@ def extract_price_change_30m(coin: Dict) -> float:
 
 
 def _fetch_coinglass_rsi(symbol: str) -> Optional[Dict]:
-    """CoinGlass V4 RSI：exchange=Binance, interval=30m, symbol=幣種。失敗時 log response.text。"""
+    """CoinGlass V4 RSI：優先 Binance，失敗則 fallback BingX（僅 BingX 上架幣種如 KABUTO）。"""
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     url = f"{CG_API_BASE}/api/futures/indicators/rsi"
-    params = {"exchange": "Binance", "interval": "30m", "symbol": base}
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=8)
-        time.sleep(0.2)
-        if r.status_code != 200:
-            logger.warning(f"CoinGlass RSI {base}: status={r.status_code} body={r.text[:500]}")
-            return None
-        data = r.json()
-        if data.get("code") not in (0, "0", 200, "200", None):
-            msg = data.get("msg") or data.get("message") or ""
-            logger.warning(f"CoinGlass RSI {base}: code={data.get('code')} msg={msg} body={r.text[:500]}")
-            return None
-        return data
-    except Exception as e:
-        logger.debug(f"CoinGlass RSI {base}: {e}")
-        return None
+    last_error = None
+    for exchange in ["Binance", "BingX"]:
+        params = {"exchange": exchange, "interval": "30m", "symbol": base}
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=8)
+            time.sleep(0.2)
+            if r.status_code != 200:
+                last_error = f"status={r.status_code} body={r.text[:300]}"
+                if exchange == "Binance":
+                    logger.debug(f"CoinGlass RSI {base} Binance: {last_error}，嘗試 BingX")
+                continue
+            data = r.json()
+            code = data.get("code")
+            msg = (data.get("msg") or data.get("message") or "").lower()
+            if code not in (0, "0", 200, "200", None) or "instrument" in msg:
+                last_error = f"code={code} msg={data.get('msg') or data.get('message')}"
+                if exchange == "Binance":
+                    logger.debug(f"CoinGlass RSI {base} Binance: {last_error}，嘗試 BingX")
+                continue
+            raw = data.get("data", data.get("list", []))
+            if isinstance(raw, list) and len(raw) > 0:
+                return data
+            if isinstance(raw, dict) and raw:
+                return data
+            last_error = "數據為空"
+            if exchange == "Binance":
+                logger.debug(f"CoinGlass RSI {base} Binance 數據為空，嘗試 BingX")
+        except Exception as e:
+            last_error = str(e)
+            if exchange == "Binance":
+                logger.debug(f"CoinGlass RSI {base} Binance: {e}，嘗試 BingX")
+    logger.warning(f"CoinGlass RSI {base}: Binance 與 BingX 均失敗，最後: {last_error}")
+    return None
 
 
 def _fetch_coinglass_boll(symbol: str) -> Optional[Dict]:
-    """CoinGlass V4 布林帶：取得 ub_value(上軌)、lb_value(下軌)。"""
+    """CoinGlass V4 布林帶：優先 Binance，失敗則 fallback BingX。"""
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     url = f"{CG_API_BASE}/api/futures/indicators/boll"
-    params = {"exchange": "Binance", "interval": "30m", "symbol": base}
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=8)
-        time.sleep(0.2)
-        if r.status_code != 200:
-            logger.warning(f"CoinGlass BOLL {base}: status={r.status_code} body={r.text[:500]}")
-            return None
-        data = r.json()
-        if data.get("code") not in (0, "0", 200, "200", None):
-            msg = data.get("msg") or data.get("message") or ""
-            logger.warning(f"CoinGlass BOLL {base}: code={data.get('code')} msg={msg} body={r.text[:500]}")
-            return None
-        return data
-    except Exception as e:
-        logger.debug(f"CoinGlass BOLL {base}: {e}")
-        return None
+    last_error = None
+    for exchange in ["Binance", "BingX"]:
+        params = {"exchange": exchange, "interval": "30m", "symbol": base}
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=8)
+            time.sleep(0.2)
+            if r.status_code != 200:
+                last_error = f"status={r.status_code} body={r.text[:300]}"
+                if exchange == "Binance":
+                    logger.debug(f"CoinGlass BOLL {base} Binance: {last_error}，嘗試 BingX")
+                continue
+            data = r.json()
+            code = data.get("code")
+            msg = (data.get("msg") or data.get("message") or "").lower()
+            if code not in (0, "0", 200, "200", None) or "instrument" in msg:
+                last_error = f"code={code} msg={data.get('msg') or data.get('message')}"
+                if exchange == "Binance":
+                    logger.debug(f"CoinGlass BOLL {base} Binance: {last_error}，嘗試 BingX")
+                continue
+            raw = data.get("data", data.get("list", []))
+            if isinstance(raw, list) and len(raw) > 0:
+                return data
+            if isinstance(raw, dict) and raw:
+                return data
+            last_error = "數據為空"
+            if exchange == "Binance":
+                logger.debug(f"CoinGlass BOLL {base} Binance 數據為空，嘗試 BingX")
+        except Exception as e:
+            last_error = str(e)
+            if exchange == "Binance":
+                logger.debug(f"CoinGlass BOLL {base} Binance: {e}，嘗試 BingX")
+    logger.warning(f"CoinGlass BOLL {base}: Binance 與 BingX 均失敗，最後: {last_error}")
+    return None
 
 
 def _fetch_coinglass_funding(symbol: str) -> Optional[float]:
