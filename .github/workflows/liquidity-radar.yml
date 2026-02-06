@@ -41,6 +41,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_LIQUIDITY_RADAR: ${{ secrets.TG_THREAD_LIQUIDITY_RADAR }}
+          COINGLASS_RATE_LIMIT_PER_MINUTE: ${{ vars.COINGLASS_RATE_LIMIT_PER_MINUTE }}
         run: |
           # 設置超時保護
           timeout 600 python jackbot.py liquidity_radar || exit 0

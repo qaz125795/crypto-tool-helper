@@ -41,6 +41,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_WHALE_POSITION: ${{ secrets.TG_THREAD_WHALE_POSITION }}
+          COINGLASS_RATE_LIMIT_PER_MINUTE: ${{ vars.COINGLASS_RATE_LIMIT_PER_MINUTE }}
         run: |
           timeout 480 python jackbot.py buying_power_monitor || exit 0
           echo "任務執行完成"
