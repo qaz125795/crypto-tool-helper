@@ -17,7 +17,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 12  # 腳本會在 8 分鐘內強制結束並推播
+    timeout-minutes: 16  # 與腳本內建 16 分鐘強制結束一致
     permissions:
       contents: read
       actions: read
@@ -45,7 +45,7 @@ jobs:
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_POSITION_CHANGE: ${{ secrets.TG_THREAD_POSITION_CHANGE }}
         run: |
-          # 腳本內建 8 分鐘強制結束，此處 10 分鐘為雙重保護
-          timeout 600 python jackbot.py position_change || exit 0
+          # 腳本內建 16 分鐘強制結束，此處 16 分鐘為雙重保護（外層 8/10 已改為 16/16）
+          timeout 960 python jackbot.py position_change || exit 0
           echo "任務執行完成"
 
