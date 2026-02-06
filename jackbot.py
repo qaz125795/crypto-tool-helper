@@ -1140,24 +1140,49 @@ def fetch_supported_futures_coins() -> List[str]:
         return []
 
 
+# Fallback 時僅記錄第一次 Binance 失敗原因，避免刷屏
+_binance_fallback_first_failure_logged = False
+
+
 def fetch_price_change_15m_binance(symbol: str) -> Optional[float]:
-    """用 Binance 公開 API 取得 15 分鐘漲跌幅%（不消耗 CoinGlass 額度，供初創版 fallback）"""
-    sym = f"{symbol}USDT" if not symbol.upper().endswith("USDT") else symbol
-    url = "https://api.binance.com/api/v3/klines"
+    """用 Binance 合約 API 取得 15 分鐘漲跌幅%（含詳細錯誤代碼診斷）"""
+    global _binance_fallback_first_failure_logged
+    # 移除特殊符號並轉大寫，確保格式正確
+    clean_symbol = symbol.replace("-", "").replace("_", "").upper()
+    sym = f"{clean_symbol}USDT" if not clean_symbol.endswith("USDT") else clean_symbol
+    url = "https://fapi.binance.com/fapi/v1/klines"
     params = {"symbol": sym, "interval": "15m", "limit": 2}
     try:
-        r = requests.get(url, params=params, timeout=5)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        if not isinstance(data, list) or len(data) < 2:
-            return None
-        prev_close = float(data[0][4])
-        last_close = float(data[1][4])
-        if not prev_close:
-            return None
-        return ((last_close - prev_close) / prev_close) * 100
-    except Exception:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if not isinstance(data, list) or len(data) < 2:
+                if not _binance_fallback_first_failure_logged:
+                    _binance_fallback_first_failure_logged = True
+                    logger.warning(f"Binance API 回傳格式異常 {sym}: 非列表或長度<2 resp={str(data)[:150]}")
+                return None
+            prev_close = float(data[0][4])
+            last_close = float(data[1][4])
+            if not prev_close:
+                return None
+            return ((last_close - prev_close) / prev_close) * 100
+
+        # --- 錯誤診斷：印出 Status Code 與回應內容 ---
+        if not _binance_fallback_first_failure_logged:
+            _binance_fallback_first_failure_logged = True
+            logger.error(f"Binance API Error for {sym}: Status {r.status_code} - {r.text[:300]}")
+        if r.status_code == 429:
+            logger.warning("⚠️ RATE LIMIT TRIGGERED (429) - 幣安 API 頻率限制")
+            time.sleep(1)
+        elif r.status_code == 418:
+            logger.warning(f"⚠️ IP 被幣安暫時封鎖 (418) - {sym}")
+        elif r.status_code in (403, 451):
+            logger.error("🚫 GEOBLOCK/REGION RESTRICTION (403/451) - 目前 IP 無法訪問幣安 API")
+        return None
+    except Exception as e:
+        if not _binance_fallback_first_failure_logged:
+            _binance_fallback_first_failure_logged = True
+            logger.warning(f"Binance 連線異常 {sym}: {type(e).__name__}: {e}")
         return None
 
 
@@ -1205,20 +1230,25 @@ def fetch_coins_price_change() -> List[Dict]:
 
 
 def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: int = 99999) -> List[Dict]:
-    """初創版 fallback：用備援來源取得 15m 漲跌幅。"""
+    """初創版 fallback：用 Binance 合約 API 取得 15m 漲跌幅（降並發避免限流）。"""
+    global _binance_fallback_first_failure_logged
+    _binance_fallback_first_failure_logged = False  # 本輪 fallback 只記錄第一次失敗
     symbols = list(supported_coins)[:max_symbols]
     out = []
     def one(sym):
         ch = fetch_price_change_15m_binance(sym)
         return {"symbol": sym, "coin": sym, "price_change_percent_15m": ch} if ch is not None else None
-    with ThreadPoolExecutor(max_workers=20) as ex:
+    # 降並發（6）與略延遲，避免 Binance 429；Futures 限流較寬仍建議節制
+    with ThreadPoolExecutor(max_workers=6) as ex:
         for i, res in enumerate(as_completed([ex.submit(one, s) for s in symbols])):
             r = res.result()
             if r is not None:
                 out.append(r)
             if (i + 1) % 100 == 0:
-                logger.info(f"Fallback 價格進度: {i + 1}/{len(symbols)}")
+                logger.info(f"Fallback 價格進度: {i + 1}/{len(symbols)} (成功 {len(out)} 個)")
     logger.info(f"Fallback 取得 {len(out)} 個幣種 15m 漲跌幅")
+    if len(out) == 0:
+        logger.warning("Fallback 全數失敗：請查看上方「Binance fallback 首次失敗」日誌；若為 429/403 可能為限流或地區限制（Zeabur/GitHub 機房 IP 可能被 Binance 限制）")
     return out
 
 
