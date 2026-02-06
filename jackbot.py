@@ -1286,10 +1286,12 @@ def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: 
 
 # OI 首次失敗僅記錄一次，避免洗版
 _coinglass_oi_first_failure_logged = False
+# 線程鎖，防止多線程同時穿透限速
+_oi_rate_limit_lock = threading.Lock()
 
 
 def _parse_oi_change_from_data_list(data_list: list) -> Optional[float]:
-    """從 CoinGlass OI K 線列表解析 15m 變化%（通用版：支援 v, value, oi, openInterest, close）"""
+    """從 CoinGlass OI K 線列表解析 15m 變化%（通用版：支援 v, c, close, oi）"""
     if not isinstance(data_list, list) or len(data_list) < 2:
         return None
     try:
@@ -1301,7 +1303,8 @@ def _parse_oi_change_from_data_list(data_list: list) -> Optional[float]:
         pass
     last = data_list[-1]
     prev = data_list[-2]
-    keys_to_check = ["v", "value", "openInterest", "oi", "close", "open"]
+    # 聚合接口常返回: t, o, h, l, c（短鍵名）
+    keys_to_check = ["v", "value", "openInterest", "oi", "close", "c", "open", "o"]
     last_oi = None
     prev_oi = None
     for k in keys_to_check:
@@ -1323,40 +1326,57 @@ def _parse_oi_change_from_data_list(data_list: list) -> Optional[float]:
 
 
 def fetch_oi_change_15m(symbol: str) -> Optional[float]:
-    """計算單一 symbol 15 分鐘 OI 變化%（初創版專用：僅用聚合持倉歷史 API）"""
+    """
+    計算單一 symbol 15 分鐘 OI 變化%
+    【初創版修復】1. Interval 修正為 "15m" (V4 標準)。2. 加入 Thread Lock 防止限速失效。3. 詳細錯誤日誌 (Debug Mode)。
+    """
     global _coinglass_oi_rate_limiter, _coinglass_oi_first_failure_logged
-    if _coinglass_oi_rate_limiter is None:
-        _coinglass_oi_rate_limiter = {"last_call": 0.0}
-    now = time.time()
-    elapsed = now - _coinglass_oi_rate_limiter.get("last_call", 0.0)
-    if elapsed < 0.1:
-        time.sleep(0.1 - elapsed)
-    _coinglass_oi_rate_limiter["last_call"] = time.time()
-    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+
+    with _oi_rate_limit_lock:
+        if _coinglass_oi_rate_limiter is None:
+            _coinglass_oi_rate_limiter = {"last_call": 0.0}
+        now = time.time()
+        elapsed = now - _coinglass_oi_rate_limiter.get("last_call", 0.0)
+        if elapsed < 0.15:
+            time.sleep(0.15 - elapsed)
+        _coinglass_oi_rate_limiter["last_call"] = time.time()
+
+    base_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     url = f"{CG_API_BASE}/api/futures/open-interest/aggregated-history"
-    params = {"symbol": base, "interval": "m15"}
+    params = {"symbol": base_symbol, "interval": "15m", "limit": 5}
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=6)
-        if resp.status_code != 200:
+        response = requests.get(url, params=params, headers=headers, timeout=8)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("code") in ("0", 0, 200, "200"):
+                data_list = result.get("data", result.get("list", []))
+                change = _parse_oi_change_from_data_list(data_list)
+                if change is not None:
+                    return change
+                if not _coinglass_oi_first_failure_logged:
+                    _coinglass_oi_first_failure_logged = True
+                    logger.warning(
+                        f"⚠️ OI 數據解析失敗 {base_symbol}: 數據為空或格式不符. 樣本: {str(data_list)[:100]}"
+                    )
+            else:
+                if not _coinglass_oi_first_failure_logged:
+                    _coinglass_oi_first_failure_logged = True
+                    logger.warning(
+                        f"⚠️ OI API 業務錯誤 {base_symbol}: code={result.get('code')} msg={result.get('msg')}"
+                    )
+        else:
             if not _coinglass_oi_first_failure_logged:
                 _coinglass_oi_first_failure_logged = True
-                try:
-                    err = resp.json()
-                    logger.warning(f"CoinGlass OI aggregated 首次失敗: status={resp.status_code} code={err.get('code')} msg={err.get('msg', err.get('message', ''))}")
-                except Exception:
-                    logger.warning(f"CoinGlass OI aggregated 首次失敗: status={resp.status_code} body={resp.text[:200]}")
-            return None
-        res = resp.json()
-        if res.get("code") not in (0, "0", 200, "200", None):
-            return None
-        data_list = res.get("data", res.get("list", []))
-        return _parse_oi_change_from_data_list(data_list)
+                logger.warning(
+                    f"⚠️ OI HTTP 請求失敗 {base_symbol}: Status {response.status_code} - {response.text[:100]}"
+                )
     except Exception as e:
         if not _coinglass_oi_first_failure_logged:
             _coinglass_oi_first_failure_logged = True
-            logger.warning(f"CoinGlass OI aggregated 請求異常: {type(e).__name__}: {e}")
-        return None
+            logger.error(f"⚠️ OI 請求異常 {base_symbol}: {str(e)}")
+    return None
 
 
 def normalize_symbol(coin: Dict) -> Optional[str]:
