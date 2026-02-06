@@ -231,9 +231,7 @@ def send_ranking_to_tg(ranking: List[Dict]):
         sign = "+" if sector['change'] > 0 else ""
         message += f"{medal} *{sector['displayName']}* `{sign}{change_str}%` {emoji}\n"
     
-    message += "\n🔗 [查看完整即時數據](https://www.coingecko.com/zh-tw/categories#key-stats) \n"
-    message += "\n💡 _數據源：CoinGecko API_ \n"
-    message += "_由傑克 AI 每小時自動監控資金流向_"
+    message += "\n💡 _由傑克 AI 每小時自動監控資金流向_"
     
     send_telegram_message(message, TG_THREAD_IDS['sector_ranking'])
 
@@ -1139,57 +1137,86 @@ def fetch_supported_futures_coins() -> List[str]:
         return []
 
 
+def fetch_price_change_15m_binance(symbol: str) -> Optional[float]:
+    """用 Binance 公開 API 取得 15 分鐘漲跌幅%（不消耗 CoinGlass 額度，供初創版 fallback）"""
+    sym = f"{symbol}USDT" if not symbol.upper().endswith("USDT") else symbol
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": sym, "interval": "15m", "limit": 2}
+    try:
+        r = requests.get(url, params=params, timeout=5)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if not isinstance(data, list) or len(data) < 2:
+            return None
+        prev_close = float(data[0][4])
+        last_close = float(data[1][4])
+        if not prev_close:
+            return None
+        return ((last_close - prev_close) / prev_close) * 100
+    except Exception:
+        return None
+
+
 def fetch_coins_price_change() -> List[Dict]:
-    """獲取幣種漲跌幅列表（改為只返回合約幣種）"""
-    # 先獲取合約幣種列表
+    """獲取幣種漲跌幅列表（改為只返回合約幣種）。初創版若 coins-price-change 為空則用 Binance 公開 API fallback。"""
     supported_coins = fetch_supported_futures_coins()
     if not supported_coins:
         logger.warning("無法獲取合約幣種列表，使用備用方法")
-        # 備用：使用原API，但會包含現貨
         url = f"{CG_API_BASE}/api/futures/coins-price-change"
-        headers = {
-            "CG-API-KEY": CG_API_KEY,
-            "accept": "application/json"
-        }
+        headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
         try:
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code != 200:
                 return []
             result = response.json()
             return result.get('data', result if isinstance(result, list) else [])
-        except:
+        except Exception:
             return []
-    
-    # 獲取價格變化數據
+
     url = f"{CG_API_BASE}/api/futures/coins-price-change"
-    headers = {
-        "CG-API-KEY": CG_API_KEY,
-        "accept": "application/json"
-    }
-    
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
-            logger.error(f"coins-price-change error: {response.status_code}")
-            return []
-        
+            logger.error(f"coins-price-change HTTP {response.status_code}")
+            return _fetch_coins_price_change_fallback(supported_coins)
         result = response.json()
         all_data = result.get('data', result if isinstance(result, list) else [])
-        
-        # 過濾：只保留合約幣種
+        if not all_data:
+            code = result.get('code', '')
+            msg = result.get('msg', result.get('message', ''))
+            logger.warning(f"CoinGlass 幣種漲跌幅返回空數據 code={code} msg={msg}（初創版可能不包含此接口，改用 Binance 公開 API）")
+            return _fetch_coins_price_change_fallback(supported_coins)
         filtered_data = []
         for item in all_data:
             symbol = item.get('symbol') or item.get('coin') or ''
-            # 移除USDT後綴進行比對
             symbol_clean = symbol.replace('USDT', '').replace('USDT-PERP', '').upper()
             if symbol_clean in supported_coins:
                 filtered_data.append(item)
-        
         logger.info(f"過濾後剩餘 {len(filtered_data)} 個合約幣種（原始 {len(all_data)} 個）")
         return filtered_data
     except Exception as e:
         logger.error(f"獲取幣種價格變化失敗: {str(e)}")
-        return []
+        return _fetch_coins_price_change_fallback(supported_coins)
+
+
+def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: int = 99999) -> List[Dict]:
+    """初創版 fallback：用備援來源取得 15m 漲跌幅。"""
+    symbols = list(supported_coins)[:max_symbols]
+    out = []
+    def one(sym):
+        ch = fetch_price_change_15m_binance(sym)
+        return {"symbol": sym, "coin": sym, "price_change_percent_15m": ch} if ch is not None else None
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        for i, res in enumerate(as_completed([ex.submit(one, s) for s in symbols])):
+            r = res.result()
+            if r is not None:
+                out.append(r)
+            if (i + 1) % 100 == 0:
+                logger.info(f"Fallback 價格進度: {i + 1}/{len(symbols)}")
+    logger.info(f"Fallback 取得 {len(out)} 個幣種 15m 漲跌幅")
+    return out
 
 
 def fetch_oi_change_15m(symbol: str) -> Optional[float]:
@@ -1409,15 +1436,15 @@ def fetch_position_change():
     # 步驟1：先獲取 BingX 交易對名單（提取幣種名稱）
     bingx_symbols = fetch_supported_futures_coins()
     if not bingx_symbols:
-        send_telegram_message("⚠️ 無法從 API 取得 BingX 合約幣種名單，請稍後再試。", TG_THREAD_IDS['position_change'])
+        send_telegram_message("⚠️ 無法取得合約幣種名單，請稍後再試。", TG_THREAD_IDS['position_change'])
         return
     
     logger.info(f"獲取到 {len(bingx_symbols)} 個 BingX 合約幣種")
     
-    # 步驟2：獲取 CoinGlass 所有幣種的價格變化數據（原本的邏輯）
+    # 步驟2：獲取幣種價格變化（CoinGlass；若為空則自動改用 Binance 公開 API，適合初創版）
     all_symbols_data = fetch_coins_price_change()
     if not all_symbols_data:
-        send_telegram_message("⚠️ 無法從 Coinglass 取得幣種漲跌資料，請稍後再試。", TG_THREAD_IDS['position_change'])
+        send_telegram_message("⚠️ 無法取得幣種漲跌資料，請稍後再試。", TG_THREAD_IDS['position_change'])
         return
     
     logger.info(f"從 Coinglass API 取得 {len(all_symbols_data)} 個幣種的價格數據")
@@ -1430,10 +1457,27 @@ def fetch_position_change():
         if symbol and symbol.upper() in bingx_symbols_upper:
             target_symbols_data.append(coin)
     
-    logger.info(f"過濾後剩餘 {len(target_symbols_data)} 個 BingX 幣種（將處理前 {MAX_SYMBOLS} 個）")
+    logger.info(f"過濾後剩餘 {len(target_symbols_data)} 個合約幣種")
     
-    # 處理合約幣種（限制數量避免超時）
-    target_symbols = target_symbols_data[:MAX_SYMBOLS] if len(target_symbols_data) > MAX_SYMBOLS else target_symbols_data
+    # 【智慧過濾 Smart Filter - 初創版專用】
+    # 策略：全市場掃描，但只對「價格有波動」的幣種查詢 OI，以節省 API 額度。
+    # 1. 價格門檻 (Gatekeeper): 15m 漲跌幅 >= 0.8% (過濾死魚盤)
+    # 2. 持倉門檻 (User Target): 15m OI 變化 >= 1.5% (只推播顯著異動)
+    PRICE_GATEKEEPER = 0.8  # 價格波動門檻 %
+    OI_THRESHOLD = 1.5      # 持倉異動門檻 %
+    
+    active_symbols = []
+    for coin in target_symbols_data:
+        p_change = extract_price_change_15m(coin)
+        if abs(p_change) >= PRICE_GATEKEEPER:
+            active_symbols.append(coin)
+    
+    logger.info(
+        f"🔍 智慧過濾: 從 {len(target_symbols_data)} 個幣種中篩選出 {len(active_symbols)} 個活躍標的 "
+        f"(價格波動 >= {PRICE_GATEKEEPER}%) 進行 OI 檢查..."
+    )
+    
+    target_symbols = active_symbols
     
     long_open = []
     long_close = []
@@ -1444,8 +1488,8 @@ def fetch_position_change():
     oi_success_count = 0
     oi_fail_count = 0
     
-    # 並行處理配置：提高並發數並在 8 分鐘內強制結束，確保每 15 分鐘能準時推播
-    MAX_WORKERS = 35
+    # 並行處理配置：初創版友善，避免觸發限流
+    MAX_WORKERS = 20
     start_time = time.time()
     MAX_EXECUTION_TIME = 8 * 60  # 8 分鐘內必須結束並推播，避免被下一輪 schedule 取消
     
@@ -1480,14 +1524,16 @@ def fetch_position_change():
                 price_change = result.get('priceChange15m')
                 oi_change = result.get('oiChange15m')
                 item = {'symbol': symbol, 'priceChange15m': price_change, 'oiChange15m': oi_change}
-                if category == 'long_open':
-                    long_open.append(item)
-                elif category == 'long_close':
-                    long_close.append(item)
-                elif category == 'short_open':
-                    short_open.append(item)
-                elif category == 'short_close':
-                    short_close.append(item)
+                # 只推播持倉變化 >= OI_THRESHOLD 的標的（用戶指定 1.5%）
+                if abs(oi_change) >= OI_THRESHOLD:
+                    if category == 'long_open':
+                        long_open.append(item)
+                    elif category == 'long_close':
+                        long_close.append(item)
+                    elif category == 'short_open':
+                        short_open.append(item)
+                    elif category == 'short_close':
+                        short_close.append(item)
     finally:
         executor.shutdown(wait=not broke_early)  # 提前結束時不等待未完成任務，以利準時推播
     
@@ -2112,10 +2158,7 @@ def fetch_and_push_economic_data():
         
     except Exception as e:
         logger.error(f"經濟數據推播執行錯誤: {str(e)}")
-        send_telegram_message(
-            f"⚠️ *經濟數據抓取錯誤*\n\n錯誤訊息：{str(e)}\n\n請檢查 API 金鑰或網路連線。", 
-            TG_THREAD_IDS['economic_data']
-        )
+        send_telegram_message("⚠️ 經濟數據暫時無法取得，請稍後再試。", TG_THREAD_IDS['economic_data'])
 
 
 # ==================== 5. 新聞快訊推特中文推播 ====================
@@ -2266,8 +2309,7 @@ def process_and_send(news: Dict, source: str):
     message = "📰 *【全球幣圈即時快訊】*\n\n"
     message += f"🔔 *{translated_title}*\n\n"
     message += f"📄 原文：{news.get('title', '')}\n"
-    message += f"🔍 來源：{news.get('source', '')}\n"
-    message += f"🔗 [點擊查看原文]({news.get('url', 'https://tree.news')})"
+    message += f"🔗 [點擊查看原文]({news.get('url', '')})"
     
     send_telegram_message(message, TG_THREAD_IDS['news'])
 
@@ -2281,7 +2323,7 @@ def process_and_send_coinglass(item: Dict, type_str: str):
     translated_title = translate_text(item.get('title') or item.get('headline') or "")
     translated_content = translate_text(item.get('content') or item.get('description') or "")
     
-    message = f"{emoji} *【CoinGlass {type_name}】*\n\n"
+    message = f"{emoji} *【全球幣圈{type_name}】*\n\n"
     
     if translated_title:
         message += f"🔔 *{translated_title}*\n\n"
@@ -2303,9 +2345,6 @@ def process_and_send_coinglass(item: Dict, type_str: str):
         # 轉換為台灣時間
         date_taipei = get_taipei_time(date)
         message += f"🕐 時間：{date_taipei.strftime('%Y-%m-%d %H:%M:%S')}\n"
-    
-    if item.get('source'):
-        message += f"🔍 來源：{item.get('source')}\n"
     
     if item.get('url') or item.get('link'):
         message += f"🔗 [點擊查看原文]({item.get('url') or item.get('link')})"
@@ -2478,7 +2517,6 @@ def fetch_funding_fortune_list():
         message += "\n💡 *套利策略*（新手說明：做多=看漲買入，做空=看跌賣出）：\n"
         message += "*正費率（+）*：做空永續合約（看跌）+ 持有現貨，每 4 小時領取資金費率。\n"
         message += "*負費率（-）*：做多永續合約（看漲）+ 賣出現貨，但需注意軋空風險。\n\n"
-        message += "📊 數據來源：[幣安U本位](https://www.binance.com/zh-TC/futures/funding-history/perpetual/real-time-funding-rate)\n"
         now_taipei = get_taipei_time()
         message += f"⏰ 更新時間：{now_taipei.strftime('%Y-%m-%d %H:%M:%S')}"
         
