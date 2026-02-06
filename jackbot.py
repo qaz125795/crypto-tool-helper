@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import random
 import pandas as pd
 import numpy as np
 
@@ -1379,7 +1380,7 @@ def _parse_oi_change_from_data_list(data_list: list) -> Optional[float]:
 def fetch_oi_change_30m(symbol: str) -> Optional[float]:
     """
     計算單一 symbol 30 分鐘 OI 變化%
-    【初創版】CoinGlass 初創版限制聚合持倉顆粒度 >= 30m，使用 30m 符合權限。Thread Lock + Debug 日誌保留。
+    【降速版】大幅增加延遲以適應 CoinGlass 嚴格限流
     """
     global _coinglass_oi_rate_limiter, _coinglass_oi_first_failure_logged
 
@@ -1388,8 +1389,9 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
             _coinglass_oi_rate_limiter = {"last_call": 0.0}
         now = time.time()
         elapsed = now - _coinglass_oi_rate_limiter.get("last_call", 0.0)
-        if elapsed < 0.15:
-            time.sleep(0.15 - elapsed)
+        wait_time = 1.5 + random.uniform(0.1, 0.5)
+        if elapsed < wait_time:
+            time.sleep(wait_time - elapsed)
         _coinglass_oi_rate_limiter["last_call"] = time.time()
 
     base_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
@@ -1397,36 +1399,27 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
     params = {"symbol": base_symbol, "interval": "30m", "limit": 5}
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
-    try:
-        response = requests.get(url, params=params, headers=headers, timeout=8)
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("code") in ("0", 0, 200, "200"):
-                data_list = result.get("data", result.get("list", []))
-                change = _parse_oi_change_from_data_list(data_list)
-                if change is not None:
-                    return change
-                if not _coinglass_oi_first_failure_logged:
-                    _coinglass_oi_first_failure_logged = True
-                    logger.warning(
-                        f"⚠️ OI 數據解析失敗 {base_symbol}: 數據為空或格式不符. 樣本: {str(data_list)[:100]}"
-                    )
-            else:
-                if not _coinglass_oi_first_failure_logged:
-                    _coinglass_oi_first_failure_logged = True
-                    logger.warning(
-                        f"⚠️ OI API 業務錯誤 {base_symbol}: code={result.get('code')} msg={result.get('msg')}"
-                    )
-        else:
-            if not _coinglass_oi_first_failure_logged:
-                _coinglass_oi_first_failure_logged = True
-                logger.warning(
-                    f"⚠️ OI HTTP 請求失敗 {base_symbol}: Status {response.status_code} - {response.text[:100]}"
-                )
-    except Exception as e:
-        if not _coinglass_oi_first_failure_logged:
-            _coinglass_oi_first_failure_logged = True
-            logger.error(f"⚠️ OI 請求異常 {base_symbol}: {str(e)}")
+    for attempt in range(2):
+        try:
+            response = requests.get(url, params=params, headers=headers, timeout=10)
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("code") in ("0", 0, 200, "200"):
+                    data_list = result.get("data", result.get("list", []))
+                    change = _parse_oi_change_from_data_list(data_list)
+                    if change is not None:
+                        return change
+                msg = result.get("msg", "")
+                if "Too Many Requests" in msg or result.get("code") == "400":
+                    logger.warning(f"CoinGlass 限流 ({base_symbol})，休息 3 秒...")
+                    time.sleep(3)
+                    continue
+            elif response.status_code == 429:
+                time.sleep(3)
+                continue
+        except Exception as e:
+            logger.debug(f"OI 請求異常 {base_symbol}: {e}")
+            time.sleep(1)
     return None
 
 
@@ -1481,39 +1474,31 @@ def extract_price_change_30m(coin: Dict) -> float:
 
 
 def _fetch_coinglass_rsi(symbol: str) -> Optional[Dict]:
-    """CoinGlass V4 RSI：先試 Binance/BingX + BTCUSDT，再試 BingX + base（僅 BingX 上架小幣）。"""
+    """CoinGlass V4 RSI：降速版，失敗直接放棄切換本地計算（省 API 額度）。"""
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     symbol_pair = base + "USDT"
     url = f"{CG_API_BASE}/api/futures/indicators/rsi"
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
-    # 依序：Binance 交易對、BingX 交易對、BingX 僅 base（部分小幣 CoinGlass 用 base）
-    tries = [("Binance", symbol_pair), ("BingX", symbol_pair), ("BingX", base)]
-    last_error = None
+    tries = [("Binance", symbol_pair)]
+
     for exchange, sym_param in tries:
         params = {"exchange": exchange, "interval": "30m", "symbol": sym_param}
         try:
+            time.sleep(1.0)
             r = requests.get(url, params=params, headers=headers, timeout=8)
-            time.sleep(0.2)
+            if r.status_code == 429 or "Too Many Requests" in r.text:
+                logger.warning(f"CoinGlass RSI 限流，跳過 {base}")
+                return None
             if r.status_code != 200:
-                last_error = f"status={r.status_code} body={r.text[:300]}"
-                if r.status_code == 429:
-                    logger.warning(f"CoinGlass RSI 限流 429: {base} ({exchange} {sym_param})")
                 continue
             data = r.json()
-            code = data.get("code")
-            msg = (data.get("msg") or data.get("message") or "").lower()
-            if code not in (0, "0", 200, "200", None) or "instrument" in msg:
-                last_error = f"code={code} msg={data.get('msg') or data.get('message')}"
+            if data.get("code") not in (0, "0", 200, "200", None):
                 continue
             raw = data.get("data", data.get("list", []))
-            if isinstance(raw, list) and len(raw) > 0:
+            if raw:
                 return data
-            if isinstance(raw, dict) and raw:
-                return data
-            last_error = "數據為空"
-        except Exception as e:
-            last_error = str(e)
-    logger.warning(f"CoinGlass RSI {base}: 所有嘗試均失敗，最後: {last_error}")
+        except Exception:
+            pass
     return None
 
 
@@ -1865,10 +1850,10 @@ def _classify_signal_and_tier(
     category: str,
     tech: Optional[Dict],
     funding_rate: Optional[float] = None,
-) -> Tuple[str, str, int, str]:
+) -> Tuple[str, str, int, str, str]:
     """
-    分級邏輯：回傳 (signal_label, zone, stars, rsi_desc)。
-    zone 為四區塊之一；stars 1～5，5 最佳。
+    分級邏輯：回傳 (signal_label, zone, stars, rsi_desc, reason)。
+    zone 為四區塊之一；stars 1～5，5 最佳；reason 為戰術理由。
     """
     oi = item.get("oiChange30m") or 0
     rsi = tech.get("rsi") if tech else None
@@ -1884,15 +1869,16 @@ def _classify_signal_and_tier(
             elif funding_rate < -EXTREME_FUNDING:
                 rsi_desc = "費率過冷❄️"
         label = label_by_cat.get(category, "📊 異動")
+        reason = "數據異動"
         if category == "short_open":
-            return (label, ZONE_BREAKOUT_SHORT, 2, rsi_desc)
+            return (label, ZONE_BREAKOUT_SHORT, 2, rsi_desc, reason)
         if category == "long_open":
-            return (label, ZONE_BREAKOUT_LONG, 2, rsi_desc)
+            return (label, ZONE_BREAKOUT_LONG, 2, rsi_desc, reason)
         if category == "short_close":
-            return (label, ZONE_BREAKOUT_LONG, 2, rsi_desc)  # 空方平倉偏多
+            return (label, ZONE_BREAKOUT_LONG, 2, rsi_desc, reason)
         if category == "long_close":
-            return (label, ZONE_BREAKOUT_SHORT, 2, rsi_desc)  # 多方平倉偏空
-        return (label, ZONE_DIP, 1, rsi_desc)
+            return (label, ZONE_BREAKOUT_SHORT, 2, rsi_desc, reason)
+        return (label, ZONE_DIP, 1, rsi_desc, reason)
     if rsi is not None:
         if rsi > 70:
             rsi_desc = f"RSI {rsi:.0f}(超買)"
@@ -1914,32 +1900,33 @@ def _classify_signal_and_tier(
     if rsi is None and funding_rate is not None and funding_rate > EXTREME_FUNDING:
         bearish_cond = True
     if oi < -2.0 and bearish_cond:
-        return ("💎 摸頭做空", ZONE_TOP, 5, rsi_desc)
+        return ("🔴 摸頭做空", ZONE_TOP, 5, rsi_desc, "⛽ 空軍投降 (嘎空結束)")
     # 突破追漲區：嘎空、順勢做多
     if oi > 2.0 and funding_rate is not None and funding_rate < -0.001:
-        return ("💎 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc)
+        return ("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 資金湧入 (強勢突破)")
     # 抄底區：做多、超賣
     bullish_cond = touch_lower or (rsi is not None and rsi < 30)
     if rsi is None and funding_rate is not None and funding_rate < -EXTREME_FUNDING:
         bullish_cond = True
     if oi < -2.0 and bullish_cond:
-        return ("💎 抄底做多", ZONE_DIP, 5, rsi_desc)
+        return ("🟢 抄底做多", ZONE_DIP, 5, rsi_desc, "🩸 賣壓竭盡 (跌深反彈)")
     # 順勢：OI > 2% 未過熱
     if oi > 2.0 and (rsi is None or (30 < rsi < 70)):
         zone = ZONE_BREAKOUT_LONG if category in ("long_open", "long_close") else ZONE_BREAKOUT_SHORT
-        return ("🟡 順勢觀察", zone, 4, rsi_desc)
+        reason = "🚀 資金湧入 (強勢突破)" if zone == ZONE_BREAKOUT_LONG else "📉 空方加碼 (順勢追跌)"
+        return ("🟡 順勢觀察", zone, 4, rsi_desc, reason)
     # 偏空過熱 -> 摸頭區
     if rsi is not None and (rsi > 70 or touch_upper):
-        return ("📉 偏空過熱", ZONE_TOP, 4, rsi_desc)
+        return ("🔴 偏空過熱", ZONE_TOP, 4, rsi_desc, "🔨 主力佈空 (漲多過熱)")
     # 偏多超賣 -> 抄底區
     if rsi is not None and (rsi < 30 or touch_lower):
-        return ("📈 偏多超賣", ZONE_DIP, 4, rsi_desc)
+        return ("🟢 偏多超賣", ZONE_DIP, 4, rsi_desc, "🛒 主力吸籌 (跌深撿便宜)")
     # 其餘依 category 歸入追漲/追跌
     if category == "short_open":
-        return ("📊 異動", ZONE_BREAKOUT_SHORT, 2, rsi_desc)
+        return ("📊 異動", ZONE_BREAKOUT_SHORT, 2, rsi_desc, "數據異動")
     if category == "long_open":
-        return ("📊 異動", ZONE_BREAKOUT_LONG, 2, rsi_desc)
-    return ("📊 異動", ZONE_DIP if category in ("long_close", "long_open") else ZONE_TOP, 1, rsi_desc)
+        return ("📊 異動", ZONE_BREAKOUT_LONG, 2, rsi_desc, "數據異動")
+    return ("📊 異動", ZONE_DIP if category in ("long_close", "long_open") else ZONE_TOP, 1, rsi_desc, "數據異動")
 
 
 def build_report_message_tiered(
@@ -1947,81 +1934,87 @@ def build_report_message_tiered(
     processed_count: int = 0,
     oi_success_count: int = 0,
 ) -> str:
-    """四區塊推播：抄底區、摸頭區、突破追漲區、跌破追跌區，區內依五星排序（5 最佳）。"""
-    def fmt(num):
-        if num is None or (isinstance(num, float) and (num != num)):
-            return "0.00%"
-        return f"{'+' if num >= 0 else ''}{num:.2f}%"
+    """新版推播：強調進場理由與戰術 + 費率狀態提示"""
 
     def star_str(n: int) -> str:
         return "⭐" * (n or 0) + "☆" * (5 - (n or 0))
 
-    def oi_plain(cat: str) -> str:
-        return {"long_open": "多方開倉", "long_close": "多方平倉", "short_open": "空方開倉", "short_close": "空方平倉"}.get(cat, "持倉異動")
+    def fmt_pct(num):
+        if num is None or (isinstance(num, float) and (num != num)):
+            return "0.00%"
+        return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
-    def line_with_funding(x: Dict) -> str:
-        price_val = x.get("current_price")
-        if price_val is not None and isinstance(price_val, (int, float)):
-            price_str = f"${price_val:,.4g}"
-        else:
-            price_str = "—"
-        oi_val = x.get("oiChange30m")
-        oi_str = fmt(oi_val)
-        oi_desc = oi_plain(x.get("category", ""))
-        rsi_part = (x.get("rsi_desc") or "RSI —").strip()
-        if rsi_part == "無技術數據":
-            rsi_part = "RSI —"
-        funding = x.get("funding_rate")
-        fee = f"｜費率 {funding*100:.2f}%" if funding is not None and isinstance(funding, (int, float)) else ""
-        stars = x.get("stars", 0)
-        sym = x.get("symbol", "")
-        return f"{star_str(stars)} *{sym}*｜價 {price_str}｜持倉 {oi_str}（{oi_desc}）｜{rsi_part} {fee}".rstrip()
-
-    zone_order = [ZONE_DIP, ZONE_TOP, ZONE_BREAKOUT_LONG, ZONE_BREAKOUT_SHORT]
-    zone_title = {
-        ZONE_DIP: "抄底區",
-        ZONE_TOP: "摸頭區",
-        ZONE_BREAKOUT_LONG: "突破追漲區",
-        ZONE_BREAKOUT_SHORT: "跌破追跌區",
+    zone_order = [ZONE_TOP, ZONE_DIP, ZONE_BREAKOUT_LONG, ZONE_BREAKOUT_SHORT]
+    zone_map = {
+        ZONE_TOP: "🏔️ 【摸頭區】 (高風險高報酬)",
+        ZONE_DIP: "🌊 【抄底區】 (高風險高報酬)",
+        ZONE_BREAKOUT_LONG: "🚀 【突破追漲】 (順勢交易)",
+        ZONE_BREAKOUT_SHORT: "📉 【跌破追跌】 (順勢交易)",
     }
 
     lines = []
-    lines.append("💰 *【傑克短線持倉異動】(30分)*")
+    lines.append("💰 *【傑克短線戰術雷達】(30分)*")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("")
-    lines.append("_推薦度：⭐⭐⭐⭐⭐ 最佳 ～ ☆☆☆☆☆ 最差_")
     lines.append("")
 
     has_any = False
+
     for zone in zone_order:
         items = [x for x in enriched_items if x.get("zone") == zone]
         if not items:
             continue
+
         has_any = True
-        items_sorted = sorted(items, key=lambda x: (-(x.get("stars") or 0), -(x.get("oiChange30m") or 0)))
-        lines.append(f"📌 *{zone_title[zone]}*")
+        items_sorted = sorted(items, key=lambda x: (-(x.get("stars") or 0), -(abs(x.get("oiChange30m") or 0))))
+
+        lines.append(f"*{zone_map[zone]}*")
+
         for x in items_sorted:
-            lines.append(line_with_funding(x))
-        lines.append("")
+            sym = x.get("symbol", "")
+            stars = x.get("stars", 1)
+            signal = x.get("signal_label", "觀望")
+            reason = x.get("reason", "數據異動")
+
+            rsi_part = x.get("rsi_desc", "RSI —")
+            oi_val = x.get("oiChange30m", 0)
+            oi_str = fmt_pct(oi_val)
+
+            funding = x.get("funding_rate")
+            fee_str = ""
+            if funding is not None:
+                fee_val = funding * 100
+                if fee_val >= 0.05:
+                    fee_state = "🔥多頭過熱"
+                elif fee_val >= 0.02:
+                    fee_state = "⚡多方擁擠"
+                elif fee_val <= -0.05:
+                    fee_state = "❄️空頭過熱"
+                elif fee_val <= -0.02:
+                    fee_state = "🥶空方擁擠"
+                else:
+                    fee_state = "⚖️多空平衡"
+                fee_str = f"｜費率 {fee_val:.3f}% ({fee_state})"
+
+            lines.append(f"{signal[:1]} *{sym}* ({star_str(stars)})")
+            lines.append(f"   💡 *戰術：{signal[2:]}*")
+            lines.append(f"   📝 *理由：{reason}*")
+            lines.append(f"   📊 數據：{rsi_part}｜持倉 {oi_str}{fee_str}")
+            lines.append("")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
 
     if not has_any:
-        lines.append("本次沒有符合條件的標的。")
+        lines.append("😴 目前市場平靜，無明顯交易訊號。")
         lines.append("")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("📌 *持倉白話*")
-    lines.append("• 多方開倉＝有人加碼做多（看漲）")
-    lines.append("• 多方平倉＝多單減碼（獲利了結或停損）")
-    lines.append("• 空方開倉＝有人加碼做空（看跌）")
-    lines.append("• 空方平倉＝空單減碼（獲利了結或停損）")
+    lines.append("📌 *戰術速查*")
+    lines.append("• ⛽ *嘎空結束*：空單停損離場，上漲動能耗盡 ⮕ 做空")
+    lines.append("• 🔨 *主力佈空*：價格漲多，大戶加碼空單賭回調 ⮕ 做空")
+    lines.append("• 🩸 *賣壓竭盡*：多單停損離場，下跌動能耗盡 ⮕ 做多")
+    lines.append("• 🛒 *主力吸籌*：價格跌深，大戶進場撿便宜 ⮕ 做多")
     lines.append("")
-    lines.append("📌 *四區說明*")
-    lines.append("• 抄底區：超賣／觸底，可考慮做多不追殺")
-    lines.append("• 摸頭區：過熱／觸頂，可考慮做空嚴設停損")
-    lines.append("• 突破追漲區：順勢做多、嘎空潛力")
-    lines.append("• 跌破追跌區：順勢做空、空方加倉")
-    lines.append("")
-    lines.append("⚠️ 本推播僅供參考，不構成投資建議。合約有風險，請自負盈虧、嚴控倉位。")
+    lines.append("⚠️ 系統僅供輔助，請嚴格設定停損。")
+
     return "\n".join(lines)
 
 
@@ -2190,10 +2183,10 @@ def fetch_position_change():
     oi_success_count = 0
     oi_fail_count = 0
     
-    # 並行處理配置：初創版友善，避免觸發限流
-    MAX_WORKERS = 20
+    # 並行處理配置：CoinGlass 專用慢速模式，避免瞬間請求過多
+    MAX_WORKERS = 4
     start_time = time.time()
-    MAX_EXECUTION_TIME = 8 * 60  # 8 分鐘內必須結束並推播，避免被下一輪 schedule 取消
+    MAX_EXECUTION_TIME = 15 * 60  # 放寬執行時間上限到 15 分鐘
     
     executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     broke_early = False
@@ -2265,7 +2258,7 @@ def fetch_position_change():
         time.sleep(0.2)
         tech = calculate_technicals(sym, bingx_symbol_override=preferred)
         funding_rate = _fetch_bingx_funding_rate(sym, preferred_symbol=preferred)
-        signal_label, zone, stars, rsi_desc = _classify_signal_and_tier(item, cat, tech, funding_rate)
+        signal_label, zone, stars, rsi_desc, reason = _classify_signal_and_tier(item, cat, tech, funding_rate)
         all_top.append({
             **item,
             "category": cat,
@@ -2274,6 +2267,7 @@ def fetch_position_change():
             "zone": zone,
             "stars": stars,
             "rsi_desc": rsi_desc,
+            "reason": reason,
             "funding_rate": funding_rate,
         })
     msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
