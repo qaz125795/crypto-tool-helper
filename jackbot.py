@@ -1320,7 +1320,7 @@ def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: 
     logger.info(f"正在使用 BingX 官方 API 獲取 {len(symbols)} 個幣種的 30m 價格數據 (降速模式)...")
 
     def one(sym):
-        time.sleep(0.05)
+        time.sleep(0.03)
         ch = fetch_price_change_30m_bingx(sym)
         return {"symbol": sym, "coin": sym, "price_change_percent_30m": ch} if ch is not None else None
 
@@ -1389,7 +1389,7 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
             _coinglass_oi_rate_limiter = {"last_call": 0.0}
         now = time.time()
         elapsed = now - _coinglass_oi_rate_limiter.get("last_call", 0.0)
-        wait_time = 1.5 + random.uniform(0.1, 0.5)
+        wait_time = 1.2 + random.uniform(0.1, 0.4)
         if elapsed < wait_time:
             time.sleep(wait_time - elapsed)
         _coinglass_oi_rate_limiter["last_call"] = time.time()
@@ -2189,7 +2189,7 @@ def fetch_position_change():
     # 並行處理配置：CoinGlass 專用慢速模式，避免瞬間請求過多
     MAX_WORKERS = 4
     start_time = time.time()
-    MAX_EXECUTION_TIME = 15 * 60  # 放寬執行時間上限到 15 分鐘
+    MAX_EXECUTION_TIME = 16 * 60  # 強制結束上限 16 分鐘（雙重保護用）
     
     executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     broke_early = False
