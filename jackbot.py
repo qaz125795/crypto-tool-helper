@@ -86,6 +86,9 @@ MAX_SYMBOLS = 904  # 將由 API 返回的合約幣種數量決定
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
+# CoinGlass OI 呼叫限速（初創版 80 次/分鐘，global 必須在函數內「最先」宣告再賦值）
+_coinglass_oi_rate_limiter = None
+
 # ==================== 工具函數 ====================
 
 def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown") -> bool:
@@ -1221,8 +1224,15 @@ def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: 
 
 def fetch_oi_change_15m(symbol: str) -> Optional[float]:
     """計算單一 symbol 15 分鐘 OI 變化%（數據源：CoinGlass Binance，與 Google Apps Script 版本一致）"""
+    global _coinglass_oi_rate_limiter
+    if _coinglass_oi_rate_limiter is None:
+        _coinglass_oi_rate_limiter = {"last_call": 0.0}
+    now = time.time()
+    elapsed = now - _coinglass_oi_rate_limiter.get("last_call", 0.0)
+    if elapsed < 0.1:
+        time.sleep(0.1 - elapsed)
+    _coinglass_oi_rate_limiter["last_call"] = time.time()
     # 直接使用 symbol+USDT 格式，使用 m15 區間
-    # 使用 exchange 參數指定 Binance（確保數據源與 Google Apps Script 版本一致）
     sym = symbol + "USDT"
     url = f"{CG_API_BASE}/api/futures/open-interest/history"
     params = {
