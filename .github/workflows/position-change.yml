@@ -44,10 +44,8 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_POSITION_CHANGE: ${{ secrets.TG_THREAD_POSITION_CHANGE }}
-          # CoinGlass 初創版（80 次/分鐘）：設為 80 即限速、全幣種覆蓋約 7–8 分鐘；不設或 0 則高並發
-          COINGLASS_RATE_LIMIT_PER_MINUTE: ${{ vars.COINGLASS_RATE_LIMIT_PER_MINUTE }}
         run: |
-          # 無限速時約 10 分鐘內結束；有限速時約 7–8 分鐘，此處 10 分鐘為雙重保護
+          # 腳本內建 8 分鐘強制結束，此處 10 分鐘為雙重保護
           timeout 600 python jackbot.py position_change || exit 0
           echo "任務執行完成"
 

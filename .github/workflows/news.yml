@@ -37,12 +37,10 @@ jobs:
       - name: Run news task
         env:
           TREE_API_KEY: ${{ secrets.TREE_API_KEY }}
-          CG_API_KEY: ${{ secrets.CG_API_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_NEWS: ${{ secrets.TG_THREAD_NEWS }}
-          COINGLASS_RATE_LIMIT_PER_MINUTE: ${{ vars.COINGLASS_RATE_LIMIT_PER_MINUTE }}
         run: |
           timeout 480 python jackbot.py news || exit 0
           echo "任務執行完成"

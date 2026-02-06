@@ -45,7 +45,6 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_ECONOMIC_DATA: ${{ secrets.TG_THREAD_ECONOMIC_DATA }}
-          COINGLASS_RATE_LIMIT_PER_MINUTE: ${{ vars.COINGLASS_RATE_LIMIT_PER_MINUTE }}
         run: |
           # 設置超時保護
           timeout 600 python jackbot.py economic_data_preview || exit 0
