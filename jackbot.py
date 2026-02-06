@@ -1284,9 +1284,31 @@ def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: 
     return out
 
 
+# OI 首次失敗僅記錄一次，避免洗版
+_coinglass_oi_first_failure_logged = False
+
+
+def _parse_oi_change_from_data_list(data_list: list) -> Optional[float]:
+    """從 CoinGlass OI K 線列表解析 15m 變化%（共用：history 與 aggregated-history）"""
+    if not isinstance(data_list, list) or len(data_list) < 2:
+        return None
+    last = data_list[-1]
+    prev = data_list[-2]
+    last_oi = last.get("close") or last.get("open")
+    prev_oi = prev.get("close") or prev.get("open")
+    try:
+        last_oi = float(last_oi) if last_oi is not None else None
+        prev_oi = float(prev_oi) if prev_oi is not None else None
+    except (ValueError, TypeError):
+        return None
+    if not last_oi or not prev_oi or prev_oi == 0:
+        return None
+    return ((last_oi - prev_oi) / prev_oi) * 100
+
+
 def fetch_oi_change_15m(symbol: str) -> Optional[float]:
-    """計算單一 symbol 15 分鐘 OI 變化%（數據源：CoinGlass Binance，與 Google Apps Script 版本一致）"""
-    global _coinglass_oi_rate_limiter
+    """計算單一 symbol 15 分鐘 OI 變化%。先試持倉歷史（K 線），初創版若無權限則改用聚合持倉歷史。"""
+    global _coinglass_oi_rate_limiter, _coinglass_oi_first_failure_logged
     if _coinglass_oi_rate_limiter is None:
         _coinglass_oi_rate_limiter = {"last_call": 0.0}
     now = time.time()
@@ -1294,52 +1316,57 @@ def fetch_oi_change_15m(symbol: str) -> Optional[float]:
     if elapsed < 0.1:
         time.sleep(0.1 - elapsed)
     _coinglass_oi_rate_limiter["last_call"] = time.time()
-    # 直接使用 symbol+USDT 格式，使用 m15 區間
-    sym = symbol + "USDT"
-    url = f"{CG_API_BASE}/api/futures/open-interest/history"
-    params = {
-        "exchange": EXCHANGE,  # 使用 Binance（確保數據源與 Google Apps Script 版本一致）
-        "symbol": sym,
-        "interval": "m15"  # 使用 15 分鐘區間
-    }
-    headers = {
-        "CG-API-KEY": CG_API_KEY,
-        "accept": "application/json"
-    }
-    
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+
+    # 1) 持倉歷史（K 線）：exchange + symbol+USDT，初創版可能回 400 Upgrade plan
+    sym = symbol + "USDT" if not symbol.upper().endswith("USDT") else symbol
+    base = symbol.replace("USDT", "").replace("-", "").upper()
+    url_history = f"{CG_API_BASE}/api/futures/open-interest/history"
+    params_history = {"exchange": EXCHANGE, "symbol": sym, "interval": "m15"}
     try:
-        # 使用較短 timeout（6 秒）以利 15 分鐘週期內完成，避免延遲推播
-        response = requests.get(url, params=params, headers=headers, timeout=6)
-        if response.status_code != 200:
-            return None
-        
-        result = response.json()
-        data_list = result.get('data', result.get('list', []))
-        
-        if not isinstance(data_list, list) or len(data_list) < 2:
-            return None
-        
-        last = data_list[-1]
-        prev = data_list[-2]
-        
-        # 實際欄位名稱：time, open, high, low, close（用 close 代表 OI 數值）
-        last_oi = last.get('close') or last.get('open')
-        prev_oi = prev.get('close') or prev.get('open')
-        
-        # 確保轉換為數字（處理字符串情況）
-        try:
-            last_oi = float(last_oi) if last_oi is not None else None
-            prev_oi = float(prev_oi) if prev_oi is not None else None
-        except (ValueError, TypeError):
-            return None
-        
-        if not last_oi or not prev_oi or prev_oi == 0:
-            return None
-        
-        change = ((last_oi - prev_oi) / prev_oi) * 100
-        return change
+        response = requests.get(url_history, params=params_history, headers=headers, timeout=6)
+        if response.status_code == 200:
+            result = response.json()
+            data_list = result.get("data", result.get("list", []))
+            change = _parse_oi_change_from_data_list(data_list)
+            if change is not None:
+                return change
+            if not _coinglass_oi_first_failure_logged:
+                _coinglass_oi_first_failure_logged = True
+                logger.warning(
+                    f"CoinGlass OI history 返回數據不足 symbol={sym} code={result.get('code')} "
+                    f"data_len={len(data_list) if isinstance(data_list, list) else 0}"
+                )
+        else:
+            if not _coinglass_oi_first_failure_logged:
+                _coinglass_oi_first_failure_logged = True
+                try:
+                    err_body = response.json()
+                    code, msg = err_body.get("code"), err_body.get("msg", err_body.get("message", ""))
+                    logger.warning(f"CoinGlass OI history 首次失敗: status={response.status_code} code={code} msg={msg}")
+                except Exception:
+                    logger.warning(f"CoinGlass OI history 首次失敗: status={response.status_code} body={response.text[:200]}")
     except Exception as e:
-        return None
+        if not _coinglass_oi_first_failure_logged:
+            _coinglass_oi_first_failure_logged = True
+            logger.warning(f"CoinGlass OI history 請求異常: {type(e).__name__}: {e}")
+
+    # 2) Fallback：聚合持倉歷史（K 線），僅需 symbol=幣種，初創版可能可用
+    _coinglass_oi_rate_limiter["last_call"] = time.time()
+    url_agg = f"{CG_API_BASE}/api/futures/open-interest/aggregated-history"
+    params_agg = {"symbol": base, "interval": "m15"}
+    try:
+        resp_agg = requests.get(url_agg, params=params_agg, headers=headers, timeout=6)
+        if resp_agg.status_code == 200:
+            res_agg = resp_agg.json()
+            if res_agg.get("code") in (0, "0", 200, "200", None):
+                data_list = res_agg.get("data", res_agg.get("list", []))
+                change = _parse_oi_change_from_data_list(data_list)
+                if change is not None:
+                    return change
+    except Exception:
+        pass
+    return None
 
 
 def normalize_symbol(coin: Dict) -> Optional[str]:
@@ -1503,8 +1530,10 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
 
 def fetch_position_change():
     """主流程：持倉變化篩選（原本的邏輯，只是改成只偵測 BingX 的 554 個交易對）"""
+    global _coinglass_oi_first_failure_logged
+    _coinglass_oi_first_failure_logged = False  # 本輪只記錄第一次 OI 失敗，方便診斷
     logger.info("開始執行持倉變化篩選，只偵測 BingX 合約幣種...")
-    
+
     # 步驟1：先獲取 BingX 交易對名單（提取幣種名稱）
     bingx_symbols = fetch_supported_futures_coins()
     if not bingx_symbols:
