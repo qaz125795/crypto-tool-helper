@@ -10,7 +10,7 @@ import json
 import time
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Set
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1072,6 +1072,49 @@ def fetch_whale_position_old():
 
 # ==================== 3. 持倉變化篩選器 ====================
 
+def fetch_bingx_contracts() -> Tuple[Set[str], Dict[str, str]]:
+    """
+    開頭拉 BingX 有支援的合約交易對：GET /openApi/swap/v2/quote/contracts。
+    回傳 (allowed_base_set, base_to_symbol)。
+    - allowed_base_set: 用於過濾的 base 集合（含 PEPE、1000PEPE、BTC 等，可與價格數據對應）。
+    - base_to_symbol: base_upper -> 正確的 BingX symbol（如 1000PEPE-USDT），供 K 線/費率 API 使用。
+    """
+    allowed: Set[str] = set()
+    base_to_symbol: Dict[str, str] = {}
+    url = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            return allowed, base_to_symbol
+        j = r.json()
+        if j.get("code") != 0:
+            return allowed, base_to_symbol
+        data = j.get("data", [])
+        if not isinstance(data, list):
+            return allowed, base_to_symbol
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            sym = item.get("symbol") or item.get("symbolName")
+            asset = item.get("asset") or ""
+            if not sym or not asset:
+                continue
+            status = item.get("status", 1)
+            if status != 1:
+                continue
+            asset_upper = asset.strip().upper()
+            allowed.add(asset_upper)
+            base_to_symbol[asset_upper] = sym.strip()
+            if asset_upper.startswith("1000") and len(asset_upper) > 4:
+                short_base = asset_upper[4:]
+                allowed.add(short_base)
+                base_to_symbol[short_base] = sym.strip()
+        return allowed, base_to_symbol
+    except Exception as e:
+        logger.warning(f"BingX contracts API 失敗: {e}")
+        return allowed, base_to_symbol
+
+
 def fetch_supported_futures_coins() -> List[str]:
     """獲取 BingX 交易所支援的合約幣種列表（應該有 600+ 個）"""
     url = "https://open-api-v4.coinglass.com/api/futures/supported-exchange-pairs"
@@ -1502,6 +1545,54 @@ def _fetch_coinglass_boll(symbol: str) -> Optional[Dict]:
     return None
 
 
+def _fetch_bingx_funding_rate(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
+    """
+    直接從 BingX API 取得該幣種資金費率。若傳入 preferred_symbol（來自 contracts），優先使用。
+    """
+    clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    try_symbols = [preferred_symbol] if preferred_symbol else []
+    try_symbols += [f"{clean}-USDT", f"1000{clean}-USDT"]
+    try_symbols = list(dict.fromkeys(try_symbols))  # 去重且保留順序
+    base_url = "https://open-api.bingx.com"
+    for sym_param in try_symbols:
+        try:
+            r = requests.get(f"{base_url}/openApi/swap/v2/quote/premiumIndex", params={"symbol": sym_param}, timeout=5)
+            time.sleep(0.1)
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            if j.get("code") != 0:
+                continue
+            data = j.get("data")
+            if isinstance(data, dict):
+                rate = data.get("lastFundingRate") or data.get("fundingRate") or data.get("nextFundingRate")
+                if rate is not None:
+                    return float(rate)
+            if isinstance(data, (int, float)):
+                return float(data)
+        except Exception:
+            continue
+    for sym_param in try_symbols:
+        try:
+            r = requests.get(f"{base_url}/openApi/swap/v2/quote/fundingRate", params={"symbol": sym_param, "limit": 2}, timeout=5)
+            time.sleep(0.1)
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            if j.get("code") != 0:
+                continue
+            data = j.get("data", [])
+            if isinstance(data, list) and data:
+                last = data[0] if data else {}
+                if isinstance(last, dict):
+                    rate = last.get("fundingRate")
+                    if rate is not None:
+                        return float(rate)
+        except Exception:
+            continue
+    return None
+
+
 def _fetch_funding_rate_map() -> Dict[str, float]:
     """
     一次取得 CoinGlass 全量資金費率（與排行榜同 API、同結構），回傳 symbol(base) -> 費率。
@@ -1597,13 +1688,15 @@ def _bbands(close: pd.Series, length: int = 20, std_dev: float = 2.0) -> Tuple[p
     return upper, middle, lower
 
 
-def _fetch_bingx_klines_and_calc(symbol: str) -> Optional[Dict[str, Any]]:
+def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     本地計算 Fallback：用 BingX 30m K 線 + 純 pandas 算 RSI(14)、布林帶(20,2)。
-    新增功能：自動嘗試 '1000' 前綴，解決部分 Meme 幣抓不到數據的問題。
+    若傳入 preferred_symbol（來自 contracts），優先使用；否則嘗試 1000 前綴。
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-    try_symbols = [f"{clean}-USDT", f"1000{clean}-USDT"]
+    try_symbols = [preferred_symbol] if preferred_symbol else []
+    try_symbols += [f"{clean}-USDT", f"1000{clean}-USDT"]
+    try_symbols = list(dict.fromkeys(try_symbols))
     url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
     raw = []
     found_symbol = None
@@ -1661,16 +1754,16 @@ def _fetch_bingx_klines_and_calc(symbol: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def calculate_technicals(symbol: str) -> Optional[Dict[str, Any]]:
+def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     先試 CoinGlass API；失敗則用 BingX K 線 + 本地 RSI/布林帶計算。
-    回傳含 source: 'CoinGlass' 或 'BingX'。
+    若傳入 bingx_symbol_override（來自 BingX contracts），BingX 請求時優先使用該 symbol。
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     # 1) 先試 CoinGlass
     rsi_data = _fetch_coinglass_rsi(symbol)
     if rsi_data is None:
-        tech = _fetch_bingx_klines_and_calc(symbol)
+        tech = _fetch_bingx_klines_and_calc(symbol, preferred_symbol=bingx_symbol_override)
         if tech:
             return tech
         return None
@@ -1739,16 +1832,22 @@ def calculate_technicals(symbol: str) -> Optional[Dict[str, Any]]:
     }
 
 
+# 四區塊 + 五星制：zone 為推播區塊名，stars 1=最差 5=最佳
+ZONE_DIP = "抄底區"
+ZONE_TOP = "摸頭區"
+ZONE_BREAKOUT_LONG = "突破追漲區"
+ZONE_BREAKOUT_SHORT = "跌破追跌區"
+
+
 def _classify_signal_and_tier(
     item: Dict,
     category: str,
     tech: Optional[Dict],
     funding_rate: Optional[float] = None,
-) -> Tuple[str, int, str]:
+) -> Tuple[str, str, int, str]:
     """
-    分級邏輯 (增強版)：
-    1. 正常情況：用 RSI + 布林帶判斷。
-    2. 缺數據情況：如果 RSI 缺失，但資金費率極端 (>0.05% 或 <-0.05%)，視為強烈訊號。
+    分級邏輯：回傳 (signal_label, zone, stars, rsi_desc)。
+    zone 為四區塊之一；stars 1～5，5 最佳。
     """
     oi = item.get("oiChange30m") or 0
     rsi = tech.get("rsi") if tech else None
@@ -1763,7 +1862,16 @@ def _classify_signal_and_tier(
                 rsi_desc = "費率過熱🔥"
             elif funding_rate < -EXTREME_FUNDING:
                 rsi_desc = "費率過冷❄️"
-        return (label_by_cat.get(category, "📊 異動"), 2, rsi_desc)
+        label = label_by_cat.get(category, "📊 異動")
+        if category == "short_open":
+            return (label, ZONE_BREAKOUT_SHORT, 2, rsi_desc)
+        if category == "long_open":
+            return (label, ZONE_BREAKOUT_LONG, 2, rsi_desc)
+        if category == "short_close":
+            return (label, ZONE_BREAKOUT_LONG, 2, rsi_desc)  # 空方平倉偏多
+        if category == "long_close":
+            return (label, ZONE_BREAKOUT_SHORT, 2, rsi_desc)  # 多方平倉偏空
+        return (label, ZONE_DIP, 1, rsi_desc)
     if rsi is not None:
         if rsi > 70:
             rsi_desc = f"RSI {rsi:.0f}(超買)"
@@ -1780,30 +1888,37 @@ def _classify_signal_and_tier(
             rsi_desc = "費率過熱🔥"
         elif funding_rate < -EXTREME_FUNDING:
             rsi_desc = "費率過冷❄️"
-    # (A) 鑽石訊號
+    # 摸頭區：做空、過熱
     bearish_cond = touch_upper or (rsi is not None and rsi > 70)
     if rsi is None and funding_rate is not None and funding_rate > EXTREME_FUNDING:
         bearish_cond = True
     if oi < -2.0 and bearish_cond:
-        return ("💎 摸頭做空", 1, rsi_desc)
+        return ("💎 摸頭做空", ZONE_TOP, 5, rsi_desc)
+    # 突破追漲區：嘎空、順勢做多
+    if oi > 2.0 and funding_rate is not None and funding_rate < -0.001:
+        return ("💎 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc)
+    # 抄底區：做多、超賣
     bullish_cond = touch_lower or (rsi is not None and rsi < 30)
     if rsi is None and funding_rate is not None and funding_rate < -EXTREME_FUNDING:
         bullish_cond = True
-    if oi > 2.0 and funding_rate is not None and funding_rate < -0.001:
-        return ("💎 潛在嘎空", 1, rsi_desc)
     if oi < -2.0 and bullish_cond:
-        return ("💎 抄底做多", 1, rsi_desc)
-    # (B) 黃金訊號
-    if oi > 2.0:
-        if rsi is None or (30 < rsi < 70):
-            return ("🟡 順勢觀察", 2, rsi_desc)
-    # (C) 其他
-    if rsi is not None:
-        if rsi > 70 or touch_upper:
-            return ("📉 偏空過熱", 2, rsi_desc)
-        if rsi < 30 or touch_lower:
-            return ("📈 偏多超賣", 2, rsi_desc)
-    return ("📊 異動", 2, rsi_desc)
+        return ("💎 抄底做多", ZONE_DIP, 5, rsi_desc)
+    # 順勢：OI > 2% 未過熱
+    if oi > 2.0 and (rsi is None or (30 < rsi < 70)):
+        zone = ZONE_BREAKOUT_LONG if category in ("long_open", "long_close") else ZONE_BREAKOUT_SHORT
+        return ("🟡 順勢觀察", zone, 4, rsi_desc)
+    # 偏空過熱 -> 摸頭區
+    if rsi is not None and (rsi > 70 or touch_upper):
+        return ("📉 偏空過熱", ZONE_TOP, 4, rsi_desc)
+    # 偏多超賣 -> 抄底區
+    if rsi is not None and (rsi < 30 or touch_lower):
+        return ("📈 偏多超賣", ZONE_DIP, 4, rsi_desc)
+    # 其餘依 category 歸入追漲/追跌
+    if category == "short_open":
+        return ("📊 異動", ZONE_BREAKOUT_SHORT, 2, rsi_desc)
+    if category == "long_open":
+        return ("📊 異動", ZONE_BREAKOUT_LONG, 2, rsi_desc)
+    return ("📊 異動", ZONE_DIP if category in ("long_close", "long_open") else ZONE_TOP, 1, rsi_desc)
 
 
 def build_report_message_tiered(
@@ -1811,20 +1926,14 @@ def build_report_message_tiered(
     processed_count: int = 0,
     oi_success_count: int = 0,
 ) -> str:
-    """依等級 1（狙擊訊號）與等級 2（異動觀察）組裝推播，排版優化、費率 2 位小數。"""
+    """四區塊推播：抄底區、摸頭區、突破追漲區、跌破追跌區，區內依五星排序（5 最佳）。"""
     def fmt(num):
         if num is None or (isinstance(num, float) and (num != num)):
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
-    tier1 = [x for x in enriched_items if x.get("tier") == 1]
-    tier2 = [x for x in enriched_items if x.get("tier") == 2]
-    risk = [x for x in enriched_items if x.get("tier") == 0]
-
-    lines = []
-    lines.append("💰 *【傑克短線持倉異動排行榜】(30分)*")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("")
+    def star_str(n: int) -> str:
+        return "★" * (n or 0) + "☆" * (5 - (n or 0))
 
     def line_with_funding(x: Dict) -> str:
         price_val = x.get("current_price")
@@ -1833,42 +1942,54 @@ def build_report_message_tiered(
         else:
             price_str = "—"
         oi_str = fmt(x.get("oiChange30m"))
-        rsi_part = x.get("rsi_desc", "RSI —").strip()
+        rsi_part = (x.get("rsi_desc") or "RSI —").strip()
         if rsi_part == "無技術數據":
             rsi_part = "RSI —"
         funding = x.get("funding_rate")
-        if funding is not None and isinstance(funding, (int, float)):
-            fee = f" | 費率 {funding*100:.2f}%"
-        else:
-            fee = ""
-        label = (x.get("signal_label") or "").strip()
+        fee = f"｜費率 {funding*100:.2f}%" if funding is not None and isinstance(funding, (int, float)) else ""
+        stars = x.get("stars", 0)
         sym = x.get("symbol", "")
-        return f"{label} *{sym}* | 價 {price_str} | OI {oi_str} | {rsi_part}{fee}"
+        return f"{star_str(stars)} *{sym}*｜價 {price_str}｜OI {oi_str}｜{rsi_part} {fee}".rstrip()
 
-    if tier1:
-        lines.append("💎 *狙擊訊號 (High Priority)*")
-        for x in tier1:
-            lines.append(line_with_funding(x))
-        lines.append("")
-    if tier2:
-        lines.append("🟡 *異動觀察 (Watchlist)*")
-        for x in tier2:
-            lines.append(line_with_funding(x))
-        lines.append("")
-    if risk:
-        lines.append("⚠️ *風險過高(觀望)*")
-        for x in risk:
+    zone_order = [ZONE_DIP, ZONE_TOP, ZONE_BREAKOUT_LONG, ZONE_BREAKOUT_SHORT]
+    zone_title = {
+        ZONE_DIP: "抄底區",
+        ZONE_TOP: "摸頭區",
+        ZONE_BREAKOUT_LONG: "突破追漲區",
+        ZONE_BREAKOUT_SHORT: "跌破追跌區",
+    }
+
+    lines = []
+    lines.append("💰 *【傑克短線持倉異動】(30分)*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+    lines.append("_推薦度：★★★★★ 最佳 ～ ☆☆☆☆☆ 最差_")
+    lines.append("")
+
+    has_any = False
+    for zone in zone_order:
+        items = [x for x in enriched_items if x.get("zone") == zone]
+        if not items:
+            continue
+        has_any = True
+        items_sorted = sorted(items, key=lambda x: (-(x.get("stars") or 0), -(x.get("oiChange30m") or 0)))
+        lines.append(f"📌 *{zone_title[zone]}*")
+        for x in items_sorted:
             lines.append(line_with_funding(x))
         lines.append("")
 
-    if not tier1 and not tier2 and not risk:
-        lines.append("本次無符合分級條件的標的。")
+    if not has_any:
+        lines.append("本次沒有符合條件的標的。")
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("💡 *【換位思考主力動機】*")
-    lines.append("請先判斷 *30分K價格走勢* 再搭配 OI 與 RSI／布林帶。")
-    lines.append("💎 狙擊＝高勝率摸頭/抄底 | 🟡 異動＝一般觀察")
+    lines.append("📌 *四區說明*")
+    lines.append("• 抄底區：超賣／觸底，可考慮做多不追殺")
+    lines.append("• 摸頭區：過熱／觸頂，可考慮做空嚴設停損")
+    lines.append("• 突破追漲區：順勢做多、嘎空潛力")
+    lines.append("• 跌破追跌區：順勢做空、空方加倉")
+    lines.append("")
+    lines.append("⚠️ 本推播僅供參考，不構成投資建議。合約有風險，請自負盈虧、嚴控倉位。")
     return "\n".join(lines)
 
 
@@ -1978,13 +2099,19 @@ def fetch_position_change():
     _coinglass_oi_first_failure_logged = False  # 本輪只記錄第一次 OI 失敗，方便診斷
     logger.info("開始執行持倉變化篩選，只偵測 BingX 合約幣種...")
 
-    # 步驟1：先獲取 BingX 交易對名單（提取幣種名稱）
-    bingx_symbols = fetch_supported_futures_coins()
-    if not bingx_symbols:
-        send_telegram_message("⚠️ 無法取得合約幣種名單，請稍後再試。", TG_THREAD_IDS['position_change'])
-        return
-    
-    logger.info(f"獲取到 {len(bingx_symbols)} 個 BingX 合約幣種")
+    # 步驟1：優先從 BingX 合約接口取得交易對（保證與 K 線/費率 API 一致）；失敗則用 CoinGlass 名單
+    allowed_bases, base_to_symbol = fetch_bingx_contracts()
+    if allowed_bases:
+        bingx_symbols_upper = allowed_bases
+        logger.info(f"從 BingX contracts 取得 {len(allowed_bases)} 個合約交易對")
+    else:
+        bingx_symbols = fetch_supported_futures_coins()
+        if not bingx_symbols:
+            send_telegram_message("⚠️ 無法取得合約幣種名單，請稍後再試。", TG_THREAD_IDS['position_change'])
+            return
+        bingx_symbols_upper = {s.upper() for s in bingx_symbols}
+        base_to_symbol = {}
+        logger.info(f"獲取到 {len(bingx_symbols)} 個 BingX 合約幣種（CoinGlass 名單）")
     
     # 步驟2：獲取幣種價格變化（CoinGlass；若為空則自動改用 Binance 公開 API，適合初創版）
     all_symbols_data = fetch_coins_price_change()
@@ -1994,8 +2121,7 @@ def fetch_position_change():
     
     logger.info(f"從 Coinglass API 取得 {len(all_symbols_data)} 個幣種的價格數據")
     
-    # 步驟3：只保留 BingX 名單中的幣種（原本的邏輯，只是過濾範圍改為 BingX）
-    bingx_symbols_upper = {s.upper() for s in bingx_symbols}
+    # 步驟3：只保留 BingX 名單中的幣種
     target_symbols_data = []
     for coin in all_symbols_data:
         symbol = normalize_symbol(coin)
@@ -2005,7 +2131,7 @@ def fetch_position_change():
     logger.info(f"過濾後剩餘 {len(target_symbols_data)} 個合約幣種")
     
     # 【智慧過濾 Smart Filter - 30m 版】放寬初選以確保足夠候選進入技術分析。
-    PRICE_GATEKEEPER = 1.2  # 30m 價格波動門檻 %
+    PRICE_GATEKEEPER = 1.0  # 30m 價格波動門檻 %（>=1% 即進入 OI 檢查）
     OI_THRESHOLD = 1.5      # 30m 持倉異動門檻 %
     active_symbols = []
     for coin in target_symbols_data:
@@ -2091,22 +2217,21 @@ def fetch_position_change():
     top_short_open = short_open[:3]
     top_short_close = short_close[:3]
 
-    # 一次取得全量資金費率（與排行榜同 API），供後續查表
-    funding_map = _fetch_funding_rate_map()
-    logger.info(f"資金費率表已取得 {len(funding_map)} 個幣種")
-    # 一律使用分級版：對每個 top 標的取 RSI/布林帶，並傳入 funding_rate 供分類判斷
+    # 一律使用分級版：對每個 top 標的取 RSI/布林帶，資金費率直接拉 BingX API 保證有值
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
         sym = item.get("symbol", "")
-        tech = calculate_technicals(sym)
-        funding_rate = funding_map.get(sym) or funding_map.get(sym.upper())
-        signal_label, tier, rsi_desc = _classify_signal_and_tier(item, cat, tech, funding_rate)
+        preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
+        tech = calculate_technicals(sym, bingx_symbol_override=preferred)
+        funding_rate = _fetch_bingx_funding_rate(sym, preferred_symbol=preferred)
+        signal_label, zone, stars, rsi_desc = _classify_signal_and_tier(item, cat, tech, funding_rate)
         all_top.append({
             **item,
             "category": cat,
             "current_price": tech.get("current_price") if tech else None,
             "signal_label": signal_label,
-            "tier": tier,
+            "zone": zone,
+            "stars": stars,
             "rsi_desc": rsi_desc,
             "funding_rate": funding_rate,
         })
