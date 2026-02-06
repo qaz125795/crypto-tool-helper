@@ -1960,14 +1960,17 @@ def build_report_message_tiered(
     has_any = False
 
     for zone in zone_order:
-        items = [x for x in enriched_items if x.get("zone") == zone]
+        items = [x for x in enriched_items if x.get("zone") == zone and (x.get("stars") or 0) >= 3]
+        lines.append(f"*{zone_map[zone]}*")
+
         if not items:
+            lines.append("_此輪無水標_")
+            lines.append("")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
             continue
 
         has_any = True
         items_sorted = sorted(items, key=lambda x: (-(x.get("stars") or 0), -(abs(x.get("oiChange30m") or 0))))
-
-        lines.append(f"*{zone_map[zone]}*")
 
         for x in items_sorted:
             sym = x.get("symbol", "")
