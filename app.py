@@ -22,7 +22,6 @@ from jackbot import (
     fetch_funding_fortune_list,
     run_long_term_once,
     run_liquidity_radar_once,
-    run_altseason_radar_once,
     run_hyperliquid_monitor_once,
 )
 
@@ -44,7 +43,6 @@ def health_check():
             '/funding_rate': '資金費率排行榜',
             '/long_term_index': '長線牛熊導航儀',
             '/liquidity_radar': '流動性獵取雷達',
-            '/altseason_radar': '山寨爆發雷達',
             '/hyperliquid': 'Hyperliquid 聰明錢監控',
             '/run/<task>': '執行指定任務 (sector_ranking, whale_position, long_term_index_once, liquidity_radar, etc.)'
         }
@@ -115,15 +113,6 @@ def run_liquidity_radar():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/altseason_radar', methods=['GET', 'POST'])
-def run_altseason_radar():
-    """執行山寨爆發雷達"""
-    try:
-        run_altseason_radar_once()
-        return jsonify({'status': 'success', 'message': '山寨爆發雷達執行成功'}), 200
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
 @app.route('/hyperliquid', methods=['GET', 'POST'])
 def run_hyperliquid():
     """執行 Hyperliquid 聰明錢監控"""
@@ -154,7 +143,6 @@ def run_task(task):
         'funding_rate': fetch_funding_fortune_list,
         'long_term_index_once': run_long_term_once,
         'liquidity_radar': run_liquidity_radar_once,
-        'altseason_radar': run_altseason_radar_once,
         'hyperliquid': run_hyperliquid_monitor_once,
     }
     

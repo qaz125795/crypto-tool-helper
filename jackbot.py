@@ -58,7 +58,6 @@ if thread_ids_str:
             'funding_rate': 244,
             'long_term_index': 248,
             'liquidity_radar': 3,
-            'altseason_radar': 254,
             'hyperliquid': 252,
         }
 else:
@@ -71,7 +70,6 @@ else:
         'funding_rate': int(os.environ.get('TG_THREAD_FUNDING_RATE', 244)),
         'long_term_index': int(os.environ.get('TG_THREAD_LONG_TERM_INDEX', 248)),
         'liquidity_radar': int(os.environ.get('TG_THREAD_LIQUIDITY_RADAR', 3)),
-        'altseason_radar': int(os.environ.get('TG_THREAD_ALTSEASON_RADAR', 254)),
         'hyperliquid': int(os.environ.get('TG_THREAD_HYPERLIQUID', 252)),
     }
 
@@ -85,6 +83,42 @@ MAX_SYMBOLS = 904  # 將由 API 返回的合約幣種數量決定
 # 數據存儲目錄
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
+
+# CoinGlass 初創版限速（80 次/分鐘）：設 COINGLASS_RATE_LIMIT_PER_MINUTE=80 即啟用，持倉變化會覆蓋全幣種但單輪約 7–8 分鐘
+COINGLASS_RATE_LIMIT_PER_MINUTE = int(os.environ.get('COINGLASS_RATE_LIMIT_PER_MINUTE', '0') or '0')
+
+# 持倉變化 OI 請求用限速器（僅在限速模式下使用）
+_coinglass_oi_rate_limiter = None
+
+
+class CoinglassRateLimiter:
+    """滑動視窗：每分鐘最多 max_per_minute 次請求，線程安全"""
+    def __init__(self, max_per_minute: int = 80, window_sec: float = 60.0):
+        self.max_per_minute = max_per_minute
+        self.window_sec = window_sec
+        self._timestamps = []
+        self._lock = threading.Lock()
+
+    def wait(self):
+        while True:
+            with self._lock:
+                now = time.time()
+                while self._timestamps and now - self._timestamps[0] >= self.window_sec:
+                    self._timestamps.pop(0)
+                if len(self._timestamps) < self.max_per_minute:
+                    self._timestamps.append(now)
+                    return
+                wait_until = self._timestamps[0] + self.window_sec - now
+            if wait_until > 0:
+                time.sleep(min(wait_until, 1.0))  # 每次最多睡 1 秒，再檢查
+
+
+def _coinglass_rate_limit_wait():
+    """初創版 80 次/分鐘：所有 CoinGlass 請求前呼叫，避免 429"""
+    global _coinglass_oi_rate_limiter
+    if _coinglass_oi_rate_limiter is not None:
+        _coinglass_oi_rate_limiter.wait()
+
 
 # ==================== 工具函數 ====================
 
@@ -242,6 +276,7 @@ def send_ranking_to_tg(ranking: List[Dict]):
 
 def fetch_global_account_ratio(symbol: str, time_type: str) -> Optional[Dict]:
     """獲取全局帳戶比（散戶情緒）"""
+    _coinglass_rate_limit_wait()
     url = f"{CG_API_BASE}/api/futures/global-long-short-account-ratio/history"
     params = {
         "exchange": EXCHANGE,
@@ -272,6 +307,7 @@ def fetch_global_account_ratio(symbol: str, time_type: str) -> Optional[Dict]:
 
 def fetch_top_account_ratio(symbol: str, time_type: str) -> Optional[Dict]:
     """獲取大戶帳戶比（大戶帳戶數）"""
+    _coinglass_rate_limit_wait()
     url = f"{CG_API_BASE}/api/futures/top-long-short-account-ratio/history"
     params = {
         "exchange": EXCHANGE,
@@ -300,6 +336,7 @@ def fetch_top_account_ratio(symbol: str, time_type: str) -> Optional[Dict]:
 
 def fetch_top_position_ratio(symbol: str, time_type: str) -> Optional[Dict]:
     """獲取大戶持倉比（巨鯨部位）"""
+    _coinglass_rate_limit_wait()
     url = f"{CG_API_BASE}/api/futures/top-long-short-position-ratio/history"
     params = {
         "exchange": EXCHANGE,
@@ -546,6 +583,7 @@ def format_symbol_message(symbol: str, analysis: Dict) -> str:
 
 def fetch_stablecoin_marketcap_history() -> Optional[List[Dict]]:
     """獲取穩定幣市值歷史數據"""
+    _coinglass_rate_limit_wait()
     url = "https://open-api-v4.coinglass.com/api/index/stableCoin-marketCap-history"
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -645,6 +683,7 @@ def fetch_stablecoin_marketcap_history() -> Optional[List[Dict]]:
 
 def fetch_aggregated_stablecoin_oi_history(symbol: str = "BTC", interval: str = "1h") -> Optional[List[Dict]]:
     """獲取聚合穩定幣保證金持倉歷史數據"""
+    _coinglass_rate_limit_wait()
     url = "https://open-api-v4.coinglass.com/api/futures/open-interest/aggregated-stablecoin-history"
     params = {
         "exchange_list": "Binance",
@@ -1071,6 +1110,7 @@ def fetch_whale_position_old():
 
 def fetch_supported_futures_coins() -> List[str]:
     """獲取 BingX 交易所支援的合約幣種列表（應該有 600+ 個）"""
+    _coinglass_rate_limit_wait()
     url = "https://open-api-v4.coinglass.com/api/futures/supported-exchange-pairs"
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -1146,6 +1186,7 @@ def fetch_coins_price_change() -> List[Dict]:
     if not supported_coins:
         logger.warning("無法獲取合約幣種列表，使用備用方法")
         # 備用：使用原API，但會包含現貨
+        _coinglass_rate_limit_wait()
         url = f"{CG_API_BASE}/api/futures/coins-price-change"
         headers = {
             "CG-API-KEY": CG_API_KEY,
@@ -1161,6 +1202,7 @@ def fetch_coins_price_change() -> List[Dict]:
             return []
     
     # 獲取價格變化數據
+    _coinglass_rate_limit_wait()
     url = f"{CG_API_BASE}/api/futures/coins-price-change"
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -1194,6 +1236,7 @@ def fetch_coins_price_change() -> List[Dict]:
 
 def fetch_oi_change_15m(symbol: str) -> Optional[float]:
     """計算單一 symbol 15 分鐘 OI 變化%（數據源：CoinGlass Binance，與 Google Apps Script 版本一致）"""
+    _coinglass_rate_limit_wait()
     # 直接使用 symbol+USDT 格式，使用 m15 區間
     # 使用 exchange 參數指定 Binance（確保數據源與 Google Apps Script 版本一致）
     sym = symbol + "USDT"
@@ -1403,7 +1446,7 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
 
 
 def fetch_position_change():
-    """主流程：持倉變化篩選（原本的邏輯，只是改成只偵測 BingX 的 554 個交易對）"""
+    """主流程：持倉變化篩選（全合約覆蓋；初創版可設 COINGLASS_RATE_LIMIT_PER_MINUTE=80 限速）"""
     logger.info("開始執行持倉變化篩選，只偵測 BingX 合約幣種...")
     
     # 步驟1：先獲取 BingX 交易對名單（提取幣種名稱）
@@ -1444,11 +1487,16 @@ def fetch_position_change():
     oi_success_count = 0
     oi_fail_count = 0
     
-    # 並行處理配置：提高並發數並在 8 分鐘內強制結束，確保每 15 分鐘能準時推播
-    MAX_WORKERS = 35
-    start_time = time.time()
-    MAX_EXECUTION_TIME = 8 * 60  # 8 分鐘內必須結束並推播，避免被下一輪 schedule 取消
+    # 初創版限速（80 次/分鐘）：全幣種覆蓋，單輪約 7–8 分鐘；未設則維持高並發、約 8 分鐘內強制結束
+    if COINGLASS_RATE_LIMIT_PER_MINUTE > 0:
+        MAX_WORKERS = 4
+        MAX_EXECUTION_TIME = 10 * 60
+        logger.info(f"CoinGlass 限速已啟用（全專案）：{COINGLASS_RATE_LIMIT_PER_MINUTE} 次/分鐘，全幣種覆蓋約需 {len(target_symbols) / COINGLASS_RATE_LIMIT_PER_MINUTE:.1f} 分鐘")
+    else:
+        MAX_WORKERS = 35
+        MAX_EXECUTION_TIME = 8 * 60
     
+    start_time = time.time()
     executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     broke_early = False
     try:
@@ -1520,6 +1568,7 @@ SENT_DATA_FILE = DATA_DIR / "sent_economic_data_ids.json"
 
 def fetch_economic_data() -> List[Dict]:
     """從 CoinGlass API 抓取經濟數據"""
+    _coinglass_rate_limit_wait()
     url = "https://open-api-v4.coinglass.com/api/calendar/economic-data"
     params = {"language": "zh"}
     headers = {
@@ -1547,6 +1596,7 @@ def fetch_economic_data() -> List[Dict]:
 
 def fetch_financial_events() -> List[Dict]:
     """從 CoinGlass API 抓取財經事件"""
+    _coinglass_rate_limit_wait()
     url = "https://open-api-v4.coinglass.com/api/calendar/financial-events"
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -1573,6 +1623,7 @@ def fetch_financial_events() -> List[Dict]:
 
 def fetch_central_bank_activities() -> List[Dict]:
     """從 CoinGlass API 抓取央行活動"""
+    _coinglass_rate_limit_wait()
     url = "https://open-api-v4.coinglass.com/api/calendar/central-bank-activities"
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -2155,6 +2206,7 @@ def fetch_tree_news():
 
 def fetch_coinglass_articles():
     """抓取 CoinGlass 新聞"""
+    _coinglass_rate_limit_wait()
     if not CG_API_KEY:
         logger.warning("請先設定 CoinGlass API 金鑰")
         return
@@ -2205,6 +2257,7 @@ def fetch_coinglass_articles():
 
 def fetch_coinglass_newsflash():
     """抓取 CoinGlass 快訊"""
+    _coinglass_rate_limit_wait()
     if not CG_API_KEY:
         logger.warning("請先設定 CoinGlass API 金鑰")
         return
@@ -2391,6 +2444,7 @@ def fetch_all_news():
 
 def fetch_funding_fortune_list():
     """抓取資金費率排行榜"""
+    _coinglass_rate_limit_wait()
     url = "https://open-api-v4.coinglass.com/api/futures/funding-rate/exchange-list"
     headers = {
         "accept": "application/json",
@@ -2492,6 +2546,7 @@ def fetch_funding_fortune_list():
 
 def _coinglass_get(path: str, params: Optional[Dict] = None) -> Optional[Dict]:
     """通用的 CoinGlass GET 請求工具"""
+    _coinglass_rate_limit_wait()
     if not CG_API_KEY:
         logger.error("CG_API_KEY 未設定，無法呼叫 CoinGlass API")
         return None
@@ -2935,6 +2990,7 @@ def get_liquidation_threshold(symbol: str, time_window: str = "1h") -> tuple:
 
 def fetch_liquidation_data(symbol: str) -> Optional[List[Dict]]:
     """從 CoinGlass 抓取單一幣種的清算彙總歷史（改進版：添加調試信息）"""
+    _coinglass_rate_limit_wait()
     if not CG_API_KEY:
         logger.error("CG_API_KEY 未設定，無法呼叫清算 API")
         return None
@@ -3164,242 +3220,12 @@ def run_liquidity_radar_once():
     logger.info(f"流動性獵取雷達完成，推送 {len(events)} 個幣種的極端爆倉事件")
 
 
-# ==================== 9. 山寨爆發雷達（Altcoin Season + RSI + Buy Ratio） ====================
-
-def _coinglass_simple_get(path: str, params: Optional[Dict] = None) -> Optional[Dict]:
-    """簡化版 GET，主要給 Altseason / RSI 這類單次查詢用"""
-    if not CG_API_KEY:
-        logger.error("CG_API_KEY 未設定，無法呼叫 CoinGlass API")
-        return None
-    url = f"{CG_API_BASE}{path}"
-    headers = {
-        "accept": "application/json",
-        "CG-API-KEY": CG_API_KEY,
-    }
-    try:
-        resp = requests.get(url, headers=headers, params=params or {}, timeout=10)
-        if resp.status_code != 200:
-            logger.error(f"CoinGlass API HTTP 錯誤 {path}: {resp.status_code} - {resp.text[:200]}")
-            return None
-        data = resp.json()
-        if data.get("code") not in (0, "0", 200, "200", None) and not data.get("success", True):
-            logger.error(f"CoinGlass API 返回錯誤 {path}: {data}")
-            return None
-        return data
-    except Exception as e:
-        logger.error(f"CoinGlass API 請求失敗 {path}: {str(e)}")
-        return None
-
-
-def fetch_altseason_index() -> Optional[float]:
-    """取得山寨季指數 (0-100)"""
-    data = _coinglass_simple_get("/api/index/altcoin-season")
-    if not data:
-        logger.warning("Altseason API 回傳為空")
-        return None
-
-    # 記錄原始數據結構以便調試
-    logger.debug(f"Altseason API 原始回傳: {json.dumps(data, ensure_ascii=False)[:500]}")
-
-    # 嘗試多種可能的數據結構
-    val = None
-    
-    # 1) 如果 data 是 dict
-    if isinstance(data.get("data"), dict):
-        inner = data["data"]
-        # 嘗試更多可能的欄位名稱
-        for key in ("value", "index", "altcoinSeasonIndex", "altcoin_season_index", 
-                    "seasonIndex", "season_index", "altcoinIndex", "altcoin_index",
-                    "score", "ratio", "percentage"):
-            if inner.get(key) is not None:
-                val = inner.get(key)
-                logger.debug(f"從 data[dict] 中找到欄位 {key}: {val}")
-                break
-    
-    # 2) 如果 data 是 list
-    elif isinstance(data.get("data"), list) and data["data"]:
-        # 取最後一筆（最新的）
-        inner = data["data"][-1]
-        if isinstance(inner, dict):
-            for key in ("value", "index", "altcoinSeasonIndex", "altcoin_season_index",
-                        "seasonIndex", "season_index", "altcoinIndex", "altcoin_index",
-                        "score", "ratio", "percentage"):
-                if inner.get(key) is not None:
-                    val = inner.get(key)
-                    logger.debug(f"從 data[list][-1] 中找到欄位 {key}: {val}")
-                    break
-    
-    # 3) 直接在頂層找
-    if val is None:
-        for key in ("value", "index", "altcoinSeasonIndex", "altcoin_season_index",
-                    "seasonIndex", "season_index", "altcoinIndex", "altcoin_index",
-                    "score", "ratio", "percentage"):
-            if data.get(key) is not None:
-                val = data.get(key)
-                logger.debug(f"從頂層找到欄位 {key}: {val}")
-                break
-    
-    # 4) 如果還是找不到，嘗試遍歷所有數值欄位
-    if val is None:
-        def find_numeric_value(obj, depth=0):
-            if depth > 3:  # 避免遞迴太深
-                return None
-            if isinstance(obj, (int, float)):
-                if 0 <= obj <= 100:  # 山寨季指數應該在 0-100 之間
-                    return obj
-            elif isinstance(obj, dict):
-                for v in obj.values():
-                    result = find_numeric_value(v, depth + 1)
-                    if result is not None:
-                        return result
-            elif isinstance(obj, list):
-                for item in obj:
-                    result = find_numeric_value(item, depth + 1)
-                    if result is not None:
-                        return result
-            return None
-        
-        val = find_numeric_value(data)
-        if val is not None:
-            logger.debug(f"透過深度搜尋找到數值: {val}")
-
-    # 轉換為 float
-    if val is not None:
-        try:
-            result = float(val)
-            # 驗證範圍
-            if 0 <= result <= 100:
-                logger.info(f"成功取得 Altseason 指數: {result}")
-                return result
-            else:
-                logger.warning(f"Altseason 指數超出範圍 (0-100): {result}")
-        except (TypeError, ValueError) as e:
-            logger.warning(f"Altseason 指數轉換失敗: {val} - {str(e)}")
-    
-    logger.warning(f"無法從 Altseason API 回傳中提取指數，原始數據: {json.dumps(data, ensure_ascii=False)[:500]}")
-    return None
-
-
-def describe_altseason(index_val: Optional[float]) -> str:
-    if index_val is None:
-        return "資料暫缺，暫時無法明確判斷是山寨季還是比特幣季。"
-    if index_val > 75:
-        return "🌋 山寨季狂歡：資金大幅流向山寨幣，波動與風險同步放大，小幣暴漲暴跌機率極高。"
-    if index_val < 25:
-        return "🛡 比特幣季：資金主要圍繞 BTC 等主流資產，山寨普漲可能還需要耐心等待。"
-    return "⚖ 資金在比特幣與山寨之間相對均衡，領頭羊個別表現更重要。"
-
-
-def fetch_rsi_list() -> List[Dict]:
-    """取得 RSI 列表並轉成標準化的 dict list，不依賴 pandas"""
-    data = _coinglass_simple_get("/api/futures/rsi/list")
-    if not data:
-        return []
-
-    raw = data.get("data") or data.get("list") or []
-    if not isinstance(raw, list) or not raw:
-        logger.warning("RSI 列表為空或格式異常")
-        return []
-
-    # 標準化欄位名稱
-    result = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        
-        # 找 symbol 欄位
-        symbol = None
-        for key in ["symbol", "pair", "coin", "symbolName"]:
-            if key in item:
-                symbol = str(item[key])
-                break
-        if not symbol:
-            continue
-
-        # 找 RSI 欄位
-        rsi_1h = None
-        rsi_4h = None
-        for key, val in item.items():
-            kl = key.lower()
-            if "rsi" in kl:
-                if "1h" in kl or "h1" in kl:
-                    try:
-                        rsi_1h = float(val) if val is not None else None
-                    except (TypeError, ValueError):
-                        pass
-                elif "4h" in kl or "h4" in kl:
-                    try:
-                        rsi_4h = float(val) if val is not None else None
-                    except (TypeError, ValueError):
-                        pass
-
-        # 找成交量欄位
-        volume = None
-        for key, val in item.items():
-            kl = key.lower()
-            if "volume" in kl or "turnover" in kl or "amount" in kl:
-                try:
-                    volume = float(val) if val is not None else None
-                except (TypeError, ValueError):
-                    pass
-                if volume is not None:
-                    break
-
-        result.append({
-            "symbol": symbol,
-            "rsi_1h": rsi_1h,
-            "rsi_4h": rsi_4h,
-            "volume": volume
-        })
-
-    return result
-
-
-def fetch_buy_ratio(symbol: str) -> Optional[float]:
-    """
-    近似計算某幣種的 Buy Ratio（由聚合掛單深度近似，bids / (bids + asks)）
-    使用 /api/futures/orderbook/aggregated-ask-bids-history
-    """
-    data = _coinglass_simple_get(
-        "/api/futures/orderbook/aggregated-ask-bids-history",
-        params={"exchange_list": "Binance", "symbol": symbol, "interval": "h1"},
-    )
-    if not data:
-        return None
-
-    arr = data.get("data") or data.get("list") or []
-    if not isinstance(arr, list) or not arr:
-        return None
-
-    last = arr[-1]
-    if isinstance(last, dict):
-        # 嘗試多種欄位名稱
-        bid_keys = [k for k in last.keys() if "bid" in k.lower()]
-        ask_keys = [k for k in last.keys() if "ask" in k.lower()]
-        bid_val = float(last.get(bid_keys[0]) or 0) if bid_keys else 0.0
-        ask_val = float(last.get(ask_keys[0]) or 0) if ask_keys else 0.0
-    elif isinstance(last, list):
-        # 假設結構 [bids, asks, time] 或 [asks, bids, time]，儘量容錯
-        numeric = [x for x in last if isinstance(x, (int, float))]
-        if len(numeric) >= 2:
-            # 假設第一個是 bids，第二個是 asks
-            bid_val, ask_val = float(numeric[0]), float(numeric[1])
-        else:
-            return None
-    else:
-        return None
-
-    total = bid_val + ask_val
-    if total <= 0:
-        return None
-    return bid_val / total * 100.0  # 轉成百分比
-
-
 def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict]]:
     """獲取價格歷史數據（OHLC）
     注意：CoinGlass API v4 可能沒有直接的 price/history 端點
     這裡使用 OI history 端點，因為它通常包含 markPrice 等價格信息
     """
+    _coinglass_rate_limit_wait()
     url = f"{CG_API_BASE}/api/futures/open-interest/history"
     params = {
         "exchange": "Binance",
@@ -3443,6 +3269,7 @@ def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict
 
 def fetch_aggregated_cvd_history(symbol: str, interval: str = "1h") -> Optional[List[Dict]]:
     """獲取聚合累計成交量差值（CVD）歷史數據"""
+    _coinglass_rate_limit_wait()
     url = "https://open-api-v4.coinglass.com/api/futures/aggregated-cvd/history"
     params = {
         "exchange_list": "Binance",
@@ -3699,175 +3526,6 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         return None
 
 
-def build_altseason_message() -> Optional[str]:
-    """組合山寨爆發雷達訊息（不依賴 pandas，加入 CVD 背離判斷）"""
-    index_val = fetch_altseason_index()
-    rsi_list = fetch_rsi_list()
-    if not rsi_list:
-        logger.error("無法取得 RSI 列表，放棄推播")
-        return None
-
-    # 只看成交額前 50 大，避免垃圾幣
-    rsi_with_vol = [r for r in rsi_list if r.get("volume") is not None]
-    if rsi_with_vol:
-        rsi_with_vol.sort(key=lambda x: x.get("volume") or 0, reverse=True)
-        rsi_list = rsi_with_vol[:50] + [r for r in rsi_list if r.get("volume") is None]
-
-    # 標準化 RSI：優先使用 4h，沒有才用 1h
-    for item in rsi_list:
-        rsi_base = item.get("rsi_4h")
-        if rsi_base is None:
-            rsi_base = item.get("rsi_1h")
-        item["rsi_base"] = rsi_base
-
-    # 過濾掉沒有 RSI 的項目
-    rsi_list = [r for r in rsi_list if r.get("rsi_base") is not None]
-
-    # 強勢突破（做多）：RSI >= 70
-    strong_list = [r for r in rsi_list if r.get("rsi_base", 0) >= 70]
-    # 超賣反彈（做多）：RSI <= 30
-    oversold_list = [r for r in rsi_list if r.get("rsi_base", 100) <= 30]
-    # 超買回調（做空）：RSI >= 70（與強勢突破相同，但買入比條件不同）
-    overbought_list = [r for r in rsi_list if r.get("rsi_base", 0) >= 70]
-
-    # 加入 Buy Ratio 過濾
-    def attach_buy_ratio(items: List[Dict]) -> List[Dict]:
-        result = []
-        for item in items:
-            sym = item.get("symbol", "")
-            base = sym.replace("USDT", "")
-            ratio = fetch_buy_ratio(base)
-            if ratio is None:
-                ratio = fetch_buy_ratio(sym)
-            item["buy_ratio"] = ratio
-            if ratio is not None:
-                result.append(item)
-            time.sleep(0.8)
-        return result
-
-    # 強勢突破（做多）：買入比 >= 55%
-    if strong_list:
-        strong_list = attach_buy_ratio(strong_list)
-        strong_list = [r for r in strong_list if r.get("buy_ratio", 0) >= 55.0]
-        strong_list.sort(key=lambda x: (x.get("rsi_base", 0), x.get("buy_ratio", 0)), reverse=True)
-        strong_list = strong_list[:5]
-
-    # 超賣反彈（做多）：買入比 >= 52%
-    if oversold_list:
-        oversold_list = attach_buy_ratio(oversold_list)
-        oversold_list = [r for r in oversold_list if r.get("buy_ratio", 0) >= 52.0]
-        oversold_list.sort(key=lambda x: (x.get("rsi_base", 100), -x.get("buy_ratio", 0)))
-        oversold_list = oversold_list[:5]
-
-    # 超買回調（做空）：RSI >= 70 且買入比 < 45%（買盤力道不足，可能回調）
-    if overbought_list:
-        overbought_list = attach_buy_ratio(overbought_list)
-        overbought_list = [r for r in overbought_list if r.get("buy_ratio") is not None and r.get("buy_ratio", 0) < 45.0]
-        overbought_list.sort(key=lambda x: (x.get("rsi_base", 0), x.get("buy_ratio", 0) or 0), reverse=True)
-        overbought_list = overbought_list[:5]
-
-    now_str = format_datetime(get_taipei_time())
-
-    lines: List[str] = []
-    lines.append("🛰️ *【區塊鏈船長 - 山寨爆發雷達】*")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-
-    # 山寨季指數
-    if index_val is not None:
-        season = "山寨季" if index_val > 50 else "比特幣季"
-        lines.append(f"📅 *當前週期*：{season}")
-        lines.append(f"📈 *山寨季指數*：{index_val:.2f}（0-100）")
-    else:
-        lines.append("📅 *當前週期*：資料暫缺")
-        lines.append("📈 *山寨季指數*：暫無法取得")
-
-    lines.append("")
-    lines.append(describe_altseason(index_val))
-    lines.append("")
-
-    # 強勢突破區（做多 = 看漲、買入）
-    lines.append("🔥 *潛力領頭羊（強勢突破 - 做多／看漲）*：")
-    if not strong_list:
-        lines.append("目前沒有符合條件的強勢突破山寨幣。")
-    else:
-        for idx, item in enumerate(strong_list, 1):
-            s = str(item.get("symbol", ""))
-            rsi_v = float(item.get("rsi_base", 0) or 0)
-            br_val = item.get("buy_ratio")
-            br = float(br_val) if br_val is not None else 0.0
-            
-            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
-            
-            # 避免請求過於頻繁
-            if idx < len(strong_list):
-                time.sleep(0.5)
-    lines.append("")
-    
-    # 超買回調區（做空 = 看跌、賣出）
-    lines.append("⚠️ *超買回調風險（做空參考／看跌）*：")
-    if not overbought_list:
-        lines.append("目前沒有明顯的超買回調候選。")
-    else:
-        for idx, item in enumerate(overbought_list, 1):
-            s = str(item.get("symbol", ""))
-            rsi_v = float(item.get("rsi_base", 0) or 0)
-            br_val = item.get("buy_ratio")
-            br = float(br_val) if br_val is not None else 0.0
-            
-            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
-            
-            # 避免請求過於頻繁
-            if idx < len(overbought_list):
-                time.sleep(0.5)
-    lines.append("")
-    
-    # 超賣反彈區（做多 = 看漲、抄底）
-    lines.append("💎 *超賣反彈機會（抄底參考 - 做多／看漲）*：")
-    if not oversold_list:
-        lines.append("目前沒有明顯的超賣反彈候選。")
-    else:
-        for idx, item in enumerate(oversold_list, 1):
-            s = str(item.get("symbol", ""))
-            rsi_v = float(item.get("rsi_base", 0) or 0)
-            br_val = item.get("buy_ratio")
-            br = float(br_val) if br_val is not None else 0.0
-            
-            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
-            
-            # 避免請求過於頻繁
-            if idx < len(oversold_list):
-                time.sleep(0.5)
-    lines.append("")
-
-    # 提示
-    lines.append("💡 *船長提示*：")
-    if index_val is not None and index_val > 60:
-        lines.append("山寨季指數正在抬升，資金開始加速流向小幣，建議重點關注領頭羊二測與放量突破。")
-    elif index_val is not None and index_val < 40:
-        lines.append("目前仍偏向比特幣季，山寨波動相對受限，建議以主流幣與現貨為主，耐心等待資金輪動。")
-    else:
-        lines.append("資金尚未明顯偏向任何一方，選擇山寨時更要搭配成交量與買入比率，避免追在假突破上。")
-
-    lines.append("")
-    lines.append(f"⏰ 更新時間：{now_str}")
-
-    return "\n".join(lines)
-
-
-def run_altseason_radar_once():
-    """每小時執行一次的山寨爆發雷達主流程"""
-    logger.info("開始執行山寨爆發雷達...")
-    msg = build_altseason_message()
-    if not msg:
-        logger.warning("本次山寨爆發雷達未能產生有效訊息")
-        return
-    thread_id = TG_THREAD_IDS.get("altseason_radar", 0)
-    if not thread_id:
-        logger.warning("未設定 TG_THREAD_ALTSEASON_RADAR，將發送到預設聊天而非特定話題")
-    send_telegram_message(msg, thread_id or int(CHAT_ID or 0), parse_mode="Markdown")
-    logger.info("山寨爆發雷達推播完成")
-
-
 # ==================== 10. Hyperliquid 聰明錢監控 ====================
 
 HYPERLIQUID_SENT_ALERTS_FILE = DATA_DIR / "hyperliquid_sent_alerts.json"
@@ -3878,6 +3536,7 @@ MONEY_PRINTER_PNL_MIN = 500_000  # $50萬 USD（放寬）
 
 def fetch_hyperliquid_whale_alert() -> List[Dict]:
     """獲取 Hyperliquid 鯨魚提醒（大額交易，改進版：降低門檻並添加調試）"""
+    _coinglass_rate_limit_wait()
     url = f"{CG_API_BASE}/api/hyperliquid/whale-alert"
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -3998,6 +3657,7 @@ def fetch_hyperliquid_whale_alert() -> List[Dict]:
 
 def fetch_hyperliquid_pnl_distribution() -> Optional[Dict]:
     """獲取 Hyperliquid 錢包盈虧分佈"""
+    _coinglass_rate_limit_wait()
     url = f"{CG_API_BASE}/api/hyperliquid/wallet/pnl-distribution"
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -4023,6 +3683,7 @@ def fetch_hyperliquid_pnl_distribution() -> Optional[Dict]:
 
 def fetch_hyperliquid_whale_position() -> List[Dict]:
     """獲取 Hyperliquid 鯨魚持倉（價值 > $100k）"""
+    _coinglass_rate_limit_wait()
     url = f"{CG_API_BASE}/api/hyperliquid/whale-position"
     headers = {
         "CG-API-KEY": CG_API_KEY,
@@ -4413,6 +4074,10 @@ def run_hyperliquid_monitor_once():
 
 if __name__ == "__main__":
     import sys
+    global _coinglass_oi_rate_limiter
+    if COINGLASS_RATE_LIMIT_PER_MINUTE > 0:
+        _coinglass_oi_rate_limiter = CoinglassRateLimiter(max_per_minute=COINGLASS_RATE_LIMIT_PER_MINUTE)
+        logger.info(f"CoinGlass 全專案限速已啟用：{COINGLASS_RATE_LIMIT_PER_MINUTE} 次/分鐘（初創版）")
     
     if len(sys.argv) > 1:
         function_name = sys.argv[1]
@@ -4441,8 +4106,6 @@ if __name__ == "__main__":
             run_long_term_once()
         elif function_name == "liquidity_radar":
             run_liquidity_radar_once()
-        elif function_name == "altseason_radar":
-            run_altseason_radar_once()
         elif function_name == "hyperliquid":
             run_hyperliquid_monitor_once()
         else:
@@ -4457,7 +4120,6 @@ if __name__ == "__main__":
             print("  long_term_index       - 長線牛熊導航儀（24 小時每 4 小時更新）")
             print("  long_term_index_once  - 長線牛熊導航儀（只執行一次，適合排程）")
             print("  liquidity_radar       - 流動性獵取雷達（極端爆倉彙整）")
-            print("  altseason_radar       - 山寨爆發雷達（Altseason + RSI + Buy Ratio）")
             print("  hyperliquid           - Hyperliquid 聰明錢監控")
     else:
         print("請指定要執行的功能，例如: python jackbot.py sector_ranking")
