@@ -1969,17 +1969,20 @@ def build_report_message_tiered(
     }
 
     lines = []
-    lines.append("💰 *【傑克短線戰術雷達】(30分)*")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    now_str = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
-    lines.append(f"🕐 {now_str} (台灣)")
+    lines.append("*💰 傑克短線戰術雷達 (30分)*")
     lines.append("")
+    now_str = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+    lines.append(f"🕐 {now_str} 台灣")
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
 
     has_any = False
 
     for zone in zone_order:
         items = [x for x in enriched_items if x.get("zone") == zone and (x.get("stars") or 0) >= 3]
+        lines.append("")
         lines.append(f"*{zone_map[zone]}*")
+        lines.append("")
 
         if not items:
             lines.append("_此輪無水標_")
@@ -2034,16 +2037,16 @@ def build_report_message_tiered(
                 else:
                     fee_state = "⚖️多空平衡"
                     fee_color = "🟡"
-                fee_str = f"｜{fee_color}費率 {fee_val:.3f}% ({fee_state})"
+                fee_str = f"{fee_color}費率 {fee_val:.3f}% ({fee_state})"
 
-            lines.append(f"{signal[:1]} *{sym}* ({star_str(stars)})")
-            lines.append(f"   💡 *戰術：{signal[2:]}*")
-            lines.append(f"   📝 *理由：{reason}*")
-            lines.append(f"   📊 數據：🟡價 {price_str}｜{rsi_part}｜{oi_detail}{fee_str}")
+            lines.append(f"{signal[:1]} *{sym}* {star_str(stars)}")
+            lines.append(f"戰術 {signal[2:]} · 理由 {reason}")
+            lines.append(f"價 {price_str} ｜ {rsi_part}")
+            lines.append(f"{oi_detail} ｜ {fee_str}")
             if zone == ZONE_TOP and funding is not None and funding < -0.0001:
-                lines.append("   ⚠️ _費率負易嘎空，不宜現價空；若回調深可提前關注或佈局_")
+                lines.append("⚠️ _費率負易嘎空，不宜現價空；若回調深可提前關注或佈局_")
             if zone == ZONE_DIP and funding is not None and funding > 0.0001:
-                lines.append("   ⚠️ _費率正多頭擁擠，不宜現價抄底；若反彈可提前獲利了結或關注_")
+                lines.append("⚠️ _費率正多頭擁擠，不宜現價抄底；若反彈可提前獲利了結或關注_")
             lines.append("")
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
