@@ -1844,6 +1844,10 @@ ZONE_TOP = "摸頭區"
 ZONE_BREAKOUT_LONG = "突破追漲區"
 ZONE_BREAKOUT_SHORT = "跌破追跌區"
 
+# 資金費率門檻（優先於技術指標）：正=多頭付費、負=空頭付費
+FUNDING_POSITIVE = 0.0005   # 0.05%，高於此視為多頭擁擠
+FUNDING_NEGATIVE = -0.0005  # -0.05%，低於此視為空頭擁擠（易嘎空）
+
 
 def _classify_signal_and_tier(
     item: Dict,
@@ -1852,22 +1856,21 @@ def _classify_signal_and_tier(
     funding_rate: Optional[float] = None,
 ) -> Tuple[str, str, int, str, str]:
     """
-    分級邏輯：回傳 (signal_label, zone, stars, rsi_desc, reason)。
-    zone 為四區塊之一；stars 1～5，5 最佳；reason 為戰術理由。
+    分級邏輯：資金費率大於一切，先依費率定方向，再輔以 OI/RSI。
+    回傳 (signal_label, zone, stars, rsi_desc, reason)。
     """
     oi = item.get("oiChange30m") or 0
     rsi = tech.get("rsi") if tech else None
     touch_upper = tech.get("touch_upper", False) if tech else False
     touch_lower = tech.get("touch_lower", False) if tech else False
-    EXTREME_FUNDING = 0.0005  # 0.05%
     rsi_desc = "RSI —"
     if tech is None:
-        label_by_cat = {"long_open": "📈 多方開倉", "long_close": "📉 多方平倉", "short_open": "📉 空方開倉", "short_close": "📈 空方平倉"}
         if funding_rate is not None:
-            if funding_rate > EXTREME_FUNDING:
+            if funding_rate > FUNDING_POSITIVE:
                 rsi_desc = "費率過熱🔥"
-            elif funding_rate < -EXTREME_FUNDING:
+            elif funding_rate < FUNDING_NEGATIVE:
                 rsi_desc = "費率過冷❄️"
+        label_by_cat = {"long_open": "📈 多方開倉", "long_close": "📉 多方平倉", "short_open": "📉 空方開倉", "short_close": "📈 空方平倉"}
         label = label_by_cat.get(category, "📊 異動")
         reason = "數據異動"
         if category == "short_open":
@@ -1891,42 +1894,55 @@ def _classify_signal_and_tier(
         if touch_lower:
             rsi_desc += " 觸底"
     elif funding_rate is not None:
-        if funding_rate > EXTREME_FUNDING:
+        if funding_rate > FUNDING_POSITIVE:
             rsi_desc = "費率過熱🔥"
-        elif funding_rate < -EXTREME_FUNDING:
+        elif funding_rate < FUNDING_NEGATIVE:
             rsi_desc = "費率過冷❄️"
-    # 摸頭區：做空、過熱
     bearish_cond = touch_upper or (rsi is not None and rsi > 70)
-    if rsi is None and funding_rate is not None and funding_rate > EXTREME_FUNDING:
+    bullish_cond = touch_lower or (rsi is not None and rsi < 30)
+    if funding_rate is not None and funding_rate > FUNDING_POSITIVE:
         bearish_cond = True
-    if oi < -2.0 and bearish_cond:
-        return ("🔴 摸頭做空", ZONE_TOP, 5, rsi_desc, "⛽ 空軍投降 (嘎空結束)")
-    # 突破追漲區：嘎空、順勢做多
+
+    # ─── 資金費率優先：先依費率定大方向 ───
+    # 1) 費率負（空頭付費、易嘎空）→ 偏多題材優先，但技術極熱仍可摸頭（謹慎做空）
+    if funding_rate is not None and funding_rate < FUNDING_NEGATIVE:
+        if oi > 2.0:
+            return ("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 費率負空頭付費 (嘎空潛力)")
+        if oi < -2.0 and bearish_cond and (rsi is not None and rsi > 75):
+            return ("🔴 摸頭做空", ZONE_TOP, 4, rsi_desc, "費率負但技術過熱，謹慎做空")
+        if oi < -2.0 and bullish_cond:
+            return ("🟢 抄底做多", ZONE_DIP, 5, rsi_desc, "🩸 賣壓竭盡 (跌深反彈)")
+        if oi > 2.0 or category in ("long_open", "short_close"):
+            return ("🟡 順勢觀察", ZONE_BREAKOUT_LONG, 4, rsi_desc, "費率負偏多題材")
+    # 2) 費率正（多頭付費）→ 偏空題材優先
+    if funding_rate is not None and funding_rate > FUNDING_POSITIVE:
+        if oi < -2.0 and bearish_cond:
+            return ("🔴 摸頭做空", ZONE_TOP, 5, rsi_desc, "⛽ 空軍投降 (嘎空結束)")
+        if bearish_cond:
+            return ("🔴 偏空過熱", ZONE_TOP, 4, rsi_desc, "🔨 主力佈空 (費率正多頭擁擠)")
+        if oi < -2.0 or category in ("short_open", "long_close"):
+            return ("🟡 順勢觀察", ZONE_TOP, 3, rsi_desc, "費率正偏空題材")
+    # 3) 費率中性：用 OI + RSI 分
     if oi > 2.0 and funding_rate is not None and funding_rate < -0.001:
         return ("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 資金湧入 (強勢突破)")
-    # 抄底區：做多、超賣
-    bullish_cond = touch_lower or (rsi is not None and rsi < 30)
-    if rsi is None and funding_rate is not None and funding_rate < -EXTREME_FUNDING:
-        bullish_cond = True
+    if oi < -2.0 and bearish_cond:
+        return ("🔴 摸頭做空", ZONE_TOP, 5, rsi_desc, "⛽ 空軍投降 (嘎空結束)")
     if oi < -2.0 and bullish_cond:
         return ("🟢 抄底做多", ZONE_DIP, 5, rsi_desc, "🩸 賣壓竭盡 (跌深反彈)")
-    # 順勢：OI > 2% 未過熱
-    if oi > 2.0 and (rsi is None or (30 < rsi < 70)):
+    if oi > 2.0:
         zone = ZONE_BREAKOUT_LONG if category in ("long_open", "long_close") else ZONE_BREAKOUT_SHORT
         reason = "🚀 資金湧入 (強勢突破)" if zone == ZONE_BREAKOUT_LONG else "📉 空方加碼 (順勢追跌)"
         return ("🟡 順勢觀察", zone, 4, rsi_desc, reason)
-    # 偏空過熱 -> 摸頭區
-    if rsi is not None and (rsi > 70 or touch_upper):
+    if bearish_cond:
         return ("🔴 偏空過熱", ZONE_TOP, 4, rsi_desc, "🔨 主力佈空 (漲多過熱)")
-    # 偏多超賣 -> 抄底區
-    if rsi is not None and (rsi < 30 or touch_lower):
+    if bullish_cond:
         return ("🟢 偏多超賣", ZONE_DIP, 4, rsi_desc, "🛒 主力吸籌 (跌深撿便宜)")
-    # 其餘依 category 歸入追漲/追跌
     if category == "short_open":
         return ("📊 異動", ZONE_BREAKOUT_SHORT, 2, rsi_desc, "數據異動")
     if category == "long_open":
         return ("📊 異動", ZONE_BREAKOUT_LONG, 2, rsi_desc, "數據異動")
-    return ("📊 異動", ZONE_DIP if category in ("long_close", "long_open") else ZONE_TOP, 1, rsi_desc, "數據異動")
+    default_zone = ZONE_DIP if category in ("long_close", "long_open") else ZONE_TOP
+    return ("📊 異動", default_zone, 1, rsi_desc, "數據異動")
 
 
 def build_report_message_tiered(
@@ -1983,8 +1999,21 @@ def build_report_message_tiered(
             price_str = f"${price:,.4g}" if price is not None and isinstance(price, (int, float)) else "—"
 
             rsi_part = x.get("rsi_desc", "RSI —")
+            if "超買" in rsi_part or "觸頂" in rsi_part:
+                rsi_color = "🔴"
+            elif "超賣" in rsi_part or "觸底" in rsi_part:
+                rsi_color = "🟢"
+            else:
+                rsi_color = "🟡"
+            rsi_part = f"{rsi_color}{rsi_part}"
+
             oi_val = x.get("oiChange30m", 0)
             oi_str = fmt_pct(oi_val)
+            cat = x.get("category", "")
+            oi_side = "多" if cat in ("long_open", "long_close") else "空"
+            oi_label = {"long_open": "多方開倉", "long_close": "多方平倉", "short_open": "空方開倉", "short_close": "空方平倉"}.get(cat, "持倉異動")
+            oi_color = "🟢" if cat in ("long_open", "short_close") else "🔴" if cat in ("short_open", "long_close") else "🟡"
+            oi_detail = f"{oi_color}持倉 {oi_side}{oi_str}（{oi_label}）"
 
             funding = x.get("funding_rate")
             fee_str = ""
@@ -1992,20 +2021,29 @@ def build_report_message_tiered(
                 fee_val = funding * 100
                 if fee_val >= 0.05:
                     fee_state = "🔥多頭過熱"
+                    fee_color = "🔴"
                 elif fee_val >= 0.02:
                     fee_state = "⚡多方擁擠"
+                    fee_color = "🔴"
                 elif fee_val <= -0.05:
                     fee_state = "❄️空頭過熱"
+                    fee_color = "🟢"
                 elif fee_val <= -0.02:
                     fee_state = "🥶空方擁擠"
+                    fee_color = "🟢"
                 else:
                     fee_state = "⚖️多空平衡"
-                fee_str = f"｜費率 {fee_val:.3f}% ({fee_state})"
+                    fee_color = "🟡"
+                fee_str = f"｜{fee_color}費率 {fee_val:.3f}% ({fee_state})"
 
             lines.append(f"{signal[:1]} *{sym}* ({star_str(stars)})")
             lines.append(f"   💡 *戰術：{signal[2:]}*")
             lines.append(f"   📝 *理由：{reason}*")
-            lines.append(f"   📊 數據：價 {price_str}｜{rsi_part}｜持倉 {oi_str}{fee_str}")
+            lines.append(f"   📊 數據：🟡價 {price_str}｜{rsi_part}｜{oi_detail}{fee_str}")
+            if zone == ZONE_TOP and funding is not None and funding < -0.0001:
+                lines.append("   ⚠️ _費率負易嘎空，不宜現價空；若回調深可提前關注或佈局_")
+            if zone == ZONE_DIP and funding is not None and funding > 0.0001:
+                lines.append("   ⚠️ _費率正多頭擁擠，不宜現價抄底；若反彈可提前獲利了結或關注_")
             lines.append("")
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -2014,12 +2052,6 @@ def build_report_message_tiered(
         lines.append("😴 目前市場平靜，無明顯交易訊號。")
         lines.append("")
 
-    lines.append("📌 *戰術速查*")
-    lines.append("• ⛽ *嘎空結束*：空單停損離場，上漲動能耗盡 ⮕ 做空")
-    lines.append("• 🔨 *主力佈空*：價格漲多，大戶加碼空單賭回調 ⮕ 做空")
-    lines.append("• 🩸 *賣壓竭盡*：多單停損離場，下跌動能耗盡 ⮕ 做多")
-    lines.append("• 🛒 *主力吸籌*：價格跌深，大戶進場撿便宜 ⮕ 做多")
-    lines.append("")
     lines.append("⚠️ 系統僅供輔助，請嚴格設定停損。")
 
     return "\n".join(lines)
