@@ -1996,7 +1996,7 @@ def build_report_message_tiered(
             signal = x.get("signal_label", "觀望")
             reason = x.get("reason", "數據異動")
             price = x.get("current_price")
-            price_str = f"${price:,.4g}" if price is not None and isinstance(price, (int, float)) else "—"
+            price_str = f"{price:,.4g}" if price is not None and isinstance(price, (int, float)) else "—"
 
             rsi_part = x.get("rsi_desc", "RSI —")
             if "超買" in rsi_part or "觸頂" in rsi_part:
