@@ -1,15 +1,13 @@
+# 持倉變化狙擊鏡：整點與半點各跑一次（UTC :00 與 :30）
+# ⚠️ GitHub 內建 schedule 不保證準時，可能延遲或漏跑。要「固定準時」請用外部 cron 觸發 workflow_dispatch，
+#    見 .github/持倉狙擊鏡準時觸發說明.md
 name: 持倉變化篩選（30分鐘循環）
-
-# 數據為 30m 顆粒度（價格 + OI），觸發器改為每 30 分鐘與數據週期一致。
-# 若需更頻繁可改 cron 或使用外部定時呼叫 workflow_dispatch，見：外部定時觸發推播_設定步驟.md
 
 on:
   schedule:
-    # 每 30 分鐘（UTC）：00, 30 分
     - cron: '0,30 * * * *'
   workflow_dispatch:
 
-# 不取消進行中的任務：讓每次觸發都能跑完並推播，避免延遲或漏推
 concurrency:
   group: position-change
   cancel-in-progress: false
@@ -17,27 +15,36 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # 放寬緩衝，避免 API 慢時被截斷
+    timeout-minutes: 20
     permissions:
       contents: read
-      actions: read
-    
+      actions: write
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Restore data state (冷卻歷史)
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: data-position-change-${{ runner.os }}
+
+      - name: Ensure data directory exists
+        run: mkdir -p data
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'  # 使用 pip 緩存加速
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run position change task (30min cycle)
+      - name: Run position change (狙擊鏡)
         env:
           CG_API_KEY: ${{ secrets.CG_API_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
@@ -45,7 +52,5 @@ jobs:
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_POSITION_CHANGE: ${{ secrets.TG_THREAD_POSITION_CHANGE }}
         run: |
-          # 腳本內建 16 分鐘強制結束，此處 16 分鐘為雙重保護（外層 8/10 已改為 16/16）
           timeout 960 python jackbot.py position_change || exit 0
           echo "任務執行完成"
-
