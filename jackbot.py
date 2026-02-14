@@ -1897,7 +1897,7 @@ def build_report_message_tiered(
 
     def calc_sl_tp(price, zone, stars):
         if price is None or price <= 0:
-            return "—", "—"
+            return "—", "—", "—"
         inverse_params = {
             5: (0.018, 0.025, 0.045), 4: (0.015, 0.020, 0.035),
             3: (0.012, 0.015, 0.025), 2: (0.010, 0.012, 0.020), 1: (0.010, 0.010, 0.015)
@@ -1934,7 +1934,7 @@ def build_report_message_tiered(
             sl_price = price * (1 + sl_pct)
             tp1_price = price * (1 - tp1_pct)
             tp2_price = price * (1 - tp2_pct)
-        return fmt_p(sl_price), f"{fmt_p(tp1_price)} ➜ {fmt_p(tp2_price)}"
+        return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price)
 
     zone_order = [ZONE_TOP, ZONE_DIP, ZONE_BREAKOUT_LONG, ZONE_BREAKOUT_SHORT]
     zone_map = {
@@ -1972,28 +1972,33 @@ def build_report_message_tiered(
             else:
                 price_str = "—"
 
-            sl_val, tp_val = calc_sl_tp(price, zone, stars)
+            sl_val, tp1_val, tp2_val = calc_sl_tp(price, zone, stars)
             is_bull = "做多" in signal or "追多" in signal or "嘎空" in signal or "抄底" in signal
             dir_emoji = "🟢 多" if is_bull else "🔴 空"
             funding = x.get("funding_rate") or 0
             fee_tag = ""
             if isinstance(funding, (int, float)) and funding * 100 >= 0.02:
-                fee_tag = " 🔥車重"
+                fee_tag = " (🔥車重)"
             elif isinstance(funding, (int, float)) and funding * 100 <= -0.02:
-                fee_tag = " ❄️軋空"
+                fee_tag = " (❄️軋空)"
+            funding_pct = (funding * 100) if isinstance(funding, (int, float)) else 0
+            funding_str = f"`{funding_pct:.4f}%`"
 
-            lines.append(f"{dir_emoji} *{sym}* {star_str(stars)}")
+            coin_url = f"https://www.coinglass.com/zh-TW/currencies/{sym}"
+            lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_str(stars)}")
+            lines.append(f"💸 費率：{funding_str}")
             lines.append(f"💡 邏輯：{action} ({reason}){fee_tag}")
             lines.append(f"📍 現價：`{price_str}`")
-            lines.append(f"🛡️ *保命：{sl_val}*")
-            lines.append(f"💰 *止盈：{tp_val}*")
+            lines.append(f"🛑 *止損*：`{sl_val}`")
+            lines.append(f"✅ *止盈1*：`{tp1_val}` (70%)")
+            lines.append(f"🚀 *止盈2*：`{tp2_val}` (30%)")
             lines.append("")
 
     if not has_any:
         lines.append("😴 獵物休息中，暫無高勝率機會。")
         lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append("⚠️ *跟單SOP*：嚴格止損，TP1 減半倉，TP2 全跑。")
+    lines.append("⚠️ *跟單SOP*：嚴格止損，TP1 70% TP2 30%")
     return "\n".join(lines)
 
 
@@ -2253,15 +2258,7 @@ def fetch_position_change():
             "funding_rate": funding_rate,
         })
     msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {"text": "🔥 去 BingX 一鍵跟單", "url": "https://bingx.com/partner/5LCE0KQE"},
-                {"text": "📊 TradingView 看盤", "url": "https://tw.tradingview.com/chart/"}
-            ]
-        ]
-    }
-    send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown", reply_markup=keyboard)
+    send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
     logger.info("持倉變化篩選執行完成並已推播")
 
 
