@@ -2,8 +2,8 @@ name: 新聞快訊推播
 
 on:
   schedule:
-    # 每 4 小時執行（UTC 時間：00:00, 04:00, 08:00, 12:00, 16:00, 20:00）
-    - cron: '0 */4 * * *'
+    # 每 4 小時執行（UTC），錯峰 20 分避免整點擠在一起
+    - cron: '20 */4 * * *'
   workflow_dispatch:
 
 # 防止並發執行
@@ -18,10 +18,17 @@ jobs:
     permissions:
       contents: read
       actions: read
-    
+      actions: write  # 供 cache 儲存狀態檔
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Restore data state cache
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: data-news-${{ runner.os }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -44,4 +51,3 @@ jobs:
         run: |
           timeout 480 python jackbot.py news || exit 0
           echo "任務執行完成"
-

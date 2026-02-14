@@ -17,7 +17,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 16  # 與腳本內建 16 分鐘強制結束一致
+    timeout-minutes: 20  # 放寬緩衝，避免 API 慢時被截斷
     permissions:
       contents: read
       actions: read
