@@ -1519,6 +1519,39 @@ def _fetch_bingx_funding_rate(symbol: str, preferred_symbol: Optional[str] = Non
     return None
 
 
+def _fetch_bingx_current_price(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
+    """
+    從 BingX swap ticker 取得即時最新價（用於報表「現價」，
+    避免使用 K 線收盤價造成與實際價格落差過大）。
+    """
+    clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    try_symbols = [preferred_symbol] if preferred_symbol else []
+    try_symbols += [f"{clean}-USDT", f"1000{clean}-USDT"]
+    try_symbols = list(dict.fromkeys([s for s in try_symbols if s]))
+    base_url = "https://open-api.bingx.com"
+    for sym_param in try_symbols:
+        try:
+            r = requests.get(
+                f"{base_url}/openApi/swap/v2/quote/ticker",
+                params={"symbol": sym_param},
+                timeout=5
+            )
+            time.sleep(0.08)
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            if j.get("code") != 0:
+                continue
+            data = j.get("data")
+            if isinstance(data, dict):
+                price = data.get("lastPrice") or data.get("price") or data.get("last")
+                if price is not None:
+                    return float(price)
+        except Exception:
+            continue
+    return None
+
+
 def _fetch_funding_rate_map() -> Dict[str, float]:
     """
     一次取得 CoinGlass 全量資金費率（與排行榜同 API、同結構），回傳 symbol(base) -> 費率。
@@ -2262,6 +2295,18 @@ def fetch_position_change():
             "reason": reason,
             "funding_rate": funding_rate,
         })
+
+    # 用 BingX 即時 ticker 刷新現價，避免「現價」與 K 線收盤價落差過大
+    for x in all_top:
+        sym = x.get("symbol", "")
+        clean_base = sym.replace("USDT", "").replace("-", "").upper()
+        preferred = base_to_symbol.get(clean_base) if base_to_symbol else None
+        if not preferred:
+            preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
+        live_price = _fetch_bingx_current_price(sym, preferred_symbol=preferred)
+        if live_price is not None:
+            x["current_price"] = live_price
+
     msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
     send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
     logger.info("持倉變化篩選執行完成並已推播")
