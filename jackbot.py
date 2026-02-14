@@ -1968,11 +1968,12 @@ def build_report_message_tiered(
         return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price)
 
     zone_order = [ZONE_TOP, ZONE_DIP, ZONE_BREAKOUT_LONG, ZONE_BREAKOUT_SHORT]
+    # 區塊只描述「市場狀態」，不暗示方向，避免與實際建議做多/做空混淆
     zone_map = {
-        ZONE_TOP: "🏔️ 【摸頭殺】 (高空埋伏)",
-        ZONE_DIP: "🌊 【黃金坑】 (遍地撿錢)",
-        ZONE_BREAKOUT_LONG: "🚀 【主升浪】 (搭順風車)",
-        ZONE_BREAKOUT_SHORT: "📉 【大跳水】 (順勢下殺)",
+        ZONE_TOP: "🏔️ 【摸頭殺】 (價格在高檔)",
+        ZONE_DIP: "🌊 【黃金坑】 (價格在低檔)",
+        ZONE_BREAKOUT_LONG: "🚀 【主升浪】 (價格在漲)",
+        ZONE_BREAKOUT_SHORT: "📉 【大跳水】 (價格在跌)",
     }
 
     lines = []
@@ -2024,6 +2025,7 @@ def build_report_message_tiered(
             coin_url = f"https://www.coinglass.com/zh-TW/currencies/{sym}"
             lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_str(stars)}")
             lines.append(f"🎲 策略：勝率 {win_rate_str}｜建議：{pos_size_str}")
+            lines.append(f"👉 *建議：做多*" if is_bull else "👉 *建議：做空*")
             lines.append(f"💸 費率：{funding_str}")
             lines.append(f"💡 邏輯：{action} ({reason}){fee_tag}")
             lines.append(f"📍 現價：`{price_str}`")
