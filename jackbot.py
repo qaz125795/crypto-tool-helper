@@ -1830,6 +1830,12 @@ ZONE_BREAKOUT_SHORT = "跌破追跌區"
 FUNDING_POSITIVE = 0.0005   # 0.05%，高於此視為多頭擁擠
 FUNDING_NEGATIVE = -0.0005  # -0.05%，低於此視為空頭擁擠（易嘎空）
 
+# RSI 區塊門檻：符合才進狙擊鏡報表（None = 不篩）
+RSI_FILTER_TOP_MIN = 65         # 摸頭區：RSI >= 65 才顯示（超買才適合摸頭做空）
+RSI_FILTER_DIP_MAX = 35         # 黃金坑：RSI <= 35 才顯示（超賣才適合抄底做多）
+RSI_FILTER_BREAKOUT_LONG_MIN = None  # 主升浪：可設 45 表示 RSI>=45 才顯示
+RSI_FILTER_BREAKOUT_SHORT_MAX = None  # 大跳水：可設 55 表示 RSI<=55 才顯示
+
 
 def _classify_signal_and_tier(
     item: Dict,
@@ -1997,9 +2003,21 @@ def build_report_message_tiered(
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
     lines.append("━━━━━━━━━━━━━━━━━━━")
 
+    def _pass_rsi_filter(x: Dict, z: str) -> bool:
+        rsi = x.get("rsi")
+        if z == ZONE_TOP and RSI_FILTER_TOP_MIN is not None:
+            return rsi is not None and rsi >= RSI_FILTER_TOP_MIN
+        if z == ZONE_DIP and RSI_FILTER_DIP_MAX is not None:
+            return rsi is not None and rsi <= RSI_FILTER_DIP_MAX
+        if z == ZONE_BREAKOUT_LONG and RSI_FILTER_BREAKOUT_LONG_MIN is not None:
+            return rsi is not None and rsi >= RSI_FILTER_BREAKOUT_LONG_MIN
+        if z == ZONE_BREAKOUT_SHORT and RSI_FILTER_BREAKOUT_SHORT_MAX is not None:
+            return rsi is not None and rsi <= RSI_FILTER_BREAKOUT_SHORT_MAX
+        return True
+
     has_any = False
     for zone in zone_order:
-        items = [x for x in enriched_items if x.get("zone") == zone and (x.get("stars") or 0) >= 3]
+        items = [x for x in enriched_items if x.get("zone") == zone and (x.get("stars") or 0) >= 3 and _pass_rsi_filter(x, zone)]
         if not items:
             continue
         lines.append(f"*{zone_map[zone]}*")
@@ -2042,6 +2060,8 @@ def build_report_message_tiered(
             lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_str(stars)}")
             lines.append(f"🎲 策略：勝率 {win_rate_str}｜建議：{pos_size_str}")
             lines.append(f"👉 *建議：做多*" if is_bull else "👉 *建議：做空*")
+            if x.get("direction_flip"):
+                lines.append(f"🔄 *本輪{x['direction_flip']}*")
             lines.append(f"💸 費率：{funding_str}")
             lines.append(f"💡 邏輯：{action} ({reason}){fee_tag}")
             lines.append(f"📍 現價：`{price_str}`")
@@ -2308,6 +2328,7 @@ def fetch_position_change():
             **item,
             "category": cat,
             "current_price": tech.get("current_price") if tech else None,
+            "rsi": tech.get("rsi") if tech else None,
             "signal_label": signal_label,
             "zone": zone,
             "stars": stars,
@@ -2342,8 +2363,65 @@ def fetch_position_change():
         filtered_top.append(x)
     all_top = filtered_top
 
-    msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
+    # 同幣同向只認最新一輪：上一輪已報過 (symbol, 多/空) 本輪就不報，但方向變了（空→多、多→空）會報
+    def _item_direction(x: Dict) -> str:
+        sig = x.get("signal_label") or ""
+        return "多" if ("做多" in sig or "追多" in sig or "嘎空" in sig or "抄底" in sig) else "空"
+
+    SNIPER_COOLDOWN_FILE = DATA_DIR / "sniper_cooldown.json"
+    try:
+        if SNIPER_COOLDOWN_FILE.exists():
+            raw = json.loads(SNIPER_COOLDOWN_FILE.read_text(encoding="utf-8"))
+            last_round = raw.get("last_round") or []
+        else:
+            last_round = []
+    except Exception:
+        last_round = []
+    # 上一輪推過的 (symbol, 方向) 本輪不重複報
+    cooldown_set = set()
+    for pair in last_round:
+        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+            cooldown_set.add((str(pair[0]), str(pair[1])))
+        elif isinstance(pair, dict) and pair.get("symbol") and pair.get("dir"):
+            cooldown_set.add((str(pair["symbol"]), str(pair["dir"])))
+
+    last_round_by_sym = {}
+    for pair in last_round:
+        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+            last_round_by_sym[str(pair[0])] = str(pair[1])
+        elif isinstance(pair, dict) and pair.get("symbol") and pair.get("dir"):
+            last_round_by_sym[str(pair["symbol"])] = str(pair["dir"])
+
+    cooled_top = []
+    for x in all_top:
+        sym = x.get("symbol") or ""
+        if not sym:
+            continue
+        cur_dir = _item_direction(x)
+        key = (sym, cur_dir)
+        if key in cooldown_set:
+            continue
+        # 上一輪有報過此幣但方向不同 → 標記多轉空/空轉多，報表會多一行提醒
+        if sym in last_round_by_sym and last_round_by_sym[sym] != cur_dir:
+            x["direction_flip"] = last_round_by_sym[sym] + "轉" + cur_dir
+        else:
+            x["direction_flip"] = None
+        cooled_top.append(x)
+
+    pairs_this_run = [(x.get("symbol"), _item_direction(x)) for x in cooled_top if x.get("symbol")]
+
+    msg = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
     send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
+
+    try:
+        SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SNIPER_COOLDOWN_FILE.write_text(
+            json.dumps({"last_round": pairs_this_run}, ensure_ascii=False),
+            encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning(f"寫入狙擊冷卻檔失敗: {e}")
+
     logger.info("持倉變化篩選執行完成並已推播")
 
 
