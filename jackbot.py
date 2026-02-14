@@ -1943,7 +1943,7 @@ def build_report_message_tiered(
     }
 
     lines = []
-    lines.append("🎯 *【傑克 30分狙擊鏡】*")
+    lines.append("🎯 *【傑克持倉異常狙擊鏡】*")
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
     lines.append("━━━━━━━━━━━━━━━━━━━")
 
@@ -1958,6 +1958,12 @@ def build_report_message_tiered(
         for x in items_sorted:
             sym = x.get("symbol", "")
             stars = x.get("stars", 1)
+            if stars >= 5:
+                win_rate_str, pos_size_str = "~75%", "標準倉 (5%)"
+            elif stars == 4:
+                win_rate_str, pos_size_str = "~50%", "減半倉 (2.5%)"
+            else:
+                win_rate_str, pos_size_str = "~40%", "輕倉試單 (1%)"
             signal = x.get("signal_label", "觀望")
             action = signal.replace("🔴 ", "").replace("🟢 ", "").replace("🟡 ", "").replace("摸頭", "").replace("抄底", "").replace("順勢", "").strip() or "觀望"
             reason_raw = (x.get("reason") or "數據異動")
@@ -1984,6 +1990,7 @@ def build_report_message_tiered(
 
             coin_url = f"https://www.coinglass.com/zh-TW/currencies/{sym}"
             lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_str(stars)}")
+            lines.append(f"🎲 策略：勝率 {win_rate_str}｜建議：{pos_size_str}")
             lines.append(f"💸 費率：{funding_str}")
             lines.append(f"💡 邏輯：{action} ({reason}){fee_tag}")
             lines.append(f"📍 現價：`{price_str}`")
@@ -1996,7 +2003,7 @@ def build_report_message_tiered(
         lines.append("😴 獵物休息中，暫無高勝率機會。")
         lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append("⚠️ *跟單SOP*：嚴格止損，TP1 70% TP2 30%")
+    lines.append("⚠️ *跟單SOP*：5星標準買，4星減半買。嚴格止損，TP1 70% / TP2 30%。")
     return "\n".join(lines)
 
 
