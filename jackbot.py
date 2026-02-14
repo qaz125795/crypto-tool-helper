@@ -94,8 +94,8 @@ _coinglass_oi_rate_limiter = None
 
 # ==================== 工具函數 ====================
 
-def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown") -> bool:
-    """發送訊息到 Telegram"""
+def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown", reply_markup: Optional[Dict] = None) -> bool:
+    """發送訊息到 Telegram（支援 Inline Keyboard 按鈕）"""
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -104,7 +104,9 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
         "parse_mode": parse_mode,
         "disable_web_page_preview": True
     }
-    
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
     try:
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code == 200:
@@ -183,15 +185,14 @@ def format_datetime(dt: datetime) -> str:
 # ==================== 1. 主流板塊排行榜推播 ====================
 
 MAIN_SECTORS = {
-    "Meme": "Meme 迷因板塊",
-    "Artificial Intelligence (AI)": "AI 人工智慧",
-    "Real World Assets (RWA)": "RWA 現實資產",
-    "Decentralized Finance (DeFi)": "DeFi 去中心化金融",
-    "Layer 2": "第二層網路 (L2)",
-    "Gaming (GameFi)": "GameFi 電競遊戲",
-    "Smart Contract Platform": "智慧合約公鏈",
-    "Exchange-based Tokens": "交易所代幣",
-    "Stablecoins": "穩定幣"
+    "Artificial Intelligence (AI)": "AI 機器人幫手",
+    "Meme": "Meme 迷因 (年輕人愛玩)",
+    "Smart Contract Platform": "智慧合約 (基礎建設)",
+    "Decentralized Finance (DeFi)": "DeFi (虛擬銀行)",
+    "Exchange-based Tokens": "交易所代幣 (券商幣)",
+    "Real World Assets (RWA)": "RWA (房產/黃金上鏈)",
+    "Gaming (GameFi)": "GameFi (打電動賺錢)",
+    "Stablecoins": "穩定幣 (美金)"
 }
 
 
@@ -226,20 +227,34 @@ def fetch_sector_ranking():
 
 
 def send_ranking_to_tg(ranking: List[Dict]):
-    """發送排行榜到 Telegram"""
-    message = "📊 *【全球主流加密板塊排行榜】(1H)* \n\n"
+    """發送排行榜到 Telegram（阿嬤友善版 + 熱力圖按鈕）"""
+    message = "📊 *【全球主流加密板塊排行榜】(4H)*\n\n"
     message += "🔥 *主流板塊強弱一覽：*\n"
-    
+
     for index, sector in enumerate(ranking):
         medal = "🥇" if index == 0 else "🥈" if index == 1 else "🥉" if index == 2 else "🔹"
-        change_str = f"{sector['change']:.2f}"
-        emoji = "📈" if sector['change'] > 0 else "📉"
-        sign = "+" if sector['change'] > 0 else ""
-        message += f"{medal} *{sector['displayName']}* `{sign}{change_str}%` {emoji}\n"
-    
-    message += "\n💡 _由傑克 AI 每小時自動監控資金流向_"
-    
-    send_telegram_message(message, TG_THREAD_IDS['sector_ranking'])
+        ch = sector.get("change", 0) or 0
+        change_str = f"{ch:.2f}"
+        sign = "+" if ch >= 0 else ""
+        # 視覺指標：>5% 火爆 / <-5% 冷卻 / -1%~1% 盤整 / 其餘 📈📉
+        if ch > 5:
+            prefix = "🔥"
+        elif ch < -5:
+            prefix = "❄️"
+        elif -1 <= ch <= 1:
+            prefix = "😴"
+        else:
+            prefix = "📈" if ch > 0 else "📉"
+        message += f"{medal} {prefix} *{sector['displayName']}* `{sign}{change_str}%`\n"
+
+    message += "\n💡 _由傑克 AI 每四小時自動監控資金流向_"
+
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🔥 查看族群熱力圖 (點我)", "url": "https://www.coingecko.com/zh-tw/categories#key-stats"}]
+        ]
+    }
+    send_telegram_message(message, TG_THREAD_IDS["sector_ranking"], reply_markup=keyboard)
 
 
 # ==================== 2. 巨鯨與大戶持倉動向 ====================
@@ -826,137 +841,55 @@ def calculate_oi_change(data_list: List[Dict]) -> Optional[Dict]:
 
 
 def buying_power_monitor():
-    """購買力監控：監控穩定幣市值和聚合穩定幣保證金持倉"""
-    logger.info("開始執行購買力監控...")
-    
-    # 1. 獲取穩定幣市值歷史
+    """【牛市燃料監控】資金進場=發車，判斷大盤動能"""
+    logger.info("開始執行牛市燃料監控...")
     marketcap_data = fetch_stablecoin_marketcap_history()
-    if not marketcap_data:
-        logger.warning("無法獲取穩定幣市值數據")
-        return
-    
-    # 2. 計算市值變化率
-    mcap_change = calculate_marketcap_change(marketcap_data)
-    if not mcap_change:
-        logger.warning("無法計算穩定幣市值變化率")
-        return
-    
-    # 3. 獲取穩定幣 OI 歷史
+    mcap_change = calculate_marketcap_change(marketcap_data) if marketcap_data else {}
     oi_data = fetch_aggregated_stablecoin_oi_history("BTC", "1h")
-    if not oi_data:
-        logger.warning("無法獲取穩定幣 OI 數據")
+    oi_change = calculate_oi_change(oi_data) if oi_data else {}
+    if not mcap_change or not oi_change:
+        logger.warning("牛市燃料監控：無法取得市值或 OI 數據，跳過推播")
         return
-    
-    # 4. 計算 OI 變化率
-    oi_change = calculate_oi_change(oi_data)
-    if not oi_change:
-        logger.warning("無法計算穩定幣 OI 變化率")
-        return
-    
-    # 5. 判斷是否需要推播（放寬條件）
-    should_alert = False
-    alert_type = []
-    
-    # 市值增加 > 0.05%（放寬從 0.1% 到 0.05%）
-    if mcap_change.get('change_1h') is not None and mcap_change['change_1h'] > 0.05:
-        should_alert = True
-        alert_type.append("資金進場")
-    elif mcap_change.get('change_24h') is not None and mcap_change['change_24h'] > 0.05:
-        should_alert = True
-        alert_type.append("資金進場")
-    
-    # OI 暴增 > 1%（放寬從 2% 到 1%）
-    if oi_change.get('change_1h') is not None and oi_change['change_1h'] > 1.0:
-        should_alert = True
-        alert_type.append("槓桿堆積")
-    elif oi_change.get('change_24h') is not None and oi_change['change_24h'] > 1.0:
-        should_alert = True
-        alert_type.append("槓桿堆積")
-    
-    # 如果沒有觸發警報條件，仍然推播數據（但標註為正常狀態）
-    # 這樣用戶可以持續監控購買力變化
-    if not should_alert:
-        logger.info(f"未觸發警報條件，但仍推播當前數據供監控")
-        logger.info(f"市值變化: 1h={mcap_change.get('change_1h')}, 24h={mcap_change.get('change_24h')}")
-        logger.info(f"OI 變化: 1h={oi_change.get('change_1h')}, 24h={oi_change.get('change_24h')}")
-        # 不 return，繼續構建推播訊息
-    
-    # 6. 構建推播訊息
-    now = get_taipei_time()
-    time_str = format_datetime(now)
-    
+
+    mcap_1h = mcap_change.get("change_1h") or 0
+    oi_1h = oi_change.get("change_1h") or 0
+    trend = "➡️ 震盪蓄力"
+    advice = "多看少動，等待方向"
+    color = "🟡"
+    if mcap_1h > 0.05 and oi_1h > 1.0:
+        trend, advice, color = "🚀 火力全開 (雙重利好)", "資金+槓桿雙噴，回調就是買點！", "🟢"
+    elif mcap_1h > 0.05:
+        trend, advice, color = "💰 資金進場 (現貨買盤)", "場外資金流入，底部墊高，偏多操作。", "🟢"
+    elif oi_1h > 1.5:
+        trend, advice, color = "⚠️ 槓桿過熱 (高波動預警)", "只有槓桿在堆，小心插針畫門。", "🔴"
+    elif mcap_1h < -0.05:
+        trend, advice, color = "📉 資金出逃 (獲利了結)", "資金正在撤退，反彈記得減倉。", "🔴"
+
     lines = []
-    lines.append("💰 *【購買力監控】*")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("⛽ *【牛市燃料監控】*")
+    lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} (台灣)")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🌡️ *市場狀態：{color} {trend}*")
     lines.append("")
-    
-    # 穩定幣市值
-    lines.append("📊 *穩定幣市值*：")
-    if mcap_change.get('latest_mcap'):
-        mcap_b = mcap_change['latest_mcap'] / 1_000_000_000  # 轉換為十億
-        lines.append(f"當前市值：*{mcap_b:.2f}B USD*")
-    
-    if mcap_change.get('change_1h') is not None:
-        change_1h = mcap_change['change_1h']
-        emoji = "📈" if change_1h > 0 else "📉"
-        lines.append(f"{emoji} 1小時變化：*{change_1h:+.2f}%*")
-    
-    if mcap_change.get('change_24h') is not None:
-        change_24h = mcap_change['change_24h']
-        emoji = "📈" if change_24h > 0 else "📉"
-        lines.append(f"{emoji} 24小時變化：*{change_24h:+.2f}%*")
-    
+    mcap_val = (mcap_change.get("latest_mcap") or 0) / 1_000_000_000
+    mcap_emoji = "📈" if mcap_1h > 0 else "📉"
+    lines.append("💵 *穩定幣 (場外資金)*")
+    lines.append(f"• 總量：${mcap_val:.2f}B")
+    lines.append(f"• 變動：{mcap_emoji} {mcap_1h:+.3f}% (1H)")
     lines.append("")
-    
-    # 穩定幣 OI
-    lines.append("⚡ *聚合穩定幣保證金持倉*：")
-    if oi_change.get('latest_oi'):
-        oi_b = oi_change['latest_oi'] / 1_000_000_000  # 轉換為十億
-        lines.append(f"當前持倉：*{oi_b:.2f}B USD*")
-    
-    if oi_change.get('change_1h') is not None:
-        change_1h = oi_change['change_1h']
-        emoji = "📈" if change_1h > 0 else "📉"
-        lines.append(f"{emoji} 1小時變化：*{change_1h:+.2f}%*")
-    
-    if oi_change.get('change_24h') is not None:
-        change_24h = oi_change['change_24h']
-        emoji = "📈" if change_24h > 0 else "📉"
-        lines.append(f"{emoji} 24小時變化：*{change_24h:+.2f}%*")
-    
+    oi_val = (oi_change.get("latest_oi") or 0) / 1_000_000_000
+    oi_emoji = "🔥" if oi_1h > 0 else "❄️"
+    lines.append("🎰 *合約持倉 (場內槓桿)*")
+    lines.append(f"• 總量：${oi_val:.2f}B")
+    lines.append(f"• 變動：{oi_emoji} {oi_1h:+.2f}% (1H)")
     lines.append("")
-    
-    # 警報提示（如果有觸發）
-    if alert_type:
-        lines.append("🚨 *警報類型*：")
-        for alert in alert_type:
-            if alert == "資金進場":
-                lines.append("✅ 資金進場：場外資金（Fiat）兌換成穩定幣準備買入")
-            elif alert == "槓桿堆積":
-                lines.append("⚠️ 槓桿堆積：場內資金正在使用穩定幣作為保證金開立做多倉位（看漲）")
-        lines.append("")
-    
-    # 船長解讀
-    lines.append("💡 *船長解讀*：")
-    if alert_type:
-        if "資金進場" in alert_type and "槓桿堆積" in alert_type:
-            lines.append("市值上升 + OI 上升 = 雙重利好，市場資金充裕且槓桿活躍，上漲動能強勁。")
-        elif "資金進場" in alert_type:
-            lines.append("市值上升代表場外資金流入，這是長線利好信號，預示後續買盤支撐。")
-        elif "槓桿堆積" in alert_type:
-            lines.append("OI 暴增預示波動將至，需注意槓桿風險，可能出現劇烈波動。")
-    else:
-        # 沒有觸發警報時的提示
-        lines.append("目前購買力變化在正常範圍內（市值變化 <= 0.05%，OI 變化 <= 1%）。")
-        lines.append("持續監控中，如有異常變化將及時通知。")
-    
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"⏰ 更新時間：{time_str}")
-    
-    message = "\n".join(lines)
-    send_telegram_message(message, TG_THREAD_IDS.get('buying_power_monitor', 246), parse_mode="Markdown")
-    logger.info("購買力監控推播完成")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"💡 *船長指令*：\n{advice}")
+
+    msg = "\n".join(lines)
+    keyboard = {"inline_keyboard": [[{"text": "💰 查看資金流向圖表", "url": "https://www.coinglass.com/zh-TW/pro/futures/OpenInterest"}]]}
+    send_telegram_message(msg, TG_THREAD_IDS.get("buying_power_monitor", 246), parse_mode="Markdown", reply_markup=keyboard)
+    logger.info("牛市燃料監控推播完成")
 
 
 # 保留舊函數名稱以向後兼容
@@ -1950,113 +1883,117 @@ def build_report_message_tiered(
     processed_count: int = 0,
     oi_success_count: int = 0,
 ) -> str:
-    """新版推播：強調進場理由與戰術 + 費率狀態提示"""
-
+    """
+    【傑克 30分狙擊鏡 - 暴力喊單版】
+    文案極度簡化，只給重點：方向、點位、理由。全線雙止盈 (TP1 保本 / TP2 暴富)。
+    """
     def star_str(n: int) -> str:
-        return "⭐" * (n or 0) + "☆" * (5 - (n or 0))
+        return "⭐" * (n or 0)
 
     def fmt_pct(num):
         if num is None or (isinstance(num, float) and (num != num)):
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
+    def calc_sl_tp(price, zone, stars):
+        if price is None or price <= 0:
+            return "—", "—"
+        inverse_params = {
+            5: (0.018, 0.025, 0.045), 4: (0.015, 0.020, 0.035),
+            3: (0.012, 0.015, 0.025), 2: (0.010, 0.012, 0.020), 1: (0.010, 0.010, 0.015)
+        }
+        trend_params = {
+            5: (0.020, 0.040, 0.080), 4: (0.015, 0.030, 0.060),
+            3: (0.012, 0.020, 0.040), 2: (0.010, 0.015, 0.030), 1: (0.010, 0.010, 0.020)
+        }
+        sl_pct, tp1_pct, tp2_pct = (0.01, 0.01, 0.02)
+        is_long = False
+        if zone == ZONE_DIP or zone == ZONE_BREAKOUT_LONG:
+            is_long = True
+        if zone in (ZONE_DIP, ZONE_TOP):
+            sl_pct, tp1_pct, tp2_pct = inverse_params.get(stars, inverse_params[3])
+        else:
+            sl_pct, tp1_pct, tp2_pct = trend_params.get(stars, trend_params[3])
+
+        def fmt_p(p):
+            if p < 0.0001:
+                return f"{p:.8f}"
+            if p < 0.01:
+                return f"{p:.6f}"
+            if p < 1:
+                return f"{p:.5f}"
+            if p < 10:
+                return f"{p:.4f}"
+            return f"{p:.2f}"
+
+        if is_long:
+            sl_price = price * (1 - sl_pct)
+            tp1_price = price * (1 + tp1_pct)
+            tp2_price = price * (1 + tp2_pct)
+        else:
+            sl_price = price * (1 + sl_pct)
+            tp1_price = price * (1 - tp1_pct)
+            tp2_price = price * (1 - tp2_pct)
+        return fmt_p(sl_price), f"{fmt_p(tp1_price)} ➜ {fmt_p(tp2_price)}"
+
     zone_order = [ZONE_TOP, ZONE_DIP, ZONE_BREAKOUT_LONG, ZONE_BREAKOUT_SHORT]
     zone_map = {
-        ZONE_TOP: "🏔️ 【摸頭區】 (高風險高報酬)",
-        ZONE_DIP: "🌊 【抄底區】 (高風險高報酬)",
-        ZONE_BREAKOUT_LONG: "🚀 【突破追漲】 (順勢交易)",
-        ZONE_BREAKOUT_SHORT: "📉 【跌破追跌】 (順勢交易)",
+        ZONE_TOP: "🏔️ 【摸頭殺】 (高空埋伏)",
+        ZONE_DIP: "🌊 【黃金坑】 (遍地撿錢)",
+        ZONE_BREAKOUT_LONG: "🚀 【主升浪】 (搭順風車)",
+        ZONE_BREAKOUT_SHORT: "📉 【大跳水】 (順勢下殺)",
     }
 
     lines = []
-    lines.append("*💰 傑克短線戰術雷達 (30分)*")
-    lines.append("")
-    now_str = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
-    lines.append(f"🕐 {now_str} 台灣")
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🎯 *【傑克 30分狙擊鏡】*")
+    lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
 
     has_any = False
-
     for zone in zone_order:
         items = [x for x in enriched_items if x.get("zone") == zone and (x.get("stars") or 0) >= 3]
-        lines.append("")
-        lines.append(f"*{zone_map[zone]}*")
-        lines.append("")
-
         if not items:
-            lines.append("_此輪無水標_")
-            lines.append("")
-            lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
             continue
-
+        lines.append(f"*{zone_map[zone]}*")
         has_any = True
         items_sorted = sorted(items, key=lambda x: (-(x.get("stars") or 0), -(abs(x.get("oiChange30m") or 0))))
-
         for x in items_sorted:
             sym = x.get("symbol", "")
             stars = x.get("stars", 1)
             signal = x.get("signal_label", "觀望")
-            reason = x.get("reason", "數據異動")
+            action = signal.replace("🔴 ", "").replace("🟢 ", "").replace("🟡 ", "").replace("摸頭", "").replace("抄底", "").replace("順勢", "").strip() or "觀望"
+            reason_raw = (x.get("reason") or "數據異動")
+            reason = reason_raw.split(" ")[0] if reason_raw else "數據"
             price = x.get("current_price")
-            price_str = f"{price:,.4g}" if price is not None and isinstance(price, (int, float)) else "—"
-
-            rsi_part = x.get("rsi_desc", "RSI —")
-            if "超買" in rsi_part or "觸頂" in rsi_part:
-                rsi_color = "🔴"
-            elif "超賣" in rsi_part or "觸底" in rsi_part:
-                rsi_color = "🟢"
+            if price is not None and isinstance(price, (int, float)):
+                price_str = f"{price:.4f}" if price < 10 else f"{price:.2f}"
+                if price < 0.01:
+                    price_str = f"{price:.6f}"
             else:
-                rsi_color = "🟡"
-            rsi_part = f"{rsi_color}{rsi_part}"
+                price_str = "—"
 
-            oi_val = x.get("oiChange30m", 0)
-            oi_str = fmt_pct(oi_val)
-            cat = x.get("category", "")
-            oi_side = "多" if cat in ("long_open", "long_close") else "空"
-            oi_label = {"long_open": "多方開倉", "long_close": "多方平倉", "short_open": "空方開倉", "short_close": "空方平倉"}.get(cat, "持倉異動")
-            oi_color = "🟢" if cat in ("long_open", "short_close") else "🔴" if cat in ("short_open", "long_close") else "🟡"
-            oi_detail = f"{oi_color}持倉 {oi_side}{oi_str}（{oi_label}）"
+            sl_val, tp_val = calc_sl_tp(price, zone, stars)
+            is_bull = "做多" in signal or "追多" in signal or "嘎空" in signal or "抄底" in signal
+            dir_emoji = "🟢 多" if is_bull else "🔴 空"
+            funding = x.get("funding_rate") or 0
+            fee_tag = ""
+            if isinstance(funding, (int, float)) and funding * 100 >= 0.02:
+                fee_tag = " 🔥車重"
+            elif isinstance(funding, (int, float)) and funding * 100 <= -0.02:
+                fee_tag = " ❄️軋空"
 
-            funding = x.get("funding_rate")
-            fee_str = ""
-            if funding is not None:
-                fee_val = funding * 100
-                if fee_val >= 0.05:
-                    fee_state = "🔥多頭過熱"
-                    fee_color = "🔴"
-                elif fee_val >= 0.02:
-                    fee_state = "⚡多方擁擠"
-                    fee_color = "🔴"
-                elif fee_val <= -0.05:
-                    fee_state = "❄️空頭過熱"
-                    fee_color = "🟢"
-                elif fee_val <= -0.02:
-                    fee_state = "🥶空方擁擠"
-                    fee_color = "🟢"
-                else:
-                    fee_state = "⚖️多空平衡"
-                    fee_color = "🟡"
-                fee_str = f"{fee_color}費率 {fee_val:.3f}% ({fee_state})"
-
-            lines.append(f"{signal[:1]} *{sym}* {star_str(stars)}")
-            lines.append(f"戰術 {signal[2:]} · 理由 {reason}")
-            lines.append(f"價 {price_str} ｜ {rsi_part}")
-            lines.append(f"{oi_detail} ｜ {fee_str}")
-            if zone == ZONE_TOP and funding is not None and funding < -0.0001:
-                lines.append("⚠️ _費率負易嘎空，不宜現價空；若回調深可提前關注或佈局_")
-            if zone == ZONE_DIP and funding is not None and funding > 0.0001:
-                lines.append("⚠️ _費率正多頭擁擠，不宜現價抄底；若反彈可提前獲利了結或關注_")
+            lines.append(f"{dir_emoji} *{sym}* {star_str(stars)}")
+            lines.append(f"💡 邏輯：{action} ({reason}){fee_tag}")
+            lines.append(f"📍 現價：`{price_str}`")
+            lines.append(f"🛡️ *保命：{sl_val}*")
+            lines.append(f"💰 *止盈：{tp_val}*")
             lines.append("")
 
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-
     if not has_any:
-        lines.append("😴 目前市場平靜，無明顯交易訊號。")
+        lines.append("😴 獵物休息中，暫無高勝率機會。")
         lines.append("")
-
-    lines.append("⚠️ 系統僅供輔助，請嚴格設定停損。")
-
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append("⚠️ *跟單SOP*：嚴格止損，TP1 減半倉，TP2 全跑。")
     return "\n".join(lines)
 
 
@@ -2316,7 +2253,15 @@ def fetch_position_change():
             "funding_rate": funding_rate,
         })
     msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
-    send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "🔥 去 BingX 一鍵跟單", "url": "https://bingx.com/partner/5LCE0KQE"},
+                {"text": "📊 TradingView 看盤", "url": "https://tw.tradingview.com/chart/"}
+            ]
+        ]
+    }
+    send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown", reply_markup=keyboard)
     logger.info("持倉變化篩選執行完成並已推播")
 
 
@@ -3559,127 +3504,42 @@ def _interpret_rainbow_zone(zone: Optional[str]) -> str:
 
 
 def build_long_term_message() -> Optional[str]:
-    """抓取並分析長線指標，組成 Telegram Markdown 推播內容"""
+    """【長線財富週期】判斷大級別買賣點，現在是底還是頂。"""
     ahr = fetch_ahr999_index()
-    rainbow_zone = fetch_rainbow_zone()
-    pi_trigger = fetch_pi_cycle_signal()
     fg = fetch_latest_fear_greed()
-
-    if ahr is None and fg is None and not rainbow_zone:
-        logger.error("長線指標資料皆取得失敗，放棄推播")
+    if ahr is None:
         return None
 
-    # Ahr999 區間判斷
-    ahr_status = "未知"
-    ahr_state = "資料不足"
-    if ahr is not None:
-        if ahr < 0.45:
-            ahr_status = "特價抄底期"
-            ahr_state = "抄底中"
-        elif ahr <= 1.2:
-            ahr_status = "定投區"
-            ahr_state = "定投中"
-        else:
-            ahr_status = "高估區"
-            ahr_state = "謹慎觀望"
+    status = "😐 尷尬區 (持有)"
+    action = "多看少動，拿住現貨"
+    color = "🟡"
+    if ahr < 0.45:
+        status, action, color = "💎 鑽石底 (大抄底)", "砸鍋賣鐵買進去！兩年後你會感謝自己！", "🟢"
+    elif ahr < 1.2:
+        status, action, color = "📥 定投區 (累積)", "薪水發了就買，不要管價格。", "🔵"
+    elif ahr > 5.0:
+        status, action, color = "☠️ 世紀頂部 (逃命)", "清倉！刪APP！去旅遊！", "🔴"
+    elif ahr > 1.2 and fg is not None and fg > 80:
+        status, action, color = "🔥 泡沫區 (減倉)", "人聲鼎沸時離場，分批賣出。", "🟠"
 
-    # 恐懼貪婪
-    fg_mood = _classify_fear_greed(fg)
-
-    # 彩虹圖中文說明
-    rainbow_desc = _interpret_rainbow_zone(rainbow_zone)
-
-    # 泡沫風險判斷：恐懼貪婪 > 80 且 Pi 觸發
-    bubble_risk = bool(fg is not None and fg > 80 and pi_trigger)
-
-    # 風險提示 / 船長建議
-    risk_text = "資料不足，暫無法評估風險。"
-    advice_text = "請先確認指標資料是否正常取得，再做決策。"
-
-    if ahr is not None:
-        if ahr < 0.45:
-            risk_text = "目前長線風險偏低，屬於「特價抄底期」，但仍需分批布局、嚴守風險。"
-            advice_text = "這裡屬於長線黃金區間，可以考慮分批逢低佈局，比特幣為主、山寨為輔。"
-        elif ahr <= 1.2:
-            risk_text = "目前估值合理偏便宜，「適合定投」區間，風險與報酬相對均衡。"
-            advice_text = "建議啟動/維持固定週期定投策略，不為短期波動情緒化。"
-        else:
-            risk_text = "目前估值偏貴，屬於高估區，若再疊加情緒過熱，需謹慎面對回撤風險。"
-            advice_text = "不建議重倉追高，可考慮只小額試單，或等待更友善的估值再進場。"
-
-    # 疊加情緒與 Pi 頂部信號調整建議
-    if fg is not None:
-        if fg <= 20:
-            risk_text += " 另外，市場處於「極度恐懼」，短線可能還有殺價，但長線通常是機會大於風險。"
-        elif fg >= 80:
-            risk_text += " 同時，市場處於「極度貪婪」，資金情緒過熱，追高風險極大。"
-
-    if bubble_risk:
-        risk_text = "⚠️ 市場進入「泡沫風險期」：情緒極度貪婪且 Pi 循環頂部指標觸發，需嚴防大幅回調。"
-        advice_text = "建議逐步減倉、鎖定獲利，避免高槓桿追高；保留現金與穩定幣，等待更好的風險回報區間。"
-    elif pi_trigger:
-        risk_text += " 另外，Pi 循環頂部指標已觸發，歷史上常對應中長期高位區。"
-        advice_text = "可以考慮調降整體倉位，將高風險山寨幣逐步換回主流或穩定幣。"
-
-    now_str = format_datetime(get_taipei_time())
-
-    msg_lines = []
-    msg_lines.append("📊 *【牛熊導航儀】*")
-    msg_lines.append("━━━━━━━━━━━━━━━━━━━━")
-    msg_lines.append("")
-
-    # 市場情緒（白話）
-    if fg is not None:
-        msg_lines.append(f"🌡️ *市場情緒*：{fg_mood}（{fg}分）")
-    else:
-        msg_lines.append("🌡️ *市場情緒*：資料暫缺")
-
-    # Ahr999（白話）
-    if ahr is not None:
-        msg_lines.append(f"💰 *Ahr999*：{ahr_status}")
-    else:
-        msg_lines.append("💰 *Ahr999*：資料暫缺")
-
-    # 彩虹圖（白話）
-    msg_lines.append(f"🌈 *彩虹圖*：{rainbow_desc}")
-
-    # 今天操作方向建議（新增）
-    msg_lines.append("")
-    msg_lines.append("🎯 *今天操作方向建議*：")
-    
-    # 根據指標綜合判斷操作方向（做多=看漲買入，做空=看跌賣出）
-    if ahr is not None and fg is not None:
-        if ahr < 0.45 and fg < 30:
-            msg_lines.append("✅ 建議：分批做多（看漲、買入），適合抄底")
-        elif ahr < 1.2 and fg < 60:
-            msg_lines.append("✅ 建議：可以考慮做多（看漲），但需謹慎")
-        elif ahr > 1.2 and fg > 70:
-            msg_lines.append("⚠️ 建議：謹慎做空（看跌、賣出），注意風險")
-        elif pi_trigger and fg > 75:
-            msg_lines.append("⚠️ 建議：減倉觀望，等待回調")
-        else:
-            msg_lines.append("➡️ 建議：保持觀望，等待明確信號")
-    elif ahr is not None:
-        if ahr < 0.45:
-            msg_lines.append("✅ 建議：可以考慮做多（看漲）")
-        elif ahr > 1.2:
-            msg_lines.append("⚠️ 建議：謹慎做空（看跌）")
-        else:
-            msg_lines.append("➡️ 建議：保持觀望")
-    else:
-        msg_lines.append("➡️ 建議：資料不足，保持觀望")
-
-    # 簡化的風險提示
-    msg_lines.append("")
-    msg_lines.append(f"🚨 *風險提示*：{risk_text}")
-
-    # 簡化的船長建議
-    msg_lines.append("")
-    msg_lines.append(f"💡 *操作建議*：{advice_text}")
-    msg_lines.append("")
-    msg_lines.append(f"⏰ 更新時間：{now_str}")
-
-    return "\n".join(msg_lines)
+    lines = []
+    lines.append("⏳ *【長線財富週期】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📍 *當前位置：{color} {status}*")
+    lines.append("")
+    lines.append(f"💰 *AHR999 指數：{ahr:.2f}*")
+    lines.append(f"🌡️ *貪婪恐懼指數：{fg}*" if fg is not None else "🌡️ *貪婪恐懼指數：—*")
+    lines.append("")
+    lines.append("🧠 *傑克船長碎碎念*：")
+    lines.append(f"👉 {action}")
+    if fg is not None and fg < 20:
+        lines.append("👉 現在市場極度恐懼，但這通常是富人變更有錢的時候。")
+    if fg is not None and fg > 80:
+        lines.append("👉 現在市場極度貪婪，擦鞋童都在問幣，你該小心了。")
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⏰ {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d')}")
+    return "\n".join(lines)
 
 
 def run_long_term_monitor(interval_hours: int = 4):
@@ -3701,14 +3561,22 @@ def run_long_term_monitor(interval_hours: int = 4):
 
 
 def run_long_term_once():
-    """只執行一次長線指標分析與推播（適合排程觸發）"""
+    """長線財富週期推播（含按鈕）"""
     logger.info("執行單次長線指標推播...")
     message = build_long_term_message()
     if not message:
         logger.warning("本次長線指標分析失敗，未發送推播")
         return
     thread_id = TG_THREAD_IDS.get("long_term_index", 248)
-    send_telegram_message(message, thread_id, parse_mode="Markdown")
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "🌈 查看比特幣彩虹圖", "url": "https://www.coinglass.com/zh-TW/pro/i/bitcoin-rainbow-chart"},
+                {"text": "💰 查看 AHR999", "url": "https://www.coinglass.com/zh-TW/pro/i/ahr999"}
+            ]
+        ]
+    }
+    send_telegram_message(message, thread_id, parse_mode="Markdown", reply_markup=keyboard)
 
 
 # ==================== 8. 流動性獵取雷達（極端清算監控） ====================
@@ -3895,40 +3763,31 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
 
 
 def format_liquidity_consolidated_message(events: List[Dict]) -> str:
-    """將多個清算事件整理成一則 Telegram 推播文字（只顯示過去1小時數據，白話+操作建議）"""
-    now = get_taipei_time()
-    time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    """【主力清算·撿屍雷達】別人恐懼我貪婪，帶血籌碼最香。"""
+    now_str = datetime.now(TAIPEI_TZ).strftime("%H:%M")
+    lines = []
+    lines.append("🩸 *【主力清算 · 撿屍雷達】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    total_vol = sum(e.get("totalVolUsd1h", 0) for e in events)
+    lines.append(f"☠️ 過去1小時，這些幣種爆倉 *${total_vol / 10000:.0f}萬*")
+    lines.append("")
 
-    lines: List[str] = []
-    lines.append("🎯 *【清算爆倉雷達】*")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"📊 本次監控共有 *{len(events)}* 個幣種達到極端爆倉門檻\n")
-
-    # 依1小時總量排序
     events_sorted = sorted(events, key=lambda e: e.get("totalVolUsd1h", 0), reverse=True)
-
     for ev in events_sorted:
-        total_1h = ev.get("totalVolUsd1h", 0.0) / 10_000
-        amount_1h = ev["dominantAmount1h"] / 10_000
-        dominant_side = ev['dominantSide']
-
-        lines.append(f"🥊 *【{ev['symbol']}】*")
-        lines.append(f"⚠️ 過去1小時內約有 *${amount_1h:.2f} 萬* 美元的 *{dominant_side}* 被強制平倉。\n")
-        
-        # 操作建議（白話，做多=看漲、做空=看跌）
-        if "多單" in dominant_side or dominant_side.startswith("多"):
-            lines.append("💡 *操作建議*：大量多單（做多倉位）被爆倉，代表價格下跌壓力大。")
-            lines.append("   • 價格還在跌：可考慮做空（看跌）摸頭，但要設好止損")
-            lines.append("   • 價格已跌很多：可考慮做多（看漲）摸底，但要分批進場")
-        else:  # 空單
-            lines.append("💡 *操作建議*：大量空單（做空倉位）被爆倉，代表價格上漲動能強。")
-            lines.append("   • 價格還在漲：可考慮做空（看跌）摸頭，但要設好止損")
-            lines.append("   • 價格已漲很多：可考慮做多（看漲）摸底，但要分批進場")
+        amt = ev.get("dominantAmount1h", 0) / 10_000
+        side = ev.get("dominantSide", "")
+        sym = ev.get("symbol", "")
+        if "多" in side:
+            icon, title, advice = "🟢", "多軍陣亡 (可嘗試摸底)", "👉 價格若止跌，分批接多 (Buy the Dip)"
+        else:
+            icon, title, advice = "🔴", "空軍陣亡 (可嘗試摸頭)", "👉 價格若漲不動，嘗試做空 (Short the Top)"
+        lines.append(f"{icon} *{sym}* 💥 爆倉 *${amt:.1f}萬*")
+        lines.append(f"💀 慘況：{title}")
+        lines.append(f"💡 策略：{advice}")
         lines.append("")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"⏰ 更新時間：{time_str}")
-
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⏰ {now_str} | 別人恐懼我貪婪，帶血籌碼最香。")
     return "\n".join(lines)
 
 
@@ -3958,8 +3817,10 @@ def run_liquidity_radar_once():
 
     msg = format_liquidity_consolidated_message(events)
     thread_id = TG_THREAD_IDS.get("liquidity_radar", 3)
-    send_telegram_message(msg, thread_id, parse_mode="Markdown")
-
+    keyboard = {
+        "inline_keyboard": [[{"text": "💀 查看詳細爆倉數據", "url": "https://www.coinglass.com/zh-TW/LiquidationData"}]]
+    }
+    send_telegram_message(msg, thread_id, parse_mode="Markdown", reply_markup=keyboard)
     logger.info(f"流動性獵取雷達完成，推送 {len(events)} 個幣種的極端爆倉事件")
 
 
@@ -4499,171 +4360,72 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
 
 
 def build_altseason_message() -> Optional[str]:
-    """組合山寨爆發雷達訊息（不依賴 pandas，加入 CVD 背離判斷）"""
+    """【山寨暴富列車】抓板塊輪動，強者恆強。"""
     index_val = fetch_altseason_index()
     rsi_list = fetch_rsi_list()
     if not rsi_list:
-        logger.error("無法取得 RSI 列表，放棄推播")
         return None
 
-    # 只看成交額前 50 大，避免垃圾幣
     rsi_with_vol = [r for r in rsi_list if r.get("volume") is not None]
     if rsi_with_vol:
         rsi_with_vol.sort(key=lambda x: x.get("volume") or 0, reverse=True)
-        rsi_list = rsi_with_vol[:50] + [r for r in rsi_list if r.get("volume") is None]
-
-    # 標準化 RSI：優先使用 4h，沒有才用 1h
+        rsi_list = rsi_with_vol[:60]
     for item in rsi_list:
-        rsi_base = item.get("rsi_4h")
-        if rsi_base is None:
-            rsi_base = item.get("rsi_1h")
-        item["rsi_base"] = rsi_base
+        item.setdefault("rsi_4h", item.get("rsi_base"))
+        item.setdefault("rsi_base", item.get("rsi_4h"))
 
-    # 過濾掉沒有 RSI 的項目
-    rsi_list = [r for r in rsi_list if r.get("rsi_base") is not None]
-
-    # 強勢突破（做多）：RSI >= 70
-    strong_list = [r for r in rsi_list if r.get("rsi_base", 0) >= 70]
-    # 超賣反彈（做多）：RSI <= 30
-    oversold_list = [r for r in rsi_list if r.get("rsi_base", 100) <= 30]
-    # 超買回調（做空）：RSI >= 70（與強勢突破相同，但買入比條件不同）
-    overbought_list = [r for r in rsi_list if r.get("rsi_base", 0) >= 70]
-
-    # 加入 Buy Ratio 過濾
     def attach_buy_ratio(items: List[Dict]) -> List[Dict]:
-        result = []
+        res = []
         for item in items:
+            sym = (item.get("symbol") or "").replace("USDT", "")
+            ratio = fetch_buy_ratio(sym) or fetch_buy_ratio(item.get("symbol", ""))
+            item["buy_ratio"] = ratio if ratio is not None else 50.0
+            res.append(item)
+            time.sleep(0.3)
+        return res
+
+    strong = [r for r in rsi_list if (r.get("rsi_4h") or r.get("rsi_base") or 0) >= 65]
+    if strong:
+        strong = attach_buy_ratio(strong[:8])
+        strong.sort(key=lambda x: x.get("buy_ratio", 0), reverse=True)
+
+    lines = []
+    lines.append("🎢 *【山寨暴富列車】*")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    season_status = "🛡️ 比特幣吸血中 (防守)"
+    if index_val is not None and index_val > 70:
+        season_status = "🌋 群魔亂舞 (山寨季)"
+    elif index_val is not None and index_val > 40:
+        season_status = "⚖️ 資金輪動中 (選幣)"
+    lines.append(f"🌍 *當前週期*：{season_status}")
+    lines.append(f"📊 *山寨指數*：`{index_val:.0f}` / 100" if index_val is not None else "📊 *山寨指數*：—")
+    lines.append("")
+    lines.append("🔥 *強勢領頭羊 (資金正在炒)*")
+    if not strong:
+        lines.append("暫無強勢幣種，市場低迷。")
+    else:
+        for i, item in enumerate(strong[:5], 1):
             sym = item.get("symbol", "")
-            base = sym.replace("USDT", "")
-            ratio = fetch_buy_ratio(base)
-            if ratio is None:
-                ratio = fetch_buy_ratio(sym)
-            item["buy_ratio"] = ratio
-            if ratio is not None:
-                result.append(item)
-            time.sleep(0.8)
-        return result
-
-    # 強勢突破（做多）：買入比 >= 55%
-    if strong_list:
-        strong_list = attach_buy_ratio(strong_list)
-        strong_list = [r for r in strong_list if r.get("buy_ratio", 0) >= 55.0]
-        strong_list.sort(key=lambda x: (x.get("rsi_base", 0), x.get("buy_ratio", 0)), reverse=True)
-        strong_list = strong_list[:5]
-
-    # 超賣反彈（做多）：買入比 >= 52%
-    if oversold_list:
-        oversold_list = attach_buy_ratio(oversold_list)
-        oversold_list = [r for r in oversold_list if r.get("buy_ratio", 0) >= 52.0]
-        oversold_list.sort(key=lambda x: (x.get("rsi_base", 100), -x.get("buy_ratio", 0)))
-        oversold_list = oversold_list[:5]
-
-    # 超買回調（做空）：RSI >= 70 且買入比 < 45%（買盤力道不足，可能回調）
-    if overbought_list:
-        overbought_list = attach_buy_ratio(overbought_list)
-        overbought_list = [r for r in overbought_list if r.get("buy_ratio") is not None and r.get("buy_ratio", 0) < 45.0]
-        overbought_list.sort(key=lambda x: (x.get("rsi_base", 0), x.get("buy_ratio", 0) or 0), reverse=True)
-        overbought_list = overbought_list[:5]
-
-    now_str = format_datetime(get_taipei_time())
-
-    lines: List[str] = []
-    lines.append("🛰️ *【區塊鏈船長 - 山寨爆發雷達】*")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-
-    # 山寨季指數
-    if index_val is not None:
-        season = "山寨季" if index_val > 50 else "比特幣季"
-        lines.append(f"📅 *當前週期*：{season}")
-        lines.append(f"📈 *山寨季指數*：{index_val:.2f}（0-100）")
-    else:
-        lines.append("📅 *當前週期*：資料暫缺")
-        lines.append("📈 *山寨季指數*：暫無法取得")
-
+            br = item.get("buy_ratio", 50)
+            rsi = item.get("rsi_4h") or item.get("rsi_base", 50)
+            lines.append(f"{i}. *{sym}* (買盤 {br:.0f}%)")
+            lines.append(f"   👉 RSI {rsi:.0f} ｜ 動能強勁，回調可接")
     lines.append("")
-    lines.append(describe_altseason(index_val))
-    lines.append("")
-
-    # 強勢突破區（做多 = 看漲、買入）
-    lines.append("🔥 *潛力領頭羊（強勢突破 - 做多／看漲）*：")
-    if not strong_list:
-        lines.append("目前沒有符合條件的強勢突破山寨幣。")
-    else:
-        for idx, item in enumerate(strong_list, 1):
-            s = str(item.get("symbol", ""))
-            rsi_v = float(item.get("rsi_base", 0) or 0)
-            br_val = item.get("buy_ratio")
-            br = float(br_val) if br_val is not None else 0.0
-            
-            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
-            
-            # 避免請求過於頻繁
-            if idx < len(strong_list):
-                time.sleep(0.5)
-    lines.append("")
-    
-    # 超買回調區（做空 = 看跌、賣出）
-    lines.append("⚠️ *超買回調風險（做空參考／看跌）*：")
-    if not overbought_list:
-        lines.append("目前沒有明顯的超買回調候選。")
-    else:
-        for idx, item in enumerate(overbought_list, 1):
-            s = str(item.get("symbol", ""))
-            rsi_v = float(item.get("rsi_base", 0) or 0)
-            br_val = item.get("buy_ratio")
-            br = float(br_val) if br_val is not None else 0.0
-            
-            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
-            
-            # 避免請求過於頻繁
-            if idx < len(overbought_list):
-                time.sleep(0.5)
-    lines.append("")
-    
-    # 超賣反彈區（做多 = 看漲、抄底）
-    lines.append("💎 *超賣反彈機會（抄底參考 - 做多／看漲）*：")
-    if not oversold_list:
-        lines.append("目前沒有明顯的超賣反彈候選。")
-    else:
-        for idx, item in enumerate(oversold_list, 1):
-            s = str(item.get("symbol", ""))
-            rsi_v = float(item.get("rsi_base", 0) or 0)
-            br_val = item.get("buy_ratio")
-            br = float(br_val) if br_val is not None else 0.0
-            
-            lines.append(f"{idx}. `{s}` - RSI: *{rsi_v:.1f}* ｜ 買入比: *{br:.1f}%*")
-            
-            # 避免請求過於頻繁
-            if idx < len(oversold_list):
-                time.sleep(0.5)
-    lines.append("")
-
-    # 提示
-    lines.append("💡 *船長提示*：")
-    if index_val is not None and index_val > 60:
-        lines.append("山寨季指數正在抬升，資金開始加速流向小幣，建議重點關注領頭羊二測與放量突破。")
-    elif index_val is not None and index_val < 40:
-        lines.append("目前仍偏向比特幣季，山寨波動相對受限，建議以主流幣與現貨為主，耐心等待資金輪動。")
-    else:
-        lines.append("資金尚未明顯偏向任何一方，選擇山寨時更要搭配成交量與買入比率，避免追在假突破上。")
-
-    lines.append("")
-    lines.append(f"⏰ 更新時間：{now_str}")
-
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append("💡 *操作心法*：強者恆強。在山寨季，不要買落後補漲的垃圾，要買就買龍頭！")
     return "\n".join(lines)
 
 
 def run_altseason_radar_once():
-    """每小時執行一次的山寨爆發雷達主流程"""
+    """山寨暴富列車主流程（含按鈕）"""
     logger.info("開始執行山寨爆發雷達...")
     msg = build_altseason_message()
     if not msg:
         logger.warning("本次山寨爆發雷達未能產生有效訊息")
         return
     thread_id = TG_THREAD_IDS.get("altseason_radar", 0)
-    if not thread_id:
-        logger.warning("未設定 TG_THREAD_ALTSEASON_RADAR，將發送到預設聊天而非特定話題")
-    send_telegram_message(msg, thread_id or int(CHAT_ID or 0), parse_mode="Markdown")
+    keyboard = {"inline_keyboard": [[{"text": "🎢 查看山寨季指數", "url": "https://www.blockchaincenter.net/en/altcoin-season-index/"}]]}
+    send_telegram_message(msg, thread_id or int(CHAT_ID or 0), parse_mode="Markdown", reply_markup=keyboard)
     logger.info("山寨爆發雷達推播完成")
 
 
