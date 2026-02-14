@@ -1520,9 +1520,15 @@ def _fetch_bingx_funding_rate(symbol: str, preferred_symbol: Optional[str] = Non
 
 
 def _fetch_bingx_current_price(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
+    """從 BingX swap ticker 取得即時最新價（相容舊呼叫，只回傳價格）。"""
+    snap = _fetch_bingx_ticker_snapshot(symbol, preferred_symbol)
+    return snap.get("price") if snap else None
+
+
+def _fetch_bingx_ticker_snapshot(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    從 BingX swap ticker 取得即時最新價（用於報表「現價」，
-    避免使用 K 線收盤價造成與實際價格落差過大）。
+    從 BingX swap v2 ticker 一次取得：最新價 + 24h 成交額(USDT)。
+    回傳 {"price": float, "volume_usd": float or None}，失敗回傳 None。
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     try_symbols = [preferred_symbol] if preferred_symbol else []
@@ -1543,10 +1549,20 @@ def _fetch_bingx_current_price(symbol: str, preferred_symbol: Optional[str] = No
             if j.get("code") != 0:
                 continue
             data = j.get("data")
-            if isinstance(data, dict):
-                price = data.get("lastPrice") or data.get("price") or data.get("last")
-                if price is not None:
-                    return float(price)
+            if not isinstance(data, dict):
+                continue
+            price = data.get("lastPrice") or data.get("price") or data.get("last")
+            if price is None:
+                continue
+            price_f = float(price)
+            volume_usd = None
+            qv = data.get("quoteVolume") or data.get("volume") or data.get("turnover")
+            if qv is not None:
+                try:
+                    volume_usd = float(qv)
+                except (TypeError, ValueError):
+                    pass
+            return {"price": price_f, "volume_usd": volume_usd}
         except Exception:
             continue
     return None
@@ -2032,6 +2048,8 @@ def build_report_message_tiered(
             lines.append(f"🛑 *止損*：`{sl_val}`")
             lines.append(f"✅ *止盈1*：`{tp1_val}` (70%)")
             lines.append(f"🚀 *止盈2*：`{tp2_val}` (30%)")
+            if x.get("low_liquidity_warning"):
+                lines.append("⚠️ 成交量偏低，建議小倉或略過")
             lines.append("")
 
     if not has_any:
@@ -2298,16 +2316,31 @@ def fetch_position_change():
             "funding_rate": funding_rate,
         })
 
-    # 用 BingX 即時 ticker 刷新現價，避免「現價」與 K 線收盤價落差過大
+    # 用 BingX ticker 一次取現價 + 24h 成交額，並做成交量門檻與標示
+    VOLUME_HARD_MIN_USD = 1_000_000   # <1M 直接排除
+    VOLUME_SOFT_MIN_USD = 5_000_000   # 1M～5M 標示「成交量偏低」
+    filtered_top = []
     for x in all_top:
         sym = x.get("symbol", "")
         clean_base = sym.replace("USDT", "").replace("-", "").upper()
         preferred = base_to_symbol.get(clean_base) if base_to_symbol else None
         if not preferred:
             preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
-        live_price = _fetch_bingx_current_price(sym, preferred_symbol=preferred)
-        if live_price is not None:
-            x["current_price"] = live_price
+        snap = _fetch_bingx_ticker_snapshot(sym, preferred_symbol=preferred)
+        if snap:
+            if snap.get("price") is not None:
+                x["current_price"] = snap["price"]
+            vol = snap.get("volume_usd")
+            if vol is not None:
+                if vol < VOLUME_HARD_MIN_USD:
+                    continue
+                x["low_liquidity_warning"] = vol < VOLUME_SOFT_MIN_USD
+            else:
+                x["low_liquidity_warning"] = False
+        else:
+            x["low_liquidity_warning"] = False
+        filtered_top.append(x)
+    all_top = filtered_top
 
     msg = build_report_message_tiered(all_top, processed_count, oi_success_count)
     send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
