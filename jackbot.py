@@ -2055,21 +2055,23 @@ def build_report_message_tiered(
     short_top = [x for x in enriched_items if x.get("zone") == ZONE_TOP and not _is_bull(x) and (x.get("stars") or 0) >= 4]
     short_break = [x for x in enriched_items if x.get("zone") == ZONE_BREAKOUT_SHORT and not _is_bull(x) and (x.get("stars") or 0) >= 4]
 
-    # 區塊：(大區標題, 小類標題, items)
+    # 區塊：分類明確、白話標題（新手看得懂）
     blocks = [
-        ("🟢 【多單區】", [
-            ("抄底", long_dip),
-            ("追漲", long_break),
+        ("🟢 *【做多區】看漲、買多單*", [
+            ("📌 抄底（跌深撿便宜）", long_dip),
+            ("📌 追漲（順勢做多）", long_break),
         ]),
-        ("🔴 【空單區】", [
-            ("摸頭", short_top),
-            ("追跌", short_break),
+        ("🔴 *【做空區】看跌、買空單*", [
+            ("📌 摸頭（漲多放空）", short_top),
+            ("📌 追跌（順勢做空）", short_break),
         ]),
     ]
 
     lines = []
     lines.append("🎯 *【傑克持倉異常狙擊鏡】*")
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
+    lines.append("")
+    lines.append("👇 以下為「做多」與「做空」兩大類，每筆都有*現價、止損、止盈1、止盈2*點位。")
     lines.append("━━━━━━━━━━━━━━━━━━━")
 
     has_any = False
@@ -2080,10 +2082,12 @@ def build_report_message_tiered(
                 continue
             has_any = True
             if not section_printed:
-                lines.append(f"*{section_title}*")
+                lines.append("")
+                lines.append(section_title)
                 section_printed = True
             items_sorted = sorted(items, key=lambda x: (-(x.get("stars") or 0), -(abs(x.get("oiChange30m") or 0))))
-            lines.append(f"*{sub_label}*")
+            lines.append("")
+            lines.append(sub_label)
             for x in items_sorted:
                 zone = x.get("zone")
                 sym = x.get("symbol", "")
@@ -2123,24 +2127,20 @@ def build_report_message_tiered(
 
                 star_display = "💎" if _is_elite(x) else star_str(stars)
                 coin_url = f"https://www.coinglass.com/zh-TW/currencies/{sym}"
-                lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_display}")
-                lines.append(f"🎲 建議倉位：{pos_size_str}")
                 action_label = _action_label(zone or ZONE_TOP, is_bull)
-                lines.append(f"👉 *建議：{action_label}*")
+                # 白話：先講方向與動作，再給點位（止損止盈都有帶出，計算正確）
+                lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_display} — 建議：{action_label}")
+                lines.append(f"用多少錢：{pos_size_str}（總資金比例）")
                 if x.get("direction_flip"):
-                    lines.append(f"🔄 *本輪{x['direction_flip']}*")
-                lines.append(f"💸 費率：{funding_str}")
+                    lines.append(f"🔄 本輪{x['direction_flip']}")
+                lines.append(f"現在價格：`{price_str}`")
+                sl_hint = "做多：跌到這裡要出場" if is_bull else "做空：漲到這裡要出場"
+                lines.append(f"🛑 *止損* `{sl_val}`（{sl_hint}）")
+                lines.append(f"✅ *止盈1* `{tp1_val}`（到價先出一半，約 70%）")
+                lines.append(f"🚀 *止盈2* `{tp2_val}`（到價再出剩下一半，約 30%）")
                 rsi_val = x.get("rsi")
-                if rsi_val is not None and isinstance(rsi_val, (int, float)):
-                    rsi_tag = "超買" if rsi_val > 70 else ("超賣" if rsi_val < 30 else "中性")
-                    lines.append(f"📊 RSI：`{rsi_val:.0f}` ({rsi_tag})")
-                else:
-                    lines.append(f"📊 RSI：{x.get('rsi_desc') or '—'}")
-                lines.append(f"💡 邏輯：{action} ({reason}){fee_tag}")
-                lines.append(f"📍 現價：`{price_str}`")
-                lines.append(f"🛑 *止損*：`{sl_val}`")
-                lines.append(f"✅ *止盈1*：`{tp1_val}` (70%)")
-                lines.append(f"🚀 *止盈2*：`{tp2_val}` (30%)")
+                rsi_txt = f"`{rsi_val:.0f}` " + ("超買" if rsi_val > 70 else ("超賣" if rsi_val < 30 else "中性")) if rsi_val is not None and isinstance(rsi_val, (int, float)) else (x.get("rsi_desc") or "—")
+                lines.append(f"補充：費率 {funding_str}｜RSI {rsi_txt}｜{reason}{fee_tag}")
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量偏低，建議小倉或略過")
                 lines.append("")
@@ -2149,20 +2149,16 @@ def build_report_message_tiered(
         lines.append("😴 獵物休息中，暫無符合條件機會。")
         lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append("⚠️ *跟單SOP*：💎滿倉 7%｜5星標準 5%｜4星減半 2.5%。嚴格止損，TP1 70% / TP2 30%。")
     lines.append("")
-    lines.append("*📋 持倉異常策略說明*")
-    lines.append("• 💎 *鑽石*：摸頭/抄底 + OI≥4% + 費率一致 + RSI 輔助(摸頭≥65/抄底≤35) → 滿倉。")
-    lines.append("• ⭐5*星*：30m OI≥3.5% + 費率配合 → 標準倉。")
-    lines.append("• ⭐4*星*：30m OI≥2.5% + 方向合理 → 減半倉。")
-    lines.append("• 邏輯：空頭平倉→抄底｜多頭平倉→摸頭｜持倉大增+費率負→嘎空。")
+    lines.append("*📖 怎麼跟單（小白版）*")
+    lines.append("• 看星等決定用多少錢：💎 最多 7%、⭐5星 約 5%、⭐4星 約 2.5%。")
+    lines.append("• 進場後一定要設*止損*，價到了就出場不凹單。")
+    lines.append("• *止盈1* 到價先賣掉約一半鎖利；*止盈2* 到價再賣掉剩下的一半。")
     lines.append("")
-    lines.append("*📌 訊號範例*")
-    lines.append("💎 鑽石：BTC 抄底做多｜OI -4.2% 空頭平倉 + 費率負 → 滿倉 7%，SL 1.5% / TP1 2.25% / TP2 3.75%")
-    lines.append("⭐5星：ETH 摸頭做空｜OI -3.8% 多頭平倉 + 費率正 → 標準倉 5%，SL 1.5% / TP1 2.25% / TP2 3.75%")
-    lines.append("⭐4星：SOL 潛在嘎空｜OI +2.8% 持倉大增 + 費率負 → 減半倉 2.5%，SL 1.8% / TP1 2.7% / TP2 4.5%")
-    lines.append("")
-    lines.append("*📖 訊號說明*：依星等下對應倉位，進場後掛好止損；TP1 到價出 70% 鎖利，TP2 到價出 30%。僅 4 星以上推播，3 星不計算。")
+    lines.append("*📋 分類說明*")
+    lines.append("• *做多區*＝看漲，買多單。底下分「抄底」（跌深撿便宜）、「追漲」（順勢做多）。")
+    lines.append("• *做空區*＝看跌，買空單。底下分「摸頭」（漲多放空）、「追跌」（順勢做空）。")
+    lines.append("• 💎 鑽石＝條件最嚴，可下較大倉位；4 星以上才會出現在上面列表。")
     return "\n".join(lines)
 
 
