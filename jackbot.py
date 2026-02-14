@@ -1895,7 +1895,8 @@ def build_report_message_tiered(
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
-    def calc_sl_tp(price, zone, stars):
+    def calc_sl_tp(price, zone, stars, is_long: bool):
+        """依實際多空方向算 SL/TP：多=止損在價下/止盈在價上；空=止損在價上/止盈在價下。"""
         if price is None or price <= 0:
             return "—", "—", "—"
         inverse_params = {
@@ -1907,9 +1908,6 @@ def build_report_message_tiered(
             3: (0.012, 0.020, 0.040), 2: (0.010, 0.015, 0.030), 1: (0.010, 0.010, 0.020)
         }
         sl_pct, tp1_pct, tp2_pct = (0.01, 0.01, 0.02)
-        is_long = False
-        if zone == ZONE_DIP or zone == ZONE_BREAKOUT_LONG:
-            is_long = True
         if zone in (ZONE_DIP, ZONE_TOP):
             sl_pct, tp1_pct, tp2_pct = inverse_params.get(stars, inverse_params[3])
         else:
@@ -1927,11 +1925,11 @@ def build_report_message_tiered(
             return f"{p:.2f}"
 
         if is_long:
-            sl_price = price * (1 - sl_pct)
+            sl_price = price * (1 - sl_pct)   # 多：止損在現價之下
             tp1_price = price * (1 + tp1_pct)
             tp2_price = price * (1 + tp2_pct)
         else:
-            sl_price = price * (1 + sl_pct)
+            sl_price = price * (1 + sl_pct)   # 空：止損在現價之上
             tp1_price = price * (1 - tp1_pct)
             tp2_price = price * (1 - tp2_pct)
         return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price)
@@ -1972,9 +1970,9 @@ def build_report_message_tiered(
             else:
                 price_str = "—"
 
-            sl_val, tp1_val, tp2_val = calc_sl_tp(price, zone, stars)
             is_bull = "做多" in signal or "追多" in signal or "嘎空" in signal or "抄底" in signal
             dir_emoji = "🟢 多" if is_bull else "🔴 空"
+            sl_val, tp1_val, tp2_val = calc_sl_tp(price, zone, stars, is_long=is_bull)
             funding = x.get("funding_rate") or 0
             fee_tag = ""
             if isinstance(funding, (int, float)) and funding * 100 >= 0.02:
