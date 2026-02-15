@@ -1907,9 +1907,13 @@ def _classify_signal_and_tier(
     """
     def apply_24h(label: str, zone: str, stars: int, rsi_desc: str, reason: str) -> Tuple[str, str, int, str, str]:
         if price_chg_24h is not None and isinstance(price_chg_24h, (int, float)):
+            # 深跌卻標追漲 → 改為抄底/反彈（24h 跌超過 10% 不當追漲）
+            if zone == ZONE_BREAKOUT_LONG and price_chg_24h < -10.0:
+                return ("🟢 深跌反彈", ZONE_DIP, stars, rsi_desc, f"📉 深跌反彈 ({reason})")
             if price_chg_24h > 15 and zone == ZONE_DIP:
                 return ("🟢 強勢嘎空", ZONE_BREAKOUT_LONG, stars, rsi_desc, "🔥 強勢嘎空")
-            if price_chg_24h < -15 and zone == ZONE_TOP:
+            # 摸頭區：24h 跌超過 10% 改為恐慌下殺（與做多區同門檻）
+            if price_chg_24h < -10.0 and zone == ZONE_TOP:
                 return ("🔴 恐慌下殺", ZONE_BREAKOUT_SHORT, stars, rsi_desc, "🩸 恐慌下殺")
         return (label, zone, stars, rsi_desc, reason)
 
@@ -2203,8 +2207,13 @@ def build_report_message_tiered(
                 # 4. Logic (the "why")
                 reason = x.get("reason", "籌碼異動")
                 lines.append(f"💡 邏輯：{reason}")
-                # 5. Price targets (separate lines, card-style)
-                lines.append(f"📍 現價：`{price_str}`")
+                # 5. Price targets (separate lines, card-style) + 24h change
+                p24 = x.get("priceChange24h")
+                p24_str = ""
+                if p24 is not None and isinstance(p24, (int, float)):
+                    p24_emoji = "📈" if p24 > 0 else "📉"
+                    p24_str = f" (24h: {p24:+.2f}% {p24_emoji})"
+                lines.append(f"📍 現價：`{price_str}`{p24_str}")
                 lines.append(f"🛑 止損：`{sl_val}` (必設)")
                 lines.append(f"✅ 止盈1：`{tp1_val}` (70%)")
                 lines.append(f"🚀 止盈2：`{tp2_val}` (30%)")
