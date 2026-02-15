@@ -3047,37 +3047,49 @@ def fetch_position_change():
         f"成交量二次過濾: 門檻 1M USD（<1M 排除），剩餘 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<7M)"
     )
 
-    # 同幣同向只認最新一輪：上一輪已報過 (symbol, 多/空) 本輪就不報，但方向變了（空→多、多→空）會報
+    # 同幣同向：X 小時內不重複推（時間窗口冷卻）；方向反轉仍會推並標記「訊號反轉」
+    COOLDOWN_HOURS = 4   # 同幣同向 4 小時內只推一次，避免短時間重複推同一檔
+    HISTORY_HOURS = 24   # 冷卻歷史保留 24 小時（供 cooldown 與 direction_flip 使用）
+
     def _item_direction(x: Dict) -> str:
         sig = x.get("signal_label") or ""
         return "多" if ("做多" in sig or "追多" in sig or "嘎空" in sig or "抄底" in sig) else "空"
 
     SNIPER_COOLDOWN_FILE = DATA_DIR / "sniper_cooldown.json"
+    now_ts = time.time()
+    cooldown_sec = COOLDOWN_HOURS * 3600
+    history_sec = HISTORY_HOURS * 3600
+    history: List[Dict] = []
     try:
         if SNIPER_COOLDOWN_FILE.exists():
             raw = json.loads(SNIPER_COOLDOWN_FILE.read_text(encoding="utf-8"))
-            last_round = raw.get("last_round") or []
-            logger.info(f"冷卻檔已讀取: {SNIPER_COOLDOWN_FILE} | 上一輪 {len(last_round)} 筆: {last_round[:10]}{'...' if len(last_round) > 10 else ''}")
+            history = raw.get("history") or []
+            # 相容舊格式：只有 last_round 時轉成 history（ts 設為 1 小時前，讓本輪仍可能冷卻）
+            if not history and raw.get("last_round"):
+                last_round = raw.get("last_round") or []
+                if last_round and isinstance(last_round[0], dict):
+                    history = [{"symbol": str(p.get("symbol")), "dir": str(p.get("dir")), "ts": int(now_ts) - 3600} for p in last_round if p.get("symbol") and p.get("dir")]
+                else:
+                    history = [{"symbol": str(p[0]), "dir": str(p[1]), "ts": int(now_ts) - 3600} for p in last_round if isinstance(p, (list, tuple)) and len(p) >= 2]
+            logger.info(f"冷卻檔已讀取: {SNIPER_COOLDOWN_FILE} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內同幣同向不重推")
         else:
-            last_round = []
             logger.info(f"冷卻檔不存在，本輪無冷卻限制: {SNIPER_COOLDOWN_FILE}")
     except Exception as e:
-        last_round = []
+        history = []
         logger.warning(f"讀取冷卻檔失敗，本輪無冷卻限制: {e}")
-    # 上一輪推過的 (symbol, 方向) 本輪不重複報
+    # 冷卻集合：過去 COOLDOWN_HOURS 內推過的 (symbol, 方向) 本輪不重複報
     cooldown_set = set()
-    for pair in last_round:
-        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
-            cooldown_set.add((str(pair[0]), str(pair[1])))
-        elif isinstance(pair, dict) and pair.get("symbol") and pair.get("dir"):
-            cooldown_set.add((str(pair["symbol"]), str(pair["dir"])))
-
+    for e in history:
+        if isinstance(e, dict) and e.get("symbol") and e.get("dir"):
+            if (now_ts - e.get("ts", 0)) <= cooldown_sec:
+                cooldown_set.add((str(e["symbol"]), str(e["dir"])))
+    # 上一輪方向（用於「多轉空/空轉多」提示）：取每幣最近一次推播的方向
     last_round_by_sym = {}
-    for pair in last_round:
-        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
-            last_round_by_sym[str(pair[0])] = str(pair[1])
-        elif isinstance(pair, dict) and pair.get("symbol") and pair.get("dir"):
-            last_round_by_sym[str(pair["symbol"])] = str(pair["dir"])
+    for e in sorted(history, key=lambda x: x.get("ts", 0), reverse=True):
+        if isinstance(e, dict) and e.get("symbol") and e.get("dir"):
+            s = str(e["symbol"])
+            if s not in last_round_by_sym:
+                last_round_by_sym[s] = str(e["dir"])
 
     cooled_top = []
     for x in all_top:
@@ -3103,11 +3115,14 @@ def fetch_position_change():
 
     try:
         SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        new_entries = [{"symbol": s, "dir": d, "ts": int(now_ts)} for (s, d) in pairs_this_run]
+        history = history + new_entries
+        history = [e for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= history_sec]
         SNIPER_COOLDOWN_FILE.write_text(
-            json.dumps({"last_round": pairs_this_run}, ensure_ascii=False),
+            json.dumps({"history": history}, ensure_ascii=False),
             encoding="utf-8"
         )
-        logger.info(f"冷卻檔已寫入: {len(pairs_this_run)} 筆 -> {SNIPER_COOLDOWN_FILE}")
+        logger.info(f"冷卻檔已寫入: 本輪 {len(pairs_this_run)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h) -> {SNIPER_COOLDOWN_FILE}")
     except Exception as e:
         logger.warning(f"寫入狙擊冷卻檔失敗: {e}")
 
