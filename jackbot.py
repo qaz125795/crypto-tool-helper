@@ -1868,16 +1868,21 @@ ZONE_BREAKOUT_SHORT = "跌破追跌區"
 FUNDING_POSITIVE = 0.0005   # 0.05%，高於此視為多頭擁擠
 FUNDING_NEGATIVE = -0.0005  # -0.05%，低於此視為空頭擁擠（易嘎空）
 
-# 星等門檻（30 分鐘版）：再收緊 OI，只留明顯異動
+# 【持倉異常 = 99% 山寨幣】BTC/ETH 量體大，30m 內 OI 波動 3~4% 幾乎不可能（除非崩盤）
+MAIN_COINS = {"BTC", "ETH"}   # 主流幣
+OI_MAIN_COIN_MIN = 5.5       # 主流幣須 |OI 30m| >= 5.5% 才進榜（門檻極高，實務上排除）
+OI_ALTCOIN_MIN = 1.5         # 山寨幣初選門檻（後續再用 OI_FOR_4_STAR 篩）
+
+# 星等門檻（針對山寨幣優化）：OI 3~4% 對山寨常見，對主流幾乎不可能
 OI_FOR_5_STAR = 4.0    # |OI 30m| >= 4% 且費率方向一致 → 5 星
 OI_FOR_4_STAR = 3.0    # |OI 30m| >= 3% 且方向合理 → 4 星（其餘不推播）
 OI_FOR_ELITE = 4.5     # 鑽石 💎：5星 + 摸頭/抄底 + |OI| >= 4.5%
 
-# 抄底/摸頭位階：用 30m 價格變化過濾，避免漲多還標抄底、跌多還標摸頭
-PRICE_DIP_MAX = 1.0    # 抄底：30m 漲幅超過此值視為非低位，改標追漲或降星
-PRICE_TOP_MIN = -1.0   # 摸頭：30m 跌幅超過此值（即跌超過 1%）視為非高位，改標追跌或降星
+# 抄底/摸頭 30m 門檻（山寨優化）：山寨 1% 是雜訊，放寬至 2.5%
+PRICE_DIP_MAX = 2.5    # 抄底：30m 漲幅 ≤ 2.5% 才算低位，超過改標追漲
+PRICE_TOP_MIN = -2.5   # 摸頭：30m 跌幅 ≥ -2.5% 才算高位，跌破改標追跌
 
-# 24H 趨勢門檻：山寨波動大，5% 易誤判，用 10% 避免假陽性
+# 24H 趨勢門檻（山寨優化）：山寨日波動 10~30% 常見，10% 以上才算趨勢
 TREND_24H_THRESHOLD = 10.0
 
 # 持倉異常策略：OI 更嚴 + 抄底/摸頭看價格位階（OI+費率為主，RSI 輔助）
@@ -1888,7 +1893,7 @@ TREND_24H_THRESHOLD = 10.0
 # │ ⭐5星  │ OI≥4%+費率                  │ 標準倉 5%   │ 持倉異常明顯，費率配合                  │
 # │ ⭐4星  │ OI≥3%+方向                  │ 減半倉 2.5% │ 有異動但強度次之                        │
 # └────────┴────────────────────────────┴─────────────┴────────────────────────────────────────┘
-# 價格位階：抄底＝30m 漲幅≤PRICE_DIP_MAX(1%)；摸頭＝30m 跌幅≥PRICE_TOP_MIN(-1%)，否則改標追漲/追跌。
+# 價格位階（山寨優化）：抄底 30m≤2.5%；摸頭 30m≥-2.5%。主流幣 OI≥5.5% 才進榜（實務上排除）。
 
 # RSI 僅供描述用，鑽石改為「OI 極強」不綁 RSI
 RSI_FILTER_TOP_MIN = 65
@@ -2381,9 +2386,8 @@ def fetch_position_change():
     
     logger.info(f"過濾後剩餘 {len(target_symbols_data)} 個合約幣種")
     
-    # 【智慧過濾 Smart Filter - 30m 版】放寬初選以確保足夠候選進入技術分析。
+    # 【智慧過濾 Smart Filter - 30m 版】山寨為主，主流幣用 OI_MAIN_COIN_MIN 排除
     PRICE_GATEKEEPER = 1.0  # 30m 價格波動門檻 %（>=1% 即進入 OI 檢查）
-    OI_THRESHOLD = 1.5      # 30m 持倉異動門檻 %
     active_symbols = []
     for coin in target_symbols_data:
         p_change = extract_price_change_30m(coin)
@@ -2445,7 +2449,9 @@ def fetch_position_change():
                 oi_change = result.get('oiChange30m')
                 price_change_24h = result.get('priceChange24h')
                 item = {'symbol': symbol, 'priceChange30m': price_change, 'oiChange30m': oi_change, 'priceChange24h': price_change_24h}
-                if abs(oi_change) >= OI_THRESHOLD:
+                base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+                oi_min = OI_MAIN_COIN_MIN if base in MAIN_COINS else OI_ALTCOIN_MIN
+                if abs(oi_change) >= oi_min:
                     if category == 'long_open':
                         long_open.append(item)
                     elif category == 'long_close':
