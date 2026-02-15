@@ -2510,11 +2510,33 @@ def fetch_position_change():
         f"🔍 智慧過濾: 從 {len(target_symbols_data)} 個幣種中篩選出 {len(active_symbols)} 個活躍標的 "
         f"(價格 30m >= {PRICE_GATEKEEPER}%) 進行 30m OI 檢查..."
     )
+    # 成交量預篩：3M 以下完全不列入，只對剩餘標的跑 OI（省時且避免低流動性雜訊）
+    VOLUME_PREFILTER_MIN_USD = 3_000_000
+    active_above_volume = []
+    for coin in active_symbols:
+        sym = normalize_symbol(coin) or ""
+        if not sym:
+            continue
+        clean_base = sym.replace("USDT", "").replace("-", "").upper()
+        preferred = base_to_symbol.get(clean_base) if base_to_symbol else None
+        if not preferred:
+            preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
+        time.sleep(0.06)
+        snap = _fetch_bingx_ticker_snapshot(sym, preferred_symbol=preferred)
+        if not snap:
+            continue
+        vol = snap.get("volume_usd")
+        if vol is not None and vol >= VOLUME_PREFILTER_MIN_USD:
+            active_above_volume.append(coin)
+    logger.info(
+        f"📊 成交量預篩: 刷掉 24h 成交量 < {VOLUME_PREFILTER_MIN_USD/1e6:.0f}M 的標的，"
+        f"剩餘 {len(active_above_volume)} 個進入 OI 檢查"
+    )
     # 為在 16 分鐘內完成，OI 階段僅處理前 320 個（約 8 分鐘內跑完）
     MAX_OI_SYMBOLS = 320
-    target_symbols = active_symbols[:MAX_OI_SYMBOLS]
-    if len(active_symbols) > MAX_OI_SYMBOLS:
-        logger.info(f"活躍標的共 {len(active_symbols)} 個，本輪僅處理前 {MAX_OI_SYMBOLS} 個以確保準時推播")
+    target_symbols = active_above_volume[:MAX_OI_SYMBOLS]
+    if len(active_above_volume) > MAX_OI_SYMBOLS:
+        logger.info(f"成交量過篩後共 {len(active_above_volume)} 個，本輪僅處理前 {MAX_OI_SYMBOLS} 個以確保準時推播")
     
     long_open = []
     long_close = []
