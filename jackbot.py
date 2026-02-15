@@ -85,8 +85,8 @@ SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 # 持倉變化篩選：改為只偵測合約幣種（使用 API 獲取）
 MAX_SYMBOLS = 904  # 將由 API 返回的合約幣種數量決定
 
-# 數據存儲目錄
-DATA_DIR = Path("data")
+# 數據存儲目錄（使用腳本所在目錄，確保 cron/Zeabur 等不同 cwd 下路徑一致）
+DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 # CoinGlass OI 呼叫限速（初創版 80 次/分鐘，global 必須在函數內「最先」宣告再賦值）
@@ -1214,6 +1214,69 @@ def fetch_coins_price_change() -> List[Dict]:
         return _fetch_coins_price_change_fallback(supported_coins)
 
 
+def _fetch_coinglass_24h_map() -> Dict[str, float]:
+    """CoinGlass 現成 24h 漲跌幅：一次 API 取得全量，回傳 {clean_symbol: pct}。失敗回傳空 dict。"""
+    if not CG_API_KEY:
+        return {}
+    try:
+        r = requests.get(
+            f"{CG_API_BASE}/api/futures/coins-price-change",
+            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+            timeout=10
+        )
+        if r.status_code != 200:
+            return {}
+        j = r.json()
+        data = j.get("data", j if isinstance(j, list) else [])
+        if not isinstance(data, list):
+            return {}
+        out = {}
+        for item in data:
+            sym = item.get("symbol") or item.get("coin") or ""
+            clean = sym.replace("USDT", "").replace("USDT-PERP", "").replace("-", "").upper()
+            if not clean:
+                continue
+            pct = item.get("price_change_percent_24h")
+            if isinstance(pct, (int, float)) and pct == pct:
+                out[clean] = float(pct)
+        logger.info(f"CoinGlass 24h 漲跌幅已取得 {len(out)} 個幣種")
+        return out
+    except Exception as e:
+        logger.warning(f"CoinGlass 24h 漲跌幅取得失敗，將用 BingX 計算: {e}")
+        return {}
+
+
+def fetch_price_change_24h_bingx(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
+    """BingX 24h 漲跌幅：用 1h K 線取 24h 前開盤與最新收盤計算（CoinGlass 無資料時 fallback）。"""
+    clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    for sym_fmt in ([preferred_symbol] if preferred_symbol else []) + [f"{clean}-USDT", f"1000{clean}-USDT"]:
+        if not sym_fmt:
+            continue
+        try:
+            r = requests.get(
+                "https://open-api.bingx.com/openApi/swap/v3/quote/klines",
+                params={"symbol": sym_fmt, "interval": "1h", "limit": 25},
+                timeout=5
+            )
+            time.sleep(0.08)
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            if j.get("code") != 0:
+                continue
+            data = j.get("data", [])
+            if not isinstance(data, list) or len(data) < 2:
+                continue
+            first_open = float(data[0].get("open") or 0)
+            last_close = float(data[-1].get("close") or 0)
+            if first_open == 0:
+                continue
+            return ((last_close - first_open) / first_open) * 100
+        except Exception:
+            continue
+    return None
+
+
 def fetch_price_change_30m_bingx(symbol: str) -> Optional[float]:
     """
     【BingX 官方數據源】30 分鐘 K 線漲跌幅。
@@ -2136,13 +2199,13 @@ def build_report_message_tiered(
     short_top = [x for x in enriched_items if x.get("zone") == ZONE_TOP and not _is_bull(x) and (x.get("stars") or 0) >= 4]
     short_break = [x for x in enriched_items if x.get("zone") == ZONE_BREAKOUT_SHORT and not _is_bull(x) and (x.get("stars") or 0) >= 4]
 
-    # 區塊：分類明確、白話標題（新手看得懂）
+    # 區塊：做多=買漲開多、做空=買跌開空，分類明確
     blocks = [
-        ("🟢 *【做多區】看漲、買多單*", [
+        ("🟢 *【做多區】做多=買漲、開多單*", [
             ("📌 抄底（跌深撿便宜）", long_dip),
             ("📌 追漲（順勢做多）", long_break),
         ]),
-        ("🔴 *【做空區】看跌、買空單*", [
+        ("🔴 *【做空區】做空=買跌、開空單*", [
             ("📌 摸頭（漲多放空）", short_top),
             ("📌 追跌（順勢做空）", short_break),
         ]),
@@ -2151,6 +2214,8 @@ def build_report_message_tiered(
     lines = []
     lines.append("🎯 *【傑克持倉異常狙擊鏡】*")
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
+    lines.append("")
+    lines.append("💡 *做多*＝看漲買入、開多單｜*做空*＝看跌賣出、開空單")
     lines.append("━━━━━━━━━━━━━━━━━━━")
 
     has_any = False
@@ -2217,12 +2282,13 @@ def build_report_message_tiered(
                 # 4. Logic (the "why")
                 reason = x.get("reason", "籌碼異動")
                 lines.append(f"💡 邏輯：{reason}")
-                # 5. Price targets (separate lines, card-style) + 24h change
+                # 5. Price targets (separate lines, card-style) + 24h 必顯示
                 p24 = x.get("priceChange24h")
-                p24_str = ""
                 if p24 is not None and isinstance(p24, (int, float)):
                     p24_emoji = "📈" if p24 > 0 else "📉"
                     p24_str = f" (24h: {p24:+.2f}% {p24_emoji})"
+                else:
+                    p24_str = " (24h: —)"
                 lines.append(f"📍 現價：`{price_str}`{p24_str}")
                 lines.append(f"🛑 止損：`{sl_val}` (必設)")
                 lines.append(f"✅ 止盈1：`{tp1_val}` (70%)")
@@ -2385,6 +2451,18 @@ def fetch_position_change():
             target_symbols_data.append(coin)
     
     logger.info(f"過濾後剩餘 {len(target_symbols_data)} 個合約幣種")
+
+    # 24h 漲跌幅：先從 CoinGlass 現成資料取得，抓不到再用 BingX 計算
+    coinglass_24h_map = {}
+    for coin in all_symbols_data:
+        pct = extract_price_change_24h(coin)
+        if pct is not None:
+            s = normalize_symbol(coin) or ""
+            clean = s.replace("USDT", "").replace("-", "").replace("_", "").upper()
+            if clean:
+                coinglass_24h_map[clean] = pct
+    if not coinglass_24h_map:
+        coinglass_24h_map = _fetch_coinglass_24h_map()
     
     # 【智慧過濾 Smart Filter - 30m 版】山寨為主，主流幣用 OI_MAIN_COIN_MIN 排除
     PRICE_GATEKEEPER = 1.0  # 30m 價格波動門檻 %（>=1% 即進入 OI 檢查）
@@ -2494,11 +2572,16 @@ def fetch_position_change():
         tech = calculate_technicals(sym, bingx_symbol_override=preferred)
         funding_rate = _fetch_bingx_funding_rate(sym, preferred_symbol=preferred)
         price_24h = item.get("priceChange24h") if isinstance(item.get("priceChange24h"), (int, float)) else None
+        if price_24h is None:
+            price_24h = coinglass_24h_map.get(clean_base)
+        if price_24h is None:
+            price_24h = fetch_price_change_24h_bingx(sym, preferred)
         signal_label, zone, stars, rsi_desc, reason = _classify_signal_and_tier(item, cat, tech, funding_rate, price_chg_24h=price_24h)
         if (stars or 0) < 4:
             continue  # 3 星不納入報表、不統計，省運算
         all_top.append({
             **item,
+            "priceChange24h": price_24h,
             "category": cat,
             "current_price": tech.get("current_price") if tech else None,
             "rsi": tech.get("rsi") if tech else None,
@@ -2510,9 +2593,9 @@ def fetch_position_change():
             "funding_rate": funding_rate,
         })
 
-    # 用 BingX ticker 一次取現價 + 24h 成交額，並做成交量門檻與標示（BingX 量較 Binance 小，軟門檻 3M）
-    VOLUME_HARD_MIN_USD = 1_000_000   # <1M 直接排除
-    VOLUME_SOFT_MIN_USD = 3_000_000   # 1M～3M 標示「成交量偏低」
+    # 用 BingX ticker 一次取現價 + 24h 成交額，並做成交量門檻與標示
+    VOLUME_HARD_MIN_USD = 1_000_000    # <1M 直接排除
+    VOLUME_SOFT_MIN_USD = 7_000_000   # <7M 標示「成交量偏低」
     filtered_top = []
     for x in all_top:
         sym = x.get("symbol", "")
@@ -2546,10 +2629,13 @@ def fetch_position_change():
         if SNIPER_COOLDOWN_FILE.exists():
             raw = json.loads(SNIPER_COOLDOWN_FILE.read_text(encoding="utf-8"))
             last_round = raw.get("last_round") or []
+            logger.info(f"冷卻檔已讀取: {SNIPER_COOLDOWN_FILE} | 上一輪 {len(last_round)} 筆: {last_round[:10]}{'...' if len(last_round) > 10 else ''}")
         else:
             last_round = []
-    except Exception:
+            logger.info(f"冷卻檔不存在，本輪無冷卻限制: {SNIPER_COOLDOWN_FILE}")
+    except Exception as e:
         last_round = []
+        logger.warning(f"讀取冷卻檔失敗，本輪無冷卻限制: {e}")
     # 上一輪推過的 (symbol, 方向) 本輪不重複報
     cooldown_set = set()
     for pair in last_round:
@@ -2573,6 +2659,7 @@ def fetch_position_change():
         cur_dir = _item_direction(x)
         key = (sym, cur_dir)
         if key in cooldown_set:
+            logger.info(f"冷卻跳過: {sym} {cur_dir} (上輪已報)")
             continue
         # 上一輪有報過此幣但方向不同 → 標記多轉空/空轉多，報表會多一行提醒
         if sym in last_round_by_sym and last_round_by_sym[sym] != cur_dir:
@@ -2592,6 +2679,7 @@ def fetch_position_change():
             json.dumps({"last_round": pairs_this_run}, ensure_ascii=False),
             encoding="utf-8"
         )
+        logger.info(f"冷卻檔已寫入: {len(pairs_this_run)} 筆 -> {SNIPER_COOLDOWN_FILE}")
     except Exception as e:
         logger.warning(f"寫入狙擊冷卻檔失敗: {e}")
 
