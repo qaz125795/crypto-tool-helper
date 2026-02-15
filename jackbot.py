@@ -1246,6 +1246,40 @@ def _fetch_coinglass_24h_map() -> Dict[str, float]:
         return {}
 
 
+def fetch_price_change_24h_coinglass_klines(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
+    """CoinGlass K 線 24h 漲跌幅：/api/futures/price/history 取 1h×25 根，首根 open、末根 close 計算。"""
+    if not CG_API_KEY:
+        return None
+    clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    # 試 Binance 常見格式：BTCUSDT、1000PEPEUSDT
+    for sym in ([preferred_symbol] if preferred_symbol else []) + [f"{clean}USDT", f"1000{clean}USDT"]:
+        if not sym:
+            continue
+        try:
+            r = requests.get(
+                f"{CG_API_BASE}/api/futures/price/history",
+                params={"exchange": "Binance", "symbol": sym, "interval": "1h", "limit": 25},
+                headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+                timeout=10
+            )
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            if j.get("code") and str(j.get("code")) != "0":
+                continue
+            data = j.get("data", [])
+            if not isinstance(data, list) or len(data) < 2:
+                continue
+            first_open = float(data[0].get("open") or data[0].get("o") or 0)
+            last_close = float(data[-1].get("close") or data[-1].get("c") or 0)
+            if first_open == 0:
+                continue
+            return ((last_close - first_open) / first_open) * 100
+        except Exception:
+            continue
+    return None
+
+
 def fetch_price_change_24h_bingx(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
     """BingX 24h 漲跌幅：用 1h K 線取 24h 前開盤與最新收盤計算（CoinGlass 無資料時 fallback）。"""
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
@@ -2574,6 +2608,8 @@ def fetch_position_change():
         price_24h = item.get("priceChange24h") if isinstance(item.get("priceChange24h"), (int, float)) else None
         if price_24h is None:
             price_24h = coinglass_24h_map.get(clean_base)
+        if price_24h is None:
+            price_24h = fetch_price_change_24h_coinglass_klines(sym, preferred)
         if price_24h is None:
             price_24h = fetch_price_change_24h_bingx(sym, preferred)
         signal_label, zone, stars, rsi_desc, reason = _classify_signal_and_tier(item, cat, tech, funding_rate, price_chg_24h=price_24h)
