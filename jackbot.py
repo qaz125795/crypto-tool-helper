@@ -1970,33 +1970,35 @@ MAIN_COINS = {"BTC", "ETH"}   # 主流幣
 OI_MAIN_COIN_MIN = 5.5       # 主流幣須 |OI 30m| >= 5.5% 才進榜（門檻極高，實務上排除）
 OI_ALTCOIN_MIN = 1.5         # 山寨幣初選門檻（後續再用 OI_FOR_4_STAR 篩）
 
-# 星等門檻（針對山寨幣優化）：OI 3~4% 對山寨常見，對主流幾乎不可能
+# 星等門檻（保守山寨）：減少雜訊、提高勝率與可用性
 OI_FOR_5_STAR = 4.0    # |OI 30m| >= 4% 且費率方向一致 → 5 星
-OI_FOR_4_STAR = 3.0    # |OI 30m| >= 3% 且方向合理 → 4 星（其餘不推播）
-OI_FOR_ELITE = 4.5     # 鑽石 💎：5星 + 摸頭/抄底 + |OI| >= 4.5%
+OI_FOR_4_STAR = 3.2    # |OI 30m| >= 3.2% 且方向合理 → 4 星（略提高減雜訊）
+OI_FOR_ELITE = 4.0     # 鑽石 💎：5星 + 摸頭/抄底 + |OI| >= 4.0%
 
-# 抄底/摸頭 30m 門檻（山寨優化）：山寨 1% 是雜訊，放寬至 2.5%
-PRICE_DIP_MAX = 2.5    # 抄底：30m 漲幅 ≤ 2.5% 才算低位，超過改標追漲
-PRICE_TOP_MIN = -2.5   # 摸頭：30m 跌幅 ≥ -2.5% 才算高位，跌破改標追跌
+# 抄底/摸頭 30m 門檻（保守山寨）：略放寬仍算低位/高位，減少誤殺
+PRICE_DIP_MAX = 3.0    # 抄底：30m 漲幅 ≤ 3% 才算低位，超過改標追漲
+PRICE_TOP_MIN = -3.0   # 摸頭：30m 跌幅 ≥ -3% 才算高位，跌破改標追跌
 
-# 24H 趨勢門檻（山寨優化）：山寨日波動 10~30% 常見，10% 以上才算趨勢
-TREND_24H_THRESHOLD = 10.0
+# 24H 趨勢門檻（保守山寨）：12% 以上才當假抄底/假摸頭，適應日波動
+TREND_24H_THRESHOLD = 12.0
 
-# 持倉異常策略：OI 更嚴 + 抄底/摸頭看價格位階（OI+費率為主，RSI 輔助）
+# 持倉異常策略（保守山寨）：提高勝率與可用性，減少客戶抱怨
 # ┌────────┬────────────────────────────┬─────────────┬────────────────────────────────────────┐
 # │ 訊號   │ 門檻                        │ 倉位比例    │ 說明                                   │
 # ├────────┼────────────────────────────┼─────────────┼────────────────────────────────────────┤
-# │ 💎鑽石 │ 摸頭/抄底+5星+OI≥4.5%+RSI輔助│ 滿倉 7%     │ 摸頭 RSI≥65/抄底 RSI≤35；價格位階過濾   │
+# │ 💎鑽石 │ 摸頭/抄底+5星+OI≥4%+量≥15M  │ 滿倉 7%     │ 24h 成交量≥15M 才給鑽石，否則顯示 5 星   │
 # │ ⭐5星  │ OI≥4%+費率                  │ 標準倉 5%   │ 持倉異常明顯，費率配合                  │
-# │ ⭐4星  │ OI≥3%+方向                  │ 減半倉 2.5% │ 有異動但強度次之                        │
+# │ ⭐4星  │ OI≥3.2%+方向                │ 減半倉 2.5% │ 略提高減雜訊                            │
 # └────────┴────────────────────────────┴─────────────┴────────────────────────────────────────┘
-# 價格位階（山寨優化）：抄底 30m≤2.5%；摸頭 30m≥-2.5%。主流幣 OI≥5.5% 才進榜（實務上排除）。
+# 價格位階：抄底 30m≤3%；摸頭 30m≥-3%。24h 假訊號門檻 12%。主流幣 OI≥5.5% 才進榜。
 
-# RSI 僅供描述用，鑽石改為「OI 極強」不綁 RSI
-RSI_FILTER_TOP_MIN = 65
-RSI_FILTER_DIP_MAX = 35
+# 鑽石 RSI 輔助：摸頭≥60 / 抄底≤40，無 RSI 不擋
+RSI_FILTER_TOP_MIN = 60
+RSI_FILTER_DIP_MAX = 40
 RSI_FILTER_BREAKOUT_LONG_MIN = None
 RSI_FILTER_BREAKOUT_SHORT_MAX = None
+# 鑽石級須 24h 成交量 ≥ 此值才顯示 💎，否則同條件只顯示 ⭐5 星（避免低流動性重倉）
+VOLUME_ELITE_MIN_USD = 15_000_000
 
 
 def _classify_signal_and_tier(
@@ -2011,7 +2013,7 @@ def _classify_signal_and_tier(
     若帶入 price_chg_24h：24h 大漲且原為抄底 → 改強勢嘎空；24h 大跌且原為摸頭 → 改恐慌下殺。
     """
     def apply_24h(label: str, zone: str, stars: int, rsi_desc: str, reason: str) -> Tuple[str, str, int, str, str]:
-        """24H 趨勢修正（Truth Protocol）：以 BingX 24h 漲跌幅為主，門檻 10% 適應山寨波動"""
+        """24H 趨勢修正（Truth Protocol）：以 24h 漲跌幅為主，門檻 12% 適應山寨日波動"""
         if price_chg_24h is not None and isinstance(price_chg_24h, (int, float)):
             # 1. 假抄底 → 強勢嘎空（24h 漲 > 10% 不當抄底，是嘎空/漲多回調）
             if zone == ZONE_DIP and price_chg_24h > TREND_24H_THRESHOLD:
@@ -2197,7 +2199,7 @@ def build_report_message_tiered(
             return rsi is not None and rsi <= RSI_FILTER_BREAKOUT_SHORT_MAX
         return True
 
-    # 極品 💎 = 摸頭/抄底 + 5星 + |OI|>=OI_FOR_ELITE + RSI 輔助確認（有 RSI 時：摸頭≥65 / 抄底≤35）
+    # 極品 💎 = 摸頭/抄底 + 5星 + |OI|>=OI_FOR_ELITE + 24h 成交量≥15M + RSI 輔助（無 RSI 不擋）
     def _is_elite(x: Dict) -> bool:
         if (x.get("stars") or 0) != 5:
             return False
@@ -2206,15 +2208,17 @@ def build_report_message_tiered(
             return False
         if abs(x.get("oiChange30m") or 0) < OI_FOR_ELITE:
             return False
+        if (x.get("volume_usd") or 0) < VOLUME_ELITE_MIN_USD:
+            return False  # 鑽石級須流動性足夠，否則只顯示 5 星
         rsi = x.get("rsi")
         if rsi is not None and isinstance(rsi, (int, float)):
             if z == ZONE_TOP:
                 if rsi < RSI_FILTER_TOP_MIN:
-                    return False  # 摸頭需 RSI 偏高（超買）才給鑽石
+                    return False
             if z == ZONE_DIP:
                 if rsi > RSI_FILTER_DIP_MAX:
-                    return False  # 抄底需 RSI 偏低（超賣）才給鑽石
-        return True  # 無 RSI 資料時不擋，仍可鑽石
+                    return False
+        return True
 
     def _action_label(zone: str, is_bull: bool) -> str:
         if zone == ZONE_TOP:
@@ -2233,13 +2237,12 @@ def build_report_message_tiered(
     short_top = [x for x in enriched_items if x.get("zone") == ZONE_TOP and not _is_bull(x) and (x.get("stars") or 0) >= 4]
     short_break = [x for x in enriched_items if x.get("zone") == ZONE_BREAKOUT_SHORT and not _is_bull(x) and (x.get("stars") or 0) >= 4]
 
-    # 區塊：做多=買漲開多、做空=買跌開空，分類明確
     blocks = [
-        ("🟢 *【做多區】做多=買漲、開多單*", [
+        ("🟢 *做多區*", [
             ("📌 抄底（跌深撿便宜）", long_dip),
             ("📌 追漲（順勢做多）", long_break),
         ]),
-        ("🔴 *【做空區】做空=買跌、開空單*", [
+        ("🔴 *做空區*", [
             ("📌 摸頭（漲多放空）", short_top),
             ("📌 追跌（順勢做空）", short_break),
         ]),
@@ -2248,8 +2251,6 @@ def build_report_message_tiered(
     lines = []
     lines.append("🎯 *【傑克持倉異常狙擊鏡】*")
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
-    lines.append("")
-    lines.append("💡 *做多*＝看漲買入、開多單｜*做空*＝看跌賣出、開空單")
     lines.append("━━━━━━━━━━━━━━━━━━━")
 
     has_any = False
@@ -2329,7 +2330,7 @@ def build_report_message_tiered(
                 lines.append(f"🚀 止盈2：`{tp2_val}` (30%)")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
-                    lines.append("⚠️ 成交量低，小心滑價")
+                    lines.append("⚠️ 成交量極低 小心滑價")
                 lines.append("")
 
     if not has_any:
@@ -2629,9 +2630,10 @@ def fetch_position_change():
             "funding_rate": funding_rate,
         })
 
-    # 用 BingX ticker 一次取現價 + 24h 成交額，並做成交量門檻與標示
+    # 用 BingX ticker 一次取現價 + 24h 成交額；5 星僅允許 >7M，否則降為 4 星；<10M 標示成交量極低
     VOLUME_HARD_MIN_USD = 1_000_000    # <1M 直接排除
-    VOLUME_SOFT_MIN_USD = 7_000_000   # <7M 標示「成交量偏低」
+    VOLUME_SOFT_MIN_USD = 10_000_000   # <10M 標示「成交量極低 小心滑價」
+    VOLUME_5STAR_MIN_USD = 7_000_000   # 5 星僅允許成交量大於 7M，≤7M 一律降為 4 星
     filtered_top = []
     for x in all_top:
         sym = x.get("symbol", "")
@@ -2640,6 +2642,7 @@ def fetch_position_change():
         if not preferred:
             preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
         snap = _fetch_bingx_ticker_snapshot(sym, preferred_symbol=preferred)
+        vol = None
         if snap:
             if snap.get("price") is not None:
                 x["current_price"] = snap["price"]
@@ -2648,10 +2651,19 @@ def fetch_position_change():
                 if vol < VOLUME_HARD_MIN_USD:
                     continue
                 x["low_liquidity_warning"] = vol < VOLUME_SOFT_MIN_USD
+                x["volume_usd"] = float(vol)
+                if (x.get("stars") or 0) == 5 and vol <= VOLUME_5STAR_MIN_USD:
+                    x["stars"] = 4
             else:
                 x["low_liquidity_warning"] = False
+                x["volume_usd"] = 0
+                if (x.get("stars") or 0) == 5:
+                    x["stars"] = 4
         else:
             x["low_liquidity_warning"] = False
+            x["volume_usd"] = 0
+            if (x.get("stars") or 0) == 5:
+                x["stars"] = 4
         filtered_top.append(x)
     all_top = filtered_top
 
