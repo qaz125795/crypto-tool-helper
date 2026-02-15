@@ -1566,7 +1566,7 @@ def fetch_coinglass_indicator(
                     continue
                 if not last:
                     continue
-                for key in ("atr", "value", "avg_true_range", "avgTrueRange"):
+                for key in ("avg_true_range_value", "atr", "value", "avg_true_range", "avgTrueRange"):
                     v = last.get(key)
                     if v is not None:
                         try:
