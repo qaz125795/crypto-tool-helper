@@ -2472,7 +2472,14 @@ def build_report_message_tiered(
                 if atr_val is not None and isinstance(atr_val, (int, float)) and atr_val > 0:
                     price_num = x.get("current_price")
                     vol_label = "波動大" if (price_num and price_num > 0 and (atr_val / price_num) > 0.03) else "波動小"
-                    atr_str = f"{atr_val:.4f}" if atr_val < 0.01 else (f"{atr_val:.2f}" if atr_val < 10 else f"{atr_val:.1f}")
+                    if atr_val < 0.0001:
+                        atr_str = f"{atr_val:.6f}".rstrip("0").rstrip(".")
+                    elif atr_val < 0.01:
+                        atr_str = f"{atr_val:.5f}".rstrip("0").rstrip(".")
+                    elif atr_val < 10:
+                        atr_str = f"{atr_val:.2f}"
+                    else:
+                        atr_str = f"{atr_val:.1f}"
                     lines.append(f"📐 ATR：`{atr_str}` ({vol_label})")
                 lines.append(f"🛑 止損：`{sl_val}` (必設)")
                 lines.append(f"✅ 止盈1：`{tp1_val}` (70%)")
