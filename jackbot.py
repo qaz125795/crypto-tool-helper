@@ -1877,6 +1877,9 @@ OI_FOR_ELITE = 4.5     # 鑽石 💎：5星 + 摸頭/抄底 + |OI| >= 4.5%
 PRICE_DIP_MAX = 1.0    # 抄底：30m 漲幅超過此值視為非低位，改標追漲或降星
 PRICE_TOP_MIN = -1.0   # 摸頭：30m 跌幅超過此值（即跌超過 1%）視為非高位，改標追跌或降星
 
+# 24H 趨勢門檻：山寨波動大，5% 易誤判，用 10% 避免假陽性
+TREND_24H_THRESHOLD = 10.0
+
 # 持倉異常策略：OI 更嚴 + 抄底/摸頭看價格位階（OI+費率為主，RSI 輔助）
 # ┌────────┬────────────────────────────┬─────────────┬────────────────────────────────────────┐
 # │ 訊號   │ 門檻                        │ 倉位比例    │ 說明                                   │
@@ -1906,16 +1909,16 @@ def _classify_signal_and_tier(
     若帶入 price_chg_24h：24h 大漲且原為抄底 → 改強勢嘎空；24h 大跌且原為摸頭 → 改恐慌下殺。
     """
     def apply_24h(label: str, zone: str, stars: int, rsi_desc: str, reason: str) -> Tuple[str, str, int, str, str]:
-        """24H 趨勢修正（Truth Protocol）：以 BingX 24h 漲跌幅為主，避免假抄底/假摸頭/假追漲"""
+        """24H 趨勢修正（Truth Protocol）：以 BingX 24h 漲跌幅為主，門檻 10% 適應山寨波動"""
         if price_chg_24h is not None and isinstance(price_chg_24h, (int, float)):
-            # 1. 假抄底 → 強勢嘎空（24h 漲 > 5% 不當抄底，是嘎空/漲多回調）
-            if zone == ZONE_DIP and price_chg_24h > 5.0:
+            # 1. 假抄底 → 強勢嘎空（24h 漲 > 10% 不當抄底，是嘎空/漲多回調）
+            if zone == ZONE_DIP and price_chg_24h > TREND_24H_THRESHOLD:
                 return ("🟢 強勢嘎空", ZONE_BREAKOUT_LONG, stars, rsi_desc, f"🔥 強勢嘎空 (24h漲 {price_chg_24h:.1f}%)")
-            # 2. 假摸頭 → 恐慌下殺（24h 跌 > 5% 不當摸頭，是崩盤/跌多續跌）
-            if zone == ZONE_TOP and price_chg_24h < -5.0:
+            # 2. 假摸頭 → 恐慌下殺（24h 跌 > 10% 不當摸頭，是崩盤/跌多續跌）
+            if zone == ZONE_TOP and price_chg_24h < -TREND_24H_THRESHOLD:
                 return ("🔴 恐慌下殺", ZONE_BREAKOUT_SHORT, stars, rsi_desc, f"🩸 恐慌下殺 (24h跌 {abs(price_chg_24h):.1f}%)")
-            # 3. 假追漲 → 深跌反彈（24h 跌 > 5% 不當追漲，是反彈/死貓跳）
-            if zone == ZONE_BREAKOUT_LONG and price_chg_24h < -5.0:
+            # 3. 假追漲 → 深跌反彈（24h 跌 > 10% 不當追漲，是反彈/死貓跳）
+            if zone == ZONE_BREAKOUT_LONG and price_chg_24h < -TREND_24H_THRESHOLD:
                 return ("🟢 深跌反彈", ZONE_DIP, stars, rsi_desc, f"📉 深跌反彈 (24h跌 {abs(price_chg_24h):.1f}%)")
         return (label, zone, stars, rsi_desc, reason)
 
