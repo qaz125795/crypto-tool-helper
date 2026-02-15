@@ -1659,6 +1659,50 @@ def fetch_coinglass_whale_index_history(
         return None
 
 
+def _whale_index_latest(symbol: str, interval: str = "1d") -> Optional[float]:
+    """
+    取得鯨魚方向指標：先試 CoinGlass 鯨魚指數 API，無數據則 fallback 大戶持倉多空比。
+    回傳值統一為 0~100 概念（>50 偏多、<50 偏空），供背離濾網使用。
+    文件: https://docs.coinglass.com/v4.0-zh/reference/鲸鱼指数
+    """
+    data = fetch_coinglass_whale_index_history(symbol, interval=interval)
+    if data:
+        raw = data.get("data", data.get("list", []))
+        if isinstance(raw, list) and raw:
+            last = raw[-1] if isinstance(raw[-1], dict) else None
+            if last:
+                for key in ("whale_index", "value", "index", "values"):
+                    v = last.get(key)
+                    if v is not None:
+                        try:
+                            val = float(v)
+                            if 0 <= val <= 100:
+                                return val
+                            if 0 <= val <= 1:
+                                return val * 100
+                            return val
+                        except (TypeError, ValueError):
+                            pass
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    symbol_param = base + "USDT"
+    fallback_data = fetch_top_position_ratio(symbol_param, interval)
+    if not fallback_data:
+        return None
+    point = get_latest_data_point(fallback_data)
+    if not point or not isinstance(point, dict):
+        return None
+    ratio = point.get("top_position_long_short_ratio")
+    if ratio is None:
+        return None
+    try:
+        r = float(ratio)
+        if r <= 0:
+            return None
+        return 50.0 * r
+    except (TypeError, ValueError):
+        return None
+
+
 def _fetch_bingx_funding_rate(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
     """
     直接從 BingX API 取得該幣種資金費率。若傳入 preferred_symbol（來自 contracts），優先使用。
@@ -2110,11 +2154,13 @@ def _classify_signal_and_tier(
     funding_rate: Optional[float] = None,
     price_chg_24h: Optional[float] = None,
     cvd_change_1h: Optional[float] = None,
+    whale_index: Optional[float] = None,
 ) -> Tuple[str, str, int, str, str]:
     """
     分級以「持倉異常(OI) + 資金費率」為主，K 線/RSI 僅輔助描述。
     若帶入 price_chg_24h：24h 大漲且原為抄底 → 改強勢嘎空；24h 大跌且原為摸頭 → 改恐慌下殺。
-    若帶入 cvd_change_1h：多向(long_open/short_close)但 CVD 變化<0 → 量價背離降 3 星；空向反之。方向一致則邏輯加 (CVD確認)。
+    若帶入 cvd_change_1h：多向但 CVD<0 或空向但 CVD>0 → 量價背離降 3 星。
+    若帶入 whale_index（0~100）：做多但鯨魚顯著看空(<40) 或做空但鯨魚顯著看多(>60) → 鯨魚背離降 3 星。
     """
     def apply_24h(label: str, zone: str, stars: int, rsi_desc: str, reason: str) -> Tuple[str, str, int, str, str]:
         """24H 趨勢修正（Truth Protocol）：以 24h 漲跌幅為主，門檻 12% 適應山寨日波動"""
@@ -2144,6 +2190,13 @@ def _classify_signal_and_tier(
             return apply_24h("📊 異動", ZONE_DIP, 3, "RSI —", "量價背離(多向但CVD跌)")
         if category in ("short_open", "long_close") and cvd_change_1h > 0:
             return apply_24h("📊 異動", ZONE_TOP, 3, "RSI —", "量價背離(空向但CVD漲)")
+
+    # 鯨魚背離：做多但鯨魚顯著看空(Index<40)、做空但鯨魚顯著看多(Index>60) → 強制 3 星不推播
+    if whale_index is not None and isinstance(whale_index, (int, float)):
+        if category in ("long_open", "short_close") and whale_index < 40:
+            return apply_24h("📊 異動", ZONE_DIP, 3, "RSI —", "鯨魚背離(做多但鯨魚偏空)")
+        if category in ("short_open", "long_close") and whale_index > 60:
+            return apply_24h("📊 異動", ZONE_TOP, 3, "RSI —", "鯨魚背離(做空但鯨魚偏多)")
 
     oi = item.get("oiChange30m") or 0
     abs_oi = abs(oi)
@@ -2477,19 +2530,9 @@ def build_report_message_tiered(
                 else:
                     p24_str = " (24h: —)"
                 lines.append(f"📍 現價：`{price_str}`{p24_str}")
-                atr_val = x.get("atr")
-                if atr_val is not None and isinstance(atr_val, (int, float)) and atr_val > 0:
-                    price_num = x.get("current_price")
-                    vol_label = "波動大" if (price_num and price_num > 0 and (atr_val / price_num) > 0.03) else "波動小"
-                    if atr_val < 0.0001:
-                        atr_str = f"{atr_val:.6f}".rstrip("0").rstrip(".")
-                    elif atr_val < 0.01:
-                        atr_str = f"{atr_val:.5f}".rstrip("0").rstrip(".")
-                    elif atr_val < 10:
-                        atr_str = f"{atr_val:.2f}"
-                    else:
-                        atr_str = f"{atr_val:.1f}"
-                    lines.append(f"📐 ATR：`{atr_str}` ({vol_label})")
+                rsi_val = x.get("rsi")
+                if rsi_val is not None and isinstance(rsi_val, (int, float)):
+                    lines.append(f"📊 RSI：`{rsi_val:.0f}`")
                 lines.append(f"🛑 止損：`{sl_val}` (必設)")
                 lines.append(f"✅ 止盈1：`{tp1_val}` (70%)")
                 lines.append(f"🚀 止盈2：`{tp2_val}` (30%)")
@@ -2812,7 +2855,14 @@ def fetch_position_change():
             price_24h = fetch_price_change_24h_bingx(sym, preferred)
         cvd_change_1h = _cvd_change_last2(clean_base, "1h")
         time.sleep(0.25)
-        signal_label, zone, stars, rsi_desc, reason = _classify_signal_and_tier(item, cat, tech, funding_rate, price_chg_24h=price_24h, cvd_change_1h=cvd_change_1h)
+        whale_idx = _whale_index_latest(clean_base, "1d")
+        time.sleep(0.2)
+        signal_label, zone, stars, rsi_desc, reason = _classify_signal_and_tier(
+            item, cat, tech, funding_rate,
+            price_chg_24h=price_24h,
+            cvd_change_1h=cvd_change_1h,
+            whale_index=whale_idx,
+        )
         if (stars or 0) < 4:
             continue  # 3 星不納入報表、不統計，省運算
         rsi_val = tech.get("rsi") if tech else None
@@ -2826,6 +2876,7 @@ def fetch_position_change():
             "current_price": tech.get("current_price") if tech else None,
             "rsi": rsi_val,
             "atr": atr_val,
+            "whale_index": whale_idx,
             "signal_label": signal_label,
             "zone": zone,
             "stars": stars,
@@ -2834,7 +2885,7 @@ def fetch_position_change():
             "funding_rate": funding_rate,
         })
         logger.info(
-            f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} 布林上={ub_val} 布林下={lb_val} ATR={atr_val} | {reason}"
+            f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} 布林上={ub_val} 布林下={lb_val} ATR={atr_val} 鯨魚指數={whale_idx} | {reason}"
         )
 
     # 用 BingX ticker 一次取現價 + 24h 成交額；5 星僅允許 >7M，否則降為 4 星；<10M 標示成交量極低
