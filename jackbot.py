@@ -10,7 +10,7 @@ import json
 import time
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any, Tuple, Set
+from typing import Dict, List, Optional, Any, Tuple, Set, Union
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1519,6 +1519,70 @@ def extract_price_change_24h(coin: Dict) -> Optional[float]:
     return None
 
 
+def fetch_coinglass_indicator(
+    symbol: str,
+    indicator_name: str,
+    interval: str = "30m",
+) -> Optional[Union[float, Dict[str, Any]]]:
+    """
+    通用 CoinGlass 技術指標 API：支援 ATR（平均真實波幅）、BOLL（布林帶）。
+    - indicator_name: 'atr' | 'boll'
+    - 回傳：atr 為最新一筆 ATR 數值 (float)；boll 為完整 API 回應 (dict，含 data/list)。
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    symbol_param = base + "USDT"
+    path_map = {"atr": "avg-true-range", "boll": "boll"}
+    path = path_map.get(indicator_name.lower()) if indicator_name else None
+    if not path:
+        return None
+    url = f"{CG_API_BASE}/api/futures/indicators/{path}"
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    if indicator_name.lower() == "atr":
+        tries = [("Binance", symbol_param)]
+    else:
+        tries = [("Binance", symbol_param), ("BingX", symbol_param), ("BingX", base)]
+    for exchange, sym in tries:
+        params = {"exchange": exchange, "symbol": sym, "interval": interval}
+        try:
+            time.sleep(0.3 if indicator_name.lower() == "atr" else 0.2)
+            r = requests.get(url, params=params, headers=headers, timeout=8)
+            if r.status_code == 429 or "Too Many Requests" in r.text:
+                return None
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            if data.get("code") not in (0, "0", 200, "200", None):
+                continue
+            msg = (data.get("msg") or data.get("message") or "").lower()
+            if "instrument" in msg:
+                continue
+            raw = data.get("data", data.get("list", []))
+            if indicator_name.lower() == "atr":
+                if isinstance(raw, list) and raw:
+                    last = raw[-1] if isinstance(raw[-1], dict) else None
+                elif isinstance(raw, dict):
+                    last = raw
+                else:
+                    continue
+                if not last:
+                    continue
+                for key in ("atr", "value", "avg_true_range", "avgTrueRange"):
+                    v = last.get(key)
+                    if v is not None:
+                        try:
+                            val = float(v)
+                            if val > 0:
+                                return val
+                        except (TypeError, ValueError):
+                            pass
+            else:
+                if (isinstance(raw, list) and len(raw) > 0) or (isinstance(raw, dict) and raw):
+                    return data
+        except Exception:
+            continue
+    return None
+
+
 def _fetch_coinglass_rsi(symbol: str) -> Optional[Dict]:
     """CoinGlass V4 RSI：降速版，失敗直接放棄切換本地計算（省 API 額度）。"""
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
@@ -1549,37 +1613,45 @@ def _fetch_coinglass_rsi(symbol: str) -> Optional[Dict]:
 
 
 def _fetch_coinglass_boll(symbol: str) -> Optional[Dict]:
-    """CoinGlass V4 布林帶：先試 Binance/BingX + BTCUSDT，再試 BingX + base。"""
+    """CoinGlass V4 布林帶：委由 fetch_coinglass_indicator(symbol, 'boll', '30m')。"""
+    out = fetch_coinglass_indicator(symbol, "boll", "30m")
+    return out if isinstance(out, dict) else None
+
+
+def _fetch_coinglass_atr(symbol: str, interval: str = "1d") -> Optional[float]:
+    """CoinGlass V4 平均真實波幅（ATR）：委由 fetch_coinglass_indicator(symbol, 'atr', interval)。"""
+    out = fetch_coinglass_indicator(symbol, "atr", interval)
+    return float(out) if isinstance(out, (int, float)) and out > 0 else None
+
+
+def fetch_coinglass_whale_index_history(
+    symbol: str,
+    exchange: str = "Binance",
+    interval: str = "1d",
+) -> Optional[Dict[str, Any]]:
+    """
+    CoinGlass V4 鯨魚指數歷史數據。
+    GET /api/futures/whale-index/history?exchange=Binance&symbol=BTCUSDT&interval=1d
+    回傳完整 API 回應 (含 data/list)，失敗回傳 None。
+    """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-    symbol_pair = base + "USDT"
-    url = f"{CG_API_BASE}/api/futures/indicators/boll"
+    symbol_param = base + "USDT"
+    url = f"{CG_API_BASE}/api/futures/whale-index/history"
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
-    tries = [("Binance", symbol_pair), ("BingX", symbol_pair), ("BingX", base)]
-    last_error = None
-    for exchange, sym_param in tries:
-        params = {"exchange": exchange, "interval": "30m", "symbol": sym_param}
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=8)
-            time.sleep(0.2)
-            if r.status_code != 200:
-                last_error = f"status={r.status_code} body={r.text[:300]}"
-                continue
-            data = r.json()
-            code = data.get("code")
-            msg = (data.get("msg") or data.get("message") or "").lower()
-            if code not in (0, "0", 200, "200", None) or "instrument" in msg:
-                last_error = f"code={code} msg={data.get('msg') or data.get('message')}"
-                continue
-            raw = data.get("data", data.get("list", []))
-            if isinstance(raw, list) and len(raw) > 0:
-                return data
-            if isinstance(raw, dict) and raw:
-                return data
-            last_error = "數據為空"
-        except Exception as e:
-            last_error = str(e)
-    logger.warning(f"CoinGlass BOLL {base}: 所有嘗試均失敗，最後: {last_error}")
-    return None
+    params = {"exchange": exchange, "symbol": symbol_param, "interval": interval}
+    try:
+        time.sleep(0.3)
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        if r.status_code == 429 or "Too Many Requests" in r.text:
+            return None
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if data.get("code") not in (0, "0", 200, "200", None):
+            return None
+        return data
+    except Exception:
+        return None
 
 
 def _fetch_bingx_funding_rate(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
@@ -1839,15 +1911,21 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     if not raw:
         logger.warning(f"BingX 本地計算失敗 {clean}: 嘗試了 {try_symbols} 皆無數據")
         return None
-    closes = []
+    highs, lows, closes = [], [], []
     for row in raw:
-        c = None
+        h = l = c = None
         if isinstance(row, dict):
+            h = row.get("high") or row.get("h")
+            l = row.get("low") or row.get("l")
             c = row.get("close") or row.get("c")
         elif isinstance(row, (list, tuple)) and len(row) >= 5:
-            c = row[4]
-        if c is not None:
+            # BingX 常見 [open, high, low, close, volume]，close 多為 index 4
+            h, l = row[1], row[2]
+            c = row[4] if len(row) > 4 else row[3]
+        if h is not None and l is not None and c is not None:
             try:
+                highs.append(float(h))
+                lows.append(float(l))
                 closes.append(float(c))
             except (TypeError, ValueError):
                 pass
@@ -1864,6 +1942,21 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     current_price = float(closes[-1]) if closes else None
     touch_upper = current_price is not None and ub_value is not None and current_price >= ub_value
     touch_lower = current_price is not None and lb_value is not None and current_price <= lb_value
+    # ATR(14): TR = max(high-low, abs(high-prev_close), abs(low-prev_close)), ATR = TR.rolling(14).mean()
+    atr_val = None
+    if len(highs) >= 15 and len(lows) >= 15:
+        df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
+        prev_close = df["close"].shift(1)
+        tr = np.maximum(
+            df["high"] - df["low"],
+            np.maximum(
+                (df["high"] - prev_close).abs(),
+                (df["low"] - prev_close).abs(),
+            ),
+        )
+        atr_series = tr.rolling(14).mean()
+        if not atr_series.empty and not pd.isna(atr_series.iloc[-1]) and atr_series.iloc[-1] > 0:
+            atr_val = float(atr_series.iloc[-1])
     return {
         "rsi": rsi_val,
         "touch_upper": touch_upper,
@@ -1871,6 +1964,7 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         "current_price": current_price,
         "ub_value": ub_value,
         "lb_value": lb_value,
+        "atr": atr_val,
         "source": "BingX",
         "real_symbol": found_symbol,
     }
@@ -1944,6 +2038,8 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
     if current_price is None and (ub_value is not None or lb_value is not None):
         current_price = ub_value or lb_value
 
+    atr_val = _fetch_coinglass_atr(symbol, "1d")
+
     return {
         "rsi": rsi_val,
         "touch_upper": touch_upper,
@@ -1951,6 +2047,7 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
         "current_price": current_price,
         "ub_value": ub_value,
         "lb_value": lb_value,
+        "atr": atr_val,
         "source": "CoinGlass",
     }
 
@@ -2007,10 +2104,12 @@ def _classify_signal_and_tier(
     tech: Optional[Dict],
     funding_rate: Optional[float] = None,
     price_chg_24h: Optional[float] = None,
+    cvd_change_1h: Optional[float] = None,
 ) -> Tuple[str, str, int, str, str]:
     """
     分級以「持倉異常(OI) + 資金費率」為主，K 線/RSI 僅輔助描述。
     若帶入 price_chg_24h：24h 大漲且原為抄底 → 改強勢嘎空；24h 大跌且原為摸頭 → 改恐慌下殺。
+    若帶入 cvd_change_1h：多向(long_open/short_close)但 CVD 變化<0 → 量價背離降 3 星；空向反之。方向一致則邏輯加 (CVD確認)。
     """
     def apply_24h(label: str, zone: str, stars: int, rsi_desc: str, reason: str) -> Tuple[str, str, int, str, str]:
         """24H 趨勢修正（Truth Protocol）：以 24h 漲跌幅為主，門檻 12% 適應山寨日波動"""
@@ -2025,6 +2124,21 @@ def _classify_signal_and_tier(
             if zone == ZONE_BREAKOUT_LONG and price_chg_24h < -TREND_24H_THRESHOLD:
                 return ("🟢 深跌反彈", ZONE_DIP, stars, rsi_desc, f"📉 深跌反彈 (24h跌 {abs(price_chg_24h):.1f}%)")
         return (label, zone, stars, rsi_desc, reason)
+
+    def _maybe_cvd_confirm(tup: Tuple[str, str, int, str, str]) -> Tuple[str, str, int, str, str]:
+        """4/5 星且 CVD 方向一致時，邏輯欄位加上 (CVD確認)"""
+        label, zone, stars, rsi_desc, reason = tup
+        if stars >= 4 and cvd_change_1h is not None:
+            if (category in ("long_open", "short_close") and cvd_change_1h > 0) or (category in ("short_open", "long_close") and cvd_change_1h < 0):
+                reason = reason + " (CVD確認)"
+        return (label, zone, stars, rsi_desc, reason)
+
+    # 量價背離：多向但 CVD 跌、空向但 CVD 漲 → 強制 3 星不推播
+    if cvd_change_1h is not None:
+        if category in ("long_open", "short_close") and cvd_change_1h < 0:
+            return apply_24h("📊 異動", ZONE_DIP, 3, "RSI —", "量價背離(多向但CVD跌)")
+        if category in ("short_open", "long_close") and cvd_change_1h > 0:
+            return apply_24h("📊 異動", ZONE_TOP, 3, "RSI —", "量價背離(空向但CVD漲)")
 
     oi = item.get("oiChange30m") or 0
     abs_oi = abs(oi)
@@ -2064,6 +2178,16 @@ def _classify_signal_and_tier(
         elif funding_rate < FUNDING_NEGATIVE:
             rsi_desc = "費率過冷❄️"
 
+    # 布林帶過濾：做多但價觸上軌 → 過熱降 3 星；做空但價觸下軌 → 過冷降 3 星
+    cp = tech.get("current_price") if tech else None
+    ub = tech.get("ub_value") if tech else None
+    lb = tech.get("lb_value") if tech else None
+    if cp is not None and ub is not None and lb is not None:
+        if category in ("long_open", "short_close") and cp > ub:
+            return apply_24h("📊 異動", ZONE_BREAKOUT_LONG, 3, rsi_desc, "⚠️ 過熱 (觸上軌)")
+        if category in ("short_open", "long_close") and cp < lb:
+            return apply_24h("📊 異動", ZONE_BREAKOUT_SHORT, 3, rsi_desc, "⚠️ 過冷 (觸下軌)")
+
     # ─── 以 OI + 費率為主，少用 RSI 決定星等 ───
     # 區塊與開平倉對應：摸頭=空頭開倉/多頭平倉 | 抄底=多頭開倉/空頭平倉 | 追漲=多頭開倉/空頭平倉 | 追跌=空頭開倉/多頭平倉
     funding_negative = funding_rate is not None and funding_rate < FUNDING_NEGATIVE
@@ -2072,44 +2196,44 @@ def _classify_signal_and_tier(
     # 5 星：|OI| >= 門檻。抄底/摸頭須過價格位階；最後套用 24h 假抄底/假摸頭過濾。
     if abs_oi >= OI_FOR_5_STAR:
         if oi > 0 and (funding_negative or (funding_rate is not None and funding_rate < -0.001)):
-            return apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 持倉大增+費率負 (嘎空潛力)")
+            return _maybe_cvd_confirm(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 持倉大增+費率負 (嘎空潛力)"))
         if oi < 0 and (funding_negative or category == "short_close"):
             if price_chg_30m is not None and price_chg_30m > PRICE_DIP_MAX:
-                return apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "持倉減但價已漲→追多")
-            return apply_24h("🟢 抄底做多", ZONE_DIP, 5, rsi_desc, "🩸 持倉大減 (空頭平倉→摸底)")
+                return _maybe_cvd_confirm(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "持倉減但價已漲→追多"))
+            return _maybe_cvd_confirm(apply_24h("🟢 抄底做多", ZONE_DIP, 5, rsi_desc, "🩸 持倉大減 (空頭平倉→摸底)"))
         if oi < 0 and (funding_positive or category == "long_close"):
             if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-                return apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "持倉減但價已跌→追空")
-            return apply_24h("🔴 摸頭做空", ZONE_TOP, 5, rsi_desc, "⛽ 持倉大減 (多頭平倉→摸頭)")
+                return _maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "持倉減但價已跌→追空"))
+            return _maybe_cvd_confirm(apply_24h("🔴 摸頭做空", ZONE_TOP, 5, rsi_desc, "⛽ 持倉大減 (多頭平倉→摸頭)"))
         if oi > 0 and category in ("long_open", "short_close"):
-            return apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 持倉大增 (追多)")
+            return _maybe_cvd_confirm(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 持倉大增 (追多)"))
         if oi < 0 and category == "short_open":
             if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-                return apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "空方加碼且價跌→追空")
-            return apply_24h("🔴 摸頭做空", ZONE_TOP, 5, rsi_desc, "📉 空方加碼 (偏空)")
+                return _maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "空方加碼且價跌→追空"))
+            return _maybe_cvd_confirm(apply_24h("🔴 摸頭做空", ZONE_TOP, 5, rsi_desc, "📉 空方加碼 (偏空)"))
         if oi > 0:
-            return apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 持倉大增 (突破)")
-        return apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "📉 持倉大減 (追跌)")
+            return _maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 持倉大增 (突破)"))
+        return _maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "📉 持倉大減 (追跌)"))
 
     # 4 星：|OI| >= 門檻 且方向合理。抄底/摸頭同樣過價格位階；套用 24h 假抄底/假摸頭過濾。
     if abs_oi >= OI_FOR_4_STAR:
         if oi > 0 and (funding_negative or category in ("long_open", "short_close")):
-            return apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 4, rsi_desc, "費率/持倉偏多")
+            return _maybe_cvd_confirm(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 4, rsi_desc, "費率/持倉偏多"))
         if oi < 0 and (funding_positive or category == "long_close"):
             if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-                return apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 4, rsi_desc, "價已跌→追空")
-            return apply_24h("🔴 偏空過熱", ZONE_TOP, 4, rsi_desc, "費率正/多頭平倉 (摸頭)")
+                return _maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 4, rsi_desc, "價已跌→追空"))
+            return _maybe_cvd_confirm(apply_24h("🔴 偏空過熱", ZONE_TOP, 4, rsi_desc, "費率正/多頭平倉 (摸頭)"))
         if oi < 0 and (funding_negative or category == "short_close"):
             if price_chg_30m is not None and price_chg_30m > PRICE_DIP_MAX:
-                return apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 4, rsi_desc, "價已漲→追多")
-            return apply_24h("🟢 抄底做多", ZONE_DIP, 4, rsi_desc, "費率負/空頭平倉 (摸底)")
+                return _maybe_cvd_confirm(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 4, rsi_desc, "價已漲→追多"))
+            return _maybe_cvd_confirm(apply_24h("🟢 抄底做多", ZONE_DIP, 4, rsi_desc, "費率負/空頭平倉 (摸底)"))
         if oi > 0:
             zone = ZONE_BREAKOUT_LONG if category in ("long_open", "short_close") else ZONE_BREAKOUT_SHORT
-            return apply_24h("🟡 順勢觀察", zone, 4, rsi_desc, "持倉異動順勢")
+            return _maybe_cvd_confirm(apply_24h("🟡 順勢觀察", zone, 4, rsi_desc, "持倉異動順勢"))
         if oi < 0:
             if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-                return apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 4, rsi_desc, "價跌→追空")
-            return apply_24h("🔴 摸頭做空", ZONE_TOP, 4, rsi_desc, "持倉減 (偏空)")
+                return _maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 4, rsi_desc, "價跌→追空"))
+            return _maybe_cvd_confirm(apply_24h("🔴 摸頭做空", ZONE_TOP, 4, rsi_desc, "持倉減 (偏空)"))
 
     # 3 星以下不推播，僅回傳供內部使用（平倉仍對應摸底/摸頭區）；仍套用 24h 過濾
     if category == "short_open":
@@ -2140,31 +2264,11 @@ def build_report_message_tiered(
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
-    def calc_sl_tp(price, zone, stars, is_long: bool):
-        """山寨 30m：SL 含「報價延遲 3-4 分鐘」buffer + 30m 波動空間，TP 維持 1.5R/2.5R。"""
-        if price is None or price <= 0:
-            return "—", "—", "—"
-        # 延遲 buffer：推播現價為 3-4 分鐘前，用戶進場價可能不利 1.5～2%，SL 預留此空間
-        DELAY_BUFFER_PCT = 0.015
-        # 逆勢（摸頭/抄底）：基礎 SL 3% + 延遲 buffer → 約 4.5%，TP 同 R
-        inverse_params = {
-            5: (0.030 + DELAY_BUFFER_PCT, 0.0675, 0.1125),   # SL 4.5%, TP1 1.5R, TP2 2.5R
-            4: (0.028 + DELAY_BUFFER_PCT, 0.0645, 0.1075),   # SL 4.3%, TP1 1.5R, TP2 2.5R
-            3: (0.025 + DELAY_BUFFER_PCT, 0.060, 0.100), 2: (0.022 + DELAY_BUFFER_PCT, 0.053, 0.088), 1: (0.020 + DELAY_BUFFER_PCT, 0.048, 0.078)
-        }
-        # 順勢（追漲/追跌）：基礎 SL 3.5% + 延遲 buffer → 約 5%
-        trend_params = {
-            5: (0.035 + DELAY_BUFFER_PCT, 0.075, 0.125),     # SL 5%, TP1 1.5R, TP2 2.5R
-            4: (0.032 + DELAY_BUFFER_PCT, 0.072, 0.120),     # SL 4.7%, TP1 1.5R, TP2 2.5R
-            3: (0.028 + DELAY_BUFFER_PCT, 0.063, 0.105), 2: (0.025 + DELAY_BUFFER_PCT, 0.056, 0.094), 1: (0.022 + DELAY_BUFFER_PCT, 0.050, 0.082)
-        }
-        sl_pct, tp1_pct, tp2_pct = (0.028 + DELAY_BUFFER_PCT, 0.0645, 0.1075)
-        if zone in (ZONE_DIP, ZONE_TOP):
-            sl_pct, tp1_pct, tp2_pct = inverse_params.get(stars, inverse_params[3])
-        else:
-            sl_pct, tp1_pct, tp2_pct = trend_params.get(stars, trend_params[3])
-
+    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool):
+        """SL/TP 統一風報比：有 ATR 時 SL=2.5*ATR，TP1=2.5*ATR(1:1 保本)，TP2=5.0*ATR(1:2 波段)；無 ATR 時 fallback 固定百分比。"""
         def fmt_p(p):
+            if p is None or (isinstance(p, float) and (p != p)) or p <= 0:
+                return "—"
             if p < 0.0001:
                 return f"{p:.8f}"
             if p < 0.01:
@@ -2175,12 +2279,40 @@ def build_report_message_tiered(
                 return f"{p:.4f}"
             return f"{p:.2f}"
 
+        if price is None or price <= 0:
+            return "—", "—", "—"
+
+        risk_multiplier = 2.5   # SL = 2.5 * ATR
+        TP1_RATIO = 1.0         # TP1 = 2.5 * ATR (1:1)
+        TP2_RATIO = 2.0         # TP2 = 5.0 * ATR (1:2)
+
+        if atr is not None and isinstance(atr, (int, float)) and atr > 0:
+            sl_dist = atr * risk_multiplier
+            tp1_dist = sl_dist * TP1_RATIO
+            tp2_dist = sl_dist * TP2_RATIO
+            if is_long:
+                sl_price = price - sl_dist
+                tp1_price = price + tp1_dist
+                tp2_price = price + tp2_dist
+            else:
+                sl_price = price + sl_dist
+                tp1_price = price - tp1_dist
+                tp2_price = price - tp2_dist
+            if sl_price <= 0 and is_long:
+                sl_price = price * 0.95
+            return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price)
+
+        # Fallback：無 ATR 時固定百分比，TP1=1:1、TP2=1:2
+        if zone in (ZONE_DIP, ZONE_TOP):
+            sl_pct, tp1_pct, tp2_pct = 0.045, 0.045, 0.09
+        else:
+            sl_pct, tp1_pct, tp2_pct = 0.05, 0.05, 0.10
         if is_long:
-            sl_price = price * (1 - sl_pct)   # 多：止損在現價之下
+            sl_price = price * (1 - sl_pct)
             tp1_price = price * (1 + tp1_pct)
             tp2_price = price * (1 + tp2_pct)
         else:
-            sl_price = price * (1 + sl_pct)   # 空：止損在現價之上
+            sl_price = price * (1 + sl_pct)
             tp1_price = price * (1 - tp1_pct)
             tp2_price = price * (1 - tp2_pct)
         return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price)
@@ -2297,14 +2429,21 @@ def build_report_message_tiered(
                         price_str = f"{price:.6f}"
                 else:
                     price_str = "—"
-                sl_val, tp1_val, tp2_val = calc_sl_tp(price, zone or ZONE_TOP, stars, is_long=is_bull)
+                sl_val, tp1_val, tp2_val = calc_sl_tp(x.get("atr"), price, zone or ZONE_TOP, is_bull)
 
                 # 1. Header: Symbol, Link, Stars
                 lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_display}")
                 # 2. Strategy & Position (no win rate)
                 lines.append(f"🎲 策略：{strength}｜建議：{pos_rec}")
-                if x.get("direction_flip"):
-                    lines.append(f"🔄 {x['direction_flip']}")
+                flip = x.get("direction_flip")
+                if flip:
+                    if "多轉空" in flip:
+                        cta = "請立即平倉多單 ➔ 反手做空"
+                    elif "空轉多" in flip:
+                        cta = "請立即平倉空單 ➔ 反手做多"
+                    else:
+                        cta = flip
+                    lines.append(f"🚨 *【訊號反轉】* {cta}")
                 # 3. Funding Rate (with interpretation for beginners)
                 fr = x.get("funding_rate")
                 if fr is not None and isinstance(fr, (int, float)):
@@ -2318,6 +2457,8 @@ def build_report_message_tiered(
                     lines.append(f"💸 費率：`{fr_pct:.4f}%` {fr_desc}")
                 # 4. Logic (the "why")
                 reason = x.get("reason", "籌碼異動")
+                if flip:
+                    reason = (reason or "") + " 趨勢已改變，舊單失效。"
                 lines.append(f"💡 邏輯：{reason}")
                 # 5. Price targets (separate lines, card-style) + 24h 必顯示
                 p24 = x.get("priceChange24h")
@@ -2327,6 +2468,12 @@ def build_report_message_tiered(
                 else:
                     p24_str = " (24h: —)"
                 lines.append(f"📍 現價：`{price_str}`{p24_str}")
+                atr_val = x.get("atr")
+                if atr_val is not None and isinstance(atr_val, (int, float)) and atr_val > 0:
+                    price_num = x.get("current_price")
+                    vol_label = "波動大" if (price_num and price_num > 0 and (atr_val / price_num) > 0.03) else "波動小"
+                    atr_str = f"{atr_val:.4f}" if atr_val < 0.01 else (f"{atr_val:.2f}" if atr_val < 10 else f"{atr_val:.1f}")
+                    lines.append(f"📐 ATR：`{atr_str}` ({vol_label})")
                 lines.append(f"🛑 止損：`{sl_val}` (必設)")
                 lines.append(f"✅ 止盈1：`{tp1_val}` (70%)")
                 lines.append(f"🚀 止盈2：`{tp2_val}` (30%)")
@@ -2637,7 +2784,9 @@ def fetch_position_change():
             price_24h = fetch_price_change_24h_coinglass_klines(sym, preferred)
         if price_24h is None:
             price_24h = fetch_price_change_24h_bingx(sym, preferred)
-        signal_label, zone, stars, rsi_desc, reason = _classify_signal_and_tier(item, cat, tech, funding_rate, price_chg_24h=price_24h)
+        cvd_change_1h = _cvd_change_last2(clean_base, "1h")
+        time.sleep(0.25)
+        signal_label, zone, stars, rsi_desc, reason = _classify_signal_and_tier(item, cat, tech, funding_rate, price_chg_24h=price_24h, cvd_change_1h=cvd_change_1h)
         if (stars or 0) < 4:
             continue  # 3 星不納入報表、不統計，省運算
         all_top.append({
@@ -2646,6 +2795,7 @@ def fetch_position_change():
             "category": cat,
             "current_price": tech.get("current_price") if tech else None,
             "rsi": tech.get("rsi") if tech else None,
+            "atr": tech.get("atr") if tech else None,
             "signal_label": signal_label,
             "zone": zone,
             "stars": stars,
@@ -4636,6 +4786,31 @@ def fetch_aggregated_cvd_history(symbol: str, interval: str = "1h") -> Optional[
         import traceback
         logger.debug(traceback.format_exc())
         return None
+
+
+def _cvd_change_last2(symbol: str, interval: str = "1h") -> Optional[float]:
+    """取 1h CVD 最近 2 根 K 的變化值 (Current_CVD - Prev_CVD)。用於過濾量價背離。"""
+    data = fetch_aggregated_cvd_history(symbol, interval)
+    if not data or len(data) < 2:
+        return None
+    sort_key = lambda x: int(x.get("time") or x.get("timestamp") or x.get("t") or 0)
+    sorted_data = sorted(data, key=sort_key)
+    last_two = sorted_data[-2:]
+    cvd_vals = []
+    for item in last_two:
+        v = None
+        for key in ("cum_vol_delta", "cvd", "value", "cvdValue", "cumulativeVolumeDelta", "volumeDelta"):
+            if item.get(key) is not None:
+                try:
+                    v = float(item[key])
+                    break
+                except (TypeError, ValueError):
+                    pass
+        if v is not None:
+            cvd_vals.append(v)
+    if len(cvd_vals) != 2:
+        return None
+    return cvd_vals[1] - cvd_vals[0]
 
 
 def detect_cvd_divergence(symbol: str) -> Optional[str]:
