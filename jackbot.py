@@ -1621,7 +1621,12 @@ def _fetch_coinglass_boll(symbol: str) -> Optional[Dict]:
 def _fetch_coinglass_atr(symbol: str, interval: str = "1d") -> Optional[float]:
     """CoinGlass V4 平均真實波幅（ATR）：委由 fetch_coinglass_indicator(symbol, 'atr', interval)。"""
     out = fetch_coinglass_indicator(symbol, "atr", interval)
-    return float(out) if isinstance(out, (int, float)) and out > 0 else None
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    if isinstance(out, (int, float)) and out > 0:
+        logger.info(f"ATR 取得 {base} ({interval}): 已取得 = {out}")
+        return float(out)
+    logger.info(f"ATR 取得 {base} ({interval}): 未取得（API 無回傳／限流／或非正數）")
+    return None
 
 
 def fetch_coinglass_whale_index_history(
@@ -2430,6 +2435,10 @@ def build_report_message_tiered(
                 else:
                     price_str = "—"
                 sl_val, tp1_val, tp2_val = calc_sl_tp(x.get("atr"), price, zone or ZONE_TOP, is_bull)
+                atr_for_log = x.get("atr")
+                logger.info(
+                    f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈1={tp1_val} 止盈2={tp2_val}"
+                )
 
                 # 1. Header: Symbol, Link, Stars
                 lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_display}")
@@ -2669,6 +2678,9 @@ def fetch_position_change():
     # 成交量預篩：3M 以下完全不列入，只對剩餘標的跑 OI（省時且避免低流動性雜訊）
     VOLUME_PREFILTER_MIN_USD = 3_000_000
     active_above_volume = []
+    vol_check_no_snap = 0
+    vol_check_no_vol = 0
+    vol_check_below = 0
     for coin in active_symbols:
         sym = normalize_symbol(coin) or ""
         if not sym:
@@ -2680,12 +2692,19 @@ def fetch_position_change():
         time.sleep(0.06)
         snap = _fetch_bingx_ticker_snapshot(sym, preferred_symbol=preferred)
         if not snap:
+            vol_check_no_snap += 1
             continue
         vol = snap.get("volume_usd")
-        if vol is not None and vol >= VOLUME_PREFILTER_MIN_USD:
-            active_above_volume.append(coin)
+        if vol is None:
+            vol_check_no_vol += 1
+            continue
+        if vol < VOLUME_PREFILTER_MIN_USD:
+            vol_check_below += 1
+            continue
+        active_above_volume.append(coin)
     logger.info(
-        f"📊 成交量預篩: 刷掉 24h 成交量 < {VOLUME_PREFILTER_MIN_USD/1e6:.0f}M 的標的，"
+        f"📊 成交量預篩: 門檻 24h 成交額 ≥ {VOLUME_PREFILTER_MIN_USD/1e6:.0f}M USD，"
+        f"通過 {len(active_above_volume)} 個、刷掉 {vol_check_no_snap + vol_check_no_vol + vol_check_below} 個 (無ticker:{vol_check_no_snap} 無成交額:{vol_check_no_vol} <3M:{vol_check_below})，"
         f"剩餘 {len(active_above_volume)} 個進入 OI 檢查"
     )
     # 為在 16 分鐘內完成，OI 階段僅處理前 320 個（約 8 分鐘內跑完）
@@ -2796,13 +2815,17 @@ def fetch_position_change():
         signal_label, zone, stars, rsi_desc, reason = _classify_signal_and_tier(item, cat, tech, funding_rate, price_chg_24h=price_24h, cvd_change_1h=cvd_change_1h)
         if (stars or 0) < 4:
             continue  # 3 星不納入報表、不統計，省運算
+        rsi_val = tech.get("rsi") if tech else None
+        ub_val = tech.get("ub_value") if tech else None
+        lb_val = tech.get("lb_value") if tech else None
+        atr_val = tech.get("atr") if tech else None
         all_top.append({
             **item,
             "priceChange24h": price_24h,
             "category": cat,
             "current_price": tech.get("current_price") if tech else None,
-            "rsi": tech.get("rsi") if tech else None,
-            "atr": tech.get("atr") if tech else None,
+            "rsi": rsi_val,
+            "atr": atr_val,
             "signal_label": signal_label,
             "zone": zone,
             "stars": stars,
@@ -2810,6 +2833,9 @@ def fetch_position_change():
             "reason": reason,
             "funding_rate": funding_rate,
         })
+        logger.info(
+            f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} 布林上={ub_val} 布林下={lb_val} ATR={atr_val} | {reason}"
+        )
 
     # 用 BingX ticker 一次取現價 + 24h 成交額；5 星僅允許 >7M，否則降為 4 星；<10M 標示成交量極低
     VOLUME_HARD_MIN_USD = 1_000_000    # <1M 直接排除
@@ -2847,6 +2873,10 @@ def fetch_position_change():
                 x["stars"] = 4
         filtered_top.append(x)
     all_top = filtered_top
+    low_liq_count = sum(1 for x in all_top if x.get("low_liquidity_warning"))
+    logger.info(
+        f"成交量二次過濾: 門檻 1M USD（<1M 排除），剩餘 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<7M)"
+    )
 
     # 同幣同向只認最新一輪：上一輪已報過 (symbol, 多/空) 本輪就不報，但方向變了（空→多、多→空）會報
     def _item_direction(x: Dict) -> str:
