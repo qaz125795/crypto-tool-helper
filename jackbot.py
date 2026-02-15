@@ -1910,7 +1910,8 @@ def _classify_signal_and_tier(
             # 深跌卻標追漲 → 改為抄底/反彈（24h 跌超過 10% 不當追漲）
             if zone == ZONE_BREAKOUT_LONG and price_chg_24h < -10.0:
                 return ("🟢 深跌反彈", ZONE_DIP, stars, rsi_desc, f"📉 深跌反彈 ({reason})")
-            if price_chg_24h > 15 and zone == ZONE_DIP:
+            # 漲很兇卻標摸底 → 改追漲（24h 漲超過 10% 不當抄底，與跌 10% 對稱）
+            if price_chg_24h > 10.0 and zone == ZONE_DIP:
                 return ("🟢 強勢嘎空", ZONE_BREAKOUT_LONG, stars, rsi_desc, "🔥 強勢嘎空")
             # 摸頭區：24h 跌超過 10% 改為恐慌下殺（與做多區同門檻）
             if price_chg_24h < -10.0 and zone == ZONE_TOP:
