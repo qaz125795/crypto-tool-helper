@@ -2373,7 +2373,10 @@ def build_report_message_tiered(
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
     def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool):
-        """SL/TP 統一風報比：有 ATR 時 SL=2.5*ATR，TP1=1:1、TP2=1:2、TP3=1:4 樂透位；無 ATR 時 fallback 固定百分比。"""
+        """
+        SL/TP 風控版：波動率阻尼 + 止損 10% 硬上限 + 做空 TP 負值防護。
+        回傳 (sl_val, tp1_val, tp2_val, tp3_val, sl_capped)。
+        """
         def fmt_p(p):
             if p is None or (isinstance(p, float) and (p != p)) or p <= 0:
                 return "—"
@@ -2388,15 +2391,29 @@ def build_report_message_tiered(
             return f"{p:.2f}"
 
         if price is None or price <= 0:
-            return "—", "—", "—", "—"
+            return "—", "—", "—", "—", False
 
-        risk_multiplier = 2.5   # SL = 2.5 * ATR
-        TP1_RATIO = 1.0         # TP1 = 2.5 * ATR (1:1)
-        TP2_RATIO = 2.0         # TP2 = 5.0 * ATR (1:2)
-        TP3_RATIO = 4.0         # TP3 = 10 * ATR (1:4 樂透)
+        TP1_RATIO = 1.0
+        TP2_RATIO = 2.0
+        TP3_RATIO = 4.0
+        MAX_SL_PERCENT = 0.10   # 強制止損不超過 10%
+        SHORT_TP_FLOOR_RATIO = 0.01  # 做空 TP 不得低於現價 1%（避免負數）
 
         if atr is not None and isinstance(atr, (int, float)) and atr > 0:
+            # 波動率阻尼：依 atr/price 動態收緊 multiplier
+            volatility_pct = atr / price
+            if volatility_pct <= 0.02:
+                risk_multiplier = 2.5
+            elif volatility_pct <= 0.05:
+                risk_multiplier = 2.0
+            else:
+                risk_multiplier = 1.5
             sl_dist = atr * risk_multiplier
+            # 強制 10% 上限
+            sl_capped = False
+            if sl_dist > price * MAX_SL_PERCENT:
+                sl_dist = price * MAX_SL_PERCENT
+                sl_capped = True
             tp1_dist = sl_dist * TP1_RATIO
             tp2_dist = sl_dist * TP2_RATIO
             tp3_dist = sl_dist * TP3_RATIO
@@ -2410,15 +2427,24 @@ def build_report_message_tiered(
                 tp1_price = price - tp1_dist
                 tp2_price = price - tp2_dist
                 tp3_price = price - tp3_dist
+                # 做空 TP 負值防護：不得 <= 0
+                floor = price * SHORT_TP_FLOOR_RATIO
+                if tp1_price <= 0:
+                    tp1_price = floor
+                if tp2_price <= 0:
+                    tp2_price = floor
+                if tp3_price <= 0:
+                    tp3_price = floor
             if sl_price <= 0 and is_long:
                 sl_price = price * 0.95
-            return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), fmt_p(tp3_price)
+            return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), fmt_p(tp3_price), sl_capped
 
-        # Fallback：無 ATR 時固定百分比，TP1=1:1、TP2=1:2、TP3=1:4
+        # Fallback：無 ATR 時固定百分比，且止損不超過 10%
         if zone in (ZONE_DIP, ZONE_TOP):
             sl_pct, tp1_pct, tp2_pct, tp3_pct = 0.045, 0.045, 0.09, 0.18
         else:
             sl_pct, tp1_pct, tp2_pct, tp3_pct = 0.05, 0.05, 0.10, 0.20
+        sl_pct = min(sl_pct, MAX_SL_PERCENT)
         if is_long:
             sl_price = price * (1 - sl_pct)
             tp1_price = price * (1 + tp1_pct)
@@ -2429,7 +2455,14 @@ def build_report_message_tiered(
             tp1_price = price * (1 - tp1_pct)
             tp2_price = price * (1 - tp2_pct)
             tp3_price = price * (1 - tp3_pct)
-        return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), fmt_p(tp3_price)
+            floor = price * SHORT_TP_FLOOR_RATIO
+            if tp1_price <= 0:
+                tp1_price = floor
+            if tp2_price <= 0:
+                tp2_price = floor
+            if tp3_price <= 0:
+                tp3_price = floor
+        return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), fmt_p(tp3_price), False
 
     def _is_bull(x: Dict) -> bool:
         sig = x.get("signal_label") or ""
@@ -2551,10 +2584,11 @@ def build_report_message_tiered(
                         price_str = f"{price:.6f}"
                 else:
                     price_str = "—"
-                sl_val, tp1_val, tp2_val, tp3_val = calc_sl_tp(x.get("atr"), price, zone or ZONE_TOP, is_bull)
+                sl_val, tp1_val, tp2_val, tp3_val, sl_capped = calc_sl_tp(x.get("atr"), price, zone or ZONE_TOP, is_bull)
                 atr_for_log = x.get("atr")
+                cap_note = " (SL已觸發10%上限限制)" if sl_capped else ""
                 logger.info(
-                    f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈1={tp1_val} 止盈2={tp2_val} 止盈3={tp3_val}"
+                    f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈1={tp1_val} 止盈2={tp2_val} 止盈3={tp3_val}{cap_note}"
                 )
 
                 # 1. Header: Symbol, Link, Stars
