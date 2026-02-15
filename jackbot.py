@@ -1906,16 +1906,17 @@ def _classify_signal_and_tier(
     若帶入 price_chg_24h：24h 大漲且原為抄底 → 改強勢嘎空；24h 大跌且原為摸頭 → 改恐慌下殺。
     """
     def apply_24h(label: str, zone: str, stars: int, rsi_desc: str, reason: str) -> Tuple[str, str, int, str, str]:
+        """24H 趨勢修正（Truth Protocol）：以 BingX 24h 漲跌幅為主，避免假抄底/假摸頭/假追漲"""
         if price_chg_24h is not None and isinstance(price_chg_24h, (int, float)):
-            # 深跌卻標追漲 → 改為抄底/反彈（24h 跌超過 10% 不當追漲）
-            if zone == ZONE_BREAKOUT_LONG and price_chg_24h < -10.0:
-                return ("🟢 深跌反彈", ZONE_DIP, stars, rsi_desc, f"📉 深跌反彈 ({reason})")
-            # 漲很兇卻標摸底 → 改追漲（24h 漲超過 10% 不當抄底，與跌 10% 對稱）
-            if price_chg_24h > 10.0 and zone == ZONE_DIP:
-                return ("🟢 強勢嘎空", ZONE_BREAKOUT_LONG, stars, rsi_desc, "🔥 強勢嘎空")
-            # 摸頭區：24h 跌超過 10% 改為恐慌下殺（與做多區同門檻）
-            if price_chg_24h < -10.0 and zone == ZONE_TOP:
-                return ("🔴 恐慌下殺", ZONE_BREAKOUT_SHORT, stars, rsi_desc, "🩸 恐慌下殺")
+            # 1. 假抄底 → 強勢嘎空（24h 漲 > 5% 不當抄底，是嘎空/漲多回調）
+            if zone == ZONE_DIP and price_chg_24h > 5.0:
+                return ("🟢 強勢嘎空", ZONE_BREAKOUT_LONG, stars, rsi_desc, f"🔥 強勢嘎空 (24h漲 {price_chg_24h:.1f}%)")
+            # 2. 假摸頭 → 恐慌下殺（24h 跌 > 5% 不當摸頭，是崩盤/跌多續跌）
+            if zone == ZONE_TOP and price_chg_24h < -5.0:
+                return ("🔴 恐慌下殺", ZONE_BREAKOUT_SHORT, stars, rsi_desc, f"🩸 恐慌下殺 (24h跌 {abs(price_chg_24h):.1f}%)")
+            # 3. 假追漲 → 深跌反彈（24h 跌 > 5% 不當追漲，是反彈/死貓跳）
+            if zone == ZONE_BREAKOUT_LONG and price_chg_24h < -5.0:
+                return ("🟢 深跌反彈", ZONE_DIP, stars, rsi_desc, f"📉 深跌反彈 (24h跌 {abs(price_chg_24h):.1f}%)")
         return (label, zone, stars, rsi_desc, reason)
 
     oi = item.get("oiChange30m") or 0
