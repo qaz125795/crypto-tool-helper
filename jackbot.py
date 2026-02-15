@@ -2581,11 +2581,17 @@ def build_report_message_tiered(
                     else:
                         fr_desc = "⚖️ 正常"
                     lines.append(f"💸 費率：`{fr_pct:.4f}%` {fr_desc}")
-                # 4. Logic (the "why")
+                # 4. Logic (the "why") + 訂單簿獨立一行（CVD 改白話）
                 reason = x.get("reason", "籌碼異動")
                 if flip:
                     reason = (reason or "") + " 趨勢已改變，舊單失效。"
-                lines.append(f"💡 邏輯：{reason}")
+                cvd_in_reason = " (CVD確認)" in (reason or "")
+                if cvd_in_reason:
+                    reason_display = (reason or "").replace(" (CVD確認)", "").strip()
+                else:
+                    reason_display = reason or "籌碼異動"
+                lines.append(f"💡 邏輯：{reason_display}")
+                lines.append(f"📋 訂單簿：{'確認有主力痕跡' if cvd_in_reason else '流動性太差 查無此幣'}")
                 # 5. Price targets (separate lines, card-style) + 24h 必顯示
                 p24 = x.get("priceChange24h")
                 if p24 is not None and isinstance(p24, (int, float)):
