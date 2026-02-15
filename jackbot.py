@@ -2141,22 +2141,24 @@ def build_report_message_tiered(
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
     def calc_sl_tp(price, zone, stars, is_long: bool):
-        """SL/TP 風報比：1R=止損距離，TP1≈1.5R 保本減倉，TP2≈2.5R 留倉。多=止損價下/止盈價上；空=反之。"""
+        """山寨 30m：SL 含「報價延遲 3-4 分鐘」buffer + 30m 波動空間，TP 維持 1.5R/2.5R。"""
         if price is None or price <= 0:
             return "—", "—", "—"
-        # 逆勢（摸頭/抄底）：SL 緊一點，TP1=1.5R / TP2=2.5R
+        # 延遲 buffer：推播現價為 3-4 分鐘前，用戶進場價可能不利 1.5～2%，SL 預留此空間
+        DELAY_BUFFER_PCT = 0.015
+        # 逆勢（摸頭/抄底）：基礎 SL 3% + 延遲 buffer → 約 4.5%，TP 同 R
         inverse_params = {
-            5: (0.015, 0.0225, 0.0375),   # SL 1.5%, TP1 1.5R, TP2 2.5R
-            4: (0.015, 0.020, 0.030),     # SL 1.5%, TP1 ~1.33R, TP2 2R
-            3: (0.012, 0.016, 0.026), 2: (0.010, 0.013, 0.020), 1: (0.010, 0.010, 0.018)
+            5: (0.030 + DELAY_BUFFER_PCT, 0.0675, 0.1125),   # SL 4.5%, TP1 1.5R, TP2 2.5R
+            4: (0.028 + DELAY_BUFFER_PCT, 0.0645, 0.1075),   # SL 4.3%, TP1 1.5R, TP2 2.5R
+            3: (0.025 + DELAY_BUFFER_PCT, 0.060, 0.100), 2: (0.022 + DELAY_BUFFER_PCT, 0.053, 0.088), 1: (0.020 + DELAY_BUFFER_PCT, 0.048, 0.078)
         }
-        # 順勢（追漲/追跌）：略寬 SL 讓單子跑，TP1=1.5R / TP2=2.5R
+        # 順勢（追漲/追跌）：基礎 SL 3.5% + 延遲 buffer → 約 5%
         trend_params = {
-            5: (0.020, 0.030, 0.050),     # SL 2%, TP1 1.5R, TP2 2.5R
-            4: (0.018, 0.027, 0.045),     # SL 1.8%, TP1 1.5R, TP2 2.5R
-            3: (0.015, 0.022, 0.038), 2: (0.012, 0.018, 0.030), 1: (0.010, 0.015, 0.025)
+            5: (0.035 + DELAY_BUFFER_PCT, 0.075, 0.125),     # SL 5%, TP1 1.5R, TP2 2.5R
+            4: (0.032 + DELAY_BUFFER_PCT, 0.072, 0.120),     # SL 4.7%, TP1 1.5R, TP2 2.5R
+            3: (0.028 + DELAY_BUFFER_PCT, 0.063, 0.105), 2: (0.025 + DELAY_BUFFER_PCT, 0.056, 0.094), 1: (0.022 + DELAY_BUFFER_PCT, 0.050, 0.082)
         }
-        sl_pct, tp1_pct, tp2_pct = (0.015, 0.022, 0.037)
+        sl_pct, tp1_pct, tp2_pct = (0.028 + DELAY_BUFFER_PCT, 0.0645, 0.1075)
         if zone in (ZONE_DIP, ZONE_TOP):
             sl_pct, tp1_pct, tp2_pct = inverse_params.get(stars, inverse_params[3])
         else:
@@ -2654,7 +2656,7 @@ def fetch_position_change():
 
     # 用 BingX ticker 一次取現價 + 24h 成交額；5 星僅允許 >7M，否則降為 4 星；<10M 標示成交量極低
     VOLUME_HARD_MIN_USD = 1_000_000    # <1M 直接排除
-    VOLUME_SOFT_MIN_USD = 10_000_000   # <10M 標示「成交量極低 小心滑價」
+    VOLUME_SOFT_MIN_USD = 7_000_000   # <7M 標示「成交量極低 小心滑價」
     VOLUME_5STAR_MIN_USD = 7_000_000   # 5 星僅允許成交量大於 7M，≤7M 一律降為 4 星
     filtered_top = []
     for x in all_top:
