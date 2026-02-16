@@ -2514,6 +2514,36 @@ def build_report_message_tiered(
             return "追空"
         return "做多" if is_bull else "做空"
 
+    def _reason_plain(reason: str) -> str:
+        """把邏輯裡的持倉/費率轉成白話（空方/多方 持倉變化）。"""
+        if not reason:
+            return "籌碼有異動"
+        r = (reason or "").strip()
+        # 持倉變化白話（依關鍵字替換）
+        if "持倉大減 (空頭平倉→摸底)" in r or ("空頭平倉" in r and "摸底" in r):
+            r = r.replace("持倉大減 (空頭平倉→摸底)", "空方在減倉，籌碼鬆動，有機會抄底")
+        if "持倉大減 (多頭平倉→摸頭)" in r or ("多頭平倉" in r and "摸頭" in r):
+            r = r.replace("持倉大減 (多頭平倉→摸頭)", "多方在減倉，漲多易回，可考慮放空")
+        if "持倉大增+費率負" in r:
+            r = r.replace("持倉大增+費率負 (嘎空潛力)", "多方加碼、費率又負，容易嘎空")
+        if "持倉大增 (追多)" in r:
+            r = r.replace("持倉大增 (追多)", "多方加碼，順勢做多")
+        if "費率/持倉偏多" in r:
+            r = r.replace("費率/持倉偏多", "籌碼與費率都偏多")
+        if "費率正/多頭平倉 (摸頭)" in r:
+            r = r.replace("費率正/多頭平倉 (摸頭)", "多方在平倉，偏空摸頭")
+        if "費率負/空頭平倉 (摸底)" in r:
+            r = r.replace("費率負/空頭平倉 (摸底)", "空方在平倉，偏多摸底")
+        if "強勢嘎空 (24h漲" in r:
+            r = r.replace("🔥 強勢嘎空 (24h漲 ", "24h 漲 ")
+            if "%)" in r and "有嘎空" not in r:
+                r = r.replace("%)", "%，有嘎空空間", 1)
+        if "持倉大減 (多頭平倉" in r and "摸頭" in r:
+            r = r.replace("⛽ 持倉大減 (多頭平倉→摸頭)", "多方在減倉，漲多易回，可放空")
+        if "持倉減 (偏空)" in r:
+            r = r.replace("持倉減 (偏空)", "持倉減，偏空")
+        return r if r.strip() else "籌碼有異動"
+
     # 四象限：只推 4 星以上（3 星不推播）
     long_dip = [x for x in enriched_items if x.get("zone") == ZONE_DIP and _is_bull(x) and (x.get("stars") or 0) >= 4]
     long_break = [x for x in enriched_items if x.get("zone") == ZONE_BREAKOUT_LONG and _is_bull(x) and (x.get("stars") or 0) >= 4]
@@ -2563,19 +2593,19 @@ def build_report_message_tiered(
                 dir_emoji = "🟢" if is_bull else "🔴"
                 coin_url = f"https://www.coinglass.com/zh-TW/currencies/{sym}"
                 star_display = "💎" if _is_elite(x) else star_str(stars)
-                # Signal strength (no win rate): 訊號強度 + 建議倉位
+                # 策略白話：訊號強度 + 建議倉位
                 if _is_elite(x):
-                    strength, pos_rec = "🔥 極強", "滿倉 (7%)"
+                    strength, pos_rec = "訊號很強，可重倉", "建議 7%"
                 elif stars >= 5:
-                    strength, pos_rec = "💪 強勢", "標準倉 (5%)"
+                    strength, pos_rec = "訊號不錯，標準倉", "建議 5%"
                 else:
-                    strength, pos_rec = "👀 觀察", "減半倉 (2.5%)"
+                    strength, pos_rec = "先觀察，小倉試單", "建議 2.5%"
                 # v3.0 波動率減倉：ATR/現價 > 2% 建議減半
                 atr_val, current_price = x.get("atr"), x.get("current_price")
                 if atr_val is not None and current_price is not None and current_price > 0:
                     volatility_pct = (atr_val / current_price) * 100
                     if volatility_pct > 2.0:
-                        pos_rec = "⚠️ 波動大，建議減半 (2.5%)"
+                        pos_rec = "波動大，倉位減半 (2.5%)"
 
                 price = x.get("current_price")
                 if price is not None and isinstance(price, (int, float)):
@@ -2593,8 +2623,8 @@ def build_report_message_tiered(
 
                 # 1. Header: Symbol, Link, Stars
                 lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_display}")
-                # 2. Strategy & Position (no win rate)
-                lines.append(f"🎲 策略：{strength}｜建議：{pos_rec}")
+                # 2. 策略（白話）
+                lines.append(f"🎲 策略：{strength}｜{pos_rec}")
                 flip = x.get("direction_flip")
                 if flip:
                     if "多轉空" in flip:
@@ -2615,7 +2645,7 @@ def build_report_message_tiered(
                     else:
                         fr_desc = "⚖️ 正常"
                     lines.append(f"💸 費率：`{fr_pct:.4f}%` {fr_desc}")
-                # 4. Logic (the "why") + 訂單簿獨立一行（CVD 改白話）
+                # 4. 邏輯（持倉變化白話）+ 訂單簿（白話）
                 reason = x.get("reason", "籌碼異動")
                 if flip:
                     reason = (reason or "") + " 趨勢已改變，舊單失效。"
@@ -2624,8 +2654,8 @@ def build_report_message_tiered(
                     reason_display = (reason or "").replace(" (CVD確認)", "").strip()
                 else:
                     reason_display = reason or "籌碼異動"
-                lines.append(f"💡 邏輯：{reason_display}")
-                lines.append(f"📋 訂單簿：{'確認有主力痕跡' if cvd_in_reason else '流動性太差 查無此幣'}")
+                lines.append(f"💡 邏輯：{_reason_plain(reason_display)}")
+                lines.append(f"📋 訂單簿：{'有大單在跟，可參考' if cvd_in_reason else '這檔量太小，查不到大單'}")
                 # 5. Price targets (separate lines, card-style) + 24h 必顯示
                 p24 = x.get("priceChange24h")
                 if p24 is not None and isinstance(p24, (int, float)):
