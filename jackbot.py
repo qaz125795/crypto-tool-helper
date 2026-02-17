@@ -2703,7 +2703,7 @@ def build_report_message_tiered(
         lines.append("不要再潛水了，多多出來跟其他人討論交流分享手上的持倉或是討論，善的循環 ❤️")
         lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append("⚠️ *操作SOP*：S級/A級標準倉，B級(博弈)減半倉。嚴格止損，TP1 保本。")
+    lines.append("⚠️ *操作SOP*：S+=頭等機艙(重倉)、S=穩健列車(標準)、A=賭鬼樂透(小倉高風險)。嚴格執行止損，勿加碼攤平。")
     return "\n".join(lines)
 
 
