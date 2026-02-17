@@ -2676,12 +2676,12 @@ def build_report_message_tiered(
                 if is_elite_sig or stars >= 5:
                     lines.append(f"✅ 止盈1：`{tp1_val}` (1.0R)")
                     lines.append(f"🚀 止盈2：`{tp2_val}` (2.0R)")
-                    if tp3_val != \"—\":
-                        lines.append(f\"🌌 止盈3：`{tp3_val}` (3.5R)\")
+                    if tp3_val != "—":
+                        lines.append(f"🌌 止盈3：`{tp3_val}` (3.5R)")
                 else:
-                    lines.append(f\"✅ 止盈1：`{tp1_val}` (1.5R)\")
-                    lines.append(f\"🚀 止盈2：`{tp2_val}` (3.0R)\")
-                    lines.append(f\"🎰 樂透3：`{tp3_val}` (5.0R)\")
+                    lines.append(f"✅ 止盈1：`{tp1_val}` (1.5R)")
+                    lines.append(f"🚀 止盈2：`{tp2_val}` (3.0R)")
+                    lines.append(f"🎰 樂透3：`{tp3_val}` (5.0R)")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
