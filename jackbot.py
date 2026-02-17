@@ -2149,10 +2149,10 @@ MAIN_COINS = {"BTC", "ETH"}   # 主流幣
 OI_MAIN_COIN_MIN = 5.5       # 主流幣須 |OI 30m| >= 5.5% 才進榜（門檻極高，實務上排除）
 OI_ALTCOIN_MIN = 1.5         # 山寨幣初選門檻（後續再用 OI_FOR_4_STAR 篩）
 
-# 星等門檻（微調：略放寬以增加 5 星/鑽石出現率）
-OI_FOR_5_STAR = 3.6    # |OI 30m| >= 3.6% → 5 星（原 4.0）
-OI_FOR_4_STAR = 2.9    # |OI 30m| >= 2.9% 且 < 3.6% → 4 星（原 3.2）
-OI_FOR_ELITE = 3.6     # 鑽石 💎：5星 + 摸頭/抄底 + |OI| >= 3.6%（與 5 星對齊）
+# 星等門檻（嚴格化：區分共識與博弈）
+OI_FOR_5_STAR = 3.8    # 5星：門檻拉高，確保是真主力
+OI_FOR_4_STAR = 3.3    # 4星：門檻拉高，過濾雜訊
+OI_FOR_ELITE = 3.8     # 鑽石 💎：與 5 星門檻對齊
 
 # 抄底/摸頭 30m 門檻（保守山寨）：略放寬仍算低位/高位，減少誤殺
 PRICE_DIP_MAX = 3.0    # 抄底：30m 漲幅 ≤ 3% 才算低位，超過改標追漲
@@ -2189,82 +2189,57 @@ def _classify_signal_and_tier(
     cvd_change_1h: Optional[float] = None,
     whale_index: Optional[float] = None,
     retail_ratio: Optional[float] = None,
-) -> Tuple[str, str, int, str, str]:
+) -> Optional[Tuple[str, str, int, str, str]]:
     """
-    分級以「持倉異常(OI) + 資金費率」為主，K 線/RSI 僅輔助描述。
-    v3.0：retail_ratio 散戶多空比 >1.45 做多降星/做空加註；極端費率加權標註。
+    分級核心邏輯 (v4.0 極速版)：
+    1. 刪除所有 3 星邏輯，未達 4 星直接回傳 None (提升效率)。
+    2. 引入 CVD 驗證：5 星必須 CVD 同向，否則降級為 4 星 (區分共識 vs 博弈)。
     """
+
+    # 0. 效率過濾：OI 未達 4 星門檻，直接丟棄，不進行後續運算
+    oi = item.get("oiChange30m") or 0
+    abs_oi = abs(oi)
+    if abs_oi < OI_FOR_4_STAR:
+        return None
+
+    # 輔助函數：24H 趨勢修正 (Truth Protocol)
     def apply_24h(label: str, zone: str, stars: int, rsi_desc: str, reason: str) -> Tuple[str, str, int, str, str]:
-        """24H 趨勢修正（Truth Protocol）：以 24h 漲跌幅為主，門檻 12% 適應山寨日波動"""
         if price_chg_24h is not None and isinstance(price_chg_24h, (int, float)):
-            # 1. 假抄底 → 強勢嘎空（24h 漲 > 10% 不當抄底，是嘎空/漲多回調）
             if zone == ZONE_DIP and price_chg_24h > TREND_24H_THRESHOLD:
                 return ("🟢 強勢嘎空", ZONE_BREAKOUT_LONG, stars, rsi_desc, f"🔥 強勢嘎空 (24h漲 {price_chg_24h:.1f}%)")
-            # 2. 假摸頭 → 恐慌下殺（24h 跌 > 10% 不當摸頭，是崩盤/跌多續跌）
             if zone == ZONE_TOP and price_chg_24h < -TREND_24H_THRESHOLD:
                 return ("🔴 恐慌下殺", ZONE_BREAKOUT_SHORT, stars, rsi_desc, f"🩸 恐慌下殺 (24h跌 {abs(price_chg_24h):.1f}%)")
-            # 3. 假追漲 → 深跌反彈（24h 跌 > 10% 不當追漲，是反彈/死貓跳）
             if zone == ZONE_BREAKOUT_LONG and price_chg_24h < -TREND_24H_THRESHOLD:
                 return ("🟢 深跌反彈", ZONE_DIP, stars, rsi_desc, f"📉 深跌反彈 (24h跌 {abs(price_chg_24h):.1f}%)")
         return (label, zone, stars, rsi_desc, reason)
 
-    def _maybe_cvd_confirm(tup: Tuple[str, str, int, str, str]) -> Tuple[str, str, int, str, str]:
-        """4/5 星且 CVD 方向一致時，邏輯欄位加上 (CVD確認)"""
-        label, zone, stars, rsi_desc, reason = tup
-        if stars >= 4 and cvd_change_1h is not None:
-            if (category in ("long_open", "short_close") and cvd_change_1h > 0) or (category in ("short_open", "long_close") and cvd_change_1h < 0):
-                reason = reason + " (CVD確認)"
-        return (label, zone, stars, rsi_desc, reason)
-
+    # 輔助函數：v3.0 散戶濾網 & 極端費率
     def _apply_retail_funding(tup: Tuple[str, str, int, str, str]) -> Tuple[str, str, int, str, str]:
-        """v3.0 散戶濾網：做多且散戶過熱降星；做空且散戶過熱加註。極端費率加權標註。"""
         label, zone, stars, rsi_desc, reason = tup
         is_long = category in ("long_open", "short_close")
         is_short = category in ("short_open", "long_close")
+
+        # 散戶過熱降級
         if retail_ratio is not None and retail_ratio > 1.45:
             if is_long:
-                stars = max(3, stars - 1)
-                reason = reason + " ⚠️ 散戶過熱(>1.45)"
+                stars = max(4, stars - 1)  # 最低降到 4，因為 3 星已刪除
+                reason = reason + " ⚠️ 散戶過熱"
             elif is_short:
-                reason = reason + " ✅ 散戶接盤(確認)"
+                reason = reason + " ✅ 散戶接盤"
+
+        # 極端費率標註
         if funding_rate is not None:
             if funding_rate < -FUNDING_EXTREME and is_long:
-                reason = reason + " 🔥 極度負費率(嘎空)"
+                reason = reason + " 🔥 費率負(嘎空)"
             if funding_rate > FUNDING_EXTREME and is_short:
-                reason = reason + " ⛽ 極度正費率(殺多)"
+                reason = reason + " ⛽ 費率正(殺多)"
         return (label, zone, stars, rsi_desc, reason)
 
-    # 量價背離：多向但 CVD 跌、空向但 CVD 漲 → 強制 3 星不推播
-    if cvd_change_1h is not None:
-        if category in ("long_open", "short_close") and cvd_change_1h < 0:
-            return _apply_retail_funding(apply_24h("📊 異動", ZONE_DIP, 3, "RSI —", "量價背離(多向但CVD跌)"))
-        if category in ("short_open", "long_close") and cvd_change_1h > 0:
-            return _apply_retail_funding(apply_24h("📊 異動", ZONE_TOP, 3, "RSI —", "量價背離(空向但CVD漲)"))
-
-    # 鯨魚背離：做多但鯨魚顯著看空(Index<40)、做空但鯨魚顯著看多(Index>60) → 強制 3 星不推播
-    if whale_index is not None and isinstance(whale_index, (int, float)):
-        if category in ("long_open", "short_close") and whale_index < 40:
-            return _apply_retail_funding(apply_24h("📊 異動", ZONE_DIP, 3, "RSI —", "鯨魚背離(做多但鯨魚偏空)"))
-        if category in ("short_open", "long_close") and whale_index > 60:
-            return _apply_retail_funding(apply_24h("📊 異動", ZONE_TOP, 3, "RSI —", "鯨魚背離(做空但鯨魚偏多)"))
-
-    oi = item.get("oiChange30m") or 0
-    abs_oi = abs(oi)
+    # 1. 準備基礎數據
     price_chg_30m = item.get("priceChange30m")
     if price_chg_30m is not None and not isinstance(price_chg_30m, (int, float)):
         price_chg_30m = None
-    # 3 星不統計不計算：|OI| 不足 4 星門檻則直接回傳；仍套用 24h 假抄底/假摸頭過濾
-    rsi_placeholder = "RSI —"
-    if abs_oi < OI_FOR_4_STAR:
-        if category == "short_open":
-            return _apply_retail_funding(apply_24h("📊 異動", ZONE_BREAKOUT_SHORT, 3, rsi_placeholder, "數據異動"))
-        if category == "long_open":
-            return _apply_retail_funding(apply_24h("📊 異動", ZONE_BREAKOUT_LONG, 3, rsi_placeholder, "數據異動"))
-        if category == "short_close":
-            return _apply_retail_funding(apply_24h("📊 異動", ZONE_DIP, 3, rsi_placeholder, "空頭平倉→摸底區"))
-        if category == "long_close":
-            return _apply_retail_funding(apply_24h("📊 異動", ZONE_TOP, 3, rsi_placeholder, "多頭平倉→摸頭區"))
-        return _apply_retail_funding(apply_24h("📊 異動", ZONE_DIP, 2, rsi_placeholder, "數據異動"))
+
     rsi = tech.get("rsi") if tech else None
     touch_upper = tech.get("touch_upper", False) if tech else False
     touch_lower = tech.get("touch_lower", False) if tech else False
@@ -2280,79 +2255,88 @@ def _classify_signal_and_tier(
             rsi_desc += " 觸頂"
         if touch_lower:
             rsi_desc += " 觸底"
-    elif funding_rate is not None:
-        if funding_rate > FUNDING_POSITIVE:
-            rsi_desc = "費率過熱🔥"
-        elif funding_rate < FUNDING_NEGATIVE:
-            rsi_desc = "費率過冷❄️"
 
-    # 布林帶過濾：做多但價觸上軌 → 過熱降 3 星；做空但價觸下軌 → 過冷降 3 星
-    cp = tech.get("current_price") if tech else None
-    ub = tech.get("ub_value") if tech else None
-    lb = tech.get("lb_value") if tech else None
-    if cp is not None and ub is not None and lb is not None:
-        if category in ("long_open", "short_close") and cp > ub:
-            return _apply_retail_funding(apply_24h("📊 異動", ZONE_BREAKOUT_LONG, 3, rsi_desc, "⚠️ 過熱 (觸上軌)"))
-        if category in ("short_open", "long_close") and cp < lb:
-            return _apply_retail_funding(apply_24h("📊 異動", ZONE_BREAKOUT_SHORT, 3, rsi_desc, "⚠️ 過冷 (觸下軌)"))
-
-    # ─── 以 OI + 費率為主，少用 RSI 決定星等 ───
-    # 區塊與開平倉對應：摸頭=空頭開倉/多頭平倉 | 抄底=多頭開倉/空頭平倉 | 追漲=多頭開倉/空頭平倉 | 追跌=空頭開倉/多頭平倉
     funding_negative = funding_rate is not None and funding_rate < FUNDING_NEGATIVE
     funding_positive = funding_rate is not None and funding_rate > FUNDING_POSITIVE
 
-    # 5 星：|OI| >= 門檻。抄底/摸頭須過價格位階；最後套用 24h 假抄底/假摸頭過濾。
+    # 2. CVD 趨勢驗證 (用於決定是否降級)
+    # 順勢：開多且CVD買 / 開空且CVD賣 / 平倉視為反向
+    is_trend_confirmed = False
+    if cvd_change_1h is not None:
+        if category == "long_open" and cvd_change_1h > 0:
+            is_trend_confirmed = True
+        elif category == "short_open" and cvd_change_1h < 0:
+            is_trend_confirmed = True
+        elif category == "short_close" and cvd_change_1h > 0:
+            is_trend_confirmed = True
+        elif category == "long_close" and cvd_change_1h < 0:
+            is_trend_confirmed = True
+
+    # 3. 判斷邏輯開始
+
+    # === 5 星邏輯 (需 OI 達標 且 CVD 確認) ===
     if abs_oi >= OI_FOR_5_STAR:
-        if oi > 0 and (funding_negative or (funding_rate is not None and funding_rate < -0.001)):
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 持倉大增+費率負 (嘎空潛力)")))
-        if oi < 0 and (funding_negative or category == "short_close"):
-            if price_chg_30m is not None and price_chg_30m > PRICE_DIP_MAX:
-                return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "持倉減但價已漲→追多")))
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟢 抄底做多", ZONE_DIP, 5, rsi_desc, "🩸 持倉大減 (空頭平倉→摸底)")))
-        if oi < 0 and (funding_positive or category == "long_close"):
-            if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-                return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "持倉減但價已跌→追空")))
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🔴 摸頭做空", ZONE_TOP, 5, rsi_desc, "⛽ 持倉大減 (多頭平倉→摸頭)")))
-        if oi > 0 and category in ("long_open", "short_close"):
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 持倉大增 (追多)")))
-        if oi < 0 and category == "short_open":
-            if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-                return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "空方加碼且價跌→追空")))
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🔴 摸頭做空", ZONE_TOP, 5, rsi_desc, "📉 空方加碼 (偏空)")))
-        if oi > 0:
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 持倉大增 (突破)")))
-        return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "📉 持倉大減 (追跌)")))
+        if is_trend_confirmed:
+            # [真 5 星]：量大 + 方向對 = 共識盤
+            reason_suffix = " (CVD確認)"
 
-    # 4 星：|OI| >= 門檻 且方向合理。抄底/摸頭同樣過價格位階；套用 24h 假抄底/假摸頭過濾。
-    if abs_oi >= OI_FOR_4_STAR:
-        if oi > 0 and (funding_negative or category in ("long_open", "short_close")):
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 4, rsi_desc, "費率/持倉偏多")))
-        if oi < 0 and (funding_positive or category == "long_close"):
-            if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-                return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 4, rsi_desc, "價已跌→追空")))
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🔴 偏空過熱", ZONE_TOP, 4, rsi_desc, "費率正/多頭平倉 (摸頭)")))
-        if oi < 0 and (funding_negative or category == "short_close"):
-            if price_chg_30m is not None and price_chg_30m > PRICE_DIP_MAX:
-                return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 4, rsi_desc, "價已漲→追多")))
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟢 抄底做多", ZONE_DIP, 4, rsi_desc, "費率負/空頭平倉 (摸底)")))
-        if oi > 0:
-            zone = ZONE_BREAKOUT_LONG if category in ("long_open", "short_close") else ZONE_BREAKOUT_SHORT
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟡 順勢觀察", zone, 4, rsi_desc, "持倉異動順勢")))
-        if oi < 0:
-            if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-                return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 4, rsi_desc, "價跌→追空")))
-            return _apply_retail_funding(_maybe_cvd_confirm(apply_24h("🔴 摸頭做空", ZONE_TOP, 4, rsi_desc, "持倉減 (偏空)")))
+            if oi > 0 and (funding_negative or (funding_rate is not None and funding_rate < -0.001)):
+                return _apply_retail_funding(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 主力共識+費率負" + reason_suffix))
 
-    # 3 星以下不推播，僅回傳供內部使用（平倉仍對應摸底/摸頭區）；仍套用 24h 過濾
-    if category == "short_open":
-        return _apply_retail_funding(apply_24h("📊 異動", ZONE_BREAKOUT_SHORT, 3, rsi_desc, "數據異動"))
-    if category == "long_open":
-        return _apply_retail_funding(apply_24h("📊 異動", ZONE_BREAKOUT_LONG, 3, rsi_desc, "數據異動"))
-    if category == "short_close":
-        return _apply_retail_funding(apply_24h("📊 異動", ZONE_DIP, 3, rsi_desc, "空頭平倉→摸底區"))
-    if category == "long_close":
-        return _apply_retail_funding(apply_24h("📊 異動", ZONE_TOP, 3, rsi_desc, "多頭平倉→摸頭區"))
-    return _apply_retail_funding(apply_24h("📊 異動", ZONE_DIP, 2, rsi_desc, "數據異動"))
+            if oi < 0 and (funding_negative or category == "short_close"):
+                if price_chg_30m is not None and price_chg_30m > PRICE_DIP_MAX:
+                    return _apply_retail_funding(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "價漲+追多" + reason_suffix))
+                return _apply_retail_funding(apply_24h("🟢 鑽石抄底", ZONE_DIP, 5, rsi_desc, "🩸 空頭逃命+CVD買" + reason_suffix))
+
+            if oi < 0 and (funding_positive or category == "long_close"):
+                if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
+                    return _apply_retail_funding(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "價跌+追空" + reason_suffix))
+                return _apply_retail_funding(apply_24h("🔴 鑽石摸頭", ZONE_TOP, 5, rsi_desc, "⛽ 多頭止盈+CVD賣" + reason_suffix))
+
+            if oi > 0 and category in ("long_open", "short_close"):
+                return _apply_retail_funding(apply_24h("🟢 順勢追多", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 量價齊揚" + reason_suffix))
+
+            if oi > 0 and category == "short_open":
+                return _apply_retail_funding(apply_24h("🔴 順勢追空", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "📉 量價齊跌" + reason_suffix))
+
+            zone = ZONE_BREAKOUT_LONG if oi > 0 else ZONE_BREAKOUT_SHORT
+            return _apply_retail_funding(apply_24h("🟡 順勢觀察", zone, 5, rsi_desc, "🚀 主力共識盤" + reason_suffix))
+
+        else:
+            # [降級 4 星]：OI 很大 但 CVD 背離 = 激戰/轉折盤
+            downgrade_reason = "⚠️ 持倉大增但CVD背離 (多空激戰)"
+            if oi > 0:
+                zone = ZONE_BREAKOUT_LONG if category in ("long_open", "short_close") else ZONE_BREAKOUT_SHORT
+                return _apply_retail_funding(apply_24h("🟡 激戰博弈", zone, 4, rsi_desc, downgrade_reason))
+            else:
+                zone = ZONE_DIP if category == "short_close" else ZONE_TOP
+                return _apply_retail_funding(apply_24h("🟡 激戰博弈", zone, 4, rsi_desc, downgrade_reason))
+
+    # === 4 星邏輯 (OI 中等 或 5 星降級) ===
+
+    if oi > 0 and (funding_negative or category in ("long_open", "short_close")):
+        return _apply_retail_funding(apply_24h("🟢 試單做多", ZONE_BREAKOUT_LONG, 4, rsi_desc, "持倉增加 (觀察動能)"))
+
+    if oi < 0 and (funding_positive or category == "long_close"):
+        if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
+            return _apply_retail_funding(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 4, rsi_desc, "價已跌→追空"))
+        return _apply_retail_funding(apply_24h("🔴 偏空過熱", ZONE_TOP, 4, rsi_desc, "多頭平倉 (摸頭試單)"))
+
+    if oi < 0 and (funding_negative or category == "short_close"):
+        if price_chg_30m is not None and price_chg_30m > PRICE_DIP_MAX:
+            return _apply_retail_funding(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 4, rsi_desc, "價已漲→追多"))
+        return _apply_retail_funding(apply_24h("🟢 抄底做多", ZONE_DIP, 4, rsi_desc, "空頭平倉 (摸底試單)"))
+
+    if oi > 0:
+        zone = ZONE_BREAKOUT_LONG if category in ("long_open", "short_close") else ZONE_BREAKOUT_SHORT
+        return _apply_retail_funding(apply_24h("🟡 順勢觀察", zone, 4, rsi_desc, "持倉異動順勢"))
+
+    if oi < 0:
+        if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
+            return _apply_retail_funding(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 4, rsi_desc, "價跌→追空"))
+        return _apply_retail_funding(apply_24h("🔴 摸頭做空", ZONE_TOP, 4, rsi_desc, "持倉減 (偏空)"))
+
+    return None
 
 
 def build_report_message_tiered(
@@ -2372,10 +2356,11 @@ def build_report_message_tiered(
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
-    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool):
+    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool):
         """
-        SL/TP 風控版：波動率阻尼 + 止損 10% 硬上限 + 做空 TP 負值防護。
-        回傳 (sl_val, tp1_val, tp2_val, tp3_val, sl_capped)。
+        SL/TP 風控版 (v5.0)：針對不同等級給予不同盈虧比 (P/L)
+        - S+/S級 (共識/順勢)：標準止損 (2.0 ATR)，追求高勝率，不輕易被洗。
+        - A級 (轉折/樂透)：極窄止損 (1.2 ATR)，追求高盈虧比 (1:5)，錯了快跑。
         """
         def fmt_p(p):
             if p is None or (isinstance(p, float) and (p != p)) or p <= 0:
@@ -2393,30 +2378,35 @@ def build_report_message_tiered(
         if price is None or price <= 0:
             return "—", "—", "—", "—", False
 
-        TP1_RATIO = 1.0
-        TP2_RATIO = 2.0
-        TP3_RATIO = 4.0
-        MAX_SL_PERCENT = 0.10   # 強制止損不超過 10%
-        SHORT_TP_FLOOR_RATIO = 0.01  # 做空 TP 不得低於現價 1%（避免負數）
+        # === 核心差異化參數 ===
+        if is_elite or stars >= 5:
+            # S+/S級：穩健順勢
+            risk_multiplier = 2.0    # 止損寬度：標準
+            tp_ratios = [1.0, 2.0, 3.5]  # TP1保本, TP2獲利, TP3趨勢
+        else:
+            # A級：轉折樂透 (以小博大)
+            risk_multiplier = 1.2    # 止損寬度：極窄
+            tp_ratios = [1.5, 3.0, 5.0]  # TP1脫離成本, TP2大賺, TP3暴擊
 
+        # 波動率過大時的額外保護
         if atr is not None and isinstance(atr, (int, float)) and atr > 0:
-            # 波動率阻尼：依 atr/price 動態收緊 multiplier
             volatility_pct = atr / price
-            if volatility_pct <= 0.02:
-                risk_multiplier = 2.5
-            elif volatility_pct <= 0.05:
-                risk_multiplier = 2.0
-            else:
-                risk_multiplier = 1.5
+            if volatility_pct > 0.05:  # 波動 > 5% 強制收緊
+                risk_multiplier *= 0.8
+
             sl_dist = atr * risk_multiplier
-            # 強制 10% 上限
+
+            # 強制 10% 硬上限
+            MAX_SL_PERCENT = 0.10
             sl_capped = False
             if sl_dist > price * MAX_SL_PERCENT:
                 sl_dist = price * MAX_SL_PERCENT
                 sl_capped = True
-            tp1_dist = sl_dist * TP1_RATIO
-            tp2_dist = sl_dist * TP2_RATIO
-            tp3_dist = sl_dist * TP3_RATIO
+
+            tp1_dist = sl_dist * tp_ratios[0]
+            tp2_dist = sl_dist * tp_ratios[1]
+            tp3_dist = sl_dist * tp_ratios[2]
+
             if is_long:
                 sl_price = price - sl_dist
                 tp1_price = price + tp1_dist
@@ -2427,42 +2417,21 @@ def build_report_message_tiered(
                 tp1_price = price - tp1_dist
                 tp2_price = price - tp2_dist
                 tp3_price = price - tp3_dist
-                # 做空 TP 負值防護：不得 <= 0
-                floor = price * SHORT_TP_FLOOR_RATIO
+                # 做空 TP 負值防護
+                floor = price * 0.01
                 if tp1_price <= 0:
                     tp1_price = floor
                 if tp2_price <= 0:
                     tp2_price = floor
                 if tp3_price <= 0:
                     tp3_price = floor
+
             if sl_price <= 0 and is_long:
                 sl_price = price * 0.95
+
             return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), fmt_p(tp3_price), sl_capped
 
-        # Fallback：無 ATR 時固定百分比，且止損不超過 10%
-        if zone in (ZONE_DIP, ZONE_TOP):
-            sl_pct, tp1_pct, tp2_pct, tp3_pct = 0.045, 0.045, 0.09, 0.18
-        else:
-            sl_pct, tp1_pct, tp2_pct, tp3_pct = 0.05, 0.05, 0.10, 0.20
-        sl_pct = min(sl_pct, MAX_SL_PERCENT)
-        if is_long:
-            sl_price = price * (1 - sl_pct)
-            tp1_price = price * (1 + tp1_pct)
-            tp2_price = price * (1 + tp2_pct)
-            tp3_price = price * (1 + tp3_pct)
-        else:
-            sl_price = price * (1 + sl_pct)
-            tp1_price = price * (1 - tp1_pct)
-            tp2_price = price * (1 - tp2_pct)
-            tp3_price = price * (1 - tp3_pct)
-            floor = price * SHORT_TP_FLOOR_RATIO
-            if tp1_price <= 0:
-                tp1_price = floor
-            if tp2_price <= 0:
-                tp2_price = floor
-            if tp3_price <= 0:
-                tp3_price = floor
-        return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), fmt_p(tp3_price), False
+        return "—", "—", "—", "—", False
 
     def _is_bull(x: Dict) -> bool:
         sig = x.get("signal_label") or ""
@@ -2561,8 +2530,22 @@ def build_report_message_tiered(
         ]),
     ]
 
+    # 統計 S+/S/A 數量
+    count_s_plus = sum(1 for x in enriched_items if _is_elite(x))
+    count_s = sum(1 for x in enriched_items if (x.get("stars") or 0) == 5 and not _is_elite(x))
+    count_a = sum(1 for x in enriched_items if (x.get("stars") or 0) == 4)
+
+    stats_parts = []
+    if count_s_plus > 0:
+        stats_parts.append(f"✈️{count_s_plus}")
+    if count_s > 0:
+        stats_parts.append(f"🚅{count_s}")
+    if count_a > 0:
+        stats_parts.append(f"👻{count_a}")
+    stats_str = " ".join(stats_parts) or "😴 無訊號"
+
     lines = []
-    lines.append("🎯 *【傑克持倉異常狙擊鏡】*")
+    lines.append(f"🎯 *{stats_str}｜傑克狙擊鏡*")
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
     lines.append("━━━━━━━━━━━━━━━━━━━")
 
@@ -2592,20 +2575,44 @@ def build_report_message_tiered(
                 is_bull = _is_bull(x)
                 dir_emoji = "🟢" if is_bull else "🔴"
                 coin_url = f"https://www.coinglass.com/zh-TW/currencies/{sym}"
-                star_display = "💎" if _is_elite(x) else star_str(stars)
-                # 策略白話：訊號強度 + 建議倉位
-                if _is_elite(x):
-                    strength, pos_rec = "訊號很強，可重倉", "建議 7%"
+                # S+/S/A 分級顯示邏輯（v5.1：頭等機艙 / 穩健列車 / 賭鬼樂透）
+                is_elite_sig = _is_elite(x)
+                if is_elite_sig:
+                    star_display = "✈️【S+級｜頭等機艙】"
                 elif stars >= 5:
-                    strength, pos_rec = "訊號不錯，標準倉", "建議 5%"
+                    star_display = "🚅【S級 ｜穩健列車】"
                 else:
-                    strength, pos_rec = "先觀察，小倉試單", "建議 2.5%"
-                # v3.0 波動率減倉：ATR/現價 > 2% 建議減半
+                    star_display = "👻【A級 ｜賭鬼樂透】"
+
+                # 策略與風控建議 (v5.0)
                 atr_val, current_price = x.get("atr"), x.get("current_price")
-                if atr_val is not None and current_price is not None and current_price > 0:
-                    volatility_pct = (atr_val / current_price) * 100
-                    if volatility_pct > 2.0:
-                        pos_rec = "波動大，倉位減半 (2.5%)"
+                is_high_vol = False
+                vol_desc = ""
+                if atr_val and current_price and (atr_val / current_price) * 100 > 2.0:
+                    is_high_vol = True
+                    vol_desc = "(波動大⚠️)"
+
+                if is_elite_sig:  # S+
+                    if is_high_vol:
+                        strength, pos_rec = "頭等艙但波動大", "標準倉 5% (已風控)"
+                    else:
+                        strength, pos_rec = "頭等機艙 S+", "重倉 7% (信心足)"
+                elif stars >= 5:  # S
+                    if is_high_vol:
+                        strength, pos_rec = "穩健但波動大", "減半倉 2.5% (防洗盤)"
+                    else:
+                        strength, pos_rec = "穩健列車 S", "標準倉 5%"
+                else:  # A (賭鬼樂透)
+                    strength = "賭鬼樂透 A (以小博大)"
+                    if is_high_vol:
+                        pos_rec = "蟻倉 1% (波動劇烈)"
+                    else:
+                        pos_rec = "試單 2.5% (窄止損)"
+
+                # 計算 SL/TP
+                sl_val, tp1_val, tp2_val, tp3_val, sl_capped = calc_sl_tp(
+                    x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig
+                )
 
                 price = x.get("current_price")
                 if price is not None and isinstance(price, (int, float)):
@@ -2614,7 +2621,6 @@ def build_report_message_tiered(
                         price_str = f"{price:.6f}"
                 else:
                     price_str = "—"
-                sl_val, tp1_val, tp2_val, tp3_val, sl_capped = calc_sl_tp(x.get("atr"), price, zone or ZONE_TOP, is_bull)
                 atr_for_log = x.get("atr")
                 cap_note = " (SL已觸發10%上限限制)" if sl_capped else ""
                 logger.info(
@@ -2622,7 +2628,7 @@ def build_report_message_tiered(
                 )
 
                 # 1. Header: Symbol, Link, Stars
-                lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_display}")
+                lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_display} {vol_desc}")
                 # 2. 策略（白話）
                 lines.append(f"🎲 策略：{strength}｜{pos_rec}")
                 flip = x.get("direction_flip")
@@ -2664,17 +2670,18 @@ def build_report_message_tiered(
                 else:
                     p24_str = " (24h: —)"
                 lines.append(f"📍 現價：`{price_str}`{p24_str}")
-                rsi_val = x.get("rsi")
-                if rsi_val is not None and isinstance(rsi_val, (int, float)):
-                    lines.append(f"📊 RSI：`{rsi_val:.0f}`")
-                lines.append(f"🛑 止損：`{sl_val}` (必設)")
-                if _is_elite(x) or (stars or 0) >= 5:
-                    lines.append(f"✅ 止盈1：`{tp1_val}` (65%)")
-                    lines.append(f"🚀 止盈2：`{tp2_val}` (25%)")
-                    lines.append(f"🎰 樂透3：`{tp3_val}` (4.0R / 10%)")
+                # 止損與止盈顯示（依 S+/S/A 分級 + R 倍數）
+                lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
+
+                if is_elite_sig or stars >= 5:
+                    lines.append(f"✅ 止盈1：`{tp1_val}` (1.0R)")
+                    lines.append(f"🚀 止盈2：`{tp2_val}` (2.0R)")
+                    if tp3_val != \"—\":
+                        lines.append(f\"🌌 止盈3：`{tp3_val}` (3.5R)\")
                 else:
-                    lines.append(f"✅ 止盈1：`{tp1_val}` (70%)")
-                    lines.append(f"🚀 止盈2：`{tp2_val}` (30%)")
+                    lines.append(f\"✅ 止盈1：`{tp1_val}` (1.5R)\")
+                    lines.append(f\"🚀 止盈2：`{tp2_val}` (3.0R)\")
+                    lines.append(f\"🎰 樂透3：`{tp3_val}` (5.0R)\")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
@@ -2687,7 +2694,7 @@ def build_report_message_tiered(
         lines.append("不要再潛水了，多多跟其他人討論交流，善的循環 ❤️")
         lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append("⚠️ *新手SOP*：5星標準買，4星減半買。嚴格止損，TP1 保本，TP2 搏暴擊。")
+    lines.append("⚠️ *操作SOP*：S級/A級標準倉，B級(博弈)減半倉。嚴格止損，TP1 保本。")
     return "\n".join(lines)
 
 
@@ -3004,15 +3011,16 @@ def fetch_position_change():
         retail_ratio = latest_point.get("global_account_long_short_ratio") if isinstance(latest_point, dict) else None
         if retail_ratio is not None and isinstance(retail_ratio, (int, float)):
             logger.info(f"散戶多空比 {clean_base}: {retail_ratio}")
-        signal_label, zone, stars, rsi_desc, reason = _classify_signal_and_tier(
+        classified = _classify_signal_and_tier(
             item, cat, tech, funding_rate,
             price_chg_24h=price_24h,
             cvd_change_1h=cvd_change_1h,
             whale_index=whale_idx,
             retail_ratio=retail_ratio,
         )
-        if (stars or 0) < 4:
-            continue  # 3 星不納入報表、不統計，省運算
+        if classified is None:
+            continue  # 未達 4 星門檻或被濾掉，直接略過
+        signal_label, zone, stars, rsi_desc, reason = classified
         rsi_val = tech.get("rsi") if tech else None
         ub_val = tech.get("ub_value") if tech else None
         lb_val = tech.get("lb_value") if tech else None
