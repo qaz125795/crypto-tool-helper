@@ -2530,10 +2530,11 @@ def build_report_message_tiered(
         ]),
     ]
 
-    # 統計 S+/S/A 數量
-    count_s_plus = sum(1 for x in enriched_items if _is_elite(x))
-    count_s = sum(1 for x in enriched_items if (x.get("stars") or 0) == 5 and not _is_elite(x))
-    count_a = sum(1 for x in enriched_items if (x.get("stars") or 0) == 4)
+    # 統計 S+/S/A 數量（僅統計實際會出現在四象限區塊中的標的）
+    eligible_items = long_dip + long_break + short_top + short_break
+    count_s_plus = sum(1 for x in eligible_items if _is_elite(x))
+    count_s = sum(1 for x in eligible_items if (x.get("stars") or 0) == 5 and not _is_elite(x))
+    count_a = sum(1 for x in eligible_items if (x.get("stars") or 0) == 4)
 
     stats_parts = []
     if count_s_plus > 0:
@@ -2547,7 +2548,7 @@ def build_report_message_tiered(
     lines = []
     lines.append(f"🎯 *{stats_str}｜傑克狙擊鏡*")
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
-    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append("━━━━━━━━━━━━━━")
 
     has_any = False
     seen_syms = set()  # 同幣只顯示一次，避免 1000PEPE 等重複出現
@@ -2644,12 +2645,20 @@ def build_report_message_tiered(
                 fr = x.get("funding_rate")
                 if fr is not None and isinstance(fr, (int, float)):
                     fr_pct = fr * 100
-                    if fr > 0.01:
+                    # 費率顯示與極端標註一致化：
+                    # - 絕對值 < FUNDING_EXTREME(0.03%)：視為中性
+                    # - 介於 EXTREME 與 1%：偏正/偏負（殺多/嘎空）
+                    # - 絕對值 > 1%：車重/軋空（極端擁擠）
+                    if fr >= 0.01:
                         fr_desc = "🔥 車重 (多頭擁擠)"
-                    elif fr < -0.01:
+                    elif fr <= -0.01:
                         fr_desc = "❄️ 軋空 (空頭擁擠)"
+                    elif fr > FUNDING_EXTREME:
+                        fr_desc = "⛽ 殺多(費率偏正)"
+                    elif fr < -FUNDING_EXTREME:
+                        fr_desc = "🔥 嘎空(費率偏負)"
                     else:
-                        fr_desc = "⚖️ 正常"
+                        fr_desc = "⚖️ 中性"
                     lines.append(f"💸 費率：`{fr_pct:.4f}%` {fr_desc}")
                 # 4. 邏輯（持倉變化白話）+ 訂單簿（白話）
                 reason = x.get("reason", "籌碼異動")
@@ -2690,8 +2699,8 @@ def build_report_message_tiered(
     if not has_any:
         lines.append("😴 暫無符合條件機會。")
         lines.append("")
-        lines.append("別看啦，沒那麼多交易機會啦！")
-        lines.append("不要再潛水了，多多跟其他人討論交流，善的循環 ❤️")
+        lines.append("看啦，沒那麼多交易機會啦！")
+        lines.append("不要再潛水了，多多出來跟其他人討論交流分享手上的持倉或是討論，善的循環 ❤️")
         lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append("⚠️ *操作SOP*：S級/A級標準倉，B級(博弈)減半倉。嚴格止損，TP1 保本。")
