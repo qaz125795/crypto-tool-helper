@@ -1,14 +1,10 @@
-# 持倉變化狙擊鏡：整點與半點各跑一次（UTC :00 與 :30）
-# ⚠️ GitHub 內建 schedule 不保證準時，可能延遲或漏跑。要「固定準時」請用外部 cron 觸發 workflow_dispatch，
-#    見 .github/持倉狙擊鏡準時觸發說明.md
+# 持倉變化狙擊鏡：僅由「外部定時服務」觸發（workflow_dispatch）
+# 不使用 GitHub schedule，改由 cron-job.org 等每 30 分鐘打 API，避免漏跑
 name: 持倉變化篩選（30分鐘循環）
 
 on:
-  schedule:
-    - cron: '0,30 * * * *'
   workflow_dispatch:
 
-# 同一時間只允許一個持倉篩選任務，避免並發時冷卻檔互相覆蓋導致同標的重複推播
 concurrency:
   group: position-change
   cancel-in-progress: true
