@@ -78,6 +78,12 @@ def fetch_ohlc_bingx(
         return pd.DataFrame()
 
 
+# BingX 黃金符號在公開 swap API 可能不存在，此時用 yfinance 代用
+# 網頁圖表連結: https://bingx.com/zh-tc/perpetual/GOLD(XAU)-USDT
+BINGX_GOLD_SYMBOLS = ("GOLD(XAU)-USDT", "GOLD-USDT", "XAU-USDT")
+YFINANCE_GOLD_SYMBOL = "GC=F"
+
+
 def fetch_ohlc(
     symbol: str,
     interval: str = "1h",
@@ -86,6 +92,7 @@ def fetch_ohlc(
 ) -> pd.DataFrame:
     """
     取得 OHLC。若 config.DATA_SOURCE=="bingx" 則走 BingX，否則 yfinance。
+    BingX 若回傳空（例如黃金合約不在公開 swap 列表），會自動改用 yfinance GC=F。
     interval: 1d, 1h, 30m, 15m, 5m
     period: 1d, 5d, 1mo（僅 yfinance 用；bingx 用 limit）
     """
@@ -93,7 +100,20 @@ def fetch_ohlc(
         limit = 150 if interval == "1h" else 100
         if period == "5d" and interval == "1h":
             limit = 120
-        return fetch_ohlc_bingx(symbol, interval=interval, limit=limit)
+        df = fetch_ohlc_bingx(symbol, interval=interval, limit=limit)
+        # BingX 黃金合約可能不在公開 API，空則改用 yfinance
+        if df.empty and symbol in BINGX_GOLD_SYMBOLS:
+            logger.warning(
+                "[數據] BingX %s 無資料（可能未支援），改用 yfinance %s",
+                symbol,
+                YFINANCE_GOLD_SYMBOL,
+            )
+            return _fetch_ohlc_yfinance(YFINANCE_GOLD_SYMBOL, interval=interval, period=period)
+        return df
+    return _fetch_ohlc_yfinance(symbol, interval=interval, period=period)
+
+
+def _fetch_ohlc_yfinance(symbol: str, interval: str = "1h", period: str = "5d") -> pd.DataFrame:
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval=interval, auto_adjust=True)
