@@ -3094,11 +3094,13 @@ def fetch_position_change():
         f"成交量二次過濾: 門檻 1M USD（<1M 排除），剩餘 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<7M)"
     )
 
-    # 同幣同向：X 小時內不重複推（時間窗口冷卻）；方向反轉仍會推並標記「訊號反轉」
-    COOLDOWN_HOURS = 4   # 同幣同向 4 小時內只推一次，避免短時間重複推同一檔
+    # 冷卻規則：只看「幣種 + 多/空」，不區分摸頭/追跌/頭等艙/列車。同一幣同方向 4h 內只推一次。
+    # 例：摸頭區報過 SPACECOIN 空 → 追跌區再出現 SPACECOIN 空也跳過；頭等艙報多 → 列車再報多也跳過。
+    COOLDOWN_HOURS = 4
     HISTORY_HOURS = 24   # 冷卻歷史保留 24 小時（供 cooldown 與 direction_flip 使用）
 
     def _item_direction(x: Dict) -> str:
+        """只回傳 多/空，冷卻不區分區塊（摸頭/追跌/頭等艙/列車等）。"""
         sig = x.get("signal_label") or ""
         return "多" if ("做多" in sig or "追多" in sig or "嘎空" in sig or "抄底" in sig) else "空"
 
@@ -3134,7 +3136,7 @@ def fetch_position_change():
     except Exception as e:
         history = []
         logger.warning(f"讀取冷卻檔失敗，本輪無冷卻限制: {e}")
-    # 冷卻集合：過去 COOLDOWN_HOURS 內推過的 (symbol, 方向) 本輪不重複報
+    # 冷卻集合：過去 COOLDOWN_HOURS 內推過的 (symbol, 多|空) 本輪不重複報（不區分哪一區）
     cooldown_set = set()
     for e in history:
         if isinstance(e, dict) and e.get("symbol") and e.get("dir"):
