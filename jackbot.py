@@ -77,7 +77,7 @@ else:
         'liquidity_radar': int(os.environ.get('TG_THREAD_LIQUIDITY_RADAR', 3)),
         'altseason_radar': int(os.environ.get('TG_THREAD_ALTSEASON_RADAR', 254)),
         'hyperliquid': int(os.environ.get('TG_THREAD_HYPERLIQUID', 252)),
-        'gold_signal': int(os.environ.get('TG_THREAD_GOLD_SIGNAL', 254)),
+        'gold_signal': int(os.environ.get('TG_THREAD_GOLD_SIGNAL') or 254),
     }
 
 # 其他配置
@@ -5955,11 +5955,11 @@ def run_gold_signal():
         )
         return
     cfg = get_config()
-    df_1h = fetch_ohlc(cfg.SYMBOL_GOLD, interval="1h", period="5d")
+    df_1h = fetch_ohlc(cfg.SYMBOL_GOLD, interval="1h", period="5d", config=cfg)
     if df_1h is None or df_1h.empty or len(df_1h) < 24:
         logger.info("黃金 1h 數據不足，本輪不推播")
         return
-    df_dxy = fetch_ohlc(cfg.SYMBOL_DXY, interval="1h", period="5d") if cfg.USE_DXY_FILTER else None
+    df_dxy = fetch_ohlc(cfg.SYMBOL_DXY, interval="1h", period="5d", config=None) if cfg.USE_DXY_FILTER else None
     signal = compute_signal(df_1h, cfg)
     if signal is None:
         logger.info("本輪無符合條件的 ORB+MA 訊號")
