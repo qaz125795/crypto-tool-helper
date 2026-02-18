@@ -15,9 +15,9 @@ class Config:
     TELEGRAM_CHAT_ID: str = ""
 
     # 數據源：yfinance | bingx（BingX 不需 API Key，公開行情）
-    # BingX 黃金永續介面: https://bingx.com/zh-tc/perpetual/GOLD(XAU)-USDT ，API 符號 XAU-USDT
+    # BingX 黃金永續介面: https://bingx.com/zh-tc/perpetual/GOLD(XAU)-USDT ，API 符號 GOLD-USDT
     DATA_SOURCE: str = "yfinance"   # 設 GOLD_DATA_SOURCE=bingx 則用 BingX
-    SYMBOL_GOLD: str = "GC=F"       # yfinance: GC=F；bingx 時 XAU-USDT（可設 GOLD_SYMBOL 覆寫）
+    SYMBOL_GOLD: str = "GC=F"       # yfinance: GC=F；bingx 時 GOLD-USDT（可設 GOLD_SYMBOL 覆寫）
     SYMBOL_DXY: str = "DX-Y.NYB"    # 美元指數（僅 yfinance）
 
     # ORB 參數 (GOLD_ORB)
@@ -53,7 +53,7 @@ class Config:
         if os.environ.get("GOLD_DATA_SOURCE", "").strip().lower() == "bingx":
             self.DATA_SOURCE = "bingx"
             if not os.environ.get("GOLD_SYMBOL"):
-                self.SYMBOL_GOLD = "XAU-USDT"  # BingX GOLD(XAU)-USDT 永續
+                self.SYMBOL_GOLD = "GOLD-USDT"  # BingX 黃金永續，API 符號為 GOLD-USDT
 
 
 def get_config() -> Config:
