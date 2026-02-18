@@ -2365,9 +2365,10 @@ def build_report_message_tiered(
         - S+/S級 (共識/順勢)：標準止損 (2.0 ATR)，追求高勝率，不輕易被洗。
         - A級 (轉折/樂透)：極窄止損 (1.2 ATR)，追求高盈虧比 (1:5)，錯了快跑。
         """
+        _na = "-"  # ASCII placeholder (avoid em-dash encoding issues on Zeabur)
         def fmt_p(p):
             if p is None or (isinstance(p, float) and (p != p)) or p <= 0:
-                return "—"
+                return _na
             if p < 0.0001:
                 return f"{p:.8f}"
             if p < 0.01:
@@ -2379,7 +2380,7 @@ def build_report_message_tiered(
             return f"{p:.2f}"
 
         if price is None or price <= 0:
-            return "—", "—", "—", "—", False
+            return _na, _na, _na, _na, False
 
         # === 核心差異化參數 ===
         if is_elite or stars >= 5:
@@ -2434,7 +2435,7 @@ def build_report_message_tiered(
 
             return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), fmt_p(tp3_price), sl_capped
 
-        return "—", "—", "—", "—", False
+        return _na, _na, _na, _na, False
 
     def _is_bull(x: Dict) -> bool:
         sig = x.get("signal_label") or ""
@@ -2680,7 +2681,7 @@ def build_report_message_tiered(
                     p24_emoji = "📈" if p24 > 0 else "📉"
                     p24_str = f" (24h: {p24:+.2f}% {p24_emoji})"
                 else:
-                    p24_str = " (24h: —)"
+                    p24_str = " (24h: -)"
                 lines.append(f"📍 現價：`{price_str}`{p24_str}")
                 # 止損與止盈顯示（依 S+/S/A 分級 + R 倍數）
                 lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
@@ -2688,7 +2689,7 @@ def build_report_message_tiered(
                 if is_elite_sig or stars >= 5:
                     lines.append(f"✅ 止盈1：`{tp1_val}` (1.0R)")
                     lines.append(f"🚀 止盈2：`{tp2_val}` (2.0R)")
-                    if tp3_val != "—":
+                    if tp3_val != "-":
                         lines.append(f"🌌 止盈3：`{tp3_val}` (3.5R)")
                 else:
                     lines.append(f"✅ 止盈1：`{tp1_val}` (1.5R)")
