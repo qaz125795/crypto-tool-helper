@@ -5962,7 +5962,7 @@ def run_gold_signal():
         from data_provider import fetch_ohlc
         from strategy_orb import compute_signal
         from filters import apply_filters
-        from telegram_sender import format_signal_message
+        from telegram_sender import format_signal_message, get_gold_chart_keyboard
         logger.info("[黃金訊號] 模組 import 成功")
     except ImportError as e:
         logger.exception("[黃金訊號] 模組 import 失敗: %s", e)
@@ -6003,7 +6003,8 @@ def run_gold_signal():
         return
     thread_id = TG_THREAD_IDS.get("gold_signal", 254)
     msg = format_signal_message(signal)
-    sent = send_telegram_message(msg, thread_id, parse_mode=None)
+    keyboard = get_gold_chart_keyboard()
+    sent = send_telegram_message(msg, thread_id, parse_mode=None, reply_markup=keyboard)
     logger.info("[黃金訊號] 推播完成 | thread_id=%s 發送結果=%s", thread_id, sent)
 
 
