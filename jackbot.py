@@ -3102,7 +3102,16 @@ def fetch_position_change():
         sig = x.get("signal_label") or ""
         return "多" if ("做多" in sig or "追多" in sig or "嘎空" in sig or "抄底" in sig) else "空"
 
-    SNIPER_COOLDOWN_FILE = DATA_DIR / "sniper_cooldown.json"
+    # 冷卻檔路徑：cron/雲端環境若 data/ 不持久，可設 SNIPER_COOLDOWN_DIR 指向同一目錄（絕對路徑）
+    _cooldown_dir = os.getenv("SNIPER_COOLDOWN_DIR")
+    if _cooldown_dir:
+        _cooldown_dir = Path(_cooldown_dir).resolve()
+        _cooldown_dir.mkdir(parents=True, exist_ok=True)
+        SNIPER_COOLDOWN_FILE = _cooldown_dir / "sniper_cooldown.json"
+    else:
+        SNIPER_COOLDOWN_FILE = (DATA_DIR / "sniper_cooldown.json").resolve()
+    _cooldown_path_abs = str(SNIPER_COOLDOWN_FILE)
+    logger.info(f"冷卻檔路徑: {_cooldown_path_abs}")
     now_ts = time.time()
     cooldown_sec = COOLDOWN_HOURS * 3600
     history_sec = HISTORY_HOURS * 3600
@@ -3118,9 +3127,10 @@ def fetch_position_change():
                     history = [{"symbol": str(p.get("symbol")), "dir": str(p.get("dir")), "ts": int(now_ts) - 3600} for p in last_round if p.get("symbol") and p.get("dir")]
                 else:
                     history = [{"symbol": str(p[0]), "dir": str(p[1]), "ts": int(now_ts) - 3600} for p in last_round if isinstance(p, (list, tuple)) and len(p) >= 2]
-            logger.info(f"冷卻檔已讀取: {SNIPER_COOLDOWN_FILE} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內同幣同向不重推")
+            _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
+            logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆 -> 同幣同向不重推")
         else:
-            logger.info(f"冷卻檔不存在，本輪無冷卻限制: {SNIPER_COOLDOWN_FILE}")
+            logger.info(f"冷卻檔不存在，本輪無冷卻限制: {_cooldown_path_abs}")
     except Exception as e:
         history = []
         logger.warning(f"讀取冷卻檔失敗，本輪無冷卻限制: {e}")
@@ -3155,6 +3165,9 @@ def fetch_position_change():
             x["direction_flip"] = None
         cooled_top.append(x)
 
+    _skipped = len(all_top) - len(cooled_top)
+    if _skipped > 0:
+        logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同向 {COOLDOWN_HOURS}h 內不重推）")
     pairs_this_run = [(x.get("symbol"), _item_direction(x)) for x in cooled_top if x.get("symbol")]
 
     msg = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
@@ -3169,7 +3182,7 @@ def fetch_position_change():
             json.dumps({"history": history}, ensure_ascii=False),
             encoding="utf-8"
         )
-        logger.info(f"冷卻檔已寫入: 本輪 {len(pairs_this_run)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h) -> {SNIPER_COOLDOWN_FILE}")
+        logger.info(f"冷卻檔已寫入: 本輪 {len(pairs_this_run)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h) -> {_cooldown_path_abs}")
     except Exception as e:
         logger.warning(f"寫入狙擊冷卻檔失敗: {e}")
 
