@@ -4,7 +4,7 @@ Telegram 訊號發送 - 法人級格式
 """
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, List
 
 import requests
 
@@ -12,9 +12,21 @@ from strategy_orb import SignalResult
 
 logger = logging.getLogger(__name__)
 
+# 對價用 K 線（Yahoo GC=F），文字連結 + TG 按鈕共用
+LINK_YAHOO_GC = "https://finance.yahoo.com/quote/GC=F"
+
+
+def get_gold_chart_keyboard() -> Dict[str, Any]:
+    """回傳 Telegram Inline Keyboard：一個「查看 Yahoo K線」按鈕。"""
+    return {
+        "inline_keyboard": [
+            [{"text": "📈 查看 Yahoo K線 (GC=F)", "url": LINK_YAHOO_GC}]
+        ]
+    }
+
 
 def format_signal_message(signal: SignalResult) -> str:
-    """專業訊號格式：多空、進場、止損(ATR)、止盈、趨勢強度、時間。"""
+    """專業訊號格式：多空、進場、止損(ATR)、止盈、趨勢強度、時間、圖表連結。"""
     side_emoji = "🟢" if signal.direction == "long" else "🔴"
     side_text = "做多" if signal.direction == "long" else "做空"
     time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -27,6 +39,8 @@ def format_signal_message(signal: SignalResult) -> str:
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 趨勢強度：{signal.trend_strength}\n"
         f"⏰ 訊號時間：{time_str}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 對價用圖表：Yahoo GC=F {LINK_YAHOO_GC}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "#XAUUSD #黃金 #訊號"
     )
