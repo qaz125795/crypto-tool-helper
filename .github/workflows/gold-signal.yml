@@ -37,6 +37,7 @@ jobs:
 
       - name: Run gold signal
         env:
+          GOLD_DATA_SOURCE: bingx
           CG_API_KEY: ${{ secrets.CG_API_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
