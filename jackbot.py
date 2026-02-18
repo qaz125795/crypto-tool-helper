@@ -5927,15 +5927,30 @@ def run_hyperliquid_monitor_once():
 
 def run_gold_signal():
     """黃金 XAUUSD 多空訊號（ORB+MA），推播到同一個 Telegram 機器人、指定 topic。"""
-    gold_bot_dir = Path(__file__).resolve().parent / "黃金策略" / "gold_signal_bot"
-    if not gold_bot_dir.is_dir():
-        logger.error("黃金訊號模組路徑不存在: %s", gold_bot_dir)
+    import sys
+    base = Path(__file__).resolve().parent
+    cwd = Path.cwd()
+    logger.info("[黃金訊號] 開始執行 | jackbot 所在目錄=%s | 當前工作目錄=%s", base, cwd)
+    # 依序嘗試：同層 gold_signal_bot（repo 根目錄）、黃金策略/gold_signal_bot、當前工作目錄
+    candidates = [
+        base / "gold_signal_bot",
+        base / "黃金策略" / "gold_signal_bot",
+        cwd / "gold_signal_bot",
+    ]
+    gold_bot_dir = None
+    for p in candidates:
+        if p.is_dir():
+            gold_bot_dir = p
+            logger.info("[黃金訊號] 使用模組路徑: %s", gold_bot_dir)
+            break
+        logger.info("[黃金訊號] 路徑不存在，跳過: %s", p)
+    if gold_bot_dir is None:
+        logger.error("[黃金訊號] 所有候選路徑皆不存在: %s", candidates)
         send_telegram_message(
-            "⚠️ 黃金訊號：找不到 黃金策略/gold_signal_bot 目錄，請確認專案結構。",
+            "⚠️ 黃金訊號：找不到 gold_signal_bot 目錄（已嘗試 黃金策略/gold_signal_bot 與 gold_signal_bot），請確認專案結構並部署該資料夾。",
             TG_THREAD_IDS.get("gold_signal", 254),
         )
         return
-    import sys
     _path_insert = str(gold_bot_dir)
     if _path_insert not in sys.path:
         sys.path.insert(0, _path_insert)
@@ -5948,33 +5963,48 @@ def run_gold_signal():
         from strategy_orb import compute_signal
         from filters import apply_filters
         from telegram_sender import format_signal_message
+        logger.info("[黃金訊號] 模組 import 成功")
     except ImportError as e:
-        logger.exception("黃金訊號模組 import 失敗: %s", e)
+        logger.exception("[黃金訊號] 模組 import 失敗: %s", e)
         send_telegram_message(
             f"⚠️ 黃金訊號：依賴缺失（請確認已安裝 yfinance）。{str(e)}",
             TG_THREAD_IDS.get("gold_signal", 254),
         )
         return
     cfg = get_config()
+    data_src = getattr(cfg, "DATA_SOURCE", "yfinance")
+    symbol = getattr(cfg, "SYMBOL_GOLD", "GC=F")
+    logger.info("[黃金訊號] 數據源=%s 符號=%s 開始拉取 1h K 線", data_src, symbol)
     df_1h = fetch_ohlc(cfg.SYMBOL_GOLD, interval="1h", period="5d", config=cfg)
-    if df_1h is None or df_1h.empty or len(df_1h) < 24:
-        logger.info("黃金 1h 數據不足，本輪不推播")
+    if df_1h is None or df_1h.empty:
+        logger.warning("[黃金訊號] 黃金 1h 數據為空 (df is None=%s, empty=%s)，本輪不推播",
+                      df_1h is None, df_1h.empty if df_1h is not None else "N/A")
         return
-    df_dxy = fetch_ohlc(cfg.SYMBOL_DXY, interval="1h", period="5d", config=None) if cfg.USE_DXY_FILTER else None
+    n_rows = len(df_1h)
+    if n_rows < 24:
+        logger.warning("[黃金訊號] 黃金 1h 數據不足 24 根 (目前 %s 根)，本輪不推播", n_rows)
+        return
+    logger.info("[黃金訊號] 黃金 1h 數據 OK，共 %s 根 | 時間範圍: %s ~ %s",
+                n_rows, df_1h.index.min() if hasattr(df_1h.index, 'min') and len(df_1h) else "N/A", df_1h.index.max() if hasattr(df_1h.index, 'max') and len(df_1h) else "N/A")
+    df_dxy = None
+    if cfg.USE_DXY_FILTER:
+        df_dxy = fetch_ohlc(cfg.SYMBOL_DXY, interval="1h", period="5d", config=None)
+        logger.info("[黃金訊號] DXY 濾網用數據: %s 根", len(df_dxy) if df_dxy is not None and not df_dxy.empty else 0)
     signal = compute_signal(df_1h, cfg)
     if signal is None:
-        logger.info("本輪無符合條件的 ORB+MA 訊號")
+        logger.info("[黃金訊號] 本輪無符合條件的 ORB+MA 訊號，跳過推播")
         return
+    logger.info("[黃金訊號] 取得訊號: 方向=%s 進場=%s", signal.direction, signal.entry)
     ok, reason = apply_filters(
         signal.direction, cfg, df_1h, df_dxy=df_dxy, now=datetime.now(timezone.utc)
     )
     if not ok:
-        logger.info("黃金訊號被濾網拒絕: %s", reason)
+        logger.info("[黃金訊號] 訊號被濾網拒絕: %s", reason)
         return
     thread_id = TG_THREAD_IDS.get("gold_signal", 254)
     msg = format_signal_message(signal)
-    send_telegram_message(msg, thread_id, parse_mode=None)
-    logger.info("黃金訊號已推播至 thread_id=%s", thread_id)
+    sent = send_telegram_message(msg, thread_id, parse_mode=None)
+    logger.info("[黃金訊號] 推播完成 | thread_id=%s 發送結果=%s", thread_id, sent)
 
 
 # ==================== 主程序 ====================
