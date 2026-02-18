@@ -63,6 +63,7 @@ if thread_ids_str:
             'liquidity_radar': 3,
             'altseason_radar': 254,
             'hyperliquid': 252,
+            'gold_signal': 254,  # 黃金 XAUUSD 訊號（可改為專用 topic 的 thread_id）
         }
 else:
     TG_THREAD_IDS = {
@@ -76,6 +77,7 @@ else:
         'liquidity_radar': int(os.environ.get('TG_THREAD_LIQUIDITY_RADAR', 3)),
         'altseason_radar': int(os.environ.get('TG_THREAD_ALTSEASON_RADAR', 254)),
         'hyperliquid': int(os.environ.get('TG_THREAD_HYPERLIQUID', 252)),
+        'gold_signal': int(os.environ.get('TG_THREAD_GOLD_SIGNAL', 254)),
     }
 
 # 其他配置
@@ -101,9 +103,10 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
         "chat_id": CHAT_ID,
         "message_thread_id": thread_id,
         "text": text,
-        "parse_mode": parse_mode,
         "disable_web_page_preview": True
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
@@ -5921,6 +5924,58 @@ def run_hyperliquid_monitor_once():
     logger.info("Hyperliquid 聰明錢監控推播完成")
 
 
+def run_gold_signal():
+    """黃金 XAUUSD 多空訊號（ORB+MA），推播到同一個 Telegram 機器人、指定 topic。"""
+    gold_bot_dir = Path(__file__).resolve().parent / "黃金策略" / "gold_signal_bot"
+    if not gold_bot_dir.is_dir():
+        logger.error("黃金訊號模組路徑不存在: %s", gold_bot_dir)
+        send_telegram_message(
+            "⚠️ 黃金訊號：找不到 黃金策略/gold_signal_bot 目錄，請確認專案結構。",
+            TG_THREAD_IDS.get("gold_signal", 254),
+        )
+        return
+    import sys
+    _path_insert = str(gold_bot_dir)
+    if _path_insert not in sys.path:
+        sys.path.insert(0, _path_insert)
+    try:
+        os.environ["TELEGRAM_BOT_TOKEN"] = os.environ.get("TG_TOKEN", "") or (TG_TOKEN or "")
+        os.environ["TELEGRAM_CHAT_ID"] = os.environ.get("CHAT_ID", "") or (CHAT_ID or "")
+        from datetime import datetime, timezone
+        from config import get_config
+        from data_provider import fetch_ohlc
+        from strategy_orb import compute_signal
+        from filters import apply_filters
+        from telegram_sender import format_signal_message
+    except ImportError as e:
+        logger.exception("黃金訊號模組 import 失敗: %s", e)
+        send_telegram_message(
+            f"⚠️ 黃金訊號：依賴缺失（請確認已安裝 yfinance）。{str(e)}",
+            TG_THREAD_IDS.get("gold_signal", 254),
+        )
+        return
+    cfg = get_config()
+    df_1h = fetch_ohlc(cfg.SYMBOL_GOLD, interval="1h", period="5d")
+    if df_1h is None or df_1h.empty or len(df_1h) < 24:
+        logger.info("黃金 1h 數據不足，本輪不推播")
+        return
+    df_dxy = fetch_ohlc(cfg.SYMBOL_DXY, interval="1h", period="5d") if cfg.USE_DXY_FILTER else None
+    signal = compute_signal(df_1h, cfg)
+    if signal is None:
+        logger.info("本輪無符合條件的 ORB+MA 訊號")
+        return
+    ok, reason = apply_filters(
+        signal.direction, cfg, df_1h, df_dxy=df_dxy, now=datetime.now(timezone.utc)
+    )
+    if not ok:
+        logger.info("黃金訊號被濾網拒絕: %s", reason)
+        return
+    thread_id = TG_THREAD_IDS.get("gold_signal", 254)
+    msg = format_signal_message(signal)
+    send_telegram_message(msg, thread_id, parse_mode=None)
+    logger.info("黃金訊號已推播至 thread_id=%s", thread_id)
+
+
 # ==================== 主程序 ====================
 
 if __name__ == "__main__":
@@ -5957,6 +6012,8 @@ if __name__ == "__main__":
             run_altseason_radar_once()
         elif function_name == "hyperliquid":
             run_hyperliquid_monitor_once()
+        elif function_name == "gold_signal":
+            run_gold_signal()
         else:
             print("可用的功能:")
             print("  sector_ranking   - 主流板塊排行榜推播")
@@ -5971,6 +6028,7 @@ if __name__ == "__main__":
             print("  liquidity_radar       - 流動性獵取雷達（極端爆倉彙整）")
             print("  altseason_radar       - 山寨爆發雷達（Altseason + RSI + Buy Ratio）")
             print("  hyperliquid           - Hyperliquid 聰明錢監控")
+            print("  gold_signal           - 黃金 XAUUSD 多空訊號（ORB+MA）")
     else:
         print("請指定要執行的功能，例如: python jackbot.py sector_ranking")
 
