@@ -1,0 +1,46 @@
+# 黃金 XAUUSD 多空訊號（與幣圈機器人同一 Bot，可改用 cron 觸發）
+name: 黃金訊號
+
+on:
+  schedule:
+    # 每小時整點 (UTC) 執行，可改為 0 8,14,20 * * * 僅美盤前後
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: gold-signal
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run gold signal
+        env:
+          CG_API_KEY: ${{ secrets.CG_API_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
+          TG_THREAD_GOLD_SIGNAL: ${{ secrets.TG_THREAD_GOLD_SIGNAL }}
+        run: |
+          timeout 300 python jackbot.py gold_signal || exit 0
+          echo "黃金訊號任務完成"
