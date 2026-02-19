@@ -231,6 +231,7 @@ def run_orb_signal(
     """
     day_df = get_trading_day_candles_1h(df_1h, session_start_hour_utc)
     if day_df.empty or len(day_df) < 2:
+        logger.info("[ORB] 當日 K 棒不足（需至少 2 根，目前 %s 根）", len(day_df) if not day_df.empty else 0)
         return SIGNAL_NONE, None, None, RangeState()
 
     if "ATR" not in day_df.columns:
@@ -318,6 +319,7 @@ def compute_signal(
         trades_per_day=config.MAX_TRADES_PER_DAY,
     )
     if signal == SIGNAL_NONE:
+        logger.info("[ORB] 當日無突破訊號（區間內未達突破條件或已達每日次數上限）")
         return None
 
     last = df_1h.iloc[-1]
@@ -325,16 +327,19 @@ def compute_signal(
     ma = last.get("MA") or last.get("SMA_100")
     atr_val = float(last["ATR"])
     if pd.isna(atr_val) or atr_val <= 0:
+        logger.warning("[ORB] ATR 無效，跳過本輪")
         return None
 
     # MA 趨勢濾網 (GOLD_ORB: 多單僅在 close > MA100)
     if signal == SIGNAL_LONG:
         if ma is not None and not pd.isna(ma) and close <= float(ma):
+            logger.info("[ORB] 有多單突破但 MA 濾網未過（收盤 %.2f <= MA100 %.2f）", close, float(ma))
             return None
         direction = "long"
         trend_strength = "多頭 (收盤 > MA100)"
     else:
         if ma is not None and not pd.isna(ma) and close >= float(ma):
+            logger.info("[ORB] 有空單突破但 MA 濾網未過（收盤 %.2f >= MA100 %.2f）", close, float(ma))
             return None
         direction = "short"
         trend_strength = "空頭 (收盤 < MA100)"
