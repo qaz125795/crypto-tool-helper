@@ -1,9 +1,10 @@
-# 黃金 XAUUSD 多空訊號（與幣圈機器人同一 Bot，可改用 cron 觸發）
+# 黃金 XAUUSD 多空訊號（與幣圈機器人同一 Bot）
+# 說明：GitHub Actions 排程約每小時整點 (UTC) 觸發，實際執行可能延遲數分鐘屬正常
 name: 黃金訊號
 
 on:
   schedule:
-    # 每小時整點 (UTC) 執行，可改為 0 8,14,20 * * * 僅美盤前後
+    # 每小時整點 (UTC)，實際觸發時間可能延遲約 0–15 分鐘
     - cron: '0 * * * *'
   workflow_dispatch:
 
@@ -22,6 +23,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Log run time (UTC)
+        run: echo "觸發時間 (UTC): $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 
       - name: Set up Python
         uses: actions/setup-python@v5
