@@ -36,13 +36,13 @@ class Config:
     MIN_RR_RATIO: float = 2.0        # 最少 1:2
     RISK_PERCENT_PER_TRADE: float = 1.0
 
-    # 濾網開關（已放寬時段：12–22 UTC，較易出訊號）
-    USE_SESSION_FILTER: bool = True   # 僅美盤/歐盤重疊時段
-    SESSION_START_UTC: int = 12      # 12:00 UTC 起（原 13，提早 1h）
-    SESSION_END_UTC: int = 22        # 22:00 UTC 止（原 21，延後 1h）
+    # 濾網開關（已關閉時段與 DXY，全天只看 ORB+MA）
+    USE_SESSION_FILTER: bool = False  # 關閉：全天 24h 都可出訊號
+    SESSION_START_UTC: int = 12      # 僅在 USE_SESSION_FILTER=True 時使用
+    SESSION_END_UTC: int = 22
     USE_VOLATILITY_FILTER: bool = True  # BB 寬度 / ATR 過低不交易
     VOLATILITY_ATR_PERCENT_MIN: float = 0.001  # ATR/Close 最低門檻
-    USE_DXY_FILTER: bool = True      # 美元指數負相關
+    USE_DXY_FILTER: bool = False     # 關閉：不因美元指數擋單，只看黃金 ORB+MA
     DXY_LOOKBACK: int = 5            # DXY 短期均線週期
 
     def __post_init__(self):
