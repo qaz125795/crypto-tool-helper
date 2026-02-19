@@ -20,9 +20,9 @@ class Config:
     SYMBOL_GOLD: str = "GC=F"       # yfinance: GC=F；bingx 時 GOLD(XAU)-USDT（可設 GOLD_SYMBOL 覆寫）
     SYMBOL_DXY: str = "DX-Y.NYB"    # 美元指數（僅 yfinance）
 
-    # ORB 參數 (GOLD_ORB)
+    # ORB 參數 (GOLD_ORB)（已放寬：區間內 2 根 K 即確立，較易出訊號）
     SESSION_START_HOUR_UTC: int = 1   # 交易日起始小時 (UTC)，XAUUSD 約 1:02 server
-    CANDLE_COMPOSITION: int = 3       # 區間內至少幾根 K 才視為「確立」
+    CANDLE_COMPOSITION: int = 2       # 區間內至少幾根 K 才視為「確立」（原 3，改 2 較寬鬆）
     MAX_TRADES_PER_DAY: int = 2       # 每日最多 1 多 1 空
 
     # 趨勢濾網 (GOLD_ORB MA100 + Gold-analysis SMA40/100)
@@ -36,10 +36,10 @@ class Config:
     MIN_RR_RATIO: float = 2.0        # 最少 1:2
     RISK_PERCENT_PER_TRADE: float = 1.0
 
-    # 濾網開關
+    # 濾網開關（已放寬時段：12–22 UTC，較易出訊號）
     USE_SESSION_FILTER: bool = True   # 僅美盤/歐盤重疊時段
-    SESSION_START_UTC: int = 13      # 13:00 UTC = 美盤開
-    SESSION_END_UTC: int = 21        # 21:00 UTC
+    SESSION_START_UTC: int = 12      # 12:00 UTC 起（原 13，提早 1h）
+    SESSION_END_UTC: int = 22        # 22:00 UTC 止（原 21，延後 1h）
     USE_VOLATILITY_FILTER: bool = True  # BB 寬度 / ATR 過低不交易
     VOLATILITY_ATR_PERCENT_MIN: float = 0.001  # ATR/Close 最低門檻
     USE_DXY_FILTER: bool = True      # 美元指數負相關
