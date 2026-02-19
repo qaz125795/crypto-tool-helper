@@ -203,14 +203,19 @@ def get_trading_day_candles_1h(
 ) -> pd.DataFrame:
     """
     從 1h DataFrame 切出「當前交易日的 K 棒」。
-    交易日：session_start_hour_utc 為起點到下一日同時間。
+    交易日：session_start_hour_utc (UTC) 為起點到下一日同時間。
+    一律在 UTC 下計算，避免 yfinance 美東時區造成當日只篩到 1 根。
     """
     if df.empty or not isinstance(df.index, pd.DatetimeIndex):
         return pd.DataFrame()
-    df = df.sort_index()
-    df = df.tz_localize(None) if df.index.tz is not None else df
+    df = df.sort_index().copy()
+    # 轉成 UTC 再切交易日，否則美東等時區會讓「當日」只有 1 根
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("America/New_York", ambiguous="infer").tz_convert("UTC")
+    else:
+        df.index = df.index.tz_convert("UTC")
     now = df.index[-1]
-    # 今日交易日起點
+    # 今日交易日起點 (UTC)
     day_start = now.normalize().replace(hour=session_start_hour_utc, minute=0, second=0, microsecond=0)
     if now.hour < session_start_hour_utc:
         day_start = day_start - pd.Timedelta(days=1)
