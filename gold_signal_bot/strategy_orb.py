@@ -317,6 +317,37 @@ def compute_signal(
         sma_fast=config.SMA_FAST,
         sma_slow=config.SMA_SLOW,
     )
+    # 調試用：記錄當日 K 線與關鍵價位，方便對照外部圖表
+    try:
+        day_df_dbg = get_trading_day_candles_1h(df_1h, config.SESSION_START_HOUR_UTC)
+        if day_df_dbg is None or day_df_dbg.empty:
+            logger.info("[ORB-DEBUG] 當日K數=0（get_trading_day_candles_1h 為空）")
+        else:
+            first = day_df_dbg.iloc[0]
+            last = day_df_dbg.iloc[-1]
+            hi_today = float(day_df_dbg["High"].max())
+            lo_today = float(day_df_dbg["Low"].min())
+            close_last = float(last["Close"])
+            ma_dbg = last.get("MA") or last.get("SMA_100")
+            atr_dbg = last.get("ATR")
+            ma_dbg_val = float(ma_dbg) if ma_dbg is not None and not pd.isna(ma_dbg) else float("nan")
+            atr_dbg_val = float(atr_dbg) if atr_dbg is not None and not pd.isna(atr_dbg) else float("nan")
+            logger.info(
+                "[ORB-DEBUG] 當日K數=%s 起點=%s 首根OHL=%.2f/%.2f/%.2f/%.2f 今日高=%.2f 低=%.2f 最新收盤=%.2f MA100=%.2f ATR=%.2f",
+                len(day_df_dbg),
+                day_df_dbg.index[0],
+                float(first["Open"]),
+                float(first["High"]),
+                float(first["Low"]),
+                float(first["Close"]),
+                hi_today,
+                lo_today,
+                close_last,
+                ma_dbg_val,
+                atr_dbg_val,
+            )
+    except Exception as e:
+        logger.warning("[ORB-DEBUG] 當日 K 線紀錄失敗: %s", e)
     signal, range_high, range_low, _ = run_orb_signal(
         df_1h,
         session_start_hour_utc=config.SESSION_START_HOUR_UTC,
