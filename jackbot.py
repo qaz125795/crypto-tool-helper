@@ -2877,8 +2877,8 @@ def fetch_position_change():
         f"🔍 智慧過濾: 從 {len(target_symbols_data)} 個幣種中篩選出 {len(active_symbols)} 個活躍標的 "
         f"(價格 30m >= {PRICE_GATEKEEPER}%) 進行 30m OI 檢查..."
     )
-    # 成交量預篩：3M 以下完全不列入，只對剩餘標的跑 OI（省時且避免低流動性雜訊）
-    VOLUME_PREFILTER_MIN_USD = 3_000_000
+    # 成交量預篩：4M 以下不跑 OI（省時 + 與推播門檻 2M 搭配，只推流動性足夠的）
+    VOLUME_PREFILTER_MIN_USD = 4_000_000
     active_above_volume = []
     vol_check_no_snap = 0
     vol_check_no_vol = 0
@@ -2905,8 +2905,8 @@ def fetch_position_change():
             continue
         active_above_volume.append(coin)
     logger.info(
-        f"📊 成交量預篩: 門檻 24h 成交額 ≥ {VOLUME_PREFILTER_MIN_USD/1e6:.0f}M USD，"
-        f"通過 {len(active_above_volume)} 個、刷掉 {vol_check_no_snap + vol_check_no_vol + vol_check_below} 個 (無ticker:{vol_check_no_snap} 無成交額:{vol_check_no_vol} <3M:{vol_check_below})，"
+        f"📊 成交量預篩: 門檻 24h 成交額 ≥ {VOLUME_PREFILTER_MIN_USD/1e6:.0f}M USD（<{VOLUME_PREFILTER_MIN_USD/1e6:.0f}M 不跑 OI），"
+        f"通過 {len(active_above_volume)} 個、刷掉 {vol_check_no_snap + vol_check_no_vol + vol_check_below} 個 (無ticker:{vol_check_no_snap} 無成交額:{vol_check_no_vol} <{VOLUME_PREFILTER_MIN_USD/1e6:.0f}M:{vol_check_below})，"
         f"剩餘 {len(active_above_volume)} 個進入 OI 檢查"
     )
     # 為在 16 分鐘內完成，OI 階段僅處理前 320 個（約 8 分鐘內跑完）
@@ -3057,8 +3057,8 @@ def fetch_position_change():
             f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} 布林上={ub_val} 布林下={lb_val} ATR={atr_val} 鯨魚指數={whale_idx} | {reason}"
         )
 
-    # 用 BingX ticker 一次取現價 + 24h 成交額；5 星僅允許 >7M，否則降為 4 星；<10M 標示成交量極低
-    VOLUME_HARD_MIN_USD = 1_000_000    # <1M 直接排除
+    # 用 BingX ticker 一次取現價 + 24h 成交額。BingX「最大持倉價值」為帳戶設定無法 API 取得，以流動性門檻替代：低於此不推（約 999U 倉位才值得進的市場）
+    VOLUME_HARD_MIN_USD = 2_000_000    # 24h 成交額 <2M 不推（原 1M），減少極低量標的 + 運算
     VOLUME_SOFT_MIN_USD = 7_000_000   # <7M 標示「成交量極低 小心滑價」
     VOLUME_5STAR_MIN_USD = 7_000_000   # 5 星僅允許成交量大於 7M，≤7M 一律降為 4 星
     filtered_top = []
@@ -3095,7 +3095,7 @@ def fetch_position_change():
     all_top = filtered_top
     low_liq_count = sum(1 for x in all_top if x.get("low_liquidity_warning"))
     logger.info(
-        f"成交量二次過濾: 門檻 1M USD（<1M 排除），剩餘 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<7M)"
+        f"成交量二次過濾: 門檻 {VOLUME_HARD_MIN_USD/1e6:.1f}M USD（<{VOLUME_HARD_MIN_USD/1e6:.1f}M 排除，約 999U 倉位才推），剩餘 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<7M)"
     )
 
     # 冷卻規則：只看「幣種 + 多/空」，不區分摸頭/追跌/頭等艙/列車。同一幣同方向 4h 內只推一次。
