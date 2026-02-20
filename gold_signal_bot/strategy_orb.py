@@ -167,11 +167,10 @@ def _get_buy_sell_signal(
     composition: int,
     trades_per_day: int,
 ) -> int:
-    """多：區間上破 + 陽線；空：區間下破 + 陰線。"""
-    # 改為 >= 讓「區間內 N 根」達標後下一根就能出訊號（原 > 導致當日僅 2 根時永遠不出）
+    """多：收盤突破區間上緣；空：收盤突破區間下緣（不要求 K 棒紅綠，以突破為準）。"""
+    # 改為 >= 讓「區間內 N 根」達標後下一根就能出訊號
     if (
         range_state.candle_counter_resistance >= composition
-        and prev.direction is True
         and prev.body_high > range_state.wick_high
         and range_state.trade_today
         and not range_state.long_position_flag
@@ -184,7 +183,6 @@ def _get_buy_sell_signal(
 
     if (
         range_state.candle_counter_support >= composition
-        and prev.direction is False
         and prev.body_low < range_state.wick_low
         and range_state.trade_today
         and not range_state.short_position_flag
@@ -283,6 +281,11 @@ def run_orb_signal(
             range_high = state.wick_high
             range_low = state.wick_low
 
+    # 無訊號時也帶回實際用於判斷的區間，方便 log 對照
+    if range_high is None and state.wick_high > 0:
+        range_high = state.wick_high
+    if range_low is None and state.wick_low > 0:
+        range_low = state.wick_low
     return last_signal, range_high, range_low, state
 
 
