@@ -2152,10 +2152,10 @@ MAIN_COINS = {"BTC", "ETH"}   # 主流幣
 OI_MAIN_COIN_MIN = 5.5       # 主流幣須 |OI 30m| >= 5.5% 才進榜（門檻極高，實務上排除）
 OI_ALTCOIN_MIN = 1.5         # 山寨幣初選門檻（後續再用 OI_FOR_4_STAR 篩）
 
-# 星等門檻（略放寬以增加 S/頭等艙訊號，CVD 同向與主力量邏輯不變，勝率可維持）
-OI_FOR_5_STAR = 3.5    # 5星：3.5% 即算主力共識（原 3.8），多一點穩健列車
-OI_FOR_4_STAR = 3.3    # 4星：不變
-OI_FOR_ELITE = 3.5     # 鑽石 💎：與 5 星對齊，多一點頭等艙
+# 星等門檻（下修 9 折以增加訊號量：3.5→3.15, 3.3→2.97）
+OI_FOR_5_STAR = 3.15   # 5星：9 折
+OI_FOR_4_STAR = 2.97   # 4星：9 折
+OI_FOR_ELITE = 3.15    # 鑽石 💎：與 5 星對齊
 
 # 抄底/摸頭 30m 門檻（保守山寨）：略放寬仍算低位/高位，減少誤殺
 PRICE_DIP_MAX = 3.0    # 抄底：30m 漲幅 ≤ 3% 才算低位，超過改標追漲
@@ -2168,9 +2168,9 @@ TREND_24H_THRESHOLD = 12.0
 # ┌────────┬────────────────────────────┬─────────────┬────────────────────────────────────────┐
 # │ 訊號   │ 門檻                        │ 倉位比例    │ 說明                                   │
 # ├────────┼────────────────────────────┼─────────────┼────────────────────────────────────────┤
-# │ 💎鑽石 │ 摸頭/抄底+5星+OI≥3.5%+量≥7M │ 滿倉 7%     │ 量≥7M + 鯨魚有數據 + 摸頭RSI≥60/抄底≤40  │
-# │ ⭐5星  │ OI≥3.5%+CVD同向             │ 標準倉 5%   │ 穩健列車                                 │
-# │ ⭐4星  │ OI≥3.3%+方向                │ 減半倉 2.5% │ 賭鬼樂透                                 │
+# │ 💎鑽石 │ 摸頭/抄底+5星+OI≥3.15%+量≥6.3M │ 滿倉 7%   │ 量≥6.3M + 鯨魚有數據 + 摸頭RSI≥60/抄底≤40 │
+# │ ⭐5星  │ OI≥3.15%+CVD同向              │ 標準倉 5% │ 穩健列車                                 │
+# │ ⭐4星  │ OI≥2.97%+方向                 │ 減半倉 2.5%│ 賭鬼樂透                                 │
 # └────────┴────────────────────────────┴─────────────┴────────────────────────────────────────┘
 # 價格位階：抄底 30m≤3%；摸頭 30m≥-3%。24h 假訊號門檻 12%。主流幣 OI≥5.5% 才進榜。
 
@@ -2179,8 +2179,8 @@ RSI_FILTER_TOP_MIN = 60
 RSI_FILTER_DIP_MAX = 40
 RSI_FILTER_BREAKOUT_LONG_MIN = 45   # v3.0 追漲時 RSI 不低於 45
 RSI_FILTER_BREAKOUT_SHORT_MAX = 55  # v3.0 追跌時 RSI 不高於 55
-# 鑽石級 24h 成交量門檻（略降以增加頭等艙訊號：7M 即給鑽石，流動性仍足）
-VOLUME_ELITE_MIN_USD = 7_000_000
+# 鑽石級 24h 成交量門檻（9 折約 6.3M）
+VOLUME_ELITE_MIN_USD = 6_300_000
 
 
 def _classify_signal_and_tier(
@@ -2866,8 +2866,8 @@ def fetch_position_change():
     if not coinglass_24h_map:
         coinglass_24h_map = _fetch_coinglass_24h_map()
     
-    # 【智慧過濾 Smart Filter - 30m 版】山寨為主，主流幣用 OI_MAIN_COIN_MIN 排除
-    PRICE_GATEKEEPER = 1.0  # 30m 價格波動門檻 %（>=1% 即進入 OI 檢查）
+    # 【智慧過濾 Smart Filter - 30m 版】山寨為主，主流幣用 OI_MAIN_COIN_MIN 排除（門檻 9 折）
+    PRICE_GATEKEEPER = 0.9  # 30m 價格波動門檻 %（>=0.9% 即進入 OI 檢查，原 1% 打 9 折）
     active_symbols = []
     for coin in target_symbols_data:
         p_change = extract_price_change_30m(coin)
@@ -2877,8 +2877,8 @@ def fetch_position_change():
         f"🔍 智慧過濾: 從 {len(target_symbols_data)} 個幣種中篩選出 {len(active_symbols)} 個活躍標的 "
         f"(價格 30m >= {PRICE_GATEKEEPER}%) 進行 30m OI 檢查..."
     )
-    # 成交量預篩：4M 以下不跑 OI（省時 + 與推播門檻 2M 搭配，只推流動性足夠的）
-    VOLUME_PREFILTER_MIN_USD = 4_000_000
+    # 成交量預篩：3.6M 以下不跑 OI（4M 打 9 折，略多訊號）
+    VOLUME_PREFILTER_MIN_USD = 3_600_000
     active_above_volume = []
     vol_check_no_snap = 0
     vol_check_no_vol = 0
@@ -3057,10 +3057,10 @@ def fetch_position_change():
             f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} 布林上={ub_val} 布林下={lb_val} ATR={atr_val} 鯨魚指數={whale_idx} | {reason}"
         )
 
-    # 用 BingX ticker 一次取現價 + 24h 成交額。BingX「最大持倉價值」為帳戶設定無法 API 取得，以流動性門檻替代：低於此不推（約 999U 倉位才值得進的市場）
-    VOLUME_HARD_MIN_USD = 2_000_000    # 24h 成交額 <2M 不推（原 1M），減少極低量標的 + 運算
-    VOLUME_SOFT_MIN_USD = 7_000_000   # <7M 標示「成交量極低 小心滑價」
-    VOLUME_5STAR_MIN_USD = 7_000_000   # 5 星僅允許成交量大於 7M，≤7M 一律降為 4 星
+    # 用 BingX ticker 一次取現價 + 24h 成交額（門檻 9 折以增加訊號）
+    VOLUME_HARD_MIN_USD = 1_800_000    # 24h 成交額 <1.8M 不推（2M 打 9 折）
+    VOLUME_SOFT_MIN_USD = 6_300_000   # <6.3M 標示「成交量極低 小心滑價」（7M 打 9 折）
+    VOLUME_5STAR_MIN_USD = 6_300_000   # 5 星僅允許 >6.3M，≤ 降為 4 星
     filtered_top = []
     for x in all_top:
         sym = x.get("symbol", "")
@@ -3095,7 +3095,7 @@ def fetch_position_change():
     all_top = filtered_top
     low_liq_count = sum(1 for x in all_top if x.get("low_liquidity_warning"))
     logger.info(
-        f"成交量二次過濾: 門檻 {VOLUME_HARD_MIN_USD/1e6:.1f}M USD（<{VOLUME_HARD_MIN_USD/1e6:.1f}M 排除，約 999U 倉位才推），剩餘 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<7M)"
+        f"成交量二次過濾: 門檻 {VOLUME_HARD_MIN_USD/1e6:.1f}M USD（<{VOLUME_HARD_MIN_USD/1e6:.1f}M 排除），剩餘 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<{VOLUME_SOFT_MIN_USD/1e6:.1f}M)"
     )
 
     # 冷卻規則：只看「幣種 + 多/空」，不區分摸頭/追跌/頭等艙/列車。同一幣同方向 4h 內只推一次。
@@ -3107,6 +3107,12 @@ def fetch_position_change():
         """只回傳 多/空，冷卻不區分區塊（摸頭/追跌/頭等艙/列車等）。"""
         sig = x.get("signal_label") or ""
         return "多" if ("做多" in sig or "追多" in sig or "嘎空" in sig or "抄底" in sig) else "空"
+
+    def _cooldown_symbol(s: str) -> str:
+        """冷卻 key 統一用「幣種基底」比對，避免 BNLIFE / BNLIFEUSDT / BNLIFE-USDT 被當不同幣重複推。"""
+        if not s:
+            return ""
+        return str(s).replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
 
     # 冷卻檔路徑：cron/雲端環境若 data/ 不持久，可設 SNIPER_COOLDOWN_DIR 指向同一目錄（絕對路徑）
     _cooldown_dir = os.getenv("SNIPER_COOLDOWN_DIR")
@@ -3140,18 +3146,18 @@ def fetch_position_change():
     except Exception as e:
         history = []
         logger.warning(f"讀取冷卻檔失敗，本輪無冷卻限制: {e}")
-    # 冷卻集合：過去 COOLDOWN_HOURS 內推過的 (symbol, 多|空) 本輪不重複報（不區分哪一區）
+    # 冷卻集合：過去 COOLDOWN_HOURS 內推過的 (正規化 symbol, 多|空) 本輪不重複報（正規化避免 BNLIFE vs BNLIFEUSDT 重複）
     cooldown_set = set()
     for e in history:
         if isinstance(e, dict) and e.get("symbol") and e.get("dir"):
             if (now_ts - e.get("ts", 0)) <= cooldown_sec:
-                cooldown_set.add((str(e["symbol"]), str(e["dir"])))
-    # 上一輪方向（用於「多轉空/空轉多」提示）：取每幣最近一次推播的方向
+                cooldown_set.add((_cooldown_symbol(str(e["symbol"])), str(e["dir"])))
+    # 上一輪方向（用於「多轉空/空轉多」提示）：取每幣最近一次推播的方向（用正規化 key）
     last_round_by_sym = {}
     for e in sorted(history, key=lambda x: x.get("ts", 0), reverse=True):
         if isinstance(e, dict) and e.get("symbol") and e.get("dir"):
-            s = str(e["symbol"])
-            if s not in last_round_by_sym:
+            s = _cooldown_symbol(str(e["symbol"]))
+            if s and s not in last_round_by_sym:
                 last_round_by_sym[s] = str(e["dir"])
 
     cooled_top = []
@@ -3159,14 +3165,15 @@ def fetch_position_change():
         sym = x.get("symbol") or ""
         if not sym:
             continue
+        sym_norm = _cooldown_symbol(sym)
         cur_dir = _item_direction(x)
-        key = (sym, cur_dir)
+        key = (sym_norm, cur_dir)
         if key in cooldown_set:
-            logger.info(f"冷卻跳過: {sym} {cur_dir} (上輪已報)")
+            logger.info(f"冷卻跳過: {sym_norm} {cur_dir} (上輪已報)")
             continue
         # 上一輪有報過此幣但方向不同 → 標記多轉空/空轉多，報表會多一行提醒
-        if sym in last_round_by_sym and last_round_by_sym[sym] != cur_dir:
-            x["direction_flip"] = last_round_by_sym[sym] + "轉" + cur_dir
+        if sym_norm in last_round_by_sym and last_round_by_sym[sym_norm] != cur_dir:
+            x["direction_flip"] = last_round_by_sym[sym_norm] + "轉" + cur_dir
         else:
             x["direction_flip"] = None
         cooled_top.append(x)
@@ -3174,14 +3181,15 @@ def fetch_position_change():
     _skipped = len(all_top) - len(cooled_top)
     if _skipped > 0:
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同向 {COOLDOWN_HOURS}h 內不重推）")
-    pairs_this_run = [(x.get("symbol"), _item_direction(x)) for x in cooled_top if x.get("symbol")]
+    # 寫入冷卻檔時也用正規化 symbol，確保下次讀取比對一致
+    pairs_this_run = [(_cooldown_symbol(x.get("symbol")), _item_direction(x)) for x in cooled_top if x.get("symbol")]
 
     msg = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
     send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
 
     try:
         SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        new_entries = [{"symbol": s, "dir": d, "ts": int(now_ts)} for (s, d) in pairs_this_run]
+        new_entries = [{"symbol": s, "dir": d, "ts": int(now_ts)} for (s, d) in pairs_this_run if s]
         history = history + new_entries
         history = [e for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= history_sec]
         SNIPER_COOLDOWN_FILE.write_text(
