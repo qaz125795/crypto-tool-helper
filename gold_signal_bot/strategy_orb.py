@@ -168,8 +168,9 @@ def _get_buy_sell_signal(
     trades_per_day: int,
 ) -> int:
     """多：區間上破 + 陽線；空：區間下破 + 陰線。"""
+    # 改為 >= 讓「區間內 N 根」達標後下一根就能出訊號（原 > 導致當日僅 2 根時永遠不出）
     if (
-        range_state.candle_counter_resistance > composition
+        range_state.candle_counter_resistance >= composition
         and prev.direction is True
         and prev.body_high > range_state.wick_high
         and range_state.trade_today
@@ -182,7 +183,7 @@ def _get_buy_sell_signal(
         return SIGNAL_LONG
 
     if (
-        range_state.candle_counter_support > composition
+        range_state.candle_counter_support >= composition
         and prev.direction is False
         and prev.body_low < range_state.wick_low
         and range_state.trade_today
@@ -264,6 +265,20 @@ def run_orb_signal(
             _update_flags(state, trades_per_day)
 
         last_signal = _get_buy_sell_signal(state, prev, candle_composition, trades_per_day)
+        if last_signal != SIGNAL_NONE:
+            range_high = state.wick_high
+            range_low = state.wick_low
+
+    # 最後一根 K 也要參與突破判斷（原本迴圈只檢查到倒數第二根）
+    if len(day_df) >= 2:
+        last_row = day_df.iloc[-1]
+        last_candle = _get_candle_info(last_row)
+        atr_last = last_row.get("ATR", point * 500)
+        if pd.isna(atr_last) or atr_last <= 0:
+            atr_last = point * 500
+        _candle_update_snr(state, last_candle, atr_last, point, candle_composition)
+        _update_flags(state, trades_per_day)
+        last_signal = _get_buy_sell_signal(state, last_candle, candle_composition, trades_per_day)
         if last_signal != SIGNAL_NONE:
             range_high = state.wick_high
             range_low = state.wick_low
@@ -355,7 +370,11 @@ def compute_signal(
         trades_per_day=config.MAX_TRADES_PER_DAY,
     )
     if signal == SIGNAL_NONE:
-        logger.info("[ORB] 當日無突破訊號（區間內未達突破條件或已達每日次數上限）")
+        logger.info(
+            "[ORB] 當日無突破訊號（區間內未達突破條件或已達每日次數上限）區間上=%.2f 區間下=%.2f",
+            range_high if range_high is not None else 0,
+            range_low if range_low is not None else 0,
+        )
         return None
 
     last = df_1h.iloc[-1]
