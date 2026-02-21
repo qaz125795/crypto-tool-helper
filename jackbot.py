@@ -2152,10 +2152,10 @@ MAIN_COINS = {"BTC", "ETH"}   # 主流幣
 OI_MAIN_COIN_MIN = 5.5       # 主流幣須 |OI 30m| >= 5.5% 才進榜（門檻極高，實務上排除）
 OI_ALTCOIN_MIN = 1.5         # 山寨幣初選門檻（後續再用 OI_FOR_4_STAR 篩）
 
-# 星等門檻（下修 9 折以增加訊號量：3.5→3.15, 3.3→2.97）
-OI_FOR_5_STAR = 3.15   # 5星：9 折
-OI_FOR_4_STAR = 2.97   # 4星：9 折
-OI_FOR_ELITE = 3.15    # 鑽石 💎：與 5 星對齊
+# 星等門檻（嚴一點保勝率：5星/鑽石 3.5%、4星 3.3%）
+OI_FOR_5_STAR = 3.5    # 5星：主力量明確才給
+OI_FOR_4_STAR = 3.3    # 4星
+OI_FOR_ELITE = 3.5     # 鑽石 💎：與 5 星對齊
 
 # 抄底/摸頭 30m 門檻（保守山寨）：略放寬仍算低位/高位，減少誤殺
 PRICE_DIP_MAX = 3.0    # 抄底：30m 漲幅 ≤ 3% 才算低位，超過改標追漲
@@ -2168,9 +2168,9 @@ TREND_24H_THRESHOLD = 12.0
 # ┌────────┬────────────────────────────┬─────────────┬────────────────────────────────────────┐
 # │ 訊號   │ 門檻                        │ 倉位比例    │ 說明                                   │
 # ├────────┼────────────────────────────┼─────────────┼────────────────────────────────────────┤
-# │ 💎鑽石 │ 摸頭/抄底+5星+OI≥3.15%+量≥6.3M │ 滿倉 7%   │ 量≥6.3M + 鯨魚有數據 + 摸頭RSI≥60/抄底≤40 │
-# │ ⭐5星  │ OI≥3.15%+CVD同向              │ 標準倉 5% │ 穩健列車                                 │
-# │ ⭐4星  │ OI≥2.97%+方向                 │ 減半倉 2.5%│ 賭鬼樂透                                 │
+# │ 💎鑽石 │ 摸頭/抄底+5星+OI≥3.5%+量≥5M  │ 滿倉 7%   │ 量≥5M + 鯨魚有數據 + 摸頭RSI≥60/抄底≤40  │
+# │ ⭐5星  │ OI≥3.5%+CVD同向              │ 標準倉 5% │ 穩健列車                                 │
+# │ ⭐4星  │ OI≥3.3%+方向                │ 減半倉 2.5%│ 賭鬼樂透                                 │
 # └────────┴────────────────────────────┴─────────────┴────────────────────────────────────────┘
 # 價格位階：抄底 30m≤3%；摸頭 30m≥-3%。24h 假訊號門檻 12%。主流幣 OI≥5.5% 才進榜。
 
@@ -2179,8 +2179,8 @@ RSI_FILTER_TOP_MIN = 60
 RSI_FILTER_DIP_MAX = 40
 RSI_FILTER_BREAKOUT_LONG_MIN = 45   # v3.0 追漲時 RSI 不低於 45
 RSI_FILTER_BREAKOUT_SHORT_MAX = 55  # v3.0 追跌時 RSI 不高於 55
-# 鑽石級 24h 成交量門檻（9 折約 6.3M）
-VOLUME_ELITE_MIN_USD = 6_300_000
+# 鑽石級 24h 成交量門檻（略放寬：5M 即給頭等艙）
+VOLUME_ELITE_MIN_USD = 5_000_000
 
 
 def _classify_signal_and_tier(
@@ -2866,8 +2866,8 @@ def fetch_position_change():
     if not coinglass_24h_map:
         coinglass_24h_map = _fetch_coinglass_24h_map()
     
-    # 【智慧過濾 Smart Filter - 30m 版】山寨為主，主流幣用 OI_MAIN_COIN_MIN 排除（門檻 9 折）
-    PRICE_GATEKEEPER = 0.9  # 30m 價格波動門檻 %（>=0.9% 即進入 OI 檢查，原 1% 打 9 折）
+    # 【智慧過濾 Smart Filter - 30m 版】山寨為主，主流幣用 OI_MAIN_COIN_MIN 排除
+    PRICE_GATEKEEPER = 1.0  # 30m 價格波動門檻 %（>=1% 即進入 OI 檢查）
     active_symbols = []
     for coin in target_symbols_data:
         p_change = extract_price_change_30m(coin)
@@ -2877,8 +2877,8 @@ def fetch_position_change():
         f"🔍 智慧過濾: 從 {len(target_symbols_data)} 個幣種中篩選出 {len(active_symbols)} 個活躍標的 "
         f"(價格 30m >= {PRICE_GATEKEEPER}%) 進行 30m OI 檢查..."
     )
-    # 成交量預篩：3.6M 以下不跑 OI（4M 打 9 折，略多訊號）
-    VOLUME_PREFILTER_MIN_USD = 3_600_000
+    # 成交量預篩：3M 以下不跑 OI（略放寬多一點候選）
+    VOLUME_PREFILTER_MIN_USD = 3_000_000
     active_above_volume = []
     vol_check_no_snap = 0
     vol_check_no_vol = 0
@@ -3057,10 +3057,10 @@ def fetch_position_change():
             f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} 布林上={ub_val} 布林下={lb_val} ATR={atr_val} 鯨魚指數={whale_idx} | {reason}"
         )
 
-    # 用 BingX ticker 一次取現價 + 24h 成交額（門檻 9 折以增加訊號）
-    VOLUME_HARD_MIN_USD = 1_800_000    # 24h 成交額 <1.8M 不推（2M 打 9 折）
-    VOLUME_SOFT_MIN_USD = 6_300_000   # <6.3M 標示「成交量極低 小心滑價」（7M 打 9 折）
-    VOLUME_5STAR_MIN_USD = 6_300_000   # 5 星僅允許 >6.3M，≤ 降為 4 星
+    # 用 BingX ticker 一次取現價 + 24h 成交額（成交量略放寬，OI 不變保勝率）
+    VOLUME_HARD_MIN_USD = 1_500_000    # 24h 成交額 <1.5M 不推（原 2M 放寬）
+    VOLUME_SOFT_MIN_USD = 5_000_000   # <5M 標示「成交量極低 小心滑價」
+    VOLUME_5STAR_MIN_USD = 5_000_000   # 5 星僅允許 >5M，≤ 降為 4 星
     filtered_top = []
     for x in all_top:
         sym = x.get("symbol", "")
