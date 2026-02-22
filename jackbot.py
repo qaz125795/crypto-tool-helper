@@ -9,6 +9,7 @@ import requests
 import json
 import time
 import logging
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple, Set, Union
 import os
@@ -22,10 +23,13 @@ import numpy as np
 # 台灣台北時區（UTC+8）
 TAIPEI_TZ = timezone(timedelta(hours=8))
 
-# 配置日誌
+# 配置日誌：執行時終端顯示 + 寫入 log 檔，方便排查
+_log_fmt = '%(asctime)s - %(levelname)s - %(message)s'
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format=_log_fmt,
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True
 )
 logger = logging.getLogger(__name__)
 
@@ -90,6 +94,12 @@ MAX_SYMBOLS = 904  # 將由 API 返回的合約幣種數量決定
 # 數據存儲目錄（使用腳本所在目錄，確保 cron/Zeabur 等不同 cwd 下路徑一致）
 DATA_DIR = Path(__file__).resolve().parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
+# 同時寫入 log 檔，方便事後排查
+_log_file = DATA_DIR / "jackbot.log"
+_fh = logging.FileHandler(_log_file, encoding="utf-8")
+_fh.setLevel(logging.INFO)
+_fh.setFormatter(logging.Formatter(_log_fmt))
+logging.getLogger().addHandler(_fh)
 
 # CoinGlass OI 呼叫限速（初創版 80 次/分鐘，global 必須在函數內「最先」宣告再賦值）
 _coinglass_oi_rate_limiter = None
@@ -2184,6 +2194,9 @@ OI_FOR_5_STAR = 3.5    # 5星：主力量明確才給
 OI_FOR_4_STAR = 3.3    # 4星
 OI_FOR_ELITE = 3.5     # 鑽石 💎：與 5 星對齊
 
+# 狙擊鏡止盈風報門檻：止盈1 若低於此 R 不推播（避免賠率差、維持勝率品質）
+MIN_TP1_R_FOR_PUSH = 0.7
+
 # 抄底/摸頭 30m 門檻（保守山寨）：略放寬仍算低位/高位，減少誤殺
 PRICE_DIP_MAX = 3.0    # 抄底：30m 漲幅 ≤ 3% 才算低位，超過改標追漲
 PRICE_TOP_MIN = -3.0   # 摸頭：30m 跌幅 ≥ -3% 才算高位，跌破改標追跌
@@ -2405,7 +2418,7 @@ def build_report_message_tiered(
             return f"{p:.2f}"
 
         if price is None or price <= 0:
-            return _na, _na, _na, None, None, False, False, None, None
+            return _na, _na, _na, None, None, None, None, False
 
         # === 核心差異化參數（只給 TP1/TP2）===
         if is_elite or stars >= 5:
@@ -2429,40 +2442,28 @@ def build_report_message_tiered(
                 sl_dist = price * MAX_SL_PERCENT
                 sl_capped = True
 
-            tp1_dist = sl_dist * tp1_r
-
+            floor = price * 0.01
+            # 技術目標：分開算布林與均線，之後取近者為 TP1、遠者為 TP2；若兩者相似則 TP2 = TP1*2
             if is_long:
                 sl_price = price - sl_dist
-                tp1_price = price + tp1_dist
-                # TP2 技術位：①上布林 ②EMA 在價上則用 EMA×1.01 ③突破做多用等距對稱；上限用 tp2_r_fallback（勝率優先：可達目標，不拉遠）
-                if ub_value is not None and ub_value > price:
-                    tp2_tech = min(ub_value, price + sl_dist * tp2_r_fallback)
-                elif ema20_close is not None and ema20_close > price:
-                    tp2_tech = min(ema20_close * 1.01, price + sl_dist * tp2_r_fallback)
-                elif ema20_close is not None and ema20_close > 0 and ema20_close < price:
-                    tp2_tech = price + (price - ema20_close)
-                    tp2_tech = min(tp2_tech, price + sl_dist * tp2_r_fallback)
+                boll_price = min(ub_value, price + sl_dist * tp2_r_fallback) if (ub_value is not None and ub_value > price) else None
+                if ema20_close is not None and ema20_close > 0:
+                    if ema20_close > price:
+                        ema_price = min(ema20_close * 1.01, price + sl_dist * tp2_r_fallback)
+                    else:
+                        ema_price = min(price + (price - ema20_close), price + sl_dist * tp2_r_fallback)
                 else:
-                    tp2_tech = price + sl_dist * tp2_r_fallback
-                tp2_price = max(tp1_price, tp2_tech)
+                    ema_price = None
             else:
                 sl_price = price + sl_dist
-                tp1_price = price - tp1_dist
-                floor = price * 0.01
-                if tp1_price <= 0:
-                    tp1_price = floor
-                if lb_value is not None and lb_value < price and lb_value > 0:
-                    tp2_tech = max(lb_value, price - sl_dist * tp2_r_fallback)
-                elif ema20_close is not None and ema20_close < price and ema20_close > 0:
-                    tp2_tech = max(ema20_close * 0.99, price - sl_dist * tp2_r_fallback)
-                elif ema20_close is not None and ema20_close > price:
-                    tp2_tech = price - (ema20_close - price)
-                    tp2_tech = max(tp2_tech, price - sl_dist * tp2_r_fallback)
+                boll_price = max(lb_value, price - sl_dist * tp2_r_fallback) if (lb_value is not None and lb_value < price and lb_value > 0) else None
+                if ema20_close is not None and ema20_close > 0:
+                    if ema20_close < price:
+                        ema_price = max(ema20_close * 0.99, price - sl_dist * tp2_r_fallback)
+                    else:
+                        ema_price = max(price - (ema20_close - price), price - sl_dist * tp2_r_fallback)
                 else:
-                    tp2_tech = price - sl_dist * tp2_r_fallback
-                tp2_price = min(tp1_price, tp2_tech)
-                if tp2_price <= 0:
-                    tp2_price = floor
+                    ema_price = None
 
             if sl_price <= 0 and is_long:
                 sl_price = price * 0.95
@@ -2499,39 +2500,105 @@ def build_report_message_tiered(
 
             risk_dist = (price - sl_price) if is_long else (sl_price - price)
             if not risk_dist or risk_dist <= 0:
-                return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), tp1_r, tp2_r_fallback, sl_capped, False, None, None
+                return fmt_p(sl_price), _na, _na, None, None, None, None, sl_capped
 
-            # TP2 若比 TP1 差則交換（做多：tp2 應更高；做空：tp2 應更低）
-            if is_long and tp2_price < tp1_price:
-                tp1_price, tp2_price = tp2_price, tp1_price
-            elif not is_long and tp2_price > tp1_price:
-                tp1_price, tp2_price = tp2_price, tp1_price
-
-            if is_long:
-                r_tp1 = (tp1_price - price) / risk_dist
-                r_tp2 = (tp2_price - price) / risk_dist
-            else:
-                r_tp1 = (price - tp1_price) / risk_dist
-                r_tp2 = (price - tp2_price) / risk_dist
-            r_tp1 = round(r_tp1, 1)
-            r_tp2 = round(r_tp2, 1)
-
-            # TP2 至少要是 TP1 的 2 倍（R）；若技術位達不到則標記並給出 2 倍價
-            min_tp2_r = 2.0 * tp1_r
-            tp2_beyond_tech = r_tp2 < min_tp2_r
-            tp2_double_val = None
-            r_tp2_double = None
-            if tp2_beyond_tech:
+            # 換算成 R（做多：目標在價上；做空：目標在價下）
+            def to_r(tgt):
+                if tgt is None or tgt <= 0:
+                    return None, None
                 if is_long:
-                    tp2_double_price = price + risk_dist * min_tp2_r
+                    r = (tgt - price) / risk_dist if tgt > price else None
                 else:
-                    tp2_double_price = max(price - risk_dist * min_tp2_r, price * 0.01)
-                tp2_double_val = fmt_p(tp2_double_price)
-                r_tp2_double = round(min_tp2_r, 1)
+                    r = (price - tgt) / risk_dist if tgt < price and tgt > 0 else None
+                return (round(r, 1), tgt) if r is not None and r > 0 else (None, None)
 
-            return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), r_tp1, r_tp2, sl_capped, tp2_beyond_tech, tp2_double_val, r_tp2_double
+            r_boll, _ = to_r(boll_price)
+            r_ema, _ = to_r(ema_price)
 
-        return _na, _na, _na, None, None, False, False, None, None
+            # 兩者相似：取最近值當 TP1，TP2 = TP1*2（小倉拚搏）
+            SIMILAR_RATIO = 1.35
+            SIMILAR_DIFF = 0.5
+            tp1_price = None
+            tp2_price = None
+            tp1_source = None  # "boll" | "ema" | "r"
+            tp2_source = None  # "boll" | "ema" | "double"
+
+            if r_boll is not None and r_ema is not None:
+                r_near = min(r_boll, r_ema)
+                r_far = max(r_boll, r_ema)
+                similar = (r_far <= r_near * SIMILAR_RATIO) or (r_far - r_near < SIMILAR_DIFF)
+                if similar:
+                    if r_boll <= r_ema:
+                        tp1_price = boll_price
+                        tp1_source = "boll"
+                    else:
+                        tp1_price = ema_price
+                        tp1_source = "ema"
+                    r_tp1 = r_near
+                    if is_long:
+                        tp2_price = price + risk_dist * (2.0 * r_near)
+                    else:
+                        tp2_price = max(price - risk_dist * (2.0 * r_near), floor)
+                    tp2_source = "double"
+                    r_tp2 = round(2.0 * r_near, 1)
+                else:
+                    if r_boll <= r_ema:
+                        tp1_price, tp2_price = boll_price, ema_price
+                        tp1_source, tp2_source = "boll", "ema"
+                        r_tp1, r_tp2 = r_boll, r_ema
+                    else:
+                        tp1_price, tp2_price = ema_price, boll_price
+                        tp1_source, tp2_source = "ema", "boll"
+                        r_tp1, r_tp2 = r_ema, r_boll
+            elif r_boll is not None:
+                tp1_price = boll_price
+                tp1_source = "boll"
+                r_tp1 = r_boll
+                if is_long:
+                    tp2_price = price + risk_dist * (2.0 * r_boll)
+                else:
+                    tp2_price = max(price - risk_dist * (2.0 * r_boll), floor)
+                tp2_source = "double"
+                r_tp2 = round(2.0 * r_boll, 1)
+            elif r_ema is not None:
+                tp1_price = ema_price
+                tp1_source = "ema"
+                r_tp1 = r_ema
+                if is_long:
+                    tp2_price = price + risk_dist * (2.0 * r_ema)
+                else:
+                    tp2_price = max(price - risk_dist * (2.0 * r_ema), floor)
+                tp2_source = "double"
+                r_tp2 = round(2.0 * r_ema, 1)
+            else:
+                # 無技術位：TP1 = tp1_r，TP2 = 2*tp1_r
+                if is_long:
+                    tp1_price = price + risk_dist * tp1_r
+                    tp2_price = price + risk_dist * (2.0 * tp1_r)
+                else:
+                    tp1_price = max(price - risk_dist * tp1_r, floor)
+                    tp2_price = max(price - risk_dist * (2.0 * tp1_r), floor)
+                tp1_source = "r"
+                tp2_source = "double"
+                r_tp1 = round(tp1_r, 1)
+                r_tp2 = round(2.0 * tp1_r, 1)
+
+            if tp1_price is not None and tp1_price <= 0 and not is_long:
+                tp1_price = floor
+            if tp2_price is not None and tp2_price <= 0 and not is_long:
+                tp2_price = floor
+            if is_long and tp2_price is not None and tp2_price < (tp1_price or 0):
+                tp1_price, tp2_price = tp2_price, tp1_price
+                tp1_source, tp2_source = tp2_source, tp1_source
+                r_tp1, r_tp2 = r_tp2, r_tp1
+            elif not is_long and tp1_price is not None and tp2_price is not None and tp2_price > tp1_price:
+                tp1_price, tp2_price = tp2_price, tp1_price
+                tp1_source, tp2_source = tp2_source, tp1_source
+                r_tp1, r_tp2 = r_tp2, r_tp1
+
+            return fmt_p(sl_price), fmt_p(tp1_price) if tp1_price else _na, fmt_p(tp2_price) if tp2_price else _na, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped
+
+        return _na, _na, _na, None, None, None, None, False
 
     def _is_bull(x: Dict) -> bool:
         sig = x.get("signal_label") or ""
@@ -2669,7 +2736,6 @@ def build_report_message_tiered(
                     continue
                 if sym:
                     seen_syms.add(sym)
-                has_any = True
                 zone = x.get("zone")
                 sym = x.get("symbol", "")
                 stars = x.get("stars", 1)
@@ -2710,12 +2776,17 @@ def build_report_message_tiered(
                     else:
                         pos_rec = "試單 2.5% (窄止損)"
 
-                # 計算 SL/TP（TP2 若比 TP1 差會交換；TP2 至少 2*TP1，否則顯示「超出技術判斷」+2倍價）
-                sl_val, tp1_val, tp2_val, r_tp1, r_tp2, sl_capped, tp2_beyond_tech, tp2_double_val, r_tp2_double = calc_sl_tp(
+                # 計算 SL/TP（止盈1、止盈2 皆由技術分析：布林 vs 均線；相似則 TP2=TP1*2）
+                sl_val, tp1_val, tp2_val, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped = calc_sl_tp(
                     x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig,
                     x.get("vwap_2h"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value")
                 )
+                # 風報比過低不推播：止盈1 < 0.7R 代表賠率差，寧可少出手保勝率
+                if r_tp1 is not None and r_tp1 < MIN_TP1_R_FOR_PUSH:
+                    logger.info(f"狙擊鏡跳過 {sym}: 止盈1 風報比 {r_tp1}R < {MIN_TP1_R_FOR_PUSH}R，不推播")
+                    continue
 
+                has_any = True
                 price = x.get("current_price")
                 if price is not None and isinstance(price, (int, float)):
                     price_str = f"{price:.4f}" if price < 10 else f"{price:.2f}"
@@ -2783,13 +2854,15 @@ def build_report_message_tiered(
                 # 止損與止盈顯示（依 S+/S/A 分級 + R 倍數）
                 lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
 
+                tp1_note = " (布林)" if tp1_source == "boll" else " (均線)" if tp1_source == "ema" else " (R倍數)" if tp1_source == "r" else ""
                 r_tp1_str = f" ({r_tp1}R)" if r_tp1 is not None else ""
-                lines.append(f"✅ 止盈1：`{tp1_val}`{r_tp1_str}")
-                if tp2_beyond_tech and tp2_double_val is not None and r_tp2_double is not None:
-                    lines.append(f"🚀 止盈2：已超出技術分析判斷，建議留小倉拚搏｜2倍TP1價：`{tp2_double_val}` ({r_tp2_double}R)")
+                lines.append(f"✅ 止盈1：`{tp1_val}`{tp1_note}{r_tp1_str}")
+                if tp2_source == "double":
+                    lines.append(f"🚀 止盈2：已超出技術分析判斷，建議留小倉拚搏｜`{tp2_val}` ({r_tp2}R)" if r_tp2 is not None else f"🚀 止盈2：已超出技術分析判斷，建議留小倉拚搏｜`{tp2_val}`")
                 else:
+                    tp2_note = " (布林)" if tp2_source == "boll" else " (均線)" if tp2_source == "ema" else ""
                     tp2_r_str = f" ({r_tp2}R)" if r_tp2 is not None else ""
-                    lines.append(f"🚀 止盈2：`{tp2_val}`{tp2_r_str}")
+                    lines.append(f"🚀 止盈2：`{tp2_val}`{tp2_note}{tp2_r_str}")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
@@ -3071,8 +3144,10 @@ def fetch_position_change():
         executor.shutdown(wait=not broke_early)  # 提前結束時不等待未完成任務，以利準時推播
     
     total_time = time.time() - start_time
+    in_four = len(long_open) + len(long_close) + len(short_open) + len(short_close)
+    below_oi_threshold = oi_success_count - in_four
     logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個 | 總用時: {total_time/60:.1f} 分鐘")
-    logger.info(f"分類結果: 多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}")
+    logger.info(f"分類結果: 多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}（共 {in_four} 個達 OI 初選門檻｜其餘 {below_oi_threshold} 個 OI 成功但 |OI 變化| 未達門檻未入四類）")
     
     # 只統計與計算 4 星以上：|OI| < OI_FOR_4_STAR 的不進 top、不跑後續運算
     long_open = [x for x in long_open if abs(x.get('oiChange30m') or 0) >= OI_FOR_4_STAR]
@@ -3087,6 +3162,7 @@ def fetch_position_change():
     top_long_close = long_close[:3]
     top_short_open = short_open[:3]
     top_short_close = short_close[:3]
+    logger.info(f"四類 TOP 候選數: 多方開倉 {len(top_long_open)}, 多方平倉 {len(top_long_close)}, 空方開倉 {len(top_short_open)}, 空方平倉 {len(top_short_close)}（各類取前 3，供後續分類/成交量/冷卻/風報篩選）")
 
     # 對 top 標的取 RSI/布林帶（僅 4 星以上候選，3 星不計算）
     time.sleep(2)
@@ -3127,6 +3203,7 @@ def fetch_position_change():
             retail_ratio=retail_ratio,
         )
         if classified is None:
+            logger.info(f"狙擊鏡跳過 {sym}: 分類未通過 (_classify_signal_and_tier 回傳 None，可能 OI/方向/價位未符合任一訊號分支)")
             continue  # 未達 4 星門檻或被濾掉，直接略過
         signal_label, zone, stars, rsi_desc, reason = classified
         rsi_val = tech.get("rsi") if tech else None
@@ -3175,6 +3252,7 @@ def fetch_position_change():
             vol = snap.get("volume_usd")
             if vol is not None:
                 if vol < VOLUME_HARD_MIN_USD:
+                    logger.info(f"狙擊鏡跳過 {sym}: 成交量 {vol/1e6:.2f}M USD < {VOLUME_HARD_MIN_USD/1e6:.1f}M 門檻")
                     continue
                 x["low_liquidity_warning"] = vol < VOLUME_SOFT_MIN_USD
                 x["volume_usd"] = float(vol)
@@ -3196,6 +3274,8 @@ def fetch_position_change():
     logger.info(
         f"成交量二次過濾: 門檻 {VOLUME_HARD_MIN_USD/1e6:.1f}M USD（<{VOLUME_HARD_MIN_USD/1e6:.1f}M 排除），剩餘 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<{VOLUME_SOFT_MIN_USD/1e6:.1f}M)"
     )
+    if len(all_top) == 0:
+        logger.info("本輪 0 筆推播：請看上方「狙擊鏡跳過」或「四類 TOP 候選數」排查（分類未通過 / 成交量<1.5M / 冷卻 / 止盈1風報比<0.7R）")
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
