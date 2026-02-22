@@ -2405,7 +2405,7 @@ def build_report_message_tiered(
             return f"{p:.2f}"
 
         if price is None or price <= 0:
-            return _na, _na, _na, None, False
+            return _na, _na, _na, None, None, False, False, None, None
 
         # === 核心差異化參數（只給 TP1/TP2）===
         if is_elite or stars >= 5:
@@ -2497,20 +2497,41 @@ def build_report_message_tiered(
             elif not is_long and sl_price <= price:
                 sl_price = price + sl_dist
 
-            # TP2 風報比（以實際停損距離為 1R）
             risk_dist = (price - sl_price) if is_long else (sl_price - price)
-            if risk_dist and risk_dist > 0:
-                if is_long:
-                    r_tp2 = (tp2_price - price) / risk_dist
-                else:
-                    r_tp2 = (price - tp2_price) / risk_dist
-                r_tp2 = round(r_tp2, 1)
+            if not risk_dist or risk_dist <= 0:
+                return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), tp1_r, tp2_r_fallback, sl_capped, False, None, None
+
+            # TP2 若比 TP1 差則交換（做多：tp2 應更高；做空：tp2 應更低）
+            if is_long and tp2_price < tp1_price:
+                tp1_price, tp2_price = tp2_price, tp1_price
+            elif not is_long and tp2_price > tp1_price:
+                tp1_price, tp2_price = tp2_price, tp1_price
+
+            if is_long:
+                r_tp1 = (tp1_price - price) / risk_dist
+                r_tp2 = (tp2_price - price) / risk_dist
             else:
-                r_tp2 = tp2_r_fallback
+                r_tp1 = (price - tp1_price) / risk_dist
+                r_tp2 = (price - tp2_price) / risk_dist
+            r_tp1 = round(r_tp1, 1)
+            r_tp2 = round(r_tp2, 1)
 
-            return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), r_tp2, sl_capped
+            # TP2 至少要是 TP1 的 2 倍（R）；若技術位達不到則標記並給出 2 倍價
+            min_tp2_r = 2.0 * tp1_r
+            tp2_beyond_tech = r_tp2 < min_tp2_r
+            tp2_double_val = None
+            r_tp2_double = None
+            if tp2_beyond_tech:
+                if is_long:
+                    tp2_double_price = price + risk_dist * min_tp2_r
+                else:
+                    tp2_double_price = max(price - risk_dist * min_tp2_r, price * 0.01)
+                tp2_double_val = fmt_p(tp2_double_price)
+                r_tp2_double = round(min_tp2_r, 1)
 
-        return _na, _na, _na, None, False
+            return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), r_tp1, r_tp2, sl_capped, tp2_beyond_tech, tp2_double_val, r_tp2_double
+
+        return _na, _na, _na, None, None, False, False, None, None
 
     def _is_bull(x: Dict) -> bool:
         sig = x.get("signal_label") or ""
@@ -2689,8 +2710,8 @@ def build_report_message_tiered(
                     else:
                         pos_rec = "試單 2.5% (窄止損)"
 
-                # 計算 SL/TP（只給 TP1 風報比、TP2 技術位+風報比）
-                sl_val, tp1_val, tp2_val, tp2_r, sl_capped = calc_sl_tp(
+                # 計算 SL/TP（TP2 若比 TP1 差會交換；TP2 至少 2*TP1，否則顯示「超出技術判斷」+2倍價）
+                sl_val, tp1_val, tp2_val, r_tp1, r_tp2, sl_capped, tp2_beyond_tech, tp2_double_val, r_tp2_double = calc_sl_tp(
                     x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig,
                     x.get("vwap_2h"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value")
                 )
@@ -2762,12 +2783,12 @@ def build_report_message_tiered(
                 # 止損與止盈顯示（依 S+/S/A 分級 + R 倍數）
                 lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
 
-                tp2_r_str = f" ({tp2_r}R)" if tp2_r is not None else ""
-                if is_elite_sig or stars >= 5:
-                    lines.append(f"✅ 止盈1：`{tp1_val}` (1.0R)")
-                    lines.append(f"🚀 止盈2：`{tp2_val}`{tp2_r_str}")
+                r_tp1_str = f" ({r_tp1}R)" if r_tp1 is not None else ""
+                lines.append(f"✅ 止盈1：`{tp1_val}`{r_tp1_str}")
+                if tp2_beyond_tech and tp2_double_val is not None and r_tp2_double is not None:
+                    lines.append(f"🚀 止盈2：已超出技術分析判斷，建議留小倉拚搏｜2倍TP1價：`{tp2_double_val}` ({r_tp2_double}R)")
                 else:
-                    lines.append(f"✅ 止盈1：`{tp1_val}` (1.5R)")
+                    tp2_r_str = f" ({r_tp2}R)" if r_tp2 is not None else ""
                     lines.append(f"🚀 止盈2：`{tp2_val}`{tp2_r_str}")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
