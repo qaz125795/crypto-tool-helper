@@ -2017,6 +2017,16 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
                 pass
     if len(closes) < 20:
         return None
+    # 30分K 最常用「關鍵均線」：EMA20（指數移動平均），對近期價格權重高、反應快，實戰多當動態支撐/阻力
+    # 做空時停損至少設在 EMA20 上方、做多時在 EMA20 下方，避免被回測均線洗掉
+    ema20_close = None
+    if len(closes) >= 20:
+        period = 20
+        alpha = 2.0 / (period + 1)
+        ema = float(np.mean(closes[:period]))
+        for i in range(period, len(closes)):
+            ema = alpha * float(closes[i]) + (1.0 - alpha) * ema
+        ema20_close = ema
     # 近 2h（4 根 30m）成交量加權均價，當停損參考；用 2h 較貼近當前走勢，避免 4h 均價太遠
     vwap_2h = None
     if len(closes) >= 4 and len(volumes) >= 4:
@@ -2066,6 +2076,8 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     }
     if vwap_2h is not None:
         out["vwap_2h"] = vwap_2h
+    if ema20_close is not None:
+        out["ema20_close"] = ema20_close
     return out
 
 
@@ -2374,10 +2386,9 @@ def build_report_message_tiered(
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
-    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool, vwap_2h: Optional[float] = None):
+    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool, vwap_2h: Optional[float] = None, ema20_close: Optional[float] = None, ub_value: Optional[float] = None, lb_value: Optional[float] = None):
         """
-        SL/TP 風控版 (v5.1)：ATR 止損 + 2h 成交均價邊界（均價用 2h 較貼近，且設最遠 1.5×ATR 不讓停損太遠）
-        - 有 2h VWAP 時：做多 SL 不低於 VWAP×0.99，做空 SL 不高於 VWAP×1.01；且停損距離不超過 1.5×ATR。
+        停損：主力成本(VWAP)+ATR+EMA20。止盈：TP1=風報比配置，TP2=技術位(布林)且至少優於TP1，並回傳TP2的R倍數。
         """
         _na = "-"  # ASCII placeholder (avoid em-dash encoding issues on Zeabur)
         def fmt_p(p):
@@ -2394,83 +2405,112 @@ def build_report_message_tiered(
             return f"{p:.2f}"
 
         if price is None or price <= 0:
-            return _na, _na, _na, _na, False
+            return _na, _na, _na, None, False
 
-        # === 核心差異化參數 ===
+        # === 核心差異化參數（只給 TP1/TP2）===
         if is_elite or stars >= 5:
-            # S+/S級：穩健順勢
-            risk_multiplier = 2.0    # 止損寬度：標準
-            tp_ratios = [1.0, 2.0, 3.5]  # TP1保本, TP2獲利, TP3趨勢
+            risk_multiplier = 2.0
+            tp1_r, tp2_r_fallback = 1.0, 2.5
         else:
-            # A級：轉折樂透 (以小博大)
-            risk_multiplier = 1.2    # 止損寬度：極窄
-            tp_ratios = [1.5, 3.0, 5.0]  # TP1脫離成本, TP2大賺, TP3暴擊
+            risk_multiplier = 1.2
+            tp1_r, tp2_r_fallback = 1.5, 3.0
 
         # 波動率過大時的額外保護
         if atr is not None and isinstance(atr, (int, float)) and atr > 0:
             volatility_pct = atr / price
-            if volatility_pct > 0.05:  # 波動 > 5% 強制收緊
+            if volatility_pct > 0.05:
                 risk_multiplier *= 0.8
 
             sl_dist = atr * risk_multiplier
 
-            # 強制 10% 硬上限
             MAX_SL_PERCENT = 0.10
             sl_capped = False
             if sl_dist > price * MAX_SL_PERCENT:
                 sl_dist = price * MAX_SL_PERCENT
                 sl_capped = True
 
-            tp1_dist = sl_dist * tp_ratios[0]
-            tp2_dist = sl_dist * tp_ratios[1]
-            tp3_dist = sl_dist * tp_ratios[2]
+            tp1_dist = sl_dist * tp1_r
 
             if is_long:
                 sl_price = price - sl_dist
                 tp1_price = price + tp1_dist
-                tp2_price = price + tp2_dist
-                tp3_price = price + tp3_dist
+                # TP2 技術位：①上布林 ②EMA 在價上則用 EMA×1.01 ③突破做多用等距對稱；上限用 tp2_r_fallback（勝率優先：可達目標，不拉遠）
+                if ub_value is not None and ub_value > price:
+                    tp2_tech = min(ub_value, price + sl_dist * tp2_r_fallback)
+                elif ema20_close is not None and ema20_close > price:
+                    tp2_tech = min(ema20_close * 1.01, price + sl_dist * tp2_r_fallback)
+                elif ema20_close is not None and ema20_close > 0 and ema20_close < price:
+                    tp2_tech = price + (price - ema20_close)
+                    tp2_tech = min(tp2_tech, price + sl_dist * tp2_r_fallback)
+                else:
+                    tp2_tech = price + sl_dist * tp2_r_fallback
+                tp2_price = max(tp1_price, tp2_tech)
             else:
                 sl_price = price + sl_dist
                 tp1_price = price - tp1_dist
-                tp2_price = price - tp2_dist
-                tp3_price = price - tp3_dist
-                # 做空 TP 負值防護
                 floor = price * 0.01
                 if tp1_price <= 0:
                     tp1_price = floor
+                if lb_value is not None and lb_value < price and lb_value > 0:
+                    tp2_tech = max(lb_value, price - sl_dist * tp2_r_fallback)
+                elif ema20_close is not None and ema20_close < price and ema20_close > 0:
+                    tp2_tech = max(ema20_close * 0.99, price - sl_dist * tp2_r_fallback)
+                elif ema20_close is not None and ema20_close > price:
+                    tp2_tech = price - (ema20_close - price)
+                    tp2_tech = max(tp2_tech, price - sl_dist * tp2_r_fallback)
+                else:
+                    tp2_tech = price - sl_dist * tp2_r_fallback
+                tp2_price = min(tp1_price, tp2_tech)
                 if tp2_price <= 0:
                     tp2_price = floor
-                if tp3_price <= 0:
-                    tp3_price = floor
 
             if sl_price <= 0 and is_long:
                 sl_price = price * 0.95
 
-            # 2h 成交均價邊界：不做破均價的極端止損；且不讓停損超過 1.5×ATR 距離（避免太遠）
-            if vwap_2h is not None and vwap_2h > 0 and sl_dist > 0:
-                if is_long:
-                    sl_vwap = vwap_2h * 0.99
-                    if sl_price < sl_vwap:
-                        sl_candidate = sl_vwap
-                        if (price - sl_candidate) <= 1.5 * sl_dist:
-                            sl_price = sl_candidate
-                else:
-                    sl_vwap = vwap_2h * 1.01
-                    if sl_price > sl_vwap:
-                        sl_candidate = sl_vwap
-                        if (sl_candidate - price) <= 1.5 * sl_dist:
-                            sl_price = sl_candidate
+            # 停損三要素：主力成本(VWAP) + ATR + EMA20 → 合理停損與風報比
+            # 主力成本用 2h VWAP 近似（這段行情的成交均價）；破成本視為趨勢失效
+            max_sl_dist = 2.5 * sl_dist  # 單筆停損最遠 2.5×ATR
+            if is_long:
+                # 做多：SL 在現價下。不設在成本(VWAP)之上（避免被洗），不設在 EMA20 之上（回測均線不觸發）
+                if vwap_2h is not None and vwap_2h > 0:
+                    cost_floor = vwap_2h * 0.995
+                    sl_price = max(sl_price, cost_floor)
+                if ema20_close is not None and ema20_close > 0 and ema20_close < price:
+                    ema_ceiling = ema20_close * 0.995
+                    sl_price = min(sl_price, ema_ceiling)
+                if (price - sl_price) > max_sl_dist:
+                    sl_price = price - max_sl_dist
+            else:
+                # 做空：SL 在現價上。不設在成本(VWAP)之下，不設在 EMA20 之下
+                if vwap_2h is not None and vwap_2h > 0:
+                    cost_ceiling = vwap_2h * 1.005
+                    sl_price = min(sl_price, cost_ceiling)
+                if ema20_close is not None and ema20_close > 0 and ema20_close > price:
+                    ema_floor = ema20_close * 1.005
+                    sl_price = max(sl_price, ema_floor)
+                if (sl_price - price) > max_sl_dist:
+                    sl_price = price + max_sl_dist
 
-            # 防呆：做多 SL 必須在現價下方、做空 SL 必須在現價上方（避免 2h 均價在歷史高/低區時出現反向止損）
+            # 防呆：做多 SL 必須在現價下方、做空 SL 必須在現價上方
             if is_long and sl_price >= price:
                 sl_price = price - sl_dist
             elif not is_long and sl_price <= price:
                 sl_price = price + sl_dist
 
-            return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), fmt_p(tp3_price), sl_capped
+            # TP2 風報比（以實際停損距離為 1R）
+            risk_dist = (price - sl_price) if is_long else (sl_price - price)
+            if risk_dist and risk_dist > 0:
+                if is_long:
+                    r_tp2 = (tp2_price - price) / risk_dist
+                else:
+                    r_tp2 = (price - tp2_price) / risk_dist
+                r_tp2 = round(r_tp2, 1)
+            else:
+                r_tp2 = tp2_r_fallback
 
-        return _na, _na, _na, _na, False
+            return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), r_tp2, sl_capped
+
+        return _na, _na, _na, None, False
 
     def _is_bull(x: Dict) -> bool:
         sig = x.get("signal_label") or ""
@@ -2649,9 +2689,10 @@ def build_report_message_tiered(
                     else:
                         pos_rec = "試單 2.5% (窄止損)"
 
-                # 計算 SL/TP
-                sl_val, tp1_val, tp2_val, tp3_val, sl_capped = calc_sl_tp(
-                    x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig, x.get("vwap_2h")
+                # 計算 SL/TP（只給 TP1 風報比、TP2 技術位+風報比）
+                sl_val, tp1_val, tp2_val, tp2_r, sl_capped = calc_sl_tp(
+                    x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig,
+                    x.get("vwap_2h"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value")
                 )
 
                 price = x.get("current_price")
@@ -2664,7 +2705,7 @@ def build_report_message_tiered(
                 atr_for_log = x.get("atr")
                 cap_note = " (SL已觸發10%上限限制)" if sl_capped else ""
                 logger.info(
-                    f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈1={tp1_val} 止盈2={tp2_val} 止盈3={tp3_val}{cap_note}"
+                    f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈1={tp1_val} 止盈2={tp2_val}{cap_note}"
                 )
 
                 # 1. Header: Symbol, Link, Stars
@@ -2721,15 +2762,13 @@ def build_report_message_tiered(
                 # 止損與止盈顯示（依 S+/S/A 分級 + R 倍數）
                 lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
 
+                tp2_r_str = f" ({tp2_r}R)" if tp2_r is not None else ""
                 if is_elite_sig or stars >= 5:
                     lines.append(f"✅ 止盈1：`{tp1_val}` (1.0R)")
-                    lines.append(f"🚀 止盈2：`{tp2_val}` (2.0R)")
-                    if tp3_val != "-":
-                        lines.append(f"🌌 止盈3：`{tp3_val}` (3.5R)")
+                    lines.append(f"🚀 止盈2：`{tp2_val}`{tp2_r_str}")
                 else:
                     lines.append(f"✅ 止盈1：`{tp1_val}` (1.5R)")
-                    lines.append(f"🚀 止盈2：`{tp2_val}` (3.0R)")
-                    lines.append(f"🎰 樂透3：`{tp3_val}` (5.0R)")
+                    lines.append(f"🚀 止盈2：`{tp2_val}`{tp2_r_str}")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
@@ -3080,7 +3119,10 @@ def fetch_position_change():
             "current_price": tech.get("current_price") if tech else None,
             "rsi": rsi_val,
             "atr": atr_val,
+            "ub_value": tech.get("ub_value") if tech else None,
+            "lb_value": tech.get("lb_value") if tech else None,
             "vwap_2h": tech.get("vwap_2h") if tech else None,
+            "ema20_close": tech.get("ema20_close") if tech else None,
             "whale_index": whale_idx,
             "signal_label": signal_label,
             "zone": zone,
