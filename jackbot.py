@@ -2195,7 +2195,7 @@ OI_FOR_4_STAR = 3.3    # 4星
 OI_FOR_ELITE = 3.5     # 鑽石 💎：與 5 星對齊
 
 # 狙擊鏡止盈風報門檻：止盈1 若低於此 R 不推播（避免賠率差、維持勝率品質）
-MIN_TP1_R_FOR_PUSH = 0.7
+MIN_TP1_R_FOR_PUSH = 0.65
 
 # 抄底/摸頭 30m 門檻（保守山寨）：略放寬仍算低位/高位，減少誤殺
 PRICE_DIP_MAX = 3.0    # 抄底：30m 漲幅 ≤ 3% 才算低位，超過改標追漲
@@ -3234,7 +3234,7 @@ def fetch_position_change():
         )
 
     # 用 BingX ticker 一次取現價 + 24h 成交額（成交量略放寬，OI 不變保勝率）
-    VOLUME_HARD_MIN_USD = 1_500_000    # 24h 成交額 <1.5M 不推（原 2M 放寬）
+    VOLUME_HARD_MIN_USD = 1_250_000    # 24h 成交額 <1.25M 不推（略放寬以增加訊號量）
     VOLUME_SOFT_MIN_USD = 5_000_000   # <5M 標示「成交量極低 小心滑價」
     VOLUME_5STAR_MIN_USD = 5_000_000   # 5 星僅允許 >5M，≤ 降為 4 星
     filtered_top = []
