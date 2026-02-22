@@ -2800,8 +2800,9 @@ def build_report_message_tiered(
                     f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈1={tp1_val} 止盈2={tp2_val}{cap_note}"
                 )
 
-                # 1. Header: Symbol, Link, Stars
-                lines.append(f"{dir_emoji} [{sym}]({coin_url}) {star_display} {vol_desc}")
+                # 1. Header: Symbol, Link, Stars（同幣換方向時在交易對後提醒）
+                flip_tag = " 🔄換方向" if x.get("direction_flip") else ""
+                lines.append(f"{dir_emoji} [{sym}]({coin_url}){flip_tag} {star_display} {vol_desc}")
                 # 2. 策略（白話）
                 lines.append(f"🎲 策略：{strength}｜{pos_rec}")
                 flip = x.get("direction_flip")
@@ -3319,18 +3320,18 @@ def fetch_position_change():
                 else:
                     history = [{"symbol": str(p[0]), "dir": str(p[1]), "ts": int(now_ts) - 3600} for p in last_round if isinstance(p, (list, tuple)) and len(p) >= 2]
             _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
-            logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆 -> 同幣不重推（不分多空）")
+            logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆 -> 同幣同方向才冷卻（換方向可推）")
         else:
             logger.info(f"冷卻檔不存在，本輪無冷卻限制: {_cooldown_path_abs}")
     except Exception as e:
         history = []
         logger.warning(f"讀取冷卻檔失敗，本輪無冷卻限制: {e}")
-    # 冷卻：同幣 4h 內只推一次，不分多空（避免 00:02 推 BNLIFE 多、00:31 又推 BNLIFE 空）
-    cooldown_symbols_4h = set()
+    # 冷卻：同幣＋同方向 4h 內只推一次；同幣換方向可推，並在交易對後提醒換方向
+    cooldown_symbol_dir_4h = set()
     for e in history:
-        if isinstance(e, dict) and e.get("symbol"):
+        if isinstance(e, dict) and e.get("symbol") and e.get("dir"):
             if (now_ts - e.get("ts", 0)) <= cooldown_sec:
-                cooldown_symbols_4h.add(_cooldown_symbol(str(e["symbol"])))
+                cooldown_symbol_dir_4h.add((_cooldown_symbol(str(e["symbol"])), str(e["dir"])))
     # 上一輪方向（用於「多轉空/空轉多」提示）：取每幣最近一次推播的方向（僅對 >4h 前推過的幣）
     last_round_by_sym = {}
     for e in sorted(history, key=lambda x: x.get("ts", 0), reverse=True):
@@ -3345,11 +3346,11 @@ def fetch_position_change():
         if not sym:
             continue
         sym_norm = _cooldown_symbol(sym)
-        if sym_norm in cooldown_symbols_4h:
-            logger.info(f"冷卻跳過: {sym_norm} (4h 內已報過，不分多空)")
-            continue
         cur_dir = _item_direction(x)
-        # 上一輪有報過此幣但方向不同（且已過 4h）→ 標記多轉空/空轉多
+        if (sym_norm, cur_dir) in cooldown_symbol_dir_4h:
+            logger.info(f"冷卻跳過: {sym_norm} ({cur_dir}) (4h 內同幣同方向已報過)")
+            continue
+        # 同幣換方向：標記多轉空/空轉多，並在交易對後顯示換方向提醒
         if sym_norm in last_round_by_sym and last_round_by_sym[sym_norm] != cur_dir:
             x["direction_flip"] = last_round_by_sym[sym_norm] + "轉" + cur_dir
         else:
@@ -3358,7 +3359,7 @@ def fetch_position_change():
 
     _skipped = len(all_top) - len(cooled_top)
     if _skipped > 0:
-        logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣 {COOLDOWN_HOURS}h 內不重推，不分多空）")
+        logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
     # 寫入冷卻檔時也用正規化 symbol，確保下次讀取比對一致
     pairs_this_run = [(_cooldown_symbol(x.get("symbol")), _item_direction(x)) for x in cooled_top if x.get("symbol")]
 
