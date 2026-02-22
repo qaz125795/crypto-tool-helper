@@ -4,7 +4,7 @@ Telegram 訊號發送 - 法人級格式
 """
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -25,11 +25,18 @@ def get_gold_chart_keyboard() -> Dict[str, Any]:
     }
 
 
-def format_signal_message(signal: SignalResult) -> str:
-    """專業訊號格式：多空、進場、止損(ATR)、止盈、趨勢強度、時間、圖表連結。"""
+def format_signal_message(
+    signal: SignalResult,
+    data_cutoff_utc: Optional[datetime] = None,
+) -> str:
+    """專業訊號格式：多空、進場、止損、止盈、趨勢強度、時間、圖表連結。可帶入數據截止時間。"""
     side_emoji = "🟢" if signal.direction == "long" else "🔴"
     side_text = "做多" if signal.direction == "long" else "做空"
     time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    data_line = ""
+    if data_cutoff_utc is not None:
+        cutoff_str = data_cutoff_utc.strftime("%Y-%m-%d %H:00 UTC") if hasattr(data_cutoff_utc, "strftime") else str(data_cutoff_utc)
+        data_line = f"📅 依據 K 線至：{cutoff_str}\n"
     return (
         f"{side_emoji} XAUUSD {side_text}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -39,6 +46,7 @@ def format_signal_message(signal: SignalResult) -> str:
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 趨勢強度：{signal.trend_strength}\n"
         f"⏰ 訊號時間：{time_str}\n"
+        f"{data_line}"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 對價用圖表：Yahoo GC=F {LINK_YAHOO_GC}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
