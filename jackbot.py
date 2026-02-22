@@ -2462,6 +2462,12 @@ def build_report_message_tiered(
                         if (sl_candidate - price) <= 1.5 * sl_dist:
                             sl_price = sl_candidate
 
+            # 防呆：做多 SL 必須在現價下方、做空 SL 必須在現價上方（避免 2h 均價在歷史高/低區時出現反向止損）
+            if is_long and sl_price >= price:
+                sl_price = price - sl_dist
+            elif not is_long and sl_price <= price:
+                sl_price = price + sl_dist
+
             return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), fmt_p(tp3_price), sl_capped
 
         return _na, _na, _na, _na, False
