@@ -6003,14 +6003,28 @@ def run_gold_signal():
         logger.info("[黃金訊號] 本輪無符合條件的 ORB+MA 訊號，跳過推播")
         return
     logger.info("[黃金訊號] 取得訊號: 方向=%s 進場=%s", signal.direction, signal.entry)
+    # 數據過舊（例如週末休市）則不推播，避免「今天沒開盤卻收到訊號」
+    last_bar = df_1h.index[-1]
+    try:
+        last_bar_utc = last_bar.tz_convert("UTC") if getattr(last_bar, "tzinfo", None) else last_bar.tz_localize("UTC")
+    except Exception:
+        last_bar_utc = last_bar
+    now_utc = datetime.now(timezone.utc)
+    try:
+        age_sec = (pd.Timestamp(now_utc) - pd.Timestamp(last_bar_utc)).total_seconds()
+    except Exception:
+        age_sec = 0
+    if age_sec > 24 * 3600:
+        logger.info("[黃金訊號] 數據過舊（最後 K 線已逾 24h，可能休市），跳過推播")
+        return
     ok, reason = apply_filters(
-        signal.direction, cfg, df_1h, df_dxy=df_dxy, now=datetime.now(timezone.utc)
+        signal.direction, cfg, df_1h, df_dxy=df_dxy, now=now_utc
     )
     if not ok:
         logger.info("[黃金訊號] 訊號被濾網拒絕: %s", reason)
         return
     thread_id = TG_THREAD_IDS.get("gold_signal", 254)
-    msg = format_signal_message(signal)
+    msg = format_signal_message(signal, data_cutoff_utc=last_bar_utc)
     keyboard = get_gold_chart_keyboard()
     sent = send_telegram_message(msg, thread_id, parse_mode=None, reply_markup=keyboard)
     logger.info("[黃金訊號] 推播完成 | thread_id=%s 發送結果=%s", thread_id, sent)
