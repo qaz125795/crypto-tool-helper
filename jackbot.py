@@ -1995,26 +1995,38 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     if not raw:
         logger.warning(f"BingX 本地計算失敗 {clean}: 嘗試了 {try_symbols} 皆無數據")
         return None
-    highs, lows, closes = [], [], []
+    highs, lows, closes, volumes = [], [], [], []
     for row in raw:
-        h = l = c = None
+        h = l = c = vol = None
         if isinstance(row, dict):
             h = row.get("high") or row.get("h")
             l = row.get("low") or row.get("l")
             c = row.get("close") or row.get("c")
+            vol = row.get("volume") or row.get("v")
         elif isinstance(row, (list, tuple)) and len(row) >= 5:
-            # BingX 常見 [open, high, low, close, volume]，close 多為 index 4
             h, l = row[1], row[2]
             c = row[4] if len(row) > 4 else row[3]
+            vol = row[5] if len(row) > 5 else None  # 常見 [ts,o,h,l,c,v]，volume 在 index 5
         if h is not None and l is not None and c is not None:
             try:
                 highs.append(float(h))
                 lows.append(float(l))
                 closes.append(float(c))
+                volumes.append(float(vol) if vol is not None else 0.0)
             except (TypeError, ValueError):
                 pass
     if len(closes) < 20:
         return None
+    # 近 2h（4 根 30m）成交量加權均價，當停損參考；用 2h 較貼近當前走勢，避免 4h 均價太遠
+    vwap_2h = None
+    if len(closes) >= 4 and len(volumes) >= 4:
+        use_c = closes[-4:]
+        use_h = highs[-4:]
+        use_l = lows[-4:]
+        use_v = volumes[-4:]
+        if sum(use_v) > 0:
+            typical = [(use_h[i] + use_l[i] + use_c[i]) / 3.0 for i in range(len(use_c))]
+            vwap_2h = sum(typical[i] * use_v[i] for i in range(len(typical))) / sum(use_v)
     series = pd.Series(closes)
     rsi_series = _rsi(series, period=14)
     if rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
@@ -2041,7 +2053,7 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         atr_series = tr.rolling(14).mean()
         if not atr_series.empty and not pd.isna(atr_series.iloc[-1]) and atr_series.iloc[-1] > 0:
             atr_val = float(atr_series.iloc[-1])
-    return {
+    out = {
         "rsi": rsi_val,
         "touch_upper": touch_upper,
         "touch_lower": touch_lower,
@@ -2052,6 +2064,9 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         "source": "BingX",
         "real_symbol": found_symbol,
     }
+    if vwap_2h is not None:
+        out["vwap_2h"] = vwap_2h
+    return out
 
 
 def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -2359,11 +2374,10 @@ def build_report_message_tiered(
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
-    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool):
+    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool, vwap_2h: Optional[float] = None):
         """
-        SL/TP 風控版 (v5.0)：針對不同等級給予不同盈虧比 (P/L)
-        - S+/S級 (共識/順勢)：標準止損 (2.0 ATR)，追求高勝率，不輕易被洗。
-        - A級 (轉折/樂透)：極窄止損 (1.2 ATR)，追求高盈虧比 (1:5)，錯了快跑。
+        SL/TP 風控版 (v5.1)：ATR 止損 + 2h 成交均價邊界（均價用 2h 較貼近，且設最遠 1.5×ATR 不讓停損太遠）
+        - 有 2h VWAP 時：做多 SL 不低於 VWAP×0.99，做空 SL 不高於 VWAP×1.01；且停損距離不超過 1.5×ATR。
         """
         _na = "-"  # ASCII placeholder (avoid em-dash encoding issues on Zeabur)
         def fmt_p(p):
@@ -2432,6 +2446,21 @@ def build_report_message_tiered(
 
             if sl_price <= 0 and is_long:
                 sl_price = price * 0.95
+
+            # 2h 成交均價邊界：不做破均價的極端止損；且不讓停損超過 1.5×ATR 距離（避免太遠）
+            if vwap_2h is not None and vwap_2h > 0 and sl_dist > 0:
+                if is_long:
+                    sl_vwap = vwap_2h * 0.99
+                    if sl_price < sl_vwap:
+                        sl_candidate = sl_vwap
+                        if (price - sl_candidate) <= 1.5 * sl_dist:
+                            sl_price = sl_candidate
+                else:
+                    sl_vwap = vwap_2h * 1.01
+                    if sl_price > sl_vwap:
+                        sl_candidate = sl_vwap
+                        if (sl_candidate - price) <= 1.5 * sl_dist:
+                            sl_price = sl_candidate
 
             return fmt_p(sl_price), fmt_p(tp1_price), fmt_p(tp2_price), fmt_p(tp3_price), sl_capped
 
@@ -2616,7 +2645,7 @@ def build_report_message_tiered(
 
                 # 計算 SL/TP
                 sl_val, tp1_val, tp2_val, tp3_val, sl_capped = calc_sl_tp(
-                    x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig
+                    x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig, x.get("vwap_2h")
                 )
 
                 price = x.get("current_price")
@@ -3045,6 +3074,7 @@ def fetch_position_change():
             "current_price": tech.get("current_price") if tech else None,
             "rsi": rsi_val,
             "atr": atr_val,
+            "vwap_2h": tech.get("vwap_2h") if tech else None,
             "whale_index": whale_idx,
             "signal_label": signal_label,
             "zone": zone,
@@ -3098,8 +3128,8 @@ def fetch_position_change():
         f"成交量二次過濾: 門檻 {VOLUME_HARD_MIN_USD/1e6:.1f}M USD（<{VOLUME_HARD_MIN_USD/1e6:.1f}M 排除），剩餘 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<{VOLUME_SOFT_MIN_USD/1e6:.1f}M)"
     )
 
-    # 冷卻規則：只看「幣種 + 多/空」，不區分摸頭/追跌/頭等艙/列車。同一幣同方向 4h 內只推一次。
-    # 例：摸頭區報過 SPACECOIN 空 → 追跌區再出現 SPACECOIN 空也跳過；頭等艙報多 → 列車再報多也跳過。
+    # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
+    # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
     COOLDOWN_HOURS = 4
     HISTORY_HOURS = 24   # 冷卻歷史保留 24 小時（供 cooldown 與 direction_flip 使用）
 
@@ -3140,19 +3170,19 @@ def fetch_position_change():
                 else:
                     history = [{"symbol": str(p[0]), "dir": str(p[1]), "ts": int(now_ts) - 3600} for p in last_round if isinstance(p, (list, tuple)) and len(p) >= 2]
             _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
-            logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆 -> 同幣同向不重推")
+            logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆 -> 同幣不重推（不分多空）")
         else:
             logger.info(f"冷卻檔不存在，本輪無冷卻限制: {_cooldown_path_abs}")
     except Exception as e:
         history = []
         logger.warning(f"讀取冷卻檔失敗，本輪無冷卻限制: {e}")
-    # 冷卻集合：過去 COOLDOWN_HOURS 內推過的 (正規化 symbol, 多|空) 本輪不重複報（正規化避免 BNLIFE vs BNLIFEUSDT 重複）
-    cooldown_set = set()
+    # 冷卻：同幣 4h 內只推一次，不分多空（避免 00:02 推 BNLIFE 多、00:31 又推 BNLIFE 空）
+    cooldown_symbols_4h = set()
     for e in history:
-        if isinstance(e, dict) and e.get("symbol") and e.get("dir"):
+        if isinstance(e, dict) and e.get("symbol"):
             if (now_ts - e.get("ts", 0)) <= cooldown_sec:
-                cooldown_set.add((_cooldown_symbol(str(e["symbol"])), str(e["dir"])))
-    # 上一輪方向（用於「多轉空/空轉多」提示）：取每幣最近一次推播的方向（用正規化 key）
+                cooldown_symbols_4h.add(_cooldown_symbol(str(e["symbol"])))
+    # 上一輪方向（用於「多轉空/空轉多」提示）：取每幣最近一次推播的方向（僅對 >4h 前推過的幣）
     last_round_by_sym = {}
     for e in sorted(history, key=lambda x: x.get("ts", 0), reverse=True):
         if isinstance(e, dict) and e.get("symbol") and e.get("dir"):
@@ -3166,12 +3196,11 @@ def fetch_position_change():
         if not sym:
             continue
         sym_norm = _cooldown_symbol(sym)
-        cur_dir = _item_direction(x)
-        key = (sym_norm, cur_dir)
-        if key in cooldown_set:
-            logger.info(f"冷卻跳過: {sym_norm} {cur_dir} (上輪已報)")
+        if sym_norm in cooldown_symbols_4h:
+            logger.info(f"冷卻跳過: {sym_norm} (4h 內已報過，不分多空)")
             continue
-        # 上一輪有報過此幣但方向不同 → 標記多轉空/空轉多，報表會多一行提醒
+        cur_dir = _item_direction(x)
+        # 上一輪有報過此幣但方向不同（且已過 4h）→ 標記多轉空/空轉多
         if sym_norm in last_round_by_sym and last_round_by_sym[sym_norm] != cur_dir:
             x["direction_flip"] = last_round_by_sym[sym_norm] + "轉" + cur_dir
         else:
@@ -3180,7 +3209,7 @@ def fetch_position_change():
 
     _skipped = len(all_top) - len(cooled_top)
     if _skipped > 0:
-        logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同向 {COOLDOWN_HOURS}h 內不重推）")
+        logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣 {COOLDOWN_HOURS}h 內不重推，不分多空）")
     # 寫入冷卻檔時也用正規化 symbol，確保下次讀取比對一致
     pairs_this_run = [(_cooldown_symbol(x.get("symbol")), _item_direction(x)) for x in cooled_top if x.get("symbol")]
 
