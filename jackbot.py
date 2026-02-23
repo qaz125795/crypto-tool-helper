@@ -3706,7 +3706,10 @@ def fetch_position_change():
         else:
             logger.info(f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，但風報比篩選後 0 筆可推播（止盈1 風報比 < {MIN_TP1_R_FOR_PUSH}R），不發送主報表")
     else:
-        logger.info(f"【未推播原因】本輪 0 筆通過冷卻（4h 內同幣同方向已推過），不發送主報表")
+        if len(all_top) == 0:
+            logger.info(f"【未推播原因】本輪無達 OI 門檻之標的（四類皆 0 筆），不發送主報表")
+        else:
+            logger.info(f"【未推播原因】本輪 {len(all_top)} 筆候選皆被冷卻（4h 內同幣同方向已推過），不發送主報表")
 
     # 僅在「本輪有實際推播」時才寫入冷卻與推播紀錄（無訊號或全篩掉不寫）
     if cooled_top and has_any:
