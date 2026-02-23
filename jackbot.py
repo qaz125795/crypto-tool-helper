@@ -2207,7 +2207,8 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
 
 def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    技術指標以 API 為準；僅當 API 搜尋不到此幣種技術分析資料時，才執行 BingX 本地換算（效率考量）。
+    技術指標：Plan A = CoinGlass API（RSI/BOLL/ATR），Plan B = BingX K 線本地計算（RSI/布林/EMA20/VWAP_2h/ATR/MACD）。
+    兩者並行、不偏袒；API 有該幣種用 Plan A，沒有則用 Plan B，下游 SL/TP 與推播邏輯一致。
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     plan_b_used = False
@@ -2284,18 +2285,11 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
 
     atr_val = _fetch_coinglass_atr(symbol, "1d")
     vwap_2h = ema20_close = None
-    # Plan A 補強：EMA / MACD / CGDI 若任一指標 API 獲取失敗，標註 plan_b_used（仍以 RSI/BOLL/ATR 為主推播）
+    # Plan A 加分項：EMA、MACD（API 失敗不影響 plan_b_used）。CGDI 大盤情緒對單標的進出影響小，不呼叫以省 API。
     ema20_api = _fetch_coinglass_ema(symbol, "30m")
     if ema20_api is not None:
         ema20_close = ema20_api
-    else:
-        plan_b_used = True
     macd_data = _fetch_coinglass_macd(symbol, "30m")
-    if macd_data is None:
-        plan_b_used = True
-    cgdi_data = _fetch_coinglass_cgdi_history(symbol, "1d")
-    if cgdi_data is None:
-        plan_b_used = True
     logger.info(f"[技術指標] {base}: 使用 CoinGlass API 數據 RSI={rsi_val} BOLL上={ub_value} BOLL下={lb_value} 現價={current_price} ATR={atr_val} EMA20={ema20_close} plan_b_used={plan_b_used}")
 
     out = {
@@ -2315,8 +2309,6 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
         out["ema20_close"] = ema20_close
     if macd_data is not None:
         out["macd"] = macd_data
-    if cgdi_data is not None:
-        out["cgdi"] = cgdi_data
     return out
 
 
@@ -2626,13 +2618,18 @@ def build_report_message_tiered(
                 tp1_price = max(price - fallback_dist, floor)
             tp1_source = "atr"
 
-        # TP2：能量邊界 = max(BOLL 上軌, Price+2.5*ATR) 做多；min(BOLL 下軌, Price-2.5*ATR) 做空。CVD 背離則下修至現價
+        # TP2：能量邊界 = max(BOLL 上軌, Price+2.5*ATR) 做多；min(BOLL 下軌, Price-2.5*ATR) 做空。
+        # 動能衰竭/CVD 背離時技術面算不出合理 TP2，改給 3R 價位並提示「超出技術分析邏輯，只能賭運氣 3R」
         energy_exhausted = False
         if cvd_divergence:
-            tp2_price = price
-            tp2_source = "exhausted"
+            tp2_dist = 3.0 * risk_dist
+            if is_long:
+                tp2_price = price + tp2_dist
+            else:
+                tp2_price = max(price - tp2_dist, floor)
+            tp2_source = "exhausted_3r"
             energy_exhausted = True
-            r_tp2 = 0.0
+            r_tp2 = 3.0
         else:
             atr_25 = (2.5 * atr_val) if atr_val else price * 0.04
             if is_long:
@@ -2879,7 +2876,7 @@ def build_report_message_tiered(
                 # 1. Header: 一鍵複製標的（無 $ 符號，方便貼到交易所搜尋）
                 sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
                 flip_tag = " 🔄換方向" if x.get("direction_flip") else ""
-                plan_b_tag = " ⚠️ 本地 Plan B 數據估算" if x.get("plan_b_used") else ""
+                plan_b_tag = " 📊 BingX K線" if x.get("plan_b_used") else " 📊 CoinGlass"
                 lines.append(f"{dir_emoji} `{sym_base}`{flip_tag}{plan_b_tag} {star_display} {vol_desc}")
                 # 2. 策略（白話，含分級 emoji）
                 lines.append(f"🎲 策略：{strength}｜{pos_rec}")
@@ -2944,7 +2941,7 @@ def build_report_message_tiered(
                 r_tp1_str = f" ({r_tp1}R)" if r_tp1 is not None else ""
                 lines.append(f"✅ 止盈1：`{tp1_val}`{tp1_note}{r_tp1_str}")
                 if energy_exhausted:
-                    lines.append(f"🚀 止盈2：動能衰竭，建議入袋｜現價 `{tp2_val}`")
+                    lines.append(f"🚀 止盈2：`{tp2_val}` (3R) 超出技術分析邏輯，只能賭個運氣 3R 了")
                 else:
                     tp2_r_str = f" ({r_tp2}R)" if r_tp2 is not None else ""
                     lines.append(f"🚀 止盈2：`{tp2_val}` (能量邊界){tp2_r_str}")
