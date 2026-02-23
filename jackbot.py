@@ -3389,9 +3389,8 @@ def fetch_position_change():
     else:
         SNIPER_COOLDOWN_FILE = (DATA_DIR / "sniper_cooldown.json").resolve()
     _cooldown_path_abs = str(SNIPER_COOLDOWN_FILE)
-    # 推播紀錄與冷卻檔同目錄；倉位追蹤（SL/TP1/TP2/籌碼反轉）依賴此檔在「每次排程之間」持久存在，否則每輪讀到 0 筆、不會發任何追蹤推播
-    SNIPER_PUSH_LOG_FILE = SNIPER_COOLDOWN_FILE.parent / "sniper_push_log.json"
-    logger.info(f"冷卻檔路徑: {_cooldown_path_abs}")
+    # 冷卻 + 推播紀錄改為「單一 JSON」一併讀寫，避免 CI cache 還原時兩檔不一致（冷卻有、推播紀錄 0 筆）
+    logger.info(f"狙擊狀態檔路徑（冷卻+推播紀錄）: {_cooldown_path_abs}")
     now_ts = time.time()
     cooldown_sec = COOLDOWN_HOURS * 3600
     history_sec = HISTORY_HOURS * 3600
@@ -3401,6 +3400,19 @@ def fetch_position_change():
         if SNIPER_COOLDOWN_FILE.exists():
             raw = json.loads(SNIPER_COOLDOWN_FILE.read_text(encoding="utf-8"))
             history = raw.get("history") or []
+            # 推播紀錄與冷卻同一檔：有 "signals" 就用，無則 []；相容舊版僅有 history
+            push_log_signals = raw.get("signals") or []
+            # 遷移：狀態檔無 signals 但舊檔存在則讀入一次
+            if not push_log_signals:
+                _legacy = SNIPER_COOLDOWN_FILE.parent / "sniper_push_log.json"
+                if _legacy.exists():
+                    try:
+                        leg = json.loads(_legacy.read_text(encoding="utf-8"))
+                        push_log_signals = leg.get("signals") or []
+                        if push_log_signals:
+                            logger.info(f"已從舊檔遷移推播紀錄 {len(push_log_signals)} 筆（sniper_push_log.json），將併入狀態檔")
+                    except Exception:
+                        pass
             # 相容舊格式：只有 last_round 時轉成 history（ts 設為 1 小時前，讓本輪仍可能冷卻）
             if not history and raw.get("last_round"):
                 last_round = raw.get("last_round") or []
@@ -3409,24 +3421,25 @@ def fetch_position_change():
                 else:
                     history = [{"symbol": str(p[0]), "dir": str(p[1]), "ts": int(now_ts) - 3600} for p in last_round if isinstance(p, (list, tuple)) and len(p) >= 2]
             _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
-            logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆 -> 同幣同方向才冷卻（換方向可推）")
+            logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆 | 推播紀錄 {len(push_log_signals)} 筆 -> 同幣同方向才冷卻（換方向可推）")
         else:
-            logger.info(f"冷卻檔不存在，本輪無冷卻限制: {_cooldown_path_abs}")
+            logger.info(f"狀態檔不存在，本輪無冷卻限制、無推播紀錄: {_cooldown_path_abs}")
+            # 遷移：若舊版 sniper_push_log.json 存在，讀入一次併入本輪 state，下次寫回即合併
+            _legacy_push = SNIPER_COOLDOWN_FILE.parent / "sniper_push_log.json"
+            if _legacy_push.exists():
+                try:
+                    leg = json.loads(_legacy_push.read_text(encoding="utf-8"))
+                    push_log_signals = leg.get("signals") or []
+                    if push_log_signals:
+                        logger.info(f"已從舊檔遷移推播紀錄 {len(push_log_signals)} 筆（sniper_push_log.json），將併入狀態檔")
+                except Exception:
+                    pass
     except Exception as e:
         history = []
-        logger.warning(f"讀取冷卻檔失敗，本輪無冷卻限制: {e}")
-    # 推播紀錄：用於「出場提示」— 讀取先前推過的訊號，若本輪價格觸及 SL/TP 或籌碼反轉則發送提前下車提示；追蹤 48 小時
+        push_log_signals = []
+        logger.warning(f"讀取狀態檔失敗，本輪無冷卻限制、無推播紀錄: {e}")
     PUSH_LOG_RETENTION_HOURS = 48
     EXIT_CHECK_WINDOW_HOURS = 48
-    try:
-        if SNIPER_PUSH_LOG_FILE.exists():
-            raw_log = json.loads(SNIPER_PUSH_LOG_FILE.read_text(encoding="utf-8"))
-            push_log_signals = raw_log.get("signals") or []
-        else:
-            push_log_signals = []
-    except Exception as e:
-        push_log_signals = []
-        logger.warning(f"讀取推播紀錄失敗，本輪不出場提示: {e}")
     # 倉位追蹤依賴「上一輪（及之前）寫入的推播紀錄」；若 data 目錄在排程間未持久化（如 CI 無 cache），此處會一直是 0 筆
     in_window = [
         e for e in push_log_signals
@@ -3566,13 +3579,14 @@ def fetch_position_change():
             logger.info(f"加碼提示已發送: {sym_base} (當初{pushed_dir}，本輪{cur_cat} 同向加強)")
     if exit_notified_set:
         try:
-            SNIPER_PUSH_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            SNIPER_PUSH_LOG_FILE.write_text(
-                json.dumps({"signals": push_log_signals}, ensure_ascii=False),
+            SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
+            state = {"history": history, "signals": push_log_signals}
+            SNIPER_COOLDOWN_FILE.write_text(
+                json.dumps(state, ensure_ascii=False),
                 encoding="utf-8"
             )
         except Exception as e:
-            logger.warning(f"寫入推播紀錄(出場標記)失敗: {e}")
+            logger.warning(f"寫入狀態檔(出場標記)失敗: {e}")
     # 肉眼可見：本輪倉位追蹤結果摘要
     if exit_notified_set:
         logger.info(f"【倉位追蹤】本輪檢查完成，共發送 {len(exit_notified_set)} 則推播 → 標的: {', '.join(sorted(exit_notified_set))}")
@@ -3633,12 +3647,7 @@ def fetch_position_change():
             new_entries = [{"symbol": s, "dir": d, "ts": int(now_ts)} for (s, d) in pairs_this_run if s]
             history = history + new_entries
             history = [e for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= history_sec]
-            SNIPER_COOLDOWN_FILE.write_text(
-                json.dumps({"history": history}, ensure_ascii=False),
-                encoding="utf-8"
-            )
-            logger.info(f"冷卻檔已寫入: 本輪 {len(pairs_this_run)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h) -> {_cooldown_path_abs}")
-            # 推播紀錄：本輪實際推出去的訊號寫入 LOG，供下一輪 48h 內出場追蹤（SL/TP1/TP2 + 籌碼反轉）使用
+            # 推播紀錄：本輪實際推出去的訊號，與冷卻一併寫入同一狀態檔（避免 cache 還原時兩檔不一致）
             pushed_at_tw = datetime.fromtimestamp(now_ts, tz=TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
 
             def _parse_price_str(s: Any) -> Optional[float]:
@@ -3703,13 +3712,15 @@ def fetch_position_change():
                 and not e.get("closed")
                 and (now_ts - e.get("ts", 0)) <= PUSH_LOG_RETENTION_HOURS * 3600
             ]
-            SNIPER_PUSH_LOG_FILE.write_text(
-                json.dumps({"signals": push_log_signals}, ensure_ascii=False),
+            state = {"history": history, "signals": push_log_signals}
+            SNIPER_COOLDOWN_FILE.write_text(
+                json.dumps(state, ensure_ascii=False),
                 encoding="utf-8"
             )
+            logger.info(f"冷卻檔已寫入: 本輪 {len(pairs_this_run)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h) -> {_cooldown_path_abs}")
             logger.info(f"推播紀錄已寫入: 本輪 {len(new_push_entries)} 筆，共 {len(push_log_signals)} 筆 (保留 {PUSH_LOG_RETENTION_HOURS}h)")
         except Exception as e:
-            logger.warning(f"寫入狙擊冷卻檔失敗: {e}")
+            logger.warning(f"寫入狙擊狀態檔失敗: {e}")
 
     logger.info("持倉變化篩選執行完成並已推播")
 
