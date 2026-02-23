@@ -2003,8 +2003,9 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         if raw:
             break
     if not raw:
-        logger.warning(f"BingX 本地計算失敗 {clean}: 嘗試了 {try_symbols} 皆無數據")
+        logger.warning(f"[本地換算] {clean}: BingX K線取得失敗，嘗試交易對 {try_symbols} 皆無數據")
         return None
+    logger.info(f"[本地換算] {clean}: BingX K線取得 {len(raw)} 根，使用交易對 {found_symbol}，開始本地計算 RSI(14)/布林(20,2)/EMA20/VWAP_2h/ATR(14)")
     highs, lows, closes, volumes = [], [], [], []
     for row in raw:
         h = l = c = vol = None
@@ -2026,6 +2027,7 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
             except (TypeError, ValueError):
                 pass
     if len(closes) < 20:
+        logger.warning(f"[本地換算] {clean}: K線有效根數 {len(closes)} < 20，無法計算")
         return None
     # 30分K 最常用「關鍵均線」：EMA20（指數移動平均），對近期價格權重高、反應快，實戰多當動態支撐/阻力
     # 做空時停損至少設在 EMA20 上方、做多時在 EMA20 下方，避免被回測均線洗掉
@@ -2037,7 +2039,7 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         for i in range(period, len(closes)):
             ema = alpha * float(closes[i]) + (1.0 - alpha) * ema
         ema20_close = ema
-    # 近 2h（4 根 30m）成交量加權均價，當停損參考；用 2h 較貼近當前走勢，避免 4h 均價太遠
+    # VWAP：小幣深度不足時 24h VWAP 易失真。Plan B 用「最近 2 小時（4 根 30m K 線）」成交量加權，更貼近短線狙擊成本位
     vwap_2h = None
     if len(closes) >= 4 and len(volumes) >= 4:
         use_c = closes[-4:]
@@ -2047,9 +2049,11 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         if sum(use_v) > 0:
             typical = [(use_h[i] + use_l[i] + use_c[i]) / 3.0 for i in range(len(use_c))]
             vwap_2h = sum(typical[i] * use_v[i] for i in range(len(typical))) / sum(use_v)
+            logger.info(f"[本地換算] {clean}: VWAP_2h 使用最近 4 根 30m K 線成交量加權 (典型價 H+L+C/3)，避免小幣 24h VWAP 失真")
     series = pd.Series(closes)
     rsi_series = _rsi(series, period=14)
     if rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
+        logger.warning(f"[本地換算] {clean}: RSI(14) 計算無效")
         return None
     rsi_val = float(rsi_series.iloc[-1])
     upper_bb, _, lower_bb = _bbands(series, length=20, std_dev=2.0)
@@ -2082,29 +2086,35 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         "lb_value": lb_value,
         "atr": atr_val,
         "source": "BingX",
+        "plan_b_used": True,
         "real_symbol": found_symbol,
     }
     if vwap_2h is not None:
         out["vwap_2h"] = vwap_2h
     if ema20_close is not None:
         out["ema20_close"] = ema20_close
+    logger.info(f"[本地換算] {clean}: 完成 RSI={rsi_val:.2f} 布林上={ub_value} 布林下={lb_value} 現價={current_price} ATR={atr_val} VWAP_2h={vwap_2h} EMA20={ema20_close} (plan_b_used=True)")
     return out
 
 
 def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    先試 CoinGlass API；失敗則用 BingX K 線 + 本地 RSI/布林帶計算。
-    若傳入 bingx_symbol_override（來自 BingX contracts），BingX 請求時優先使用該 symbol。
+    技術指標以 API 為準；僅當 API 搜尋不到此幣種技術分析資料時，才執行 BingX 本地換算（效率考量）。
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-    # 1) 先試 CoinGlass
+    plan_b_used = False
+    # Plan A：優先使用 CoinGlass API 技術指標
+    logger.info(f"[技術指標] {base}: 查詢 CoinGlass API RSI...")
     rsi_data = _fetch_coinglass_rsi(symbol)
     if rsi_data is None:
+        logger.info(f"[技術指標] {base}: API 無此幣種 RSI 數據，改執行 BingX 本地換算（K線+RSI/布林/EMA/VWAP/ATR）")
         tech = _fetch_bingx_klines_and_calc(symbol, preferred_symbol=bingx_symbol_override)
         if tech:
+            logger.info(f"[技術指標] {base}: 本地換算完成 RSI={tech.get('rsi')} 布林上={tech.get('ub_value')} 布林下={tech.get('lb_value')} ATR={tech.get('atr')} VWAP_2h={tech.get('vwap_2h')}")
             return tech
-        logger.info(f"RSI 無數據 {base}: CoinGlass 與 BingX 本地計算均失敗（可能限流 429 或該交易對 K 線不可用）")
+        logger.warning(f"[技術指標] {base}: CoinGlass 與 BingX 本地計算均失敗（可能限流 429 或該交易對 K 線不可用）")
         return None
+    logger.info(f"[技術指標] {base}: CoinGlass RSI 有數據，繼續取 BOLL/ATR")
     boll_data = _fetch_coinglass_boll(symbol)
 
     rsi_val = None
@@ -2128,6 +2138,11 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
                 except (TypeError, ValueError):
                     pass
     if rsi_val is None:
+        logger.info(f"[技術指標] {base}: API 回傳 RSI 結構無有效數值，改執行 BingX 本地換算")
+        tech = _fetch_bingx_klines_and_calc(symbol, preferred_symbol=bingx_symbol_override)
+        if tech:
+            logger.info(f"[技術指標] {base}: 本地換算完成")
+            return tech
         return None
 
     ub_value = None
@@ -2160,8 +2175,11 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
         current_price = ub_value or lb_value
 
     atr_val = _fetch_coinglass_atr(symbol, "1d")
+    vwap_2h = ema20_close = None
+    # 僅在「搜尋不到此幣種技術分析資料」時才執行本地換算；API 有回傳則一律用 API 數據，不再為缺欄位呼叫本地（自行換算效率慢）
+    logger.info(f"[技術指標] {base}: 使用 CoinGlass API 數據 RSI={rsi_val} BOLL上={ub_value} BOLL下={lb_value} 現價={current_price} ATR={atr_val}")
 
-    return {
+    out = {
         "rsi": rsi_val,
         "touch_upper": touch_upper,
         "touch_lower": touch_lower,
@@ -2170,7 +2188,13 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
         "lb_value": lb_value,
         "atr": atr_val,
         "source": "CoinGlass",
+        "plan_b_used": plan_b_used,
     }
+    if vwap_2h is not None:
+        out["vwap_2h"] = vwap_2h
+    if ema20_close is not None:
+        out["ema20_close"] = ema20_close
+    return out
 
 
 # 四區塊 + 五星制：zone 為推播區塊名，stars 1=最差 5=最佳
@@ -2221,6 +2245,8 @@ RSI_FILTER_BREAKOUT_LONG_MIN = 45   # v3.0 追漲時 RSI 不低於 45
 RSI_FILTER_BREAKOUT_SHORT_MAX = 55  # v3.0 追跌時 RSI 不高於 55
 # 鑽石級 24h 成交量門檻（略放寬：5M 即給頭等艙）
 VOLUME_ELITE_MIN_USD = 5_000_000
+# A 級費率硬過濾：資金費率 > 0.05% 視為多頭擁擠，不推 A 級防接盤殺多
+FUNDING_A_GRADE_MAX = 0.0005
 
 
 def _classify_signal_and_tier(
@@ -2244,6 +2270,12 @@ def _classify_signal_and_tier(
     abs_oi = abs(oi)
     if abs_oi < OI_FOR_4_STAR:
         return None
+
+    # A 級費率硬過濾：賭鬼樂透(A級) 且 資金費率 > 0.05% 不推，防接盤殺多
+    def _ret_4(label: str, zone: str, rsi_desc: str, reason: str):
+        if funding_rate is not None and funding_rate > FUNDING_A_GRADE_MAX:
+            return None
+        return _apply_retail_funding(apply_24h(label, zone, 4, rsi_desc, reason))
 
     # 輔助函數：24H 趨勢修正 (Truth Protocol)
     def apply_24h(label: str, zone: str, stars: int, rsi_desc: str, reason: str) -> Tuple[str, str, int, str, str]:
@@ -2350,34 +2382,34 @@ def _classify_signal_and_tier(
             downgrade_reason = "⚠️ 持倉大增但CVD背離 (多空激戰)"
             if oi > 0:
                 zone = ZONE_BREAKOUT_LONG if category in ("long_open", "short_close") else ZONE_BREAKOUT_SHORT
-                return _apply_retail_funding(apply_24h("🟡 激戰博弈", zone, 4, rsi_desc, downgrade_reason))
+                return _ret_4("🟡 激戰博弈", zone, rsi_desc, downgrade_reason)
             else:
                 zone = ZONE_DIP if category == "short_close" else ZONE_TOP
-                return _apply_retail_funding(apply_24h("🟡 激戰博弈", zone, 4, rsi_desc, downgrade_reason))
+                return _ret_4("🟡 激戰博弈", zone, rsi_desc, downgrade_reason)
 
     # === 4 星邏輯 (OI 中等 或 5 星降級) ===
 
     if oi > 0 and (funding_negative or category in ("long_open", "short_close")):
-        return _apply_retail_funding(apply_24h("🟢 試單做多", ZONE_BREAKOUT_LONG, 4, rsi_desc, "持倉增加 (觀察動能)"))
+        return _ret_4("🟢 試單做多", ZONE_BREAKOUT_LONG, rsi_desc, "持倉增加 (觀察動能)")
 
     if oi < 0 and (funding_positive or category == "long_close"):
         if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-            return _apply_retail_funding(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 4, rsi_desc, "價已跌→追空"))
-        return _apply_retail_funding(apply_24h("🔴 偏空過熱", ZONE_TOP, 4, rsi_desc, "多頭平倉 (摸頭試單)"))
+            return _ret_4("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, rsi_desc, "價已跌→追空")
+        return _ret_4("🔴 偏空過熱", ZONE_TOP, rsi_desc, "多頭平倉 (摸頭試單)")
 
     if oi < 0 and (funding_negative or category == "short_close"):
         if price_chg_30m is not None and price_chg_30m > PRICE_DIP_MAX:
-            return _apply_retail_funding(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 4, rsi_desc, "價已漲→追多"))
-        return _apply_retail_funding(apply_24h("🟢 抄底做多", ZONE_DIP, 4, rsi_desc, "空頭平倉 (摸底試單)"))
+            return _ret_4("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, rsi_desc, "價已漲→追多")
+        return _ret_4("🟢 抄底做多", ZONE_DIP, rsi_desc, "空頭平倉 (摸底試單)")
 
     if oi > 0:
         zone = ZONE_BREAKOUT_LONG if category in ("long_open", "short_close") else ZONE_BREAKOUT_SHORT
-        return _apply_retail_funding(apply_24h("🟡 順勢觀察", zone, 4, rsi_desc, "持倉異動順勢"))
+        return _ret_4("🟡 順勢觀察", zone, rsi_desc, "持倉異動順勢")
 
     if oi < 0:
         if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-            return _apply_retail_funding(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 4, rsi_desc, "價跌→追空"))
-        return _apply_retail_funding(apply_24h("🔴 摸頭做空", ZONE_TOP, 4, rsi_desc, "持倉減 (偏空)"))
+            return _ret_4("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, rsi_desc, "價跌→追空")
+        return _ret_4("🔴 摸頭做空", ZONE_TOP, rsi_desc, "持倉減 (偏空)")
 
     return None
 
@@ -2399,11 +2431,12 @@ def build_report_message_tiered(
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
-    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool, vwap_2h: Optional[float] = None, ema20_close: Optional[float] = None, ub_value: Optional[float] = None, lb_value: Optional[float] = None):
+    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool, vwap_2h: Optional[float] = None, ema20_close: Optional[float] = None, ub_value: Optional[float] = None, lb_value: Optional[float] = None, cvd_divergence: bool = False):
         """
-        停損：主力成本(VWAP)+ATR+EMA20。止盈：TP1=風報比配置，TP2=技術位(布林)且至少優於TP1，並回傳TP2的R倍數。
+        專業籌碼博弈版：TP1=主力成本對稱位(VWAP)，TP2=BOLL 與 2.5*ATR 取邊界，SL=1.5*ATR 上限 10%。
+        CVD 背離時 TP2 下修至現價並標記動能衰竭。
         """
-        _na = "-"  # ASCII placeholder (avoid em-dash encoding issues on Zeabur)
+        _na = "-"
         def fmt_p(p):
             if p is None or (isinstance(p, float) and (p != p)) or p <= 0:
                 return _na
@@ -2418,187 +2451,95 @@ def build_report_message_tiered(
             return f"{p:.2f}"
 
         if price is None or price <= 0:
-            return _na, _na, _na, None, None, None, None, False
+            return _na, _na, _na, None, None, None, None, False, False
 
-        # === 核心差異化參數（只給 TP1/TP2）===
-        if is_elite or stars >= 5:
-            risk_multiplier = 2.0
-            tp1_r, tp2_r_fallback = 1.0, 2.5
-        else:
-            risk_multiplier = 1.2
-            tp1_r, tp2_r_fallback = 1.5, 3.0
+        atr_val = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
+        floor = price * 0.01
+        MAX_SL_PERCENT = 0.10
+        sl_capped = False
 
-        # 波動率過大時的額外保護
-        if atr is not None and isinstance(atr, (int, float)) and atr > 0:
-            volatility_pct = atr / price
-            if volatility_pct > 0.05:
-                risk_multiplier *= 0.8
-
-            sl_dist = atr * risk_multiplier
-
-            MAX_SL_PERCENT = 0.10
-            sl_capped = False
+        # 主動停損 SL：基礎 1.5*ATR，強制上限 10%
+        if atr_val is not None:
+            sl_dist = 1.5 * atr_val
             if sl_dist > price * MAX_SL_PERCENT:
                 sl_dist = price * MAX_SL_PERCENT
                 sl_capped = True
+        else:
+            sl_dist = price * 0.03  # 無 ATR 時暫用 3%
 
-            floor = price * 0.01
-            # 技術目標：分開算布林與均線，之後取近者為 TP1、遠者為 TP2；若兩者相似則 TP2 = TP1*2
-            if is_long:
-                sl_price = price - sl_dist
-                boll_price = min(ub_value, price + sl_dist * tp2_r_fallback) if (ub_value is not None and ub_value > price) else None
-                if ema20_close is not None and ema20_close > 0:
-                    if ema20_close > price:
-                        ema_price = min(ema20_close * 1.01, price + sl_dist * tp2_r_fallback)
-                    else:
-                        ema_price = min(price + (price - ema20_close), price + sl_dist * tp2_r_fallback)
-                else:
-                    ema_price = None
-            else:
-                sl_price = price + sl_dist
-                boll_price = max(lb_value, price - sl_dist * tp2_r_fallback) if (lb_value is not None and lb_value < price and lb_value > 0) else None
-                if ema20_close is not None and ema20_close > 0:
-                    if ema20_close < price:
-                        ema_price = max(ema20_close * 0.99, price - sl_dist * tp2_r_fallback)
-                    else:
-                        ema_price = max(price - (ema20_close - price), price - sl_dist * tp2_r_fallback)
-                else:
-                    ema_price = None
-
-            if sl_price <= 0 and is_long:
+        if is_long:
+            sl_price = price - sl_dist
+            if sl_price <= 0:
                 sl_price = price * 0.95
+            # 破主力成本區可標註籌碼失效（SL 不設在 VWAP 之上）
+            if vwap_2h is not None and vwap_2h > 0:
+                sl_price = max(sl_price, vwap_2h * 0.995)
+        else:
+            sl_price = price + sl_dist
+            if vwap_2h is not None and vwap_2h > 0:
+                sl_price = min(sl_price, vwap_2h * 1.005)
 
-            # 停損三要素：主力成本(VWAP) + ATR + EMA20 → 合理停損與風報比
-            # 主力成本用 2h VWAP 近似（這段行情的成交均價）；破成本視為趨勢失效
-            max_sl_dist = 2.5 * sl_dist  # 單筆停損最遠 2.5×ATR
+        risk_dist = (price - sl_price) if is_long else (sl_price - price)
+        if not risk_dist or risk_dist <= 0:
+            return fmt_p(sl_price), _na, _na, None, None, None, None, sl_capped, False
+
+        # TP1：主力成本對稱位 Price + (Price - vwap_2h)；無 VWAP 用 1.2*ATR
+        if vwap_2h is not None and vwap_2h > 0:
             if is_long:
-                # 做多：SL 在現價下。不設在成本(VWAP)之上（避免被洗），不設在 EMA20 之上（回測均線不觸發）
-                if vwap_2h is not None and vwap_2h > 0:
-                    cost_floor = vwap_2h * 0.995
-                    sl_price = max(sl_price, cost_floor)
-                if ema20_close is not None and ema20_close > 0 and ema20_close < price:
-                    ema_ceiling = ema20_close * 0.995
-                    sl_price = min(sl_price, ema_ceiling)
-                if (price - sl_price) > max_sl_dist:
-                    sl_price = price - max_sl_dist
+                tp1_price = 2.0 * price - vwap_2h
+                if tp1_price <= price:
+                    tp1_price = price + (1.2 * atr_val if atr_val else price * 0.02)
             else:
-                # 做空：SL 在現價上。不設在成本(VWAP)之下，不設在 EMA20 之下
-                if vwap_2h is not None and vwap_2h > 0:
-                    cost_ceiling = vwap_2h * 1.005
-                    sl_price = min(sl_price, cost_ceiling)
-                if ema20_close is not None and ema20_close > 0 and ema20_close > price:
-                    ema_floor = ema20_close * 1.005
-                    sl_price = max(sl_price, ema_floor)
-                if (sl_price - price) > max_sl_dist:
-                    sl_price = price + max_sl_dist
-
-            # 防呆：做多 SL 必須在現價下方、做空 SL 必須在現價上方
-            if is_long and sl_price >= price:
-                sl_price = price - sl_dist
-            elif not is_long and sl_price <= price:
-                sl_price = price + sl_dist
-
-            risk_dist = (price - sl_price) if is_long else (sl_price - price)
-            if not risk_dist or risk_dist <= 0:
-                return fmt_p(sl_price), _na, _na, None, None, None, None, sl_capped
-
-            # 換算成 R（做多：目標在價上；做空：目標在價下）
-            def to_r(tgt):
-                if tgt is None or tgt <= 0:
-                    return None, None
-                if is_long:
-                    r = (tgt - price) / risk_dist if tgt > price else None
-                else:
-                    r = (price - tgt) / risk_dist if tgt < price and tgt > 0 else None
-                return (round(r, 1), tgt) if r is not None and r > 0 else (None, None)
-
-            r_boll, _ = to_r(boll_price)
-            r_ema, _ = to_r(ema_price)
-
-            # 兩者相似：取最近值當 TP1，TP2 = TP1*2（小倉拚搏）
-            SIMILAR_RATIO = 1.35
-            SIMILAR_DIFF = 0.5
-            tp1_price = None
-            tp2_price = None
-            tp1_source = None  # "boll" | "ema" | "r"
-            tp2_source = None  # "boll" | "ema" | "double"
-
-            if r_boll is not None and r_ema is not None:
-                r_near = min(r_boll, r_ema)
-                r_far = max(r_boll, r_ema)
-                similar = (r_far <= r_near * SIMILAR_RATIO) or (r_far - r_near < SIMILAR_DIFF)
-                if similar:
-                    if r_boll <= r_ema:
-                        tp1_price = boll_price
-                        tp1_source = "boll"
-                    else:
-                        tp1_price = ema_price
-                        tp1_source = "ema"
-                    r_tp1 = r_near
-                    if is_long:
-                        tp2_price = price + risk_dist * (2.0 * r_near)
-                    else:
-                        tp2_price = max(price - risk_dist * (2.0 * r_near), floor)
-                    tp2_source = "double"
-                    r_tp2 = round(2.0 * r_near, 1)
-                else:
-                    if r_boll <= r_ema:
-                        tp1_price, tp2_price = boll_price, ema_price
-                        tp1_source, tp2_source = "boll", "ema"
-                        r_tp1, r_tp2 = r_boll, r_ema
-                    else:
-                        tp1_price, tp2_price = ema_price, boll_price
-                        tp1_source, tp2_source = "ema", "boll"
-                        r_tp1, r_tp2 = r_ema, r_boll
-            elif r_boll is not None:
-                tp1_price = boll_price
-                tp1_source = "boll"
-                r_tp1 = r_boll
-                if is_long:
-                    tp2_price = price + risk_dist * (2.0 * r_boll)
-                else:
-                    tp2_price = max(price - risk_dist * (2.0 * r_boll), floor)
-                tp2_source = "double"
-                r_tp2 = round(2.0 * r_boll, 1)
-            elif r_ema is not None:
-                tp1_price = ema_price
-                tp1_source = "ema"
-                r_tp1 = r_ema
-                if is_long:
-                    tp2_price = price + risk_dist * (2.0 * r_ema)
-                else:
-                    tp2_price = max(price - risk_dist * (2.0 * r_ema), floor)
-                tp2_source = "double"
-                r_tp2 = round(2.0 * r_ema, 1)
+                tp1_price = 2.0 * vwap_2h - price
+                if tp1_price >= price or tp1_price <= 0:
+                    tp1_price = max(price - (1.2 * atr_val if atr_val else price * 0.02), floor)
+            tp1_source = "vwap"
+        else:
+            fallback_dist = (1.2 * atr_val) if atr_val else price * 0.02
+            if is_long:
+                tp1_price = price + fallback_dist
             else:
-                # 無技術位：TP1 = tp1_r，TP2 = 2*tp1_r
-                if is_long:
-                    tp1_price = price + risk_dist * tp1_r
-                    tp2_price = price + risk_dist * (2.0 * tp1_r)
+                tp1_price = max(price - fallback_dist, floor)
+            tp1_source = "atr"
+
+        # TP2：能量邊界 = max(BOLL 上軌, Price+2.5*ATR) 做多；min(BOLL 下軌, Price-2.5*ATR) 做空。CVD 背離則下修至現價
+        energy_exhausted = False
+        if cvd_divergence:
+            tp2_price = price
+            tp2_source = "exhausted"
+            energy_exhausted = True
+            r_tp2 = 0.0
+        else:
+            atr_25 = (2.5 * atr_val) if atr_val else price * 0.04
+            if is_long:
+                cand = price + atr_25
+                if ub_value is not None and ub_value > price:
+                    tp2_price = max(ub_value, cand)
                 else:
-                    tp1_price = max(price - risk_dist * tp1_r, floor)
-                    tp2_price = max(price - risk_dist * (2.0 * tp1_r), floor)
-                tp1_source = "r"
-                tp2_source = "double"
-                r_tp1 = round(tp1_r, 1)
-                r_tp2 = round(2.0 * tp1_r, 1)
+                    tp2_price = cand
+                tp2_source = "boll_atr"
+            else:
+                cand = max(price - atr_25, floor)
+                if lb_value is not None and lb_value < price and lb_value > 0:
+                    tp2_price = min(lb_value, cand)
+                else:
+                    tp2_price = cand
+                tp2_source = "boll_atr"
 
-            if tp1_price is not None and tp1_price <= 0 and not is_long:
-                tp1_price = floor
-            if tp2_price is not None and tp2_price <= 0 and not is_long:
-                tp2_price = floor
-            if is_long and tp2_price is not None and tp2_price < (tp1_price or 0):
-                tp1_price, tp2_price = tp2_price, tp1_price
-                tp1_source, tp2_source = tp2_source, tp1_source
-                r_tp1, r_tp2 = r_tp2, r_tp1
-            elif not is_long and tp1_price is not None and tp2_price is not None and tp2_price > tp1_price:
-                tp1_price, tp2_price = tp2_price, tp1_price
-                tp1_source, tp2_source = tp2_source, tp1_source
-                r_tp1, r_tp2 = r_tp2, r_tp1
+        if is_long and tp2_price < (tp1_price or 0):
+            tp2_price = tp1_price or price
+        if not is_long and tp2_price > (tp1_price or price):
+            tp2_price = tp1_price or floor
+        if not is_long and tp2_price <= 0:
+            tp2_price = floor
 
-            return fmt_p(sl_price), fmt_p(tp1_price) if tp1_price else _na, fmt_p(tp2_price) if tp2_price else _na, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped
+        r_tp1 = round((tp1_price - price) / risk_dist, 1) if is_long and tp1_price else None
+        if not is_long and tp1_price:
+            r_tp1 = round((price - tp1_price) / risk_dist, 1)
+        if not energy_exhausted:
+            r_tp2 = round((tp2_price - price) / risk_dist, 1) if is_long else round((price - tp2_price) / risk_dist, 1)
 
-        return _na, _na, _na, None, None, None, None, False
+        return fmt_p(sl_price), fmt_p(tp1_price) if tp1_price else _na, fmt_p(tp2_price) if tp2_price else _na, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped, energy_exhausted
 
     def _is_bull(x: Dict) -> bool:
         sig = x.get("signal_label") or ""
@@ -2745,11 +2686,11 @@ def build_report_message_tiered(
                 # S+/S/A 分級顯示邏輯（v5.1：頭等機艙 / 穩健列車 / 賭鬼樂透）
                 is_elite_sig = _is_elite(x)
                 if is_elite_sig:
-                    star_display = "✈️【S+級｜頭等機艙】"
+                    star_display = "✈️【頭等機艙】(重倉/高信心)"
                 elif stars >= 5:
-                    star_display = "🚅【S級 ｜穩健列車】"
+                    star_display = "🚅【穩健列車】(標準倉)"
                 else:
-                    star_display = "👻【A級 ｜賭鬼樂透】"
+                    star_display = "👻【賭鬼樂透】(小倉位/高風險)"
 
                 # 策略與風控建議 (v5.0)
                 atr_val, current_price = x.get("atr"), x.get("current_price")
@@ -2777,9 +2718,10 @@ def build_report_message_tiered(
                         pos_rec = "試單 2.5% (窄止損)"
 
                 # 計算 SL/TP（止盈1、止盈2 皆由技術分析：布林 vs 均線；相似則 TP2=TP1*2）
-                sl_val, tp1_val, tp2_val, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped = calc_sl_tp(
+                cvd_div = "CVD背離" in (x.get("reason") or "")
+                sl_val, tp1_val, tp2_val, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped, energy_exhausted = calc_sl_tp(
                     x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig,
-                    x.get("vwap_2h"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value")
+                    x.get("vwap_2h"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value"), cvd_divergence=cvd_div
                 )
                 # 風報比過低不推播：止盈1 < 0.7R 代表賠率差，寧可少出手保勝率
                 if r_tp1 is not None and r_tp1 < MIN_TP1_R_FOR_PUSH:
@@ -2800,9 +2742,11 @@ def build_report_message_tiered(
                     f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈1={tp1_val} 止盈2={tp2_val}{cap_note}"
                 )
 
-                # 1. Header: Symbol, Link, Stars（同幣換方向時在交易對後提醒）
+                # 1. Header: 一鍵複製標的 `$BASE`，無超連結；Plan B 時註明；同幣換方向提醒
+                sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
                 flip_tag = " 🔄換方向" if x.get("direction_flip") else ""
-                lines.append(f"{dir_emoji} [{sym}]({coin_url}){flip_tag} {star_display} {vol_desc}")
+                plan_b_tag = " ⚠️ 本地 Plan B 數據估算" if x.get("plan_b_used") else ""
+                lines.append(f"{dir_emoji} `${sym_base}`{flip_tag}{plan_b_tag} {star_display} {vol_desc}")
                 # 2. 策略（白話）
                 lines.append(f"🎲 策略：{strength}｜{pos_rec}")
                 flip = x.get("direction_flip")
@@ -2855,15 +2799,14 @@ def build_report_message_tiered(
                 # 止損與止盈顯示（依 S+/S/A 分級 + R 倍數）
                 lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
 
-                tp1_note = " (布林)" if tp1_source == "boll" else " (均線)" if tp1_source == "ema" else " (R倍數)" if tp1_source == "r" else ""
+                tp1_note = " (主力成本對稱)" if tp1_source == "vwap" else " (1.2R)" if tp1_source == "atr" else ""
                 r_tp1_str = f" ({r_tp1}R)" if r_tp1 is not None else ""
                 lines.append(f"✅ 止盈1：`{tp1_val}`{tp1_note}{r_tp1_str}")
-                if tp2_source == "double":
-                    lines.append(f"🚀 止盈2：已超出技術分析判斷，建議留小倉拚搏｜`{tp2_val}` ({r_tp2}R)" if r_tp2 is not None else f"🚀 止盈2：已超出技術分析判斷，建議留小倉拚搏｜`{tp2_val}`")
+                if energy_exhausted:
+                    lines.append(f"🚀 止盈2：動能衰竭，建議入袋｜現價 `{tp2_val}`")
                 else:
-                    tp2_note = " (布林)" if tp2_source == "boll" else " (均線)" if tp2_source == "ema" else ""
                     tp2_r_str = f" ({r_tp2}R)" if r_tp2 is not None else ""
-                    lines.append(f"🚀 止盈2：`{tp2_val}`{tp2_note}{tp2_r_str}")
+                    lines.append(f"🚀 止盈2：`{tp2_val}` (能量邊界){tp2_r_str}")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
@@ -2876,7 +2819,7 @@ def build_report_message_tiered(
         lines.append("不要再潛水了，多多出來跟其他人討論交流分享手上的持倉或是討論，善的循環 ❤️")
         lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append("⚠️ *操作SOP*：S+=頭等機艙(重倉)、S=穩健列車(標準)、A=賭鬼樂透(小倉高風險)。嚴格執行止損，勿加碼攤平。")
+    lines.append("⚠️ *操作SOP*：頭等機艙=重倉/高信心、穩健列車=標準倉、賭鬼樂透=小倉位/高風險。嚴格執行止損，勿加碼攤平。")
     return "\n".join(lines)
 
 
@@ -3229,6 +3172,7 @@ def fetch_position_change():
             "rsi_desc": rsi_desc,
             "reason": reason,
             "funding_rate": funding_rate,
+            "plan_b_used": bool(tech.get("plan_b_used")) if tech else False,
         })
         logger.info(
             f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} 布林上={ub_val} 布林下={lb_val} ATR={atr_val} 鯨魚指數={whale_idx} | {reason}"
