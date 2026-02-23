@@ -2591,8 +2591,11 @@ def build_report_message_tiered(
                 sl_price = max(sl_price, vwap_2h * 0.995)
         else:
             sl_price = price + sl_dist
+            # 做空時 SL 必須在現價上方；僅當 VWAP 上限高於現價才壓，否則會壓到現價下導致 risk_dist<=0、TP 全變 -
             if vwap_2h is not None and vwap_2h > 0:
-                sl_price = min(sl_price, vwap_2h * 1.005)
+                vwap_cap = vwap_2h * 1.005
+                if vwap_cap > price:
+                    sl_price = min(sl_price, vwap_cap)
 
         risk_dist = (price - sl_price) if is_long else (sl_price - price)
         if not risk_dist or risk_dist <= 0:
@@ -2822,7 +2825,7 @@ def build_report_message_tiered(
                 vol_desc = ""
                 if atr_val and current_price and (atr_val / current_price) * 100 > 2.0:
                     is_high_vol = True
-                    vol_desc = "(波動大⚠️)"
+                    vol_desc = " (波動大⚠️)"
 
                 if is_elite_sig:  # S+
                     if is_high_vol:
@@ -2835,11 +2838,11 @@ def build_report_message_tiered(
                     else:
                         strength, pos_rec = "穩健列車 S", "標準倉 5%"
                 else:  # A (賭鬼樂透)
-                    strength = "賭鬼樂透 A (以小博大)"
+                    strength = "賭鬼樂透 A"
                     if is_high_vol:
-                        pos_rec = "蟻倉 1% (波動劇烈)"
+                        pos_rec = "蟻倉 1%"
                     else:
-                        pos_rec = "試單 2.5% (窄止損)"
+                        pos_rec = "試單 2.5%"
                 strength = f"{tier_emoji} {strength}"
 
                 # 計算 SL/TP（止盈1、止盈2 皆由技術分析：布林 vs 均線；相似則 TP2=TP1*2）
@@ -2873,11 +2876,10 @@ def build_report_message_tiered(
                     f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈1={tp1_val} 止盈2={tp2_val}{cap_note}"
                 )
 
-                # 1. Header: 一鍵複製標的（無 $ 符號，方便貼到交易所搜尋）
+                # 1. Header: 標的＋換方向＋波動提示（精簡，不顯示數據來源與分級標籤）
                 sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
                 flip_tag = " 🔄換方向" if x.get("direction_flip") else ""
-                plan_b_tag = " 📊 BingX K線" if x.get("plan_b_used") else " 📊 CoinGlass"
-                lines.append(f"{dir_emoji} `{sym_base}`{flip_tag}{plan_b_tag} {star_display} {vol_desc}")
+                lines.append(f"{dir_emoji} `{sym_base}`{flip_tag}{vol_desc}")
                 # 2. 策略（白話，含分級 emoji）
                 lines.append(f"🎲 策略：{strength}｜{pos_rec}")
                 flip = x.get("direction_flip")
@@ -2950,9 +2952,7 @@ def build_report_message_tiered(
                     lines.append("⚠️ 成交量極低 小心滑價")
                 lines.append("")
 
-    lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append("⚠️ *操作SOP*：頭等機艙=重倉/高信心、穩健列車=標準倉、賭鬼樂透=小倉位/高風險。嚴格執行止損，勿加碼攤平。")
-    return "\n".join(lines)
+    return "\n".join(lines), has_any
 
 
 def build_report_message(top_long_open: List, top_long_close: List, top_short_open: List, top_short_close: List, processed_count: int = 0, oi_success_count: int = 0) -> str:
@@ -3399,6 +3399,7 @@ def fetch_position_change():
     else:
         SNIPER_COOLDOWN_FILE = (DATA_DIR / "sniper_cooldown.json").resolve()
     _cooldown_path_abs = str(SNIPER_COOLDOWN_FILE)
+    # 推播紀錄與冷卻檔同目錄；倉位追蹤（SL/TP1/TP2/籌碼反轉）依賴此檔在「每次排程之間」持久存在，否則每輪讀到 0 筆、不會發任何追蹤推播
     SNIPER_PUSH_LOG_FILE = SNIPER_COOLDOWN_FILE.parent / "sniper_push_log.json"
     logger.info(f"冷卻檔路徑: {_cooldown_path_abs}")
     now_ts = time.time()
@@ -3436,6 +3437,14 @@ def fetch_position_change():
     except Exception as e:
         push_log_signals = []
         logger.warning(f"讀取推播紀錄失敗，本輪不出場提示: {e}")
+    # 倉位追蹤依賴「上一輪（及之前）寫入的推播紀錄」；若 data 目錄在排程間未持久化（如 CI 無 cache），此處會一直是 0 筆
+    in_window = [
+        e for e in push_log_signals
+        if isinstance(e, dict) and not e.get("notified_exit") and (e.get("symbol") or "").strip()
+        and (now_ts - (e.get("ts") or 0)) <= EXIT_CHECK_WINDOW_HOURS * 3600
+    ]
+    logger.info(f"推播紀錄: 共 {len(push_log_signals)} 筆，48h 內且未結案 {len(in_window)} 筆待追蹤 (倉位追蹤需 data 目錄在排程間持久化)")
+    logger.info(f"【倉位追蹤】本輪待追蹤 {len(in_window)} 筆歷史訊號 (48h 內未結案)，開始檢查 SL/TP1/TP2、籌碼反轉、同向加碼…")
     exit_notified_set: Set[str] = set()
     # SL 觸發時輪播勵志文案（每次隨機選一段）
     SL_STOPLOSS_COPY = [
@@ -3475,6 +3484,9 @@ def fetch_position_change():
                     cur_price = float(snap.get("price"))
                 except (TypeError, ValueError):
                     cur_price = None
+            if cur_price is None:
+                if snap is None:
+                    logger.warning(f"倉位追蹤取價失敗(無快照): {sym_base} full_symbol={full_sym}")
             if cur_price is not None:
                 is_long = pushed_dir == "多"
                 # 1-1) 先檢查止損：一旦觸及 SL 即結案
@@ -3491,6 +3503,7 @@ def fetch_position_change():
                         entry["closed"] = True
                         exit_notified_set.add(sym_base)
                         price_closed = True
+                        logger.info(f"倉位追蹤已發送: {sym_base} 觸發止損 (本倉結案)")
                 # 1-2) 若未止損，檢查 TP2：達到最終停利即結案
                 if not price_closed and tp2_level is not None:
                     if (is_long and cur_price >= tp2_level) or (not is_long and cur_price <= tp2_level):
@@ -3504,6 +3517,7 @@ def fetch_position_change():
                         entry["closed"] = True
                         exit_notified_set.add(sym_base)
                         price_closed = True
+                        logger.info(f"倉位追蹤已發送: {sym_base} 已達停利點2 (本倉完結)")
                 # 1-3) 價格仍在區間內且尚未提示過 TP1 → 提示一次「已達停利點1，剩小倉拚 TP2」
                 if (not price_closed) and tp1_level is not None and not tp1_notified:
                     hit_tp1 = (is_long and cur_price >= tp1_level) or (not is_long and cur_price <= tp1_level)
@@ -3516,6 +3530,7 @@ def fetch_position_change():
                         send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
                         entry["tp1_notified"] = True
                         exit_notified_set.add(sym_base)
+                        logger.info(f"倉位追蹤已發送: {sym_base} 已達停利點1 (留倉拚 TP2)")
 
         # 價格已結案（SL 或 TP2），不再做籌碼反轉檢查
         if entry.get("closed"):
@@ -3568,6 +3583,11 @@ def fetch_position_change():
             )
         except Exception as e:
             logger.warning(f"寫入推播紀錄(出場標記)失敗: {e}")
+    # 肉眼可見：本輪倉位追蹤結果摘要
+    if exit_notified_set:
+        logger.info(f"【倉位追蹤】本輪檢查完成，共發送 {len(exit_notified_set)} 則推播 → 標的: {', '.join(sorted(exit_notified_set))}")
+    else:
+        logger.info(f"【倉位追蹤】本輪檢查完成，無觸發 (待追蹤 {len(in_window)} 筆均未達 SL/TP1/TP2 或籌碼反轉/加碼)")
     # 冷卻：同幣＋同方向 4h 內只推一次；同幣換方向可推，並在交易對後提醒換方向
     cooldown_symbol_dir_4h = set()
     for e in history:
@@ -3605,13 +3625,15 @@ def fetch_position_change():
     # 寫入冷卻檔時也用正規化 symbol，確保下次讀取比對一致
     pairs_this_run = [(_cooldown_symbol(x.get("symbol")), _item_direction(x)) for x in cooled_top if x.get("symbol")]
 
-    # 本輪沒有新開單訊號時不推任何主報表，安靜；倉位追蹤（SL/TP1/TP2/籌碼反轉/同標的）已在上方照常跑，有觸發才發
+    # 僅在「實際有至少一則訊號」時才推主報表；無訊號或全被風報比篩掉 → 不推，安靜
+    has_any = False
     if cooled_top:
-        msg = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
-        send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
+        msg, has_any = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
+        if has_any:
+            send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
 
-    # 僅本輪有新開單時才寫入冷卻與推播紀錄；無新開單時安靜，倉位追蹤結果已在上方處理（有觸發才發）
-    if cooled_top:
+    # 僅在「本輪有實際推播」時才寫入冷卻與推播紀錄（無訊號或全篩掉不寫）
+    if cooled_top and has_any:
         try:
             SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
             new_entries = [{"symbol": s, "dir": d, "ts": int(now_ts)} for (s, d) in pairs_this_run if s]
