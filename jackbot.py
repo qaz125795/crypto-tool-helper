@@ -3515,7 +3515,9 @@ def fetch_position_change():
         and (now_ts - (e.get("ts") or 0)) <= EXIT_CHECK_WINDOW_HOURS * 3600
     ]
     logger.info(f"推播紀錄: 共 {len(push_log_signals)} 筆，48h 內且未結案 {len(in_window)} 筆待追蹤 (倉位追蹤需 data 目錄在排程間持久化)")
-    logger.info(f"【倉位追蹤】本輪待追蹤 {len(in_window)} 筆歷史訊號 (48h 內未結案)，開始檢查 SL/TP1/TP2、籌碼反轉、同向加碼…")
+    if len(push_log_signals) == 0 and len(history) > 0:
+        logger.warning("推播紀錄為 0 筆但冷卻有歷史 → 若曾推播過，請確認 workflow 的 data 目錄已正確 cache/還原，否則每輪從空檔開始、無法倉位追蹤")
+    logger.info(f"【倉位追蹤】本輪待追蹤 {len(in_window)} 筆歷史訊號 (48h 內未結案)，開始檢查 SL/TP1/TP2、籌碼反轉、進場理由…")
     exit_notified_set: Set[str] = set()
     # SL 觸發時輪播勵志文案（每次隨機選一段）
     SL_STOPLOSS_COPY = [
@@ -3607,8 +3609,21 @@ def fetch_position_change():
         if entry.get("closed"):
             continue
 
-        # 2) 籌碼變化追蹤：反轉→提早下車；同向加強→可考慮加碼
+        # 每輪反查「進場理由還再不再」並寫入 LOG（肉眼可見追蹤）
         cur_cat = current_category_by_base.get(sym_base)
+        entry_cat = entry.get("entry_category") or "-"
+        cur_label = cur_cat if cur_cat else "未入四類"
+        if not cur_cat:
+            reason_status = "未入四類(觀察)"
+        elif (pushed_dir == "多" and cur_cat in ("short_open", "long_close")) or (pushed_dir == "空" and cur_cat in ("long_open", "short_close")):
+            reason_status = "反轉"
+        elif (pushed_dir == "多" and cur_cat in ("long_open", "short_close")) or (pushed_dir == "空" and cur_cat in ("short_open", "long_close")):
+            reason_status = "仍在"
+        else:
+            reason_status = "弱化"
+        logger.info(f"【進場理由】{sym_base} 當初 {entry_cat} 本輪 {cur_label} -> {reason_status}")
+
+        # 2) 籌碼變化追蹤：反轉→提早下車；同向加強→可考慮加碼
         if not cur_cat:
             continue
         # 2a) 籌碼反轉 → 提早出場
@@ -3743,6 +3758,7 @@ def fetch_position_change():
                     "symbol": base_sym,           # 基底（例如 BTC）
                     "full_symbol": full_sym,      # 完整交易對（例如 BTC-USDT）
                     "dir": dir_str,               # 多 / 空
+                    "entry_category": x.get("category") or "",  # 進場時 OI 類別（供每輪反查「理由還再不再」）
                     "ts": int(now_ts),
                     "pushed_at_tw": pushed_at_tw,
                     "notified_exit": False,
