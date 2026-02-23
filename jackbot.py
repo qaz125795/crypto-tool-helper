@@ -2778,7 +2778,7 @@ def build_report_message_tiered(
     stats_str = " ".join(stats_parts) or "😴 無訊號"
 
     lines = []
-    lines.append(f"🎯 *{stats_str}｜傑克狙擊鏡*")
+    lines.append(f"🎯 *{stats_str}｜傑克持倉狙擊鏡*")
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
     lines.append("━━━━━━━━━━━━━━")
 
@@ -2807,16 +2807,19 @@ def build_report_message_tiered(
                 is_bull = _is_bull(x)
                 dir_emoji = "🟢" if is_bull else "🔴"
                 coin_url = f"https://www.coinglass.com/zh-TW/currencies/{sym}"
-                # S+/S/A 分級顯示邏輯（v5.1：頭等機艙 / 穩健列車 / 賭鬼樂透）
+                # S+/S/A 分級顯示邏輯：頭等機艙 5 星、穩健列車 3 星、賭鬼不給星
                 is_elite_sig = _is_elite(x)
                 if is_elite_sig:
-                    star_display = "✈️【頭等機艙】(重倉/高信心)"
+                    tier_emoji = "✈️"
+                    star_display = "✈️【頭等機艙】(高信心) ⭐⭐⭐⭐⭐"
                 elif stars >= 5:
-                    star_display = "🚅【穩健列車】(標準倉)"
+                    tier_emoji = "🚅"
+                    star_display = "🚅【穩健列車】(標準倉) ⭐⭐⭐"
                 else:
-                    star_display = "👻【賭鬼樂透】(小倉位/高風險)"
+                    tier_emoji = "👻"
+                    star_display = "👻【賭鬼樂透】(高風險)💣"
 
-                # 策略與風控建議 (v5.0)
+                # 策略與風控建議（策略前加分級 emoji）
                 atr_val, current_price = x.get("atr"), x.get("current_price")
                 is_high_vol = False
                 vol_desc = ""
@@ -2840,6 +2843,7 @@ def build_report_message_tiered(
                         pos_rec = "蟻倉 1% (波動劇烈)"
                     else:
                         pos_rec = "試單 2.5% (窄止損)"
+                strength = f"{tier_emoji} {strength}"
 
                 # 計算 SL/TP（止盈1、止盈2 皆由技術分析：布林 vs 均線；相似則 TP2=TP1*2）
                 cvd_div = "CVD背離" in (x.get("reason") or "")
@@ -2849,6 +2853,10 @@ def build_report_message_tiered(
                     x.get("vwap_2h"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value"),
                     cvd_divergence=(cvd_div or tech_exhausted)
                 )
+                # 將 SL/TP 價位存回項目，供後續 24h 出場追蹤（SL/TP1/TP2）
+                x["sl_price_str"] = sl_val
+                x["tp1_price_str"] = tp1_val
+                x["tp2_price_str"] = tp2_val
                 # 風報比過低不推播：止盈1 < 0.7R 代表賠率差，寧可少出手保勝率
                 if r_tp1 is not None and r_tp1 < MIN_TP1_R_FOR_PUSH:
                     logger.info(f"狙擊鏡跳過 {sym}: 止盈1 風報比 {r_tp1}R < {MIN_TP1_R_FOR_PUSH}R，不推播")
@@ -2868,12 +2876,12 @@ def build_report_message_tiered(
                     f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈1={tp1_val} 止盈2={tp2_val}{cap_note}"
                 )
 
-                # 1. Header: 一鍵複製標的 `$BASE`，無超連結；Plan B 時註明；同幣換方向提醒
+                # 1. Header: 一鍵複製標的（無 $ 符號，方便貼到交易所搜尋）
                 sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
                 flip_tag = " 🔄換方向" if x.get("direction_flip") else ""
                 plan_b_tag = " ⚠️ 本地 Plan B 數據估算" if x.get("plan_b_used") else ""
-                lines.append(f"{dir_emoji} `${sym_base}`{flip_tag}{plan_b_tag} {star_display} {vol_desc}")
-                # 2. 策略（白話）
+                lines.append(f"{dir_emoji} `{sym_base}`{flip_tag}{plan_b_tag} {star_display} {vol_desc}")
+                # 2. 策略（白話，含分級 emoji）
                 lines.append(f"🎲 策略：{strength}｜{pos_rec}")
                 flip = x.get("direction_flip")
                 if flip:
@@ -2922,6 +2930,13 @@ def build_report_message_tiered(
                 else:
                     p24_str = " (24h: -)"
                 lines.append(f"📍 現價：`{price_str}`{p24_str}")
+                # 主力均價（成本參考）：優先 VWAP_2h，無則用 EMA20
+                vwap_ref = x.get("vwap_2h")
+                ema_ref = x.get("ema20_close")
+                if vwap_ref is not None and isinstance(vwap_ref, (int, float)):
+                    lines.append(f"📍 主力均價(參考)：`{vwap_ref:,.4f}`")
+                elif ema_ref is not None and isinstance(ema_ref, (int, float)):
+                    lines.append(f"📍 均線參考(EMA20)：`{ema_ref:,.4f}`")
                 # 止損與止盈顯示（依 S+/S/A 分級 + R 倍數）
                 lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
 
@@ -2936,15 +2951,8 @@ def build_report_message_tiered(
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
-                # 時間停損：90 分鐘(3根K)未脫離成本區建議撤單
-                lines.append("⏰ 船長指令：若 90 分鐘內(3根K)未脫離成本區，代表主力動能不足，建議撤單。")
                 lines.append("")
 
-    if not has_any:
-        lines.append("哥們你記住，你的腎、肺都有兩個，但你有一個就能活；運鈔車保全第一發都是空包彈，人們都在銀行存錢，屁股不止可以拉屎，你輸了只是把錢給人家，但你放棄了就是真的輸了。人們都說十賭九輸，你現在已經九次輸了。你再博一把就可以收回來，如果你還想東山再起，那我還看得起你；你現在放棄了，我就真的看不起你了。你記住，一顆腎、一個角膜、一個肺都能活，可偏偏上天給了你兩個。兄弟，如果你說你需要200最後一舞，我會毫不猶豫發給你；但是你跟我說借200坐車要去進廠打工，對不起，我的錢不會借給懦夫，你太讓我失望了。")
-        lines.append("")
-        lines.append("人要相信運氣，放平心態，父母的養老金，家裡的房子，老婆的首飾，孩子的學費，朋友的轉帳，網貸高利貸，都是咱們上岸的資本。翻身打一場漂亮仗，加油兄弟！哪有小孩天天哭？哪有男人天天輸？你要不要好好想想你來到這世上是為了什麼？父母的養老費和家裡的房產證都是翻身的資本，我相信你能做得到。")
-        lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append("⚠️ *操作SOP*：頭等機艙=重倉/高信心、穩健列車=標準倉、賭鬼樂透=小倉位/高風險。嚴格執行止損，勿加碼攤平。")
     return "\n".join(lines)
@@ -3366,6 +3374,25 @@ def fetch_position_change():
             return ""
         return str(s).replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
 
+    # 本輪四類籌碼分類（全表，供出場提示比對）：當初推多→若本輪變 short_open/long_close 即反轉；當初推空→若本輪變 long_open/short_close 即反轉
+    current_category_by_base: Dict[str, str] = {}
+    for x in long_open:
+        b = _cooldown_symbol(x.get("symbol") or "")
+        if b:
+            current_category_by_base[b] = "long_open"
+    for x in long_close:
+        b = _cooldown_symbol(x.get("symbol") or "")
+        if b:
+            current_category_by_base[b] = "long_close"
+    for x in short_open:
+        b = _cooldown_symbol(x.get("symbol") or "")
+        if b:
+            current_category_by_base[b] = "short_open"
+    for x in short_close:
+        b = _cooldown_symbol(x.get("symbol") or "")
+        if b:
+            current_category_by_base[b] = "short_close"
+
     # 冷卻檔路徑：cron/雲端環境若 data/ 不持久，可設 SNIPER_COOLDOWN_DIR 指向同一目錄（絕對路徑）
     _cooldown_dir = os.getenv("SNIPER_COOLDOWN_DIR")
     if _cooldown_dir:
@@ -3375,11 +3402,13 @@ def fetch_position_change():
     else:
         SNIPER_COOLDOWN_FILE = (DATA_DIR / "sniper_cooldown.json").resolve()
     _cooldown_path_abs = str(SNIPER_COOLDOWN_FILE)
+    SNIPER_PUSH_LOG_FILE = SNIPER_COOLDOWN_FILE.parent / "sniper_push_log.json"
     logger.info(f"冷卻檔路徑: {_cooldown_path_abs}")
     now_ts = time.time()
     cooldown_sec = COOLDOWN_HOURS * 3600
     history_sec = HISTORY_HOURS * 3600
     history: List[Dict] = []
+    push_log_signals: List[Dict] = []
     try:
         if SNIPER_COOLDOWN_FILE.exists():
             raw = json.loads(SNIPER_COOLDOWN_FILE.read_text(encoding="utf-8"))
@@ -3398,6 +3427,150 @@ def fetch_position_change():
     except Exception as e:
         history = []
         logger.warning(f"讀取冷卻檔失敗，本輪無冷卻限制: {e}")
+    # 推播紀錄：用於「出場提示」— 讀取先前推過的訊號，若本輪價格觸及 SL/TP 或籌碼反轉則發送提前下車提示；追蹤 48 小時
+    PUSH_LOG_RETENTION_HOURS = 48
+    EXIT_CHECK_WINDOW_HOURS = 48
+    try:
+        if SNIPER_PUSH_LOG_FILE.exists():
+            raw_log = json.loads(SNIPER_PUSH_LOG_FILE.read_text(encoding="utf-8"))
+            push_log_signals = raw_log.get("signals") or []
+        else:
+            push_log_signals = []
+    except Exception as e:
+        push_log_signals = []
+        logger.warning(f"讀取推播紀錄失敗，本輪不出場提示: {e}")
+    exit_notified_set: Set[str] = set()
+    # SL 觸發時輪播勵志文案（每次隨機選一段）
+    SL_STOPLOSS_COPY = [
+        "翻身打一場漂亮仗，加油兄弟！哪有小孩天天哭？哪有男人天天輸？你要不要好好想想你來到這世上是為了什麼？",
+        "人要相信運氣，放平心態，父母的養老金，家裡的房子，老婆的首飾，孩子的學費，朋友的轉帳，網貸高利貸，都是咱們上岸的資本。",
+        "哥們你記住，你的腎、肺都有兩個，但你有一個就能活。",
+        "運鈔車保全第一發都是空包彈，人們都在銀行存錢，屁股不止可以拉屎，你輸了只是把錢給人家，但你放棄了就是真的輸了。",
+        "人們都說十賭九輸，你現在已經九次輸了。你再博一把就可以收回來，如果你還想東山再起，那我還看得起你；你現在放棄了，我就真的看不起你了。你記住，一顆腎、一個角膜、一個肺都能活，可偏偏上天給了你兩個。",
+        "兄弟，如果你說你需要200最後一舞，我會毫不猶豫發給你；但是你跟我說借200坐車要去進廠打工，對不起，我的錢不會借給懦夫，你太讓我失望了。",
+    ]
+    for entry in push_log_signals:
+        if not isinstance(entry, dict) or entry.get("notified_exit"):
+            continue
+        sym_base = (entry.get("symbol") or "").strip().upper()
+        if not sym_base:
+            continue
+        pushed_ts = entry.get("ts") or 0
+        if (now_ts - pushed_ts) > EXIT_CHECK_WINDOW_HOURS * 3600:
+            continue
+        pushed_dir = (entry.get("dir") or "").strip()
+        pushed_at_tw = entry.get("pushed_at_tw") or datetime.fromtimestamp(pushed_ts, tz=TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+        dir_label = "多單" if pushed_dir == "多" else "空單"
+
+        # 1) 價格追蹤：若已觸及 SL 或 TP2，則視為本倉結案並刪除；TP1 則提示一次後保留
+        sl_level = entry.get("sl")
+        tp1_level = entry.get("tp1")
+        tp2_level = entry.get("tp2")
+        tp1_notified = bool(entry.get("tp1_notified"))
+        price_closed = False
+
+        if sl_level is not None or tp1_level is not None or tp2_level is not None:
+            full_sym = entry.get("full_symbol") or f"{sym_base}USDT"
+            snap = _fetch_bingx_ticker_snapshot(full_sym, preferred_symbol=None)
+            cur_price = None
+            if snap and snap.get("price") is not None:
+                try:
+                    cur_price = float(snap.get("price"))
+                except (TypeError, ValueError):
+                    cur_price = None
+            if cur_price is not None:
+                is_long = pushed_dir == "多"
+                # 1-1) 先檢查止損：一旦觸及 SL 即結案
+                if sl_level is not None:
+                    if (is_long and cur_price <= sl_level) or (not is_long and cur_price >= sl_level):
+                        sl_copy = random.choice(SL_STOPLOSS_COPY)
+                        exit_msg = (
+                            f"⚠️ *【已觸發止損・本倉結案】*\n"
+                            f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 價格已觸及止損 `{sl_level}`，"
+                            f"視為本次進場已結束，後續不再追蹤此倉。\n\n{sl_copy}"
+                        )
+                        send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+                        entry["notified_exit"] = True
+                        entry["closed"] = True
+                        exit_notified_set.add(sym_base)
+                        price_closed = True
+                # 1-2) 若未止損，檢查 TP2：達到最終停利即結案
+                if not price_closed and tp2_level is not None:
+                    if (is_long and cur_price >= tp2_level) or (not is_long and cur_price <= tp2_level):
+                        exit_msg = (
+                            f"🎉 *【已達停利點2・本倉完結】*\n"
+                            f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 價格已達停利點2 `{tp2_level}`，"
+                            f"工具都免費給你用了，波段目標達成還不曬對帳單孝敬一下傑克？"
+                        )
+                        send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+                        entry["notified_exit"] = True
+                        entry["closed"] = True
+                        exit_notified_set.add(sym_base)
+                        price_closed = True
+                # 1-3) 價格仍在區間內且尚未提示過 TP1 → 提示一次「已達停利點1，剩小倉拚 TP2」
+                if (not price_closed) and tp1_level is not None and not tp1_notified:
+                    hit_tp1 = (is_long and cur_price >= tp1_level) or (not is_long and cur_price <= tp1_level)
+                    if hit_tp1:
+                        exit_msg = (
+                            f"✅ *【已達停利點1】*\n"
+                            f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 已達停利點1 `{tp1_level}`，"
+                            f"先落袋一部分、留小倉拚停利點2～有賺還不曬單孝敬傑克，工具都免費給你用了。"
+                        )
+                        send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+                        entry["tp1_notified"] = True
+                        exit_notified_set.add(sym_base)
+
+        # 價格已結案（SL 或 TP2），不再做籌碼反轉檢查
+        if entry.get("closed"):
+            continue
+
+        # 2) 籌碼變化追蹤：反轉→提早下車；同向加強→可考慮加碼
+        cur_cat = current_category_by_base.get(sym_base)
+        if not cur_cat:
+            continue
+        # 2a) 籌碼反轉 → 提早出場
+        reversal = False
+        if pushed_dir == "多" and cur_cat in ("short_open", "long_close"):
+            reversal = True
+        elif pushed_dir == "空" and cur_cat in ("long_open", "short_close"):
+            reversal = True
+        if reversal:
+            exit_msg = (
+                f"🚨 *【籌碼反轉・建議下車】*\n"
+                f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 籌碼已出現反轉，"
+                f"可考慮提前下車，等待下一輪機會。"
+            )
+            send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+            entry["notified_exit"] = True
+            entry["closed"] = True
+            exit_notified_set.add(sym_base)
+            logger.info(f"出場提示已發送: {sym_base} (當初{pushed_dir}，本輪{cur_cat} 籌碼反轉)")
+            continue
+        # 2b) 籌碼同向加強 → 可考慮加碼（不結案，只提示一次；用 tp1_notified 類似標記避免洗版，或單獨加碼標記）
+        same_side_strength = False
+        if pushed_dir == "多" and cur_cat in ("long_open", "short_close"):
+            same_side_strength = True
+        elif pushed_dir == "空" and cur_cat in ("short_open", "long_close"):
+            same_side_strength = True
+        if same_side_strength and not entry.get("add_notified"):
+            add_msg = (
+                f"📈 *【籌碼同向加強・可考慮加碼】*\n"
+                f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 本輪籌碼同向加強，"
+                f"可考慮加碼或持有拚停利。"
+            )
+            send_telegram_message(add_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+            entry["add_notified"] = True
+            exit_notified_set.add(sym_base)
+            logger.info(f"加碼提示已發送: {sym_base} (當初{pushed_dir}，本輪{cur_cat} 同向加強)")
+    if exit_notified_set:
+        try:
+            SNIPER_PUSH_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            SNIPER_PUSH_LOG_FILE.write_text(
+                json.dumps({"signals": push_log_signals}, ensure_ascii=False),
+                encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning(f"寫入推播紀錄(出場標記)失敗: {e}")
     # 冷卻：同幣＋同方向 4h 內只推一次；同幣換方向可推，並在交易對後提醒換方向
     cooldown_symbol_dir_4h = set()
     for e in history:
@@ -3435,21 +3608,95 @@ def fetch_position_change():
     # 寫入冷卻檔時也用正規化 symbol，確保下次讀取比對一致
     pairs_this_run = [(_cooldown_symbol(x.get("symbol")), _item_direction(x)) for x in cooled_top if x.get("symbol")]
 
-    msg = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
-    send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
+    # 本輪沒有新開單訊號時不推任何主報表，安靜；倉位追蹤（SL/TP1/TP2/籌碼反轉/同標的）已在上方照常跑，有觸發才發
+    if cooled_top:
+        msg = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
+        send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
 
-    try:
-        SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        new_entries = [{"symbol": s, "dir": d, "ts": int(now_ts)} for (s, d) in pairs_this_run if s]
-        history = history + new_entries
-        history = [e for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= history_sec]
-        SNIPER_COOLDOWN_FILE.write_text(
-            json.dumps({"history": history}, ensure_ascii=False),
-            encoding="utf-8"
-        )
-        logger.info(f"冷卻檔已寫入: 本輪 {len(pairs_this_run)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h) -> {_cooldown_path_abs}")
-    except Exception as e:
-        logger.warning(f"寫入狙擊冷卻檔失敗: {e}")
+    # 僅本輪有新開單時才寫入冷卻與推播紀錄；無新開單時安靜，倉位追蹤結果已在上方處理（有觸發才發）
+    if cooled_top:
+        try:
+            SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
+            new_entries = [{"symbol": s, "dir": d, "ts": int(now_ts)} for (s, d) in pairs_this_run if s]
+            history = history + new_entries
+            history = [e for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= history_sec]
+            SNIPER_COOLDOWN_FILE.write_text(
+                json.dumps({"history": history}, ensure_ascii=False),
+                encoding="utf-8"
+            )
+            logger.info(f"冷卻檔已寫入: 本輪 {len(pairs_this_run)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h) -> {_cooldown_path_abs}")
+            # 推播紀錄：本輪實際推出去的訊號寫入 LOG，供下一輪 48h 內出場追蹤（SL/TP1/TP2 + 籌碼反轉）使用
+            pushed_at_tw = datetime.fromtimestamp(now_ts, tz=TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+
+            def _parse_price_str(s: Any) -> Optional[float]:
+                try:
+                    if s is None or s == "-" or s == "":
+                        return None
+                    return float(str(s))
+                except Exception:
+                    return None
+
+            new_push_entries: List[Dict[str, Any]] = []
+            for x in cooled_top:
+                full_sym = x.get("symbol") or ""
+                base_sym = _cooldown_symbol(full_sym)
+                if not base_sym:
+                    continue
+                dir_str = _item_direction(x)
+                sl_str = x.get("sl_price_str")
+                tp1_str = x.get("tp1_price_str")
+                tp2_str = x.get("tp2_price_str")
+                entry = {
+                    "symbol": base_sym,           # 基底（例如 BTC）
+                    "full_symbol": full_sym,      # 完整交易對（例如 BTC-USDT）
+                    "dir": dir_str,               # 多 / 空
+                    "ts": int(now_ts),
+                    "pushed_at_tw": pushed_at_tw,
+                    "notified_exit": False,
+                    "closed": False,
+                    "sl": _parse_price_str(sl_str),
+                    "tp1": _parse_price_str(tp1_str),
+                    "tp2": _parse_price_str(tp2_str),
+                    "tp1_notified": False,
+                }
+                new_push_entries.append(entry)
+                # 48h 內同標的已有推播：同方向提醒調整防守、不同方向提醒可考慮反手
+                prev_in_window = [
+                    e for e in push_log_signals
+                    if isinstance(e, dict) and (e.get("symbol") or "").strip().upper() == base_sym
+                    and not e.get("closed") and (now_ts - (e.get("ts") or 0)) <= PUSH_LOG_RETENTION_HOURS * 3600
+                ]
+                if prev_in_window:
+                    latest_prev = max(prev_in_window, key=lambda e: e.get("ts") or 0)
+                    prev_tw = latest_prev.get("pushed_at_tw") or datetime.fromtimestamp(latest_prev.get("ts") or 0, tz=TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+                    prev_dir = (latest_prev.get("dir") or "").strip()
+                    prev_label = "多單" if prev_dir == "多" else "空單"
+                    if prev_dir == dir_str:
+                        reminder_msg = (
+                            f"🔄 *【同標的・同方向】*\n"
+                            f"台灣時間 *{prev_tw}* 已有此標的 *{prev_label}*（`{base_sym}`），本輪再次出現同方向，注意可調整防守點。"
+                        )
+                    else:
+                        reminder_msg = (
+                            f"🔄 *【同標的・不同方向】*\n"
+                            f"台灣時間 *{prev_tw}* 已有此標的 *{prev_label}*（`{base_sym}`），本輪不同方向，注意可考慮反手。"
+                        )
+                    send_telegram_message(reminder_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+
+            push_log_signals = push_log_signals + new_push_entries
+            push_log_signals = [
+                e for e in push_log_signals
+                if isinstance(e, dict)
+                and not e.get("closed")
+                and (now_ts - e.get("ts", 0)) <= PUSH_LOG_RETENTION_HOURS * 3600
+            ]
+            SNIPER_PUSH_LOG_FILE.write_text(
+                json.dumps({"signals": push_log_signals}, ensure_ascii=False),
+                encoding="utf-8"
+            )
+            logger.info(f"推播紀錄已寫入: 本輪 {len(new_push_entries)} 筆，共 {len(push_log_signals)} 筆 (保留 {PUSH_LOG_RETENTION_HOURS}h)")
+        except Exception as e:
+            logger.warning(f"寫入狙擊冷卻檔失敗: {e}")
 
     logger.info("持倉變化篩選執行完成並已推播")
 
