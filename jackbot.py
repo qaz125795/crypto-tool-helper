@@ -3311,11 +3311,9 @@ def fetch_position_change():
             f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} 布林上={ub_val} 布林下={lb_val} ATR={atr_val} 鯨魚指數={whale_idx} | {reason}"
         )
 
-    # 用 BingX ticker 一次取現價 + 24h 成交額（成交量略放寬，OI 不變保勝率）
-    VOLUME_HARD_MIN_USD = 1_250_000    # 24h 成交額 <1.25M 不推（略放寬以增加訊號量）
+    # 用 BingX ticker 取現價 + 24h 成交額（僅標示低流動性與 5 星降星，不再做成交量門檻過濾）
     VOLUME_SOFT_MIN_USD = 5_000_000   # <5M 標示「成交量極低 小心滑價」
     VOLUME_5STAR_MIN_USD = 5_000_000   # 5 星僅允許 >5M，≤ 降為 4 星
-    filtered_top = []
     for x in all_top:
         sym = x.get("symbol", "")
         clean_base = sym.replace("USDT", "").replace("-", "").upper()
@@ -3323,15 +3321,11 @@ def fetch_position_change():
         if not preferred:
             preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
         snap = _fetch_bingx_ticker_snapshot(sym, preferred_symbol=preferred)
-        vol = None
         if snap:
             if snap.get("price") is not None:
                 x["current_price"] = snap["price"]
             vol = snap.get("volume_usd")
             if vol is not None:
-                if vol < VOLUME_HARD_MIN_USD:
-                    logger.info(f"狙擊鏡跳過 {sym}: 成交量 {vol/1e6:.2f}M USD < {VOLUME_HARD_MIN_USD/1e6:.1f}M 門檻")
-                    continue
                 x["low_liquidity_warning"] = vol < VOLUME_SOFT_MIN_USD
                 x["volume_usd"] = float(vol)
                 if (x.get("stars") or 0) == 5 and vol <= VOLUME_5STAR_MIN_USD:
@@ -3346,14 +3340,10 @@ def fetch_position_change():
             x["volume_usd"] = 0
             if (x.get("stars") or 0) == 5:
                 x["stars"] = 4
-        filtered_top.append(x)
-    all_top = filtered_top
     low_liq_count = sum(1 for x in all_top if x.get("low_liquidity_warning"))
-    logger.info(
-        f"成交量二次過濾: 門檻 {VOLUME_HARD_MIN_USD/1e6:.1f}M USD（<{VOLUME_HARD_MIN_USD/1e6:.1f}M 排除），剩餘 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<{VOLUME_SOFT_MIN_USD/1e6:.1f}M)"
-    )
+    logger.info(f"本輪 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<{VOLUME_SOFT_MIN_USD/1e6:.1f}M)")
     if len(all_top) == 0:
-        logger.info("本輪 0 筆推播：請看上方「狙擊鏡跳過」或「四類 TOP 候選數」排查（分類未通過 / 成交量<1.5M / 冷卻 / 止盈1風報比<0.7R）")
+        logger.info("本輪 0 筆推播：請看上方「狙擊鏡跳過」或「四類 TOP 候選數」排查（分類未通過 / 冷卻 / 止盈1風報比<0.65R）")
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
@@ -3631,6 +3621,10 @@ def fetch_position_change():
         msg, has_any = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
         if has_any:
             send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
+        else:
+            logger.info(f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，但風報比篩選後 0 筆可推播（止盈1 風報比 < {MIN_TP1_R_FOR_PUSH}R），不發送主報表")
+    else:
+        logger.info(f"【未推播原因】本輪 0 筆通過冷卻（4h 內同幣同方向已推過），不發送主報表")
 
     # 僅在「本輪有實際推播」時才寫入冷卻與推播紀錄（無訊號或全篩掉不寫）
     if cooled_top and has_any:
