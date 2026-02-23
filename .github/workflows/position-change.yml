@@ -21,11 +21,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 狙擊狀態檔（冷卻+推播紀錄同一 JSON）必須「每次跑完都寫回」cache，否則：
+      # - 下一輪會還原舊檔、同幣同向又推一次
+      # - 倉位追蹤(SL/TP1/TP2/籌碼反轉) 讀不到上一輪推過的訊號 → 永遠 0 筆、不會發追蹤推播
+      # 用 run_id 當 key 一部份 → 每次都是新 key → 一定會 save；restore-keys 取前綴 → 還原上一輪的 cache。
       - name: Restore data state (冷卻歷史)
         uses: actions/cache@v4
         with:
           path: data
-          key: data-position-change-${{ runner.os }}
+          key: data-position-change-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            data-position-change-${{ runner.os }}-
 
       - name: Ensure data directory exists
         run: mkdir -p data
