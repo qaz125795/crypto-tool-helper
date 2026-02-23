@@ -2548,8 +2548,9 @@ def build_report_message_tiered(
 
     def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool, vwap_2h: Optional[float] = None, ema20_close: Optional[float] = None, ub_value: Optional[float] = None, lb_value: Optional[float] = None, cvd_divergence: bool = False):
         """
-        專業籌碼博弈版：TP1=主力成本對稱位(VWAP)，TP2=BOLL 與 2.5*ATR 取邊界，SL=1.5*ATR 上限 10%。
-        CVD 背離時 TP2 下修至現價並標記動能衰竭。
+        專業 OI 持倉版：SL=1.5*ATR、上限 10%。
+        - SL 未壓縮：TP1=主力對稱(VWAP) 或 1.2*ATR，上限 2.5R；TP2=能量邊界(布林/2.5*ATR) 或 CVD 時 3R。一律報 R。
+        - SL 被 10% 壓縮：TP 改以 ATR 價位報（1.2/2.5/3*ATR），不報 R，避免分母被壓小導致 R 失真。
         """
         _na = "-"
         def fmt_p(p):
@@ -2591,7 +2592,7 @@ def build_report_message_tiered(
                 sl_price = max(sl_price, vwap_2h * 0.995)
         else:
             sl_price = price + sl_dist
-            # 做空時 SL 必須在現價上方；僅當 VWAP 上限高於現價才壓，否則會壓到現價下導致 risk_dist<=0、TP 全變 -
+            # 做空時 SL 必須在現價上方；僅當 VWAP 上限高於現價才壓
             if vwap_2h is not None and vwap_2h > 0:
                 vwap_cap = vwap_2h * 1.005
                 if vwap_cap > price:
@@ -2602,6 +2603,48 @@ def build_report_message_tiered(
             return fmt_p(sl_price), _na, _na, None, None, None, None, sl_capped, False
         risk_dist = max(risk_dist, price * 0.005)  # 避免除零與異常 R
 
+        # SL 被 10% 壓縮時：TP 改以 ATR 價位報（不報 R），避免 R 被扭曲
+        if sl_capped:
+            atr_tp1 = (1.2 * atr_val) if atr_val else price * 0.02
+            atr_tp2 = (2.5 * atr_val) if atr_val else price * 0.04
+            atr_tp2_ex = (3.0 * atr_val) if atr_val else price * 0.05
+            if is_long:
+                tp1_price = price + atr_tp1
+                tp1_source = "atr"
+                if cvd_divergence:
+                    tp2_price = price + atr_tp2_ex
+                    tp2_source = "exhausted_3r"
+                    energy_exhausted = True
+                else:
+                    tp2_price = price + atr_tp2
+                    if ub_value is not None and ub_value > price:
+                        tp2_price = max(ub_value, tp2_price)
+                    tp2_source = "boll_atr"
+                    energy_exhausted = False
+            else:
+                tp1_price = max(price - atr_tp1, floor)
+                tp1_source = "atr"
+                if cvd_divergence:
+                    tp2_price = max(price - atr_tp2_ex, floor)
+                    tp2_source = "exhausted_3r"
+                    energy_exhausted = True
+                else:
+                    tp2_price = max(price - atr_tp2, floor)
+                    if lb_value is not None and lb_value < price and lb_value > 0:
+                        tp2_price = min(lb_value, tp2_price)
+                    tp2_source = "boll_atr"
+                    energy_exhausted = False
+            if is_long and tp2_price < (tp1_price or 0):
+                tp2_price = tp1_price or price
+            if not is_long and tp2_price > (tp1_price or price):
+                tp2_price = max((tp1_price or price) - ((2.5 * atr_val) if atr_val else price * 0.04), floor)
+            if not is_long and tp2_price <= 0:
+                tp2_price = floor
+            r_tp1 = None
+            r_tp2 = None
+            return fmt_p(sl_price), fmt_p(tp1_price) if tp1_price else _na, fmt_p(tp2_price) if tp2_price else _na, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped, energy_exhausted
+
+        # 以下：SL 未壓縮，正常用 risk_dist 算 R 與 TP
         # TP1：主力成本對稱位 Price + (Price - vwap_2h)；無 VWAP 用 1.2*ATR
         if vwap_2h is not None and vwap_2h > 0:
             if is_long:
@@ -2621,6 +2664,16 @@ def build_report_message_tiered(
                 tp1_price = max(price - fallback_dist, floor)
             tp1_source = "atr"
 
+        # 止盈1 上限：主力對稱有時會算出 5R、6R，第一目標過遠不現實，改為最多 2.5R 先落袋
+        r_tp1_raw = (tp1_price - price) / risk_dist if is_long else (price - tp1_price) / risk_dist
+        MAX_TP1_R = 2.5
+        if tp1_price and r_tp1_raw > MAX_TP1_R:
+            if is_long:
+                tp1_price = price + MAX_TP1_R * risk_dist
+            else:
+                tp1_price = max(price - MAX_TP1_R * risk_dist, floor)
+            tp1_source = "vwap_capped" if tp1_source == "vwap" else tp1_source
+
         # TP2：能量邊界 = max(BOLL 上軌, Price+2.5*ATR) 做多；min(BOLL 下軌, Price-2.5*ATR) 做空。
         # 動能衰竭/CVD 背離時技術面算不出合理 TP2，改給 3R 價位並提示「超出技術分析邏輯，只能賭運氣 3R」
         energy_exhausted = False
@@ -2632,7 +2685,6 @@ def build_report_message_tiered(
                 tp2_price = max(price - tp2_dist, floor)
             tp2_source = "exhausted_3r"
             energy_exhausted = True
-            r_tp2 = 3.0
         else:
             atr_25 = (2.5 * atr_val) if atr_val else price * 0.04
             if is_long:
@@ -2650,18 +2702,22 @@ def build_report_message_tiered(
                     tp2_price = cand
                 tp2_source = "boll_atr"
 
+        # TP2 必須比 TP1 更遠：做多 TP2>=TP1，做空 TP2<=TP1；不可讓 TP1=TP2（否則顯示邏輯怪）
         if is_long and tp2_price < (tp1_price or 0):
             tp2_price = tp1_price or price
         if not is_long and tp2_price > (tp1_price or price):
-            tp2_price = tp1_price or floor
+            # 做空時 TP2 至少比 TP1 再遠 1R，避免 TP2 被壓成等於 TP1
+            tp2_price = (tp1_price or price) - risk_dist
+            if tp2_price <= 0:
+                tp2_price = floor
         if not is_long and tp2_price <= 0:
             tp2_price = floor
 
         r_tp1 = round((tp1_price - price) / risk_dist, 1) if is_long and tp1_price else None
         if not is_long and tp1_price:
             r_tp1 = round((price - tp1_price) / risk_dist, 1)
-        if not energy_exhausted:
-            r_tp2 = round((tp2_price - price) / risk_dist, 1) if is_long else round((price - tp2_price) / risk_dist, 1)
+        # 統一用最終 tp2_price 算 r_tp2（做空被 clamp 後需重算，與價位一致）
+        r_tp2 = round((tp2_price - price) / risk_dist, 1) if is_long else round((price - tp2_price) / risk_dist, 1)
 
         return fmt_p(sl_price), fmt_p(tp1_price) if tp1_price else _na, fmt_p(tp2_price) if tp2_price else _na, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped, energy_exhausted
 
@@ -2939,14 +2995,26 @@ def build_report_message_tiered(
                 # 止損與止盈顯示（依 S+/S/A 分級 + R 倍數）
                 lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
 
-                tp1_note = " (主力成本對稱)" if tp1_source == "vwap" else " (1.2R)" if tp1_source == "atr" else ""
-                r_tp1_str = f" ({r_tp1}R)" if r_tp1 is not None else ""
-                lines.append(f"✅ 止盈1：`{tp1_val}`{tp1_note}{r_tp1_str}")
-                if energy_exhausted:
-                    lines.append(f"🚀 止盈2：`{tp2_val}` (3R) 超出技術分析邏輯，只能賭個運氣 3R 了")
+                # SL 被 10% 壓縮時：止盈以 ATR 價位報，不報 R（避免 R 被扭曲）
+                if sl_capped:
+                    lines.append(f"✅ 止盈1：`{tp1_val}` (約1.2*ATR)")
+                    if energy_exhausted:
+                        lines.append(f"🚀 止盈2：`{tp2_val}` (約3*ATR) 超出技術分析邏輯，只能賭個運氣")
+                    else:
+                        lines.append(f"🚀 止盈2：`{tp2_val}` (約2.5*ATR)")
+                    lines.append("※ SL 已觸 10% 上限，止盈以 ATR 價位為主")
                 else:
-                    tp2_r_str = f" ({r_tp2}R)" if r_tp2 is not None else ""
-                    lines.append(f"🚀 止盈2：`{tp2_val}` (能量邊界){tp2_r_str}")
+                    # 止盈1 只顯示一個括號：有實際 R 就顯示數字，否則顯示來源
+                    if r_tp1 is not None:
+                        tp1_suffix = f" ({r_tp1}R，主力對稱過遠先落袋)" if tp1_source == "vwap_capped" else f" ({r_tp1}R)"
+                    else:
+                        tp1_suffix = " (主力成本對稱)" if tp1_source == "vwap" else " (1.2R)" if tp1_source == "atr" else ""
+                    lines.append(f"✅ 止盈1：`{tp1_val}`{tp1_suffix}")
+                    if energy_exhausted:
+                        lines.append(f"🚀 止盈2：`{tp2_val}` (3R) 超出技術分析邏輯，只能賭個運氣 3R 了")
+                    else:
+                        tp2_r_str = f" ({r_tp2}R)" if r_tp2 is not None else ""
+                        lines.append(f"🚀 止盈2：`{tp2_val}` (能量邊界){tp2_r_str}")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
