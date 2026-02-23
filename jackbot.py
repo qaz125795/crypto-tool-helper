@@ -1669,6 +1669,91 @@ def _fetch_coinglass_atr(symbol: str, interval: str = "1d") -> Optional[float]:
     return None
 
 
+def _fetch_coinglass_ema(symbol: str, interval: str = "30m") -> Optional[float]:
+    """CoinGlass V4 EMA：/api/futures/indicators/ema，取 EMA20。"""
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    symbol_param = base + "USDT"
+    url = f"{CG_API_BASE}/api/futures/indicators/ema"
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    for exchange in ("Binance", "BingX"):
+        params = {"exchange": exchange, "symbol": symbol_param, "interval": interval}
+        try:
+            time.sleep(0.25)
+            r = requests.get(url, params=params, headers=headers, timeout=8)
+            if r.status_code != 200 or "Too Many Requests" in (r.text or ""):
+                continue
+            data = r.json()
+            if data.get("code") not in (0, "0", 200, "200", None):
+                continue
+            raw = data.get("data", data.get("list", []))
+            if isinstance(raw, list) and raw:
+                last = raw[-1] if isinstance(raw[-1], dict) else None
+                if last:
+                    for k in ("ema20", "ema_20", "value", "ema"):
+                        v = last.get(k)
+                        if v is not None:
+                            try:
+                                val = float(v)
+                                if val > 0:
+                                    logger.info(f"[技術指標] {base}: EMA API 取得 ema20={val}")
+                                    return val
+                            except (TypeError, ValueError):
+                                pass
+        except Exception:
+            pass
+    logger.info(f"[技術指標] {base}: EMA API 無回傳或無 EMA20")
+    return None
+
+
+def _fetch_coinglass_macd(symbol: str, interval: str = "30m") -> Optional[Dict]:
+    """CoinGlass V4 MACD：/api/futures/indicators/macd。回傳最後一筆 MACD 相關數值或 None。"""
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    symbol_param = base + "USDT"
+    url = f"{CG_API_BASE}/api/futures/indicators/macd"
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    for exchange in ("Binance", "BingX"):
+        params = {"exchange": exchange, "symbol": symbol_param, "interval": interval}
+        try:
+            time.sleep(0.25)
+            r = requests.get(url, params=params, headers=headers, timeout=8)
+            if r.status_code != 200 or "Too Many Requests" in (r.text or ""):
+                continue
+            data = r.json()
+            if data.get("code") not in (0, "0", 200, "200", None):
+                continue
+            raw = data.get("data", data.get("list", []))
+            if isinstance(raw, list) and raw and isinstance(raw[-1], dict):
+                logger.info(f"[技術指標] {base}: MACD API 取得")
+                return raw[-1]
+        except Exception:
+            pass
+    logger.info(f"[技術指標] {base}: MACD API 無回傳")
+    return None
+
+
+def _fetch_coinglass_cgdi_history(symbol: Optional[str] = None, interval: str = "1d") -> Optional[Dict]:
+    """CoinGlass CGDI 指數：/api/futures/cgdi-index/history，用於大盤情緒。可傳 symbol 或取整體。"""
+    url = f"{CG_API_BASE}/api/futures/cgdi-index/history"
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    params = {"exchange": "Binance", "interval": interval}
+    if symbol:
+        base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+        params["symbol"] = base + "USDT"
+    try:
+        time.sleep(0.2)
+        r = requests.get(url, params=params, headers=headers, timeout=8)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if data.get("code") not in (0, "0", 200, "200", None):
+            return None
+        if data.get("data") or data.get("list"):
+            return data
+    except Exception:
+        pass
+    return None
+
+
 def fetch_coinglass_whale_index_history(
     symbol: str,
     exchange: str = "Binance",
@@ -2077,6 +2162,28 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         atr_series = tr.rolling(14).mean()
         if not atr_series.empty and not pd.isna(atr_series.iloc[-1]) and atr_series.iloc[-1] > 0:
             atr_val = float(atr_series.iloc[-1])
+
+    # MACD(12, 26, 9)：用於能量背離偵測
+    macd_hist = None
+    energy_exhausted = False
+    if len(closes) >= 35:
+        ser = pd.Series(closes, dtype=float)
+        ema12 = ser.ewm(span=12, adjust=False).mean()
+        ema26 = ser.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        macd_hist = macd_line - signal_line
+        # 能量背離：價格創新高但 MACD 柱狀縮短
+        lookback = 5
+        if len(closes) >= lookback and len(macd_hist) >= 3:
+            recent_closes = closes[-lookback:]
+            recent_hist = macd_hist.iloc[-3:].tolist()
+            price_new_high = (recent_closes[-1] >= max(recent_closes))
+            hist_shortening = len(recent_hist) >= 2 and recent_hist[-1] < recent_hist[-2]
+            if price_new_high and hist_shortening:
+                energy_exhausted = True
+                logger.info(f"[本地換算] {clean}: 能量背離偵測 價格創高但 MACD 柱狀縮短 → energy_exhausted=True")
+
     out = {
         "rsi": rsi_val,
         "touch_upper": touch_upper,
@@ -2088,6 +2195,7 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         "source": "BingX",
         "plan_b_used": True,
         "real_symbol": found_symbol,
+        "energy_exhausted": energy_exhausted,
     }
     if vwap_2h is not None:
         out["vwap_2h"] = vwap_2h
@@ -2176,8 +2284,19 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
 
     atr_val = _fetch_coinglass_atr(symbol, "1d")
     vwap_2h = ema20_close = None
-    # 僅在「搜尋不到此幣種技術分析資料」時才執行本地換算；API 有回傳則一律用 API 數據，不再為缺欄位呼叫本地（自行換算效率慢）
-    logger.info(f"[技術指標] {base}: 使用 CoinGlass API 數據 RSI={rsi_val} BOLL上={ub_value} BOLL下={lb_value} 現價={current_price} ATR={atr_val}")
+    # Plan A 補強：EMA / MACD / CGDI 若任一指標 API 獲取失敗，標註 plan_b_used（仍以 RSI/BOLL/ATR 為主推播）
+    ema20_api = _fetch_coinglass_ema(symbol, "30m")
+    if ema20_api is not None:
+        ema20_close = ema20_api
+    else:
+        plan_b_used = True
+    macd_data = _fetch_coinglass_macd(symbol, "30m")
+    if macd_data is None:
+        plan_b_used = True
+    cgdi_data = _fetch_coinglass_cgdi_history(symbol, "1d")
+    if cgdi_data is None:
+        plan_b_used = True
+    logger.info(f"[技術指標] {base}: 使用 CoinGlass API 數據 RSI={rsi_val} BOLL上={ub_value} BOLL下={lb_value} 現價={current_price} ATR={atr_val} EMA20={ema20_close} plan_b_used={plan_b_used}")
 
     out = {
         "rsi": rsi_val,
@@ -2194,6 +2313,10 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
         out["vwap_2h"] = vwap_2h
     if ema20_close is not None:
         out["ema20_close"] = ema20_close
+    if macd_data is not None:
+        out["macd"] = macd_data
+    if cgdi_data is not None:
+        out["cgdi"] = cgdi_data
     return out
 
 
@@ -2482,6 +2605,7 @@ def build_report_message_tiered(
         risk_dist = (price - sl_price) if is_long else (sl_price - price)
         if not risk_dist or risk_dist <= 0:
             return fmt_p(sl_price), _na, _na, None, None, None, None, sl_capped, False
+        risk_dist = max(risk_dist, price * 0.005)  # 避免除零與異常 R
 
         # TP1：主力成本對稱位 Price + (Price - vwap_2h)；無 VWAP 用 1.2*ATR
         if vwap_2h is not None and vwap_2h > 0:
@@ -2719,9 +2843,11 @@ def build_report_message_tiered(
 
                 # 計算 SL/TP（止盈1、止盈2 皆由技術分析：布林 vs 均線；相似則 TP2=TP1*2）
                 cvd_div = "CVD背離" in (x.get("reason") or "")
+                tech_exhausted = bool(x.get("energy_exhausted"))
                 sl_val, tp1_val, tp2_val, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped, energy_exhausted = calc_sl_tp(
                     x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig,
-                    x.get("vwap_2h"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value"), cvd_divergence=cvd_div
+                    x.get("vwap_2h"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value"),
+                    cvd_divergence=(cvd_div or tech_exhausted)
                 )
                 # 風報比過低不推播：止盈1 < 0.7R 代表賠率差，寧可少出手保勝率
                 if r_tp1 is not None and r_tp1 < MIN_TP1_R_FOR_PUSH:
@@ -2810,13 +2936,14 @@ def build_report_message_tiered(
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
+                # 時間停損：90 分鐘(3根K)未脫離成本區建議撤單
+                lines.append("⏰ 船長指令：若 90 分鐘內(3根K)未脫離成本區，代表主力動能不足，建議撤單。")
                 lines.append("")
 
     if not has_any:
-        lines.append("😴 暫無符合條件機會。")
+        lines.append("哥們你記住，你的腎、肺都有兩個，但你有一個就能活；運鈔車保全第一發都是空包彈，人們都在銀行存錢，屁股不止可以拉屎，你輸了只是把錢給人家，但你放棄了就是真的輸了。人們都說十賭九輸，你現在已經九次輸了。你再博一把就可以收回來，如果你還想東山再起，那我還看得起你；你現在放棄了，我就真的看不起你了。你記住，一顆腎、一個角膜、一個肺都能活，可偏偏上天給了你兩個。兄弟，如果你說你需要200最後一舞，我會毫不猶豫發給你；但是你跟我說借200坐車要去進廠打工，對不起，我的錢不會借給懦夫，你太讓我失望了。")
         lines.append("")
-        lines.append("看啦，沒那麼多交易機會啦！")
-        lines.append("不要再潛水了，多多出來跟其他人討論交流分享手上的持倉或是討論，善的循環 ❤️")
+        lines.append("人要相信運氣，放平心態，父母的養老金，家裡的房子，老婆的首飾，孩子的學費，朋友的轉帳，網貸高利貸，都是咱們上岸的資本。翻身打一場漂亮仗，加油兄弟！哪有小孩天天哭？哪有男人天天輸？你要不要好好想想你來到這世上是為了什麼？父母的養老費和家裡的房產證都是翻身的資本，我相信你能做得到。")
         lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append("⚠️ *操作SOP*：頭等機艙=重倉/高信心、穩健列車=標準倉、賭鬼樂透=小倉位/高風險。嚴格執行止損，勿加碼攤平。")
@@ -3173,6 +3300,7 @@ def fetch_position_change():
             "reason": reason,
             "funding_rate": funding_rate,
             "plan_b_used": bool(tech.get("plan_b_used")) if tech else False,
+            "energy_exhausted": bool(tech.get("energy_exhausted")) if tech else False,
         })
         logger.info(
             f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} 布林上={ub_val} 布林下={lb_val} ATR={atr_val} 鯨魚指數={whale_idx} | {reason}"
