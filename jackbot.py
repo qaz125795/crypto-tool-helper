@@ -2201,6 +2201,10 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         out["vwap_2h"] = vwap_2h
     if ema20_close is not None:
         out["ema20_close"] = ema20_close
+    # 近期結構（2h 內高低）：真實價格支撐/壓力，供 TP1「有依據」版本
+    if len(highs) >= 4 and len(lows) >= 4:
+        out["recent_high_2h"] = max(highs[-4:])
+        out["recent_low_2h"] = min(lows[-4:])
     logger.info(f"[本地換算] {clean}: 完成 RSI={rsi_val:.2f} 布林上={ub_value} 布林下={lb_value} 現價={current_price} ATR={atr_val} VWAP_2h={vwap_2h} EMA20={ema20_close} (plan_b_used=True)")
     return out
 
@@ -2333,7 +2337,7 @@ OI_FOR_5_STAR = 3.5    # 5星：主力量明確才給
 OI_FOR_4_STAR = 3.3    # 4星
 OI_FOR_ELITE = 3.5     # 鑽石 💎：與 5 星對齊
 
-# 狙擊鏡止盈風報門檻：止盈1 若低於此 R 不推播（避免賠率差、維持勝率品質）
+# 狙擊鏡止盈風報門檻：止盈若低於此 R 不推播（避免賠率差、維持勝率品質）
 MIN_TP1_R_FOR_PUSH = 0.65
 
 # 抄底/摸頭 30m 門檻（保守山寨）：略放寬仍算低位/高位，減少誤殺
@@ -2536,7 +2540,7 @@ def build_report_message_tiered(
 ) -> str:
     """
     【傑克 30分狙擊鏡 - 暴力喊單版】
-    文案極度簡化，只給重點：方向、點位、理由。全線雙止盈 (TP1 保本 / TP2 暴富)。
+    文案極度簡化，只給重點：方向、點位、理由。SL 與 TP 同源（主力成本 或 ATR）。
     """
     def star_str(n: int) -> str:
         return "⭐" * (n or 0)
@@ -2546,11 +2550,11 @@ def build_report_message_tiered(
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
-    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool, vwap_2h: Optional[float] = None, ema20_close: Optional[float] = None, ub_value: Optional[float] = None, lb_value: Optional[float] = None, cvd_divergence: bool = False):
+    def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool, vwap_2h: Optional[float] = None, ema20_close: Optional[float] = None, ub_value: Optional[float] = None, lb_value: Optional[float] = None, cvd_divergence: bool = False, recent_high_2h: Optional[float] = None, recent_low_2h: Optional[float] = None):
         """
-        專業 OI 持倉版：SL=1.5*ATR、上限 10%。
-        - SL 未壓縮：TP1=主力對稱(VWAP) 或 1.2*ATR，上限 2.5R；TP2=能量邊界(布林/2.5*ATR) 或 CVD 時 3R。一律報 R。
-        - SL 被 10% 壓縮：TP 改以 ATR 價位報（1.2/2.5/3*ATR），不報 R，避免分母被壓小導致 R 失真。
+        專業 OI 持倉版：SL 與 TP 同源（停損停利理由一致）。
+        - SL 用主力成本推算（VWAP 抬/壓）→ TP 用主力成本對稱。
+        - SL 用 ATR 推算（含 10% 壓縮）→ TP 用 1.2×ATR。
         """
         _na = "-"
         def fmt_p(p):
@@ -2602,126 +2606,70 @@ def build_report_message_tiered(
 
         risk_dist = (price - sl_price) if is_long else (sl_price - price)
         if not risk_dist or risk_dist <= 0:
-            return fmt_p(sl_price), _na, _na, None, None, None, None, sl_capped, False
+            return fmt_p(sl_price), _na, _na, None, None, None, None, sl_capped, False, _na, "", _na, ""
         risk_dist = max(risk_dist, price * 0.005)  # 避免除零與異常 R
 
-        # SL 被 10% 壓縮時：TP 改以 ATR 價位報（不報 R），避免 R 被扭曲
+        # SL 用什麼方案，TP 就用什麼方案（停損停利理由一致）
+        # 判斷 SL 是否用了主力成本：有 VWAP 且實際抬/壓了 SL
+        pure_sl_long = price - sl_dist
+        pure_sl_short = price + sl_dist
+        sl_used_vwap = (
+            vwap_2h is not None and vwap_2h > 0
+            and ((is_long and sl_price > pure_sl_long) or (not is_long and sl_price < pure_sl_short))
+        )
+
+        # SL 被 10% 壓縮 → 純 ATR 方案，TP 用 ATR
         if sl_capped:
-            atr_tp1 = (1.2 * atr_val) if atr_val else price * 0.02
-            atr_tp2 = (2.5 * atr_val) if atr_val else price * 0.04
-            atr_tp2_ex = (3.0 * atr_val) if atr_val else price * 0.05
+            atr_tp = (1.2 * atr_val) if atr_val else price * 0.02
             if is_long:
-                tp1_price = price + atr_tp1
-                tp1_source = "atr"
-                if cvd_divergence:
-                    tp2_price = price + atr_tp2_ex
-                    tp2_source = "exhausted_3r"
-                    energy_exhausted = True
-                else:
-                    tp2_price = price + atr_tp2
-                    if ub_value is not None and ub_value > price:
-                        tp2_price = max(ub_value, tp2_price)
-                    tp2_source = "boll_atr"
-                    energy_exhausted = False
+                tp1_price = price + atr_tp
             else:
-                tp1_price = max(price - atr_tp1, floor)
-                tp1_source = "atr"
-                if cvd_divergence:
-                    tp2_price = max(price - atr_tp2_ex, floor)
-                    tp2_source = "exhausted_3r"
-                    energy_exhausted = True
-                else:
-                    tp2_price = max(price - atr_tp2, floor)
-                    if lb_value is not None and lb_value < price and lb_value > 0:
-                        tp2_price = min(lb_value, tp2_price)
-                    tp2_source = "boll_atr"
-                    energy_exhausted = False
-            if is_long and tp2_price < (tp1_price or 0):
-                tp2_price = tp1_price or price
-            if not is_long and tp2_price > (tp1_price or price):
-                tp2_price = max((tp1_price or price) - ((2.5 * atr_val) if atr_val else price * 0.04), floor)
-            if not is_long and tp2_price <= 0:
-                tp2_price = floor
-            r_tp1 = None
-            r_tp2 = None
-            return fmt_p(sl_price), fmt_p(tp1_price) if tp1_price else _na, fmt_p(tp2_price) if tp2_price else _na, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped, energy_exhausted
+                tp1_price = max(price - atr_tp, floor)
+            r_tp1 = round((tp1_price - price) / risk_dist, 1) if is_long else round((price - tp1_price) / risk_dist, 1) if not is_long else None
+            tp1_label = "ATR"
+            tp1_real_str = fmt_p(tp1_price) if tp1_price else _na
+            tp1_real_note = "1.2×ATR"
+            return fmt_p(sl_price), fmt_p(tp1_price) if tp1_price else _na, _na, r_tp1, None, tp1_label, "", sl_capped, False, tp1_real_str, tp1_real_note, _na, ""
 
-        # 以下：SL 未壓縮，正常用 risk_dist 算 R 與 TP
-        # TP1：主力成本對稱位 Price + (Price - vwap_2h)；無 VWAP 用 1.2*ATR
-        if vwap_2h is not None and vwap_2h > 0:
+        # SL 用了主力成本 → TP 用主力成本對稱；否則 TP 用 ATR
+        MAX_TP_R = 2.5
+        tp1_label = "主力成本"
+        if sl_used_vwap and vwap_2h is not None and vwap_2h > 0:
             if is_long:
-                tp1_price = 2.0 * price - vwap_2h
-                if tp1_price <= price:
+                cand = 2.0 * price - vwap_2h
+                if cand > price:
+                    tp1_price = cand
+                    tp1_note = "主力成本對稱"
+                else:
                     tp1_price = price + (1.2 * atr_val if atr_val else price * 0.02)
+                    tp1_note = "主力對稱無效改1.2×ATR"
+                    tp1_label = "ATR"
             else:
-                tp1_price = 2.0 * vwap_2h - price
-                if tp1_price >= price or tp1_price <= 0:
+                cand = 2.0 * vwap_2h - price
+                if 0 < cand < price:
+                    tp1_price = cand
+                    tp1_note = "主力成本對稱"
+                else:
                     tp1_price = max(price - (1.2 * atr_val if atr_val else price * 0.02), floor)
-            tp1_source = "vwap"
+                    tp1_note = "主力對稱無效改1.2×ATR"
+                    tp1_label = "ATR"
+            if tp1_note == "主力成本對稱":
+                r_raw = (tp1_price - price) / risk_dist if is_long else (price - tp1_price) / risk_dist
+                if r_raw > MAX_TP_R:
+                    tp1_price = price + MAX_TP_R * risk_dist if is_long else max(price - MAX_TP_R * risk_dist, floor)
+                    tp1_note = "主力對稱(已壓2.5R)"
         else:
+            # SL 純 ATR → TP 用 1.2×ATR
             fallback_dist = (1.2 * atr_val) if atr_val else price * 0.02
-            if is_long:
-                tp1_price = price + fallback_dist
-            else:
-                tp1_price = max(price - fallback_dist, floor)
-            tp1_source = "atr"
-
-        # 止盈1 上限：主力對稱有時會算出 5R、6R，第一目標過遠不現實，改為最多 2.5R 先落袋
-        r_tp1_raw = (tp1_price - price) / risk_dist if is_long else (price - tp1_price) / risk_dist
-        MAX_TP1_R = 2.5
-        if tp1_price and r_tp1_raw > MAX_TP1_R:
-            if is_long:
-                tp1_price = price + MAX_TP1_R * risk_dist
-            else:
-                tp1_price = max(price - MAX_TP1_R * risk_dist, floor)
-            tp1_source = "vwap_capped" if tp1_source == "vwap" else tp1_source
-
-        # TP2：能量邊界 = max(BOLL 上軌, Price+2.5*ATR) 做多；min(BOLL 下軌, Price-2.5*ATR) 做空。
-        # 動能衰竭/CVD 背離時技術面算不出合理 TP2，改給 3R 價位並提示「超出技術分析邏輯，只能賭運氣 3R」
-        energy_exhausted = False
-        if cvd_divergence:
-            tp2_dist = 3.0 * risk_dist
-            if is_long:
-                tp2_price = price + tp2_dist
-            else:
-                tp2_price = max(price - tp2_dist, floor)
-            tp2_source = "exhausted_3r"
-            energy_exhausted = True
-        else:
-            atr_25 = (2.5 * atr_val) if atr_val else price * 0.04
-            if is_long:
-                cand = price + atr_25
-                if ub_value is not None and ub_value > price:
-                    tp2_price = max(ub_value, cand)
-                else:
-                    tp2_price = cand
-                tp2_source = "boll_atr"
-            else:
-                cand = max(price - atr_25, floor)
-                if lb_value is not None and lb_value < price and lb_value > 0:
-                    tp2_price = min(lb_value, cand)
-                else:
-                    tp2_price = cand
-                tp2_source = "boll_atr"
-
-        # TP2 必須比 TP1 更遠：做多 TP2>=TP1，做空 TP2<=TP1；不可讓 TP1=TP2（否則顯示邏輯怪）
-        if is_long and tp2_price < (tp1_price or 0):
-            tp2_price = tp1_price or price
-        if not is_long and tp2_price > (tp1_price or price):
-            # 做空時 TP2 至少比 TP1 再遠 1R，避免 TP2 被壓成等於 TP1
-            tp2_price = (tp1_price or price) - risk_dist
-            if tp2_price <= 0:
-                tp2_price = floor
-        if not is_long and tp2_price <= 0:
-            tp2_price = floor
-
+            tp1_price = (price + fallback_dist) if is_long else max(price - fallback_dist, floor)
+            tp1_note = "1.2×ATR"
+            tp1_label = "ATR"
         r_tp1 = round((tp1_price - price) / risk_dist, 1) if is_long and tp1_price else None
         if not is_long and tp1_price:
             r_tp1 = round((price - tp1_price) / risk_dist, 1)
-        # 統一用最終 tp2_price 算 r_tp2（做空被 clamp 後需重算，與價位一致）
-        r_tp2 = round((tp2_price - price) / risk_dist, 1) if is_long else round((price - tp2_price) / risk_dist, 1)
-
-        return fmt_p(sl_price), fmt_p(tp1_price) if tp1_price else _na, fmt_p(tp2_price) if tp2_price else _na, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped, energy_exhausted
+        tp1_real_str = fmt_p(tp1_price) if tp1_price else _na
+        tp1_real_note = tp1_note
+        return fmt_p(sl_price), fmt_p(tp1_price) if tp1_price else _na, _na, r_tp1, None, tp1_label, "", sl_capped, False, tp1_real_str, tp1_real_note, _na, ""
 
     def _is_bull(x: Dict) -> bool:
         sig = x.get("signal_label") or ""
@@ -2903,21 +2851,24 @@ def build_report_message_tiered(
                         pos_rec = "試單 2.5%"
                 strength = f"{tier_emoji} {strength}"
 
-                # 計算 SL/TP（止盈1、止盈2 皆由技術分析：布林 vs 均線；相似則 TP2=TP1*2）
+                # 計算 SL/TP（SL 與 TP 同源：主力成本 或 ATR）
                 cvd_div = "CVD背離" in (x.get("reason") or "")
                 tech_exhausted = bool(x.get("energy_exhausted"))
-                sl_val, tp1_val, tp2_val, r_tp1, r_tp2, tp1_source, tp2_source, sl_capped, energy_exhausted = calc_sl_tp(
+                sl_val, tp1_val, tp2_val, r_tp1, r_tp2, tp1_label, tp2_label, sl_capped, energy_exhausted, tp1_real_str, tp1_real_note, tp1_atr_str, tp1_atr_note = calc_sl_tp(
                     x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig,
                     x.get("vwap_2h"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value"),
-                    cvd_divergence=(cvd_div or tech_exhausted)
+                    cvd_divergence=(cvd_div or tech_exhausted),
+                    recent_high_2h=x.get("recent_high_2h"), recent_low_2h=x.get("recent_low_2h")
                 )
-                # 將 SL/TP 價位存回項目，供後續 24h 出場追蹤（SL/TP1/TP2）
+                # 將 SL/TP 價位與標籤存回，供 24h 出場追蹤（SL 與 TP 同源：主力成本 或 ATR）
                 x["sl_price_str"] = sl_val
                 x["tp1_price_str"] = tp1_val
-                x["tp2_price_str"] = tp2_val
-                # 風報比過低不推播：止盈1 < 0.7R 代表賠率差，寧可少出手保勝率
+                x["tp1_label"] = tp1_label
+                x["tp1_real_str"] = tp1_real_str
+                x["tp1_real_note"] = tp1_real_note
+                # 風報比過低不推播：止盈 < 門檻 R 代表賠率差，寧可少出手保勝率
                 if r_tp1 is not None and r_tp1 < MIN_TP1_R_FOR_PUSH:
-                    logger.info(f"狙擊鏡跳過 {sym}: 止盈1 風報比 {r_tp1}R < {MIN_TP1_R_FOR_PUSH}R，不推播")
+                    logger.info(f"狙擊鏡跳過 {sym}: 止盈 風報比 {r_tp1}R < {MIN_TP1_R_FOR_PUSH}R，不推播")
                     continue
 
                 has_any = True
@@ -2931,7 +2882,7 @@ def build_report_message_tiered(
                 atr_for_log = x.get("atr")
                 cap_note = " (SL已觸發10%上限限制)" if sl_capped else ""
                 logger.info(
-                    f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈1={tp1_val} 止盈2={tp2_val}{cap_note}"
+                    f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈={tp1_val}{cap_note}"
                 )
 
                 # 1. Header: 標的＋換方向＋波動提示（精簡，不顯示數據來源與分級標籤）
@@ -2994,29 +2945,18 @@ def build_report_message_tiered(
                     lines.append(f"📍 主力均價(參考)：`{vwap_ref:,.4f}`")
                 elif ema_ref is not None and isinstance(ema_ref, (int, float)):
                     lines.append(f"📍 均線參考(EMA20)：`{ema_ref:,.4f}`")
-                # 止損與止盈顯示（依 S+/S/A 分級 + R 倍數）
+                # 止損與止盈顯示（同源：理由一致）
+                t1_label = x.get("tp1_label") or "主力成本"
                 lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
-
-                # SL 被 10% 壓縮時：止盈以 ATR 價位報，不報 R（避免 R 被扭曲）
                 if sl_capped:
-                    lines.append(f"✅ 止盈1：`{tp1_val}` (約1.2*ATR)")
-                    if energy_exhausted:
-                        lines.append(f"🚀 止盈2：`{tp2_val}` (約3*ATR) 超出技術分析邏輯，只能賭個運氣")
-                    else:
-                        lines.append(f"🚀 止盈2：`{tp2_val}` (約2.5*ATR)")
-                    lines.append("※ SL 已觸 10% 上限，止盈以 ATR 價位為主")
+                    lines.append("※ 損＝觸及 1.5×ATR 或 10% 上限；盈＝達 1.2×ATR（同源 ATR）")
                 else:
-                    # 止盈1 只顯示一個括號：有實際 R 就顯示數字，否則顯示來源
-                    if r_tp1 is not None:
-                        tp1_suffix = f" ({r_tp1}R，主力對稱過遠先落袋)" if tp1_source == "vwap_capped" else f" ({r_tp1}R)"
-                    else:
-                        tp1_suffix = " (主力成本對稱)" if tp1_source == "vwap" else " (1.2R)" if tp1_source == "atr" else ""
-                    lines.append(f"✅ 止盈1：`{tp1_val}`{tp1_suffix}")
-                    if energy_exhausted:
-                        lines.append(f"🚀 止盈2：`{tp2_val}` (3R) 超出技術分析邏輯，只能賭個運氣 3R 了")
-                    else:
-                        tp2_r_str = f" ({r_tp2}R)" if r_tp2 is not None else ""
-                        lines.append(f"🚀 止盈2：`{tp2_val}` (能量邊界){tp2_r_str}")
+                    lines.append("※ 損＝觸及防守（主力成本區或 1.5×ATR）；盈＝達目標（與止損同源）")
+                r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
+                if sl_capped:
+                    lines.append(f"✅ 止盈：`{tp1_val}` (ATR 1.2×){r1}")
+                else:
+                    lines.append(f"✅ 止盈：`{tp1_val}` ({t1_label}){r1}")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
@@ -3413,7 +3353,7 @@ def fetch_position_change():
     low_liq_count = sum(1 for x in all_top if x.get("low_liquidity_warning"))
     logger.info(f"本輪 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<{VOLUME_SOFT_MIN_USD/1e6:.1f}M)")
     if len(all_top) == 0:
-        logger.info("本輪 0 筆推播：請看上方「狙擊鏡跳過」或「四類 TOP 候選數」排查（分類未通過 / 冷卻 / 止盈1風報比<0.65R）")
+        logger.info("本輪 0 筆推播：請看上方「狙擊鏡跳過」或「四類 TOP 候選數」排查（分類未通過 / 冷卻 / 止盈風報比<0.65R）")
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
@@ -3517,35 +3457,36 @@ def fetch_position_change():
         pushed_today = [e for e in push_log_signals if isinstance(e, dict) and e.get("ts") and datetime.fromtimestamp(e["ts"], tz=TAIPEI_TZ).date() == summary_date]
         closed_today = [e for e in push_log_signals if isinstance(e, dict) and e.get("closed") and e.get("closed_ts") and datetime.fromtimestamp(e["closed_ts"], tz=TAIPEI_TZ).date() == summary_date]
         n_sl = sum(1 for e in closed_today if e.get("exit_reason") == "sl")
-        n_tp2 = sum(1 for e in closed_today if e.get("exit_reason") == "tp2")
+        n_tp1 = sum(1 for e in closed_today if e.get("exit_reason") == "tp1")
         n_reversal = sum(1 for e in closed_today if e.get("exit_reason") == "reversal")
+        n_win = n_tp1
         n_closed = len(closed_today)
         n_pushed = len(pushed_today)
-        win = n_sl + n_tp2
-        win_rate = (n_tp2 / win * 100) if win else None
+        win_rate = (n_win / (n_win + n_sl) * 100) if (n_win + n_sl) else None
         summary_lines = [
             f"📊 *【{summary_date} 每日績效總結】*",
             f"",
             f"📤 當日推播：{n_pushed} 單",
-            f"✅ 已結案：{n_closed} 單（停利 {n_tp2}｜停損 {n_sl}｜籌碼反轉 {n_reversal}）",
+            f"✅ 已結案：{n_closed} 單（止盈 {n_tp1}｜止損 {n_sl}｜籌碼反轉 {n_reversal}）",
+            f"※ 止盈算贏、止損算輸 → {n_win} 贏 / {n_sl} 輸",
         ]
         if win_rate is not None:
-            summary_lines.append(f"📈 整體勝率（停利/(停損+停利)）：{win_rate:.1f}%")
+            summary_lines.append(f"📈 整體勝率：{win_rate:.1f}%")
         summary_lines.append(f"")
         # 各分類（多單/空單）勝率
         for _dir, _label in (("多", "多單"), ("空", "空單")):
             p_d = [e for e in pushed_today if (e.get("dir") or "").strip() == _dir]
             c_d = [e for e in closed_today if (e.get("dir") or "").strip() == _dir]
             sl_d = sum(1 for e in c_d if e.get("exit_reason") == "sl")
-            tp2_d = sum(1 for e in c_d if e.get("exit_reason") == "tp2")
-            w_d = sl_d + tp2_d
-            wr_d = (tp2_d / w_d * 100) if w_d else None
+            tp1_d = sum(1 for e in c_d if e.get("exit_reason") == "tp1")
+            w_d = tp1_d + sl_d
+            wr_d = (tp1_d / w_d * 100) if w_d else None
             _wr_str = f"{wr_d:.1f}%" if wr_d is not None else "-"
-            summary_lines.append(f"　{_label}：推播 {len(p_d)}｜結案 {len(c_d)}（停利 {tp2_d}｜停損 {sl_d}）勝率 {_wr_str}")
+            summary_lines.append(f"　{_label}：推播 {len(p_d)}｜結案 {len(c_d)}（止盈 {tp1_d}｜止損 {sl_d}）勝率 {_wr_str}")
         summary_lines.append(f"")
         summary_lines.append(f"🕐 {now_tw.strftime('%Y-%m-%d %H:%M')} 台灣")
         send_telegram_message("\n".join(summary_lines), TG_THREAD_IDS["position_change"], parse_mode="Markdown")
-        logger.info(f"每日績效總結已發送: {summary_date} 推播 {n_pushed} 結案 {n_closed} 停損 {n_sl} 停利 {n_tp2} 反轉 {n_reversal} 勝率 {win_rate}%")
+        logger.info(f"每日績效總結已發送: {summary_date} 推播 {n_pushed} 結案 {n_closed} 止盈 {n_tp1} 止損 {n_sl} 反轉 {n_reversal} 勝率 {win_rate}%")
     # 倉位追蹤依賴「上一輪（及之前）寫入的推播紀錄」；若 data 目錄在排程間未持久化（如 CI 無 cache），此處會一直是 0 筆
     in_window = [
         e for e in push_log_signals
@@ -3555,7 +3496,7 @@ def fetch_position_change():
     logger.info(f"推播紀錄: 共 {len(push_log_signals)} 筆，48h 內且未結案 {len(in_window)} 筆待追蹤 (倉位追蹤需 data 目錄在排程間持久化)")
     if len(push_log_signals) == 0 and len(history) > 0:
         logger.warning("推播紀錄為 0 筆但冷卻有歷史 → 若曾推播過，請確認 workflow 的 data 目錄已正確 cache/還原，否則每輪從空檔開始、無法倉位追蹤")
-    logger.info(f"【倉位追蹤】本輪待追蹤 {len(in_window)} 筆歷史訊號 (48h 內未結案)，開始檢查 SL/TP1/TP2、籌碼反轉、進場理由…")
+    logger.info(f"【倉位追蹤】本輪待追蹤 {len(in_window)} 筆歷史訊號 (48h 內未結案)，開始檢查 SL/TP、籌碼反轉、進場理由…")
     exit_notified_set: Set[str] = set()
     # SL 觸發時輪播勵志文案（每次隨機選一段）
     SL_STOPLOSS_COPY = [
@@ -3579,14 +3520,12 @@ def fetch_position_change():
         pushed_at_tw = entry.get("pushed_at_tw") or datetime.fromtimestamp(pushed_ts, tz=TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
         dir_label = "多單" if pushed_dir == "多" else "空單"
 
-        # 1) 價格追蹤：若已觸及 SL 或 TP2，則視為本倉結案並刪除；TP1 則提示一次後保留
+        # 1) 價格追蹤：觸及 SL 或 TP 即結案（SL/TP 同源：主力成本 或 ATR）
         sl_level = entry.get("sl")
         tp1_level = entry.get("tp1")
-        tp2_level = entry.get("tp2")
-        tp1_notified = bool(entry.get("tp1_notified"))
         price_closed = False
 
-        if sl_level is not None or tp1_level is not None or tp2_level is not None:
+        if sl_level is not None or tp1_level is not None:
             full_sym = entry.get("full_symbol") or f"{sym_base}USDT"
             snap = _fetch_bingx_ticker_snapshot(full_sym, preferred_symbol=None)
             cur_price = None
@@ -3607,7 +3546,7 @@ def fetch_position_change():
                         exit_msg = (
                             f"⚠️ *【已觸發止損・本倉結案】*\n"
                             f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 價格已觸及止損 `{sl_level}`，"
-                            f"視為本次進場已結束，後續不再追蹤此倉。\n\n{sl_copy}"
+                            f"防守價（主力成本區或 1.5×ATR）被跌破/漲破，進場理由失效。\n\n{sl_copy}"
                         )
                         send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
                         entry["notified_exit"] = True
@@ -3617,43 +3556,31 @@ def fetch_position_change():
                         exit_notified_set.add(sym_base)
                         price_closed = True
                         logger.info(f"倉位追蹤已發送: {sym_base} 觸發止損 (本倉結案)")
-                # 1-2) 若未止損，檢查 TP2：達到最終停利即結案
-                if not price_closed and tp2_level is not None:
-                    if (is_long and cur_price >= tp2_level) or (not is_long and cur_price <= tp2_level):
+                # 1-2) 若未止損，檢查止盈（與 SL 同源）：達標即結案
+                tp1_lbl = entry.get("tp1_label") or "主力成本"
+                if not price_closed and tp1_level is not None:
+                    hit_tp = (is_long and cur_price >= tp1_level) or (not is_long and cur_price <= tp1_level)
+                    if hit_tp:
                         exit_msg = (
-                            f"🎉 *【已達停利點2・本倉完結】*\n"
-                            f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 價格已達停利點2 `{tp2_level}`，"
-                            f"工具都免費給你用了，波段目標達成還不曬對帳單孝敬一下傑克？"
+                            f"✅ *【已達止盈・本倉完結】*\n"
+                            f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 已達止盈({tp1_lbl}) `{tp1_level}`，"
+                            f"目標與止損同源（主力成本對稱或 1.2×ATR）達標，本倉結案。"
                         )
                         send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
                         entry["notified_exit"] = True
                         entry["closed"] = True
-                        entry["exit_reason"] = "tp2"
+                        entry["exit_reason"] = "tp1"
                         entry["closed_ts"] = int(now_ts)
                         exit_notified_set.add(sym_base)
                         price_closed = True
-                        logger.info(f"倉位追蹤已發送: {sym_base} 已達停利點2 (本倉完結)")
-                # 1-3) 價格仍在區間內且尚未提示過 TP1 → 提示一次「已達停利點1，剩小倉拚 TP2」
-                if (not price_closed) and tp1_level is not None and not tp1_notified:
-                    hit_tp1 = (is_long and cur_price >= tp1_level) or (not is_long and cur_price <= tp1_level)
-                    if hit_tp1:
-                        exit_msg = (
-                            f"✅ *【已達停利點1】*\n"
-                            f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 已達停利點1 `{tp1_level}`，"
-                            f"先落袋一部分、留小倉拚停利點2～有賺還不曬單孝敬傑克，工具都免費給你用了。"
-                        )
-                        send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
-                        entry["tp1_notified"] = True
-                        exit_notified_set.add(sym_base)
-                        logger.info(f"倉位追蹤已發送: {sym_base} 已達停利點1 (留倉拚 TP2)")
-                # 每筆都打 LOG：現價 vs 止損/止盈 是否觸發（未觸發時寫入方便排查）
+                        logger.info(f"倉位追蹤已發送: {sym_base} 已達止盈({tp1_lbl}) (本倉完結)")
                 if not price_closed:
-                    logger.info(f"比對價格: {sym_base} 現價 {cur_price} | 止損 {sl_level} 止盈1 {tp1_level} 止盈2 {tp2_level} -> 未觸發")
+                    logger.info(f"比對價格: {sym_base} 現價 {cur_price} | 止損 {sl_level} 止盈 {tp1_level} -> 未觸發")
         else:
             # 紀錄缺 sl/tp 欄位（舊格式或寫入時無價位），本輪僅做進場理由與籌碼追蹤
             logger.info(f"比對價格: {sym_base} 無止損/止盈價位可比對（紀錄缺 sl/tp），僅做進場理由與籌碼追蹤")
 
-        # 價格已結案（SL 或 TP2），不再做籌碼反轉檢查
+        # 價格已結案（SL 或 TP），不再做籌碼反轉檢查
         if entry.get("closed"):
             continue
 
@@ -3725,7 +3652,7 @@ def fetch_position_change():
     if exit_notified_set:
         logger.info(f"【倉位追蹤】本輪檢查完成，共發送 {len(exit_notified_set)} 則推播 → 標的: {', '.join(sorted(exit_notified_set))}")
     else:
-        logger.info(f"【倉位追蹤】本輪檢查完成，無觸發 (待追蹤 {len(in_window)} 筆均未達 SL/TP1/TP2 或籌碼反轉/加碼)")
+        logger.info(f"【倉位追蹤】本輪檢查完成，無觸發 (待追蹤 {len(in_window)} 筆均未達 SL/TP 或籌碼反轉/加碼)")
     # 冷卻：同幣＋同方向 4h 內只推一次；同幣換方向可推，並在交易對後提醒換方向
     cooldown_symbol_dir_4h = set()
     for e in history:
@@ -3770,7 +3697,7 @@ def fetch_position_change():
         if has_any:
             send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
         else:
-            logger.info(f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，但風報比篩選後 0 筆可推播（止盈1 風報比 < {MIN_TP1_R_FOR_PUSH}R），不發送主報表")
+            logger.info(f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，但風報比篩選後 0 筆可推播（止盈風報比 < {MIN_TP1_R_FOR_PUSH}R），不發送主報表")
     else:
         if len(all_top) == 0:
             logger.info(f"【未推播原因】本輪無達 OI 門檻之標的（四類皆 0 筆），不發送主報表")
@@ -3804,19 +3731,18 @@ def fetch_position_change():
                 dir_str = _item_direction(x)
                 sl_str = x.get("sl_price_str")
                 tp1_str = x.get("tp1_price_str")
-                tp2_str = x.get("tp2_price_str")
                 entry = {
-                    "symbol": base_sym,           # 基底（例如 BTC）
-                    "full_symbol": full_sym,      # 完整交易對（例如 BTC-USDT）
-                    "dir": dir_str,               # 多 / 空
-                    "entry_category": x.get("category") or "",  # 進場時 OI 類別（供每輪反查「理由還再不再」）
+                    "symbol": base_sym,
+                    "full_symbol": full_sym,
+                    "dir": dir_str,
+                    "entry_category": x.get("category") or "",
                     "ts": int(now_ts),
                     "pushed_at_tw": pushed_at_tw,
                     "notified_exit": False,
                     "closed": False,
                     "sl": _parse_price_str(sl_str),
                     "tp1": _parse_price_str(tp1_str),
-                    "tp2": _parse_price_str(tp2_str),
+                    "tp1_label": x.get("tp1_label") or "主力成本",
                     "tp1_notified": False,
                 }
                 new_push_entries.append(entry)
@@ -3832,22 +3758,20 @@ def fetch_position_change():
                     prev_dir = (latest_prev.get("dir") or "").strip()
                     prev_label = "多單" if prev_dir == "多" else "空單"
                     if prev_dir == dir_str:
-                        # 同方向：追蹤停損改為本輪新防守點，TP 採較近版本（多單取 min、空單取 max）
+                        # 同方向：追蹤停損/止盈改為本輪（SL/TP 同源）
                         new_sl = _parse_price_str(sl_str)
                         new_tp1 = _parse_price_str(tp1_str)
-                        new_tp2 = _parse_price_str(tp2_str)
                         for e in prev_in_window:
                             if (e.get("dir") or "").strip() != dir_str:
                                 continue
                             if new_sl is not None:
                                 e["sl"] = new_sl
-                            o1, o2 = e.get("tp1"), e.get("tp2")
-                            if dir_str == "多":
-                                e["tp1"] = min(o1, new_tp1) if (o1 is not None and new_tp1 is not None) else (new_tp1 or o1)
-                                e["tp2"] = min(o2, new_tp2) if (o2 is not None and new_tp2 is not None) else (new_tp2 or o2)
-                            else:
-                                e["tp1"] = max(o1, new_tp1) if (o1 is not None and new_tp1 is not None) else (new_tp1 or o1)
-                                e["tp2"] = max(o2, new_tp2) if (o2 is not None and new_tp2 is not None) else (new_tp2 or o2)
+                            if new_tp1 is not None:
+                                o1 = e.get("tp1")
+                                if dir_str == "多":
+                                    e["tp1"] = min(o1, new_tp1) if o1 is not None else new_tp1
+                                else:
+                                    e["tp1"] = max(o1, new_tp1) if o1 is not None else new_tp1
                         reminder_msg = (
                             f"🔄 *【同標的・同方向】*\n"
                             f"台灣時間 *{prev_tw}* 已有此標的 *{prev_label}*（`{base_sym}`），本輪再次出現同方向，注意可調整防守點；"
