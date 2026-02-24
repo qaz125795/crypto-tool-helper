@@ -2945,11 +2945,9 @@ def build_report_message_tiered(
                     lines.append(f"📍 主力均價(參考)：`{vwap_ref:,.4f}`")
                 elif ema_ref is not None and isinstance(ema_ref, (int, float)):
                     lines.append(f"📍 均線參考(EMA20)：`{ema_ref:,.4f}`")
-                # 止損與止盈顯示（同源）+ 損/盈可能原因
+                # 止損與止盈顯示（同源）
                 t1_label = x.get("tp1_label") or "主力成本"
                 lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
-                lines.append("※ 吃損可能原因：主力撤出、籌碼反轉、或資金費率擠壓；可對照當時持倉與費率判斷。")
-                lines.append("※ 盈可能原因：主力方向延續（主力成本達標）或波動如預期（ATR 達標）。")
                 r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
                 if sl_capped:
                     lines.append(f"✅ 止盈：`{tp1_val}` (ATR 1.2×){r1}")
@@ -3544,7 +3542,7 @@ def fetch_position_change():
                         exit_msg = (
                             f"⚠️ *【已觸發止損・本倉結案】*\n"
                             f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 價格已觸及止損 `{sl_level}`。\n"
-                            f"可能原因：主力撤出、籌碼反轉、或資金費率擠壓；若持倉結構仍在可再觀察下一輪。\n\n{sl_copy}"
+                            f"原因：價格觸及防守價，進場理由失效。\n\n{sl_copy}"
                         )
                         send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
                         entry["notified_exit"] = True
@@ -3559,10 +3557,11 @@ def fetch_position_change():
                 if not price_closed and tp1_level is not None:
                     hit_tp = (is_long and cur_price >= tp1_level) or (not is_long and cur_price <= tp1_level)
                     if hit_tp:
+                        _tp_reason = "主力成本對稱達標" if tp1_lbl == "主力成本" else "波動如預期(ATR)達標"
                         exit_msg = (
                             f"✅ *【已達止盈・本倉完結】*\n"
                             f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 已達止盈({tp1_lbl}) `{tp1_level}`。\n"
-                            f"可能原因：主力方向延續（主力成本達標）或波動如預期（ATR 達標），本倉結案。"
+                            f"原因：{_tp_reason}，本倉結案。"
                         )
                         send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
                         entry["notified_exit"] = True
