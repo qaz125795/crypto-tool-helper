@@ -3510,6 +3510,42 @@ def fetch_position_change():
         logger.warning(f"讀取狀態檔失敗，本輪無冷卻限制、無推播紀錄: {e}")
     PUSH_LOG_RETENTION_HOURS = 48
     EXIT_CHECK_WINDOW_HOURS = 48
+    # 每日 00:00 那一輪（台灣時間 0:00~0:29）發送「昨日」績效總結
+    now_tw = datetime.fromtimestamp(now_ts, tz=TAIPEI_TZ)
+    if now_tw.hour == 0 and now_tw.minute < 30:
+        summary_date = (now_tw - timedelta(days=1)).date()
+        pushed_today = [e for e in push_log_signals if isinstance(e, dict) and e.get("ts") and datetime.fromtimestamp(e["ts"], tz=TAIPEI_TZ).date() == summary_date]
+        closed_today = [e for e in push_log_signals if isinstance(e, dict) and e.get("closed") and e.get("closed_ts") and datetime.fromtimestamp(e["closed_ts"], tz=TAIPEI_TZ).date() == summary_date]
+        n_sl = sum(1 for e in closed_today if e.get("exit_reason") == "sl")
+        n_tp2 = sum(1 for e in closed_today if e.get("exit_reason") == "tp2")
+        n_reversal = sum(1 for e in closed_today if e.get("exit_reason") == "reversal")
+        n_closed = len(closed_today)
+        n_pushed = len(pushed_today)
+        win = n_sl + n_tp2
+        win_rate = (n_tp2 / win * 100) if win else None
+        summary_lines = [
+            f"📊 *【{summary_date} 每日績效總結】*",
+            f"",
+            f"📤 當日推播：{n_pushed} 單",
+            f"✅ 已結案：{n_closed} 單（停利 {n_tp2}｜停損 {n_sl}｜籌碼反轉 {n_reversal}）",
+        ]
+        if win_rate is not None:
+            summary_lines.append(f"📈 整體勝率（停利/(停損+停利)）：{win_rate:.1f}%")
+        summary_lines.append(f"")
+        # 各分類（多單/空單）勝率
+        for _dir, _label in (("多", "多單"), ("空", "空單")):
+            p_d = [e for e in pushed_today if (e.get("dir") or "").strip() == _dir]
+            c_d = [e for e in closed_today if (e.get("dir") or "").strip() == _dir]
+            sl_d = sum(1 for e in c_d if e.get("exit_reason") == "sl")
+            tp2_d = sum(1 for e in c_d if e.get("exit_reason") == "tp2")
+            w_d = sl_d + tp2_d
+            wr_d = (tp2_d / w_d * 100) if w_d else None
+            _wr_str = f"{wr_d:.1f}%" if wr_d is not None else "-"
+            summary_lines.append(f"　{_label}：推播 {len(p_d)}｜結案 {len(c_d)}（停利 {tp2_d}｜停損 {sl_d}）勝率 {_wr_str}")
+        summary_lines.append(f"")
+        summary_lines.append(f"🕐 {now_tw.strftime('%Y-%m-%d %H:%M')} 台灣")
+        send_telegram_message("\n".join(summary_lines), TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+        logger.info(f"每日績效總結已發送: {summary_date} 推播 {n_pushed} 結案 {n_closed} 停損 {n_sl} 停利 {n_tp2} 反轉 {n_reversal} 勝率 {win_rate}%")
     # 倉位追蹤依賴「上一輪（及之前）寫入的推播紀錄」；若 data 目錄在排程間未持久化（如 CI 無 cache），此處會一直是 0 筆
     in_window = [
         e for e in push_log_signals
@@ -3576,6 +3612,8 @@ def fetch_position_change():
                         send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
                         entry["notified_exit"] = True
                         entry["closed"] = True
+                        entry["exit_reason"] = "sl"
+                        entry["closed_ts"] = int(now_ts)
                         exit_notified_set.add(sym_base)
                         price_closed = True
                         logger.info(f"倉位追蹤已發送: {sym_base} 觸發止損 (本倉結案)")
@@ -3590,6 +3628,8 @@ def fetch_position_change():
                         send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
                         entry["notified_exit"] = True
                         entry["closed"] = True
+                        entry["exit_reason"] = "tp2"
+                        entry["closed_ts"] = int(now_ts)
                         exit_notified_set.add(sym_base)
                         price_closed = True
                         logger.info(f"倉位追蹤已發送: {sym_base} 已達停利點2 (本倉完結)")
@@ -3642,17 +3682,20 @@ def fetch_position_change():
             reversal = True
         if reversal:
             exit_msg = (
-                f"🚨 *【籌碼反轉・建議下車】*\n"
+                f"🚨 *【籌碼反轉・很可惜】*\n"
                 f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 籌碼已出現反轉，"
-                f"可考慮提前下車，等待下一輪機會。"
+                f"建議減碼或再觀察，等待下一輪機會。\n"
+                f"_（僅供參考，若未即時看到推播也可繼續持有，依自身狀況判斷。)_"
             )
             send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
             entry["notified_exit"] = True
             entry["closed"] = True
+            entry["exit_reason"] = "reversal"
+            entry["closed_ts"] = int(now_ts)
             exit_notified_set.add(sym_base)
             logger.info(f"出場提示已發送: {sym_base} (當初{pushed_dir}，本輪{cur_cat} 籌碼反轉)")
             continue
-        # 2b) 籌碼同向加強 → 可考慮加碼（不結案，只提示一次；用 tp1_notified 類似標記避免洗版，或單獨加碼標記）
+        # 2b) 籌碼同向：主力/倉位還在，可持續持有（不建議加碼，僅提醒遵守停損停利）
         same_side_strength = False
         if pushed_dir == "多" and cur_cat in ("long_open", "short_close"):
             same_side_strength = True
@@ -3660,9 +3703,9 @@ def fetch_position_change():
             same_side_strength = True
         if same_side_strength and not entry.get("add_notified"):
             add_msg = (
-                f"📈 *【籌碼同向加強・可考慮加碼】*\n"
-                f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 本輪籌碼同向加強，"
-                f"可考慮加碼或持有拚停利。"
+                f"📈 *【籌碼同向・倉位仍在】*\n"
+                f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 本輪主力/倉位方向仍在，"
+                f"可持續持有，一樣遵守停損停利。"
             )
             send_telegram_message(add_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
             entry["add_notified"] = True
@@ -3789,9 +3832,26 @@ def fetch_position_change():
                     prev_dir = (latest_prev.get("dir") or "").strip()
                     prev_label = "多單" if prev_dir == "多" else "空單"
                     if prev_dir == dir_str:
+                        # 同方向：追蹤停損改為本輪新防守點，TP 採較近版本（多單取 min、空單取 max）
+                        new_sl = _parse_price_str(sl_str)
+                        new_tp1 = _parse_price_str(tp1_str)
+                        new_tp2 = _parse_price_str(tp2_str)
+                        for e in prev_in_window:
+                            if (e.get("dir") or "").strip() != dir_str:
+                                continue
+                            if new_sl is not None:
+                                e["sl"] = new_sl
+                            o1, o2 = e.get("tp1"), e.get("tp2")
+                            if dir_str == "多":
+                                e["tp1"] = min(o1, new_tp1) if (o1 is not None and new_tp1 is not None) else (new_tp1 or o1)
+                                e["tp2"] = min(o2, new_tp2) if (o2 is not None and new_tp2 is not None) else (new_tp2 or o2)
+                            else:
+                                e["tp1"] = max(o1, new_tp1) if (o1 is not None and new_tp1 is not None) else (new_tp1 or o1)
+                                e["tp2"] = max(o2, new_tp2) if (o2 is not None and new_tp2 is not None) else (new_tp2 or o2)
                         reminder_msg = (
                             f"🔄 *【同標的・同方向】*\n"
-                            f"台灣時間 *{prev_tw}* 已有此標的 *{prev_label}*（`{base_sym}`），本輪再次出現同方向，注意可調整防守點。"
+                            f"台灣時間 *{prev_tw}* 已有此標的 *{prev_label}*（`{base_sym}`），本輪再次出現同方向，注意可調整防守點；"
+                            f"追蹤的止損/止盈已同步更新為本輪較近版本。"
                         )
                     else:
                         reminder_msg = (
@@ -3801,12 +3861,16 @@ def fetch_position_change():
                     send_telegram_message(reminder_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
 
             push_log_signals = push_log_signals + new_push_entries
-            push_log_signals = [
-                e for e in push_log_signals
-                if isinstance(e, dict)
-                and not e.get("closed")
-                and (now_ts - e.get("ts", 0)) <= PUSH_LOG_RETENTION_HOURS * 3600
-            ]
+            # 未結案：保留 48h；已結案：保留 48h（供每日 00:00 績效總結統計）
+            def _retain_signal(e: Dict[str, Any]) -> bool:
+                if not isinstance(e, dict):
+                    return False
+                t = e.get("ts") or 0
+                ct = e.get("closed_ts") or t
+                if e.get("closed"):
+                    return (now_ts - ct) <= PUSH_LOG_RETENTION_HOURS * 3600
+                return (now_ts - t) <= PUSH_LOG_RETENTION_HOURS * 3600
+            push_log_signals = [e for e in push_log_signals if _retain_signal(e)]
             state = {"history": history, "signals": push_log_signals}
             SNIPER_COOLDOWN_FILE.write_text(
                 json.dumps(state, ensure_ascii=False),
