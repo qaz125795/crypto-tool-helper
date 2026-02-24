@@ -2587,9 +2587,11 @@ def build_report_message_tiered(
             sl_price = price - sl_dist
             if sl_price <= 0:
                 sl_price = price * 0.95
-            # 破主力成本區可標註籌碼失效（SL 不設在 VWAP 之上）
+            # 破主力成本區可標註籌碼失效（SL 不設在 VWAP 之上）；僅當 VWAP 在現價下方時才抬 SL，否則 SL>現價 會導致 risk_dist<=0、TP 全變 -
             if vwap_2h is not None and vwap_2h > 0:
-                sl_price = max(sl_price, vwap_2h * 0.995)
+                vwap_floor = vwap_2h * 0.995
+                if vwap_floor < price:
+                    sl_price = max(sl_price, vwap_floor)
         else:
             sl_price = price + sl_dist
             # 做空時 SL 必須在現價上方；僅當 VWAP 上限高於現價才壓
