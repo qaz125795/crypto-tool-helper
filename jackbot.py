@@ -3604,6 +3604,12 @@ def fetch_position_change():
                         entry["tp1_notified"] = True
                         exit_notified_set.add(sym_base)
                         logger.info(f"倉位追蹤已發送: {sym_base} 已達停利點1 (留倉拚 TP2)")
+                # 每筆都打 LOG：現價 vs 止損/止盈 是否觸發（未觸發時寫入方便排查）
+                if not price_closed:
+                    logger.info(f"比對價格: {sym_base} 現價 {cur_price} | 止損 {sl_level} 止盈1 {tp1_level} 止盈2 {tp2_level} -> 未觸發")
+        else:
+            # 紀錄缺 sl/tp 欄位（舊格式或寫入時無價位），本輪僅做進場理由與籌碼追蹤
+            logger.info(f"比對價格: {sym_base} 無止損/止盈價位可比對（紀錄缺 sl/tp），僅做進場理由與籌碼追蹤")
 
         # 價格已結案（SL 或 TP2），不再做籌碼反轉檢查
         if entry.get("closed"):
