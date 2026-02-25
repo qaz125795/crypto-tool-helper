@@ -2553,8 +2553,8 @@ def build_report_message_tiered(
     def calc_sl_tp(atr: Optional[float], price: float, zone: str, is_long: bool, stars: int, is_elite: bool, vwap_2h: Optional[float] = None, ema20_close: Optional[float] = None, ub_value: Optional[float] = None, lb_value: Optional[float] = None, cvd_divergence: bool = False, recent_high_2h: Optional[float] = None, recent_low_2h: Optional[float] = None):
         """
         專業 OI 持倉版：SL 與 TP 同源（停損停利理由一致）。
-        - SL 用主力成本推算（VWAP 抬/壓）→ TP 用主力成本對稱。
-        - SL 用 ATR 推算（含 10% 壓縮）→ TP 用 1.2×ATR。
+        - 抄底/摸頭：SL 1.5×ATR、上限 10%，TP 1.2×ATR 或主力對稱。
+        - 追單（突破追漲/追跌）：SL 1.2×ATR、上限 5%，TP 1.0×ATR（貼近限價與實際追單邏輯）。
         """
         _na = "-"
         def fmt_p(p):
@@ -2575,31 +2575,35 @@ def build_report_message_tiered(
 
         atr_val = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
         floor = price * 0.01
-        MAX_SL_PERCENT = 0.10
+        # 追單（突破區）：守近一點、目標近一點，符合限價/實際追單
+        is_chase = zone in (ZONE_BREAKOUT_LONG, ZONE_BREAKOUT_SHORT)
+        if is_chase:
+            SL_ATR_MULT, MAX_SL_PERCENT, TP_ATR_MULT = 1.2, 0.05, 1.0
+        else:
+            SL_ATR_MULT, MAX_SL_PERCENT, TP_ATR_MULT = 1.5, 0.10, 1.2
         sl_capped = False
 
-        # 主動停損 SL：基礎 1.5*ATR，強制上限 10%
+        # 主動停損 SL
         if atr_val is not None:
-            sl_dist = 1.5 * atr_val
+            sl_dist = SL_ATR_MULT * atr_val
             if sl_dist > price * MAX_SL_PERCENT:
                 sl_dist = price * MAX_SL_PERCENT
                 sl_capped = True
         else:
-            sl_dist = price * 0.03  # 無 ATR 時暫用 3%
+            sl_dist = price * (0.02 if is_chase else 0.03)
 
         if is_long:
             sl_price = price - sl_dist
             if sl_price <= 0:
                 sl_price = price * 0.95
-            # 破主力成本區可標註籌碼失效（SL 不設在 VWAP 之上）；僅當 VWAP 在現價下方時才抬 SL，否則 SL>現價 會導致 risk_dist<=0、TP 全變 -
-            if vwap_2h is not None and vwap_2h > 0:
+            # 追單不抬 SL（維持 ATR 防守）；抄底/摸頭才用 VWAP 抬
+            if not is_chase and vwap_2h is not None and vwap_2h > 0:
                 vwap_floor = vwap_2h * 0.995
                 if vwap_floor < price:
                     sl_price = max(sl_price, vwap_floor)
         else:
             sl_price = price + sl_dist
-            # 做空時 SL 必須在現價上方；僅當 VWAP 上限高於現價才壓
-            if vwap_2h is not None and vwap_2h > 0:
+            if not is_chase and vwap_2h is not None and vwap_2h > 0:
                 vwap_cap = vwap_2h * 1.005
                 if vwap_cap > price:
                     sl_price = min(sl_price, vwap_cap)
@@ -2618,9 +2622,9 @@ def build_report_message_tiered(
             and ((is_long and sl_price > pure_sl_long) or (not is_long and sl_price < pure_sl_short))
         )
 
-        # SL 被 10% 壓縮 → 純 ATR 方案，TP 用 ATR
+        # SL 觸及上限 → 純 ATR 方案，TP 用 ATR（追單用 1.0×、一般 1.2×）
         if sl_capped:
-            atr_tp = (1.2 * atr_val) if atr_val else price * 0.02
+            atr_tp = (TP_ATR_MULT * atr_val) if atr_val else price * (0.015 if is_chase else 0.02)
             if is_long:
                 tp1_price = price + atr_tp
             else:
@@ -2628,21 +2632,21 @@ def build_report_message_tiered(
             r_tp1 = round((tp1_price - price) / risk_dist, 1) if is_long else round((price - tp1_price) / risk_dist, 1) if not is_long else None
             tp1_label = "ATR"
             tp1_real_str = fmt_p(tp1_price) if tp1_price else _na
-            tp1_real_note = "1.2×ATR"
+            tp1_real_note = f"{TP_ATR_MULT}×ATR"
             return fmt_p(sl_price), fmt_p(tp1_price) if tp1_price else _na, _na, r_tp1, None, tp1_label, "", sl_capped, False, tp1_real_str, tp1_real_note, _na, ""
 
-        # SL 用了主力成本 → TP 用主力成本對稱；否則 TP 用 ATR
+        # 追單一律 ATR；抄底/摸頭才用主力成本對稱
         MAX_TP_R = 2.5
         tp1_label = "主力成本"
-        if sl_used_vwap and vwap_2h is not None and vwap_2h > 0:
+        if not is_chase and sl_used_vwap and vwap_2h is not None and vwap_2h > 0:
             if is_long:
                 cand = 2.0 * price - vwap_2h
                 if cand > price:
                     tp1_price = cand
                     tp1_note = "主力成本對稱"
                 else:
-                    tp1_price = price + (1.2 * atr_val if atr_val else price * 0.02)
-                    tp1_note = "主力對稱無效改1.2×ATR"
+                    tp1_price = price + (TP_ATR_MULT * atr_val if atr_val else price * 0.02)
+                    tp1_note = f"主力對稱無效改{TP_ATR_MULT}×ATR"
                     tp1_label = "ATR"
             else:
                 cand = 2.0 * vwap_2h - price
@@ -2650,8 +2654,8 @@ def build_report_message_tiered(
                     tp1_price = cand
                     tp1_note = "主力成本對稱"
                 else:
-                    tp1_price = max(price - (1.2 * atr_val if atr_val else price * 0.02), floor)
-                    tp1_note = "主力對稱無效改1.2×ATR"
+                    tp1_price = max(price - (TP_ATR_MULT * atr_val if atr_val else price * 0.02), floor)
+                    tp1_note = f"主力對稱無效改{TP_ATR_MULT}×ATR"
                     tp1_label = "ATR"
             if tp1_note == "主力成本對稱":
                 r_raw = (tp1_price - price) / risk_dist if is_long else (price - tp1_price) / risk_dist
@@ -2659,10 +2663,10 @@ def build_report_message_tiered(
                     tp1_price = price + MAX_TP_R * risk_dist if is_long else max(price - MAX_TP_R * risk_dist, floor)
                     tp1_note = "主力對稱(已壓2.5R)"
         else:
-            # SL 純 ATR → TP 用 1.2×ATR
-            fallback_dist = (1.2 * atr_val) if atr_val else price * 0.02
+            # SL 純 ATR → TP 用 ATR（追單 1.0×、一般 1.2×）
+            fallback_dist = (TP_ATR_MULT * atr_val) if atr_val else price * (0.015 if is_chase else 0.02)
             tp1_price = (price + fallback_dist) if is_long else max(price - fallback_dist, floor)
-            tp1_note = "1.2×ATR"
+            tp1_note = f"{TP_ATR_MULT}×ATR"
             tp1_label = "ATR"
         r_tp1 = round((tp1_price - price) / risk_dist, 1) if is_long and tp1_price else None
         if not is_long and tp1_price:
@@ -2768,11 +2772,13 @@ def build_report_message_tiered(
         ]),
     ]
 
-    # 統計 S+/S/A 數量（僅統計實際會出現在四象限區塊中的標的）
+    # 統計 S+/S/A 數量（依「不重複標的」計，避免同標的出現在多區塊時顯示多台列車）
     eligible_items = long_dip + long_break + short_top + short_break
-    count_s_plus = sum(1 for x in eligible_items if _is_elite(x))
-    count_s = sum(1 for x in eligible_items if (x.get("stars") or 0) == 5 and not _is_elite(x))
-    count_a = sum(1 for x in eligible_items if (x.get("stars") or 0) == 4)
+    eligible_by_sym = {str(x.get("symbol") or "").strip(): x for x in eligible_items if x.get("symbol")}
+    eligible_unique = list(eligible_by_sym.values())
+    count_s_plus = sum(1 for x in eligible_unique if _is_elite(x))
+    count_s = sum(1 for x in eligible_unique if (x.get("stars") or 0) == 5 and not _is_elite(x))
+    count_a = sum(1 for x in eligible_unique if (x.get("stars") or 0) == 4)
 
     stats_parts = []
     if count_s_plus > 0:
@@ -2945,14 +2951,11 @@ def build_report_message_tiered(
                     lines.append(f"📍 主力均價(參考)：`{vwap_ref:,.4f}`")
                 elif ema_ref is not None and isinstance(ema_ref, (int, float)):
                     lines.append(f"📍 均線參考(EMA20)：`{ema_ref:,.4f}`")
-                # 止損與止盈顯示（同源）
-                t1_label = x.get("tp1_label") or "主力成本"
+                # 止損與止盈顯示（同源；追單為 1.0×ATR，一般 1.2× 或主力成本）
+                t1_note = x.get("tp1_real_note") or x.get("tp1_label") or "ATR"
                 lines.append(f"🛑 止損：`{sl_val}` {'(極窄)' if stars < 5 else '(標準)'} {cap_note}")
                 r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
-                if sl_capped:
-                    lines.append(f"✅ 止盈：`{tp1_val}` (ATR 1.2×){r1}")
-                else:
-                    lines.append(f"✅ 止盈：`{tp1_val}` ({t1_label}){r1}")
+                lines.append(f"✅ 止盈：`{tp1_val}` ({t1_note}){r1}")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
