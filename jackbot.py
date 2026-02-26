@@ -2743,14 +2743,30 @@ def build_report_message_tiered(
                 tp1_label = "1.5R"
             r_tp1 = round(((tp1_price - price) / risk_dist) if is_long else ((price - tp1_price) / risk_dist), 1)
 
-        # 賭鬼 (A)：SL 保留現有結構邏輯，TP1 固定為 1.0R，且不設 TP2
+        # 賭鬼 (A)：SL 保留現有結構邏輯，TP1 固定為 1.0R，TP2 採用「風報比 2.5~4.0R」區間的理論目標
         else:
+            # TP1：固定 1R
             tp1_price = price + 1.0 * risk_dist if is_long else price - 1.0 * risk_dist
             tp1_label = "1.0R"
             r_tp1 = 1.0
-            tp2_price = None
-            tp2_label = ""
-            r_tp2 = None
+            # TP2：依波動度動態選擇 2.5R~4.0R 之間的目標（僅作為績效評估用理論 TP2）
+            atr_val = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
+            target_r2 = 3.0
+            if atr_val is not None and price > 0:
+                vol_pct = (atr_val / price) * 100.0
+                if vol_pct >= 3.0:
+                    target_r2 = 2.5
+                elif vol_pct <= 1.5:
+                    target_r2 = 3.5
+                else:
+                    # 線性內插 1.5%~3.0% → 3.5R~2.5R
+                    ratio = (vol_pct - 1.5) / (3.0 - 1.5)
+                    target_r2 = 3.5 - ratio * (3.5 - 2.5)
+            # 保險起見 clamp 在 2.5~4.0R 之間
+            target_r2 = max(2.5, min(4.0, target_r2))
+            tp2_price = price + target_r2 * risk_dist if is_long else price - target_r2 * risk_dist
+            tp2_label = f"{target_r2:.1f}R"
+            r_tp2 = round(target_r2, 1)
 
         # energy_exhausted / cvd_divergence 保留為附註旗標
         energy_exhausted = bool(cvd_divergence)
@@ -3902,11 +3918,11 @@ def fetch_position_change():
             # 紀錄缺 sl/tp 欄位（舊格式或寫入時無價位），本輪僅做進場理由與籌碼追蹤
             logger.info(f"比對價格: {sym_base} 無止損/止盈價位可比對（紀錄缺 sl/tp），僅做進場理由與籌碼追蹤")
 
-        # 1-3) 時間衰竭：持倉超過 4 小時仍未達標，建議保本/小虧出場
-        if (not entry.get("closed")) and pushed_ts and (now_ts - pushed_ts) >= 4 * 3600:
+        # 1-3) 時間衰竭：持倉超過 24 小時仍未達標，建議保本/小虧出場
+        if (not entry.get("closed")) and pushed_ts and (now_ts - pushed_ts) >= 24 * 3600:
             timeout_msg = (
                 f"⏳ *【動能衰竭・建議保本平倉】*\n"
-                f"標的 `{sym_base}` 已持倉超過 4 小時未達目標，主力動能減弱，"
+                f"標的 `{sym_base}` 已持倉超過 24 小時未達目標，主力動能減弱，"
                 f"建議原價或小虧平倉，本倉結案。"
             )
             send_telegram_message(timeout_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
@@ -3916,7 +3932,7 @@ def fetch_position_change():
             entry["realized_R"] = 0.0
             entry["closed_ts"] = int(now_ts)
             exit_notified_set.add(sym_base)
-            logger.info(f"倉位追蹤已發送: {sym_base} 動能衰竭超過4小時，建議保本/小虧出場 (本倉結案)")
+            logger.info(f"倉位追蹤已發送: {sym_base} 動能衰竭超過24小時，建議保本/小虧出場 (本倉結案)")
 
         # 價格已結案（SL / TP / timeout），不再做籌碼反轉檢查
         if entry.get("closed"):
