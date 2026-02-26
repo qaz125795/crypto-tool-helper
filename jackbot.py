@@ -6996,8 +6996,8 @@ def run_gold_signal():
     logger.info("[黃金訊號] 黃金 1h 數據 OK，共 %s 根 | 時間範圍: %s ~ %s",
                 n_rows, df_1h.index.min() if hasattr(df_1h.index, 'min') and len(df_1h) else "N/A", df_1h.index.max() if hasattr(df_1h.index, 'max') and len(df_1h) else "N/A")
 
-    # 狀態檔路徑（可被 GitHub Actions cache 還原）
-    state_dir = cwd / "gold_signal_state"
+    # 狀態檔路徑：與 gold_signal_bot 同層，方便 repo 內放 gold_signal_bot/gold_signal_state/state.json
+    state_dir = cwd / "gold_signal_bot" / "gold_signal_state"
     state_path = state_dir / "state.json"
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
