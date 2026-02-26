@@ -49,6 +49,7 @@ def format_signal_message(
         f"{data_line}"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 對價用圖表：Yahoo GC=F {LINK_YAHOO_GC}\n"
+        "⚠️ 由於 BingX 黃金合約報價可能與 GC=F 有價差，下單前請務必打開 BingX 圖表自行核對價格與合約設定。\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "#XAUUSD #黃金 #訊號"
     )

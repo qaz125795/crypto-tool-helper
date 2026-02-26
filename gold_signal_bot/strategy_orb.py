@@ -167,11 +167,13 @@ def _get_buy_sell_signal(
     composition: int,
     trades_per_day: int,
 ) -> int:
-    """多：收盤突破區間上緣；空：收盤突破區間下緣（不要求 K 棒紅綠，以突破為準）。"""
+    """多：收盤突破區間實體高點；空：收盤跌破區間實體低點（以 Close 為主）。"""
+    # 以實體高/低(body_high/body_low) 為區間上下緣，並以當根 Close 判斷突破
+    close_price = prev.body_high if prev.direction else prev.body_low
     # 改為 >= 讓「區間內 N 根」達標後下一根就能出訊號
     if (
         range_state.candle_counter_resistance >= composition
-        and prev.body_high > range_state.wick_high
+        and close_price > range_state.body_high
         and range_state.trade_today
         and not range_state.long_position_flag
     ):
@@ -183,7 +185,7 @@ def _get_buy_sell_signal(
 
     if (
         range_state.candle_counter_support >= composition
-        and prev.body_low < range_state.wick_low
+        and close_price < range_state.body_low
         and range_state.trade_today
         and not range_state.short_position_flag
     ):
@@ -266,9 +268,11 @@ def run_orb_signal(
         if last_signal != SIGNAL_NONE:
             range_high = state.wick_high
             range_low = state.wick_low
+            # 一旦出現有效訊號，立即中斷，避免後續 K 線將 last_signal 洗回 NONE
+            break
 
-    # 最後一根 K 也要參與突破判斷（原本迴圈只檢查到倒數第二根）
-    if len(day_df) >= 2:
+    # 若迴圈尚未產生訊號，最後一根 K 也要參與突破判斷
+    if len(day_df) >= 2 and last_signal == SIGNAL_NONE:
         last_row = day_df.iloc[-1]
         last_candle = _get_candle_info(last_row)
         atr_last = last_row.get("ATR", point * 500)
@@ -346,7 +350,8 @@ def compute_signal(
             hi_today = float(day_df_dbg["High"].max())
             lo_today = float(day_df_dbg["Low"].min())
             close_last = float(last["Close"])
-            ma_dbg = last.get("MA") or last.get("SMA_100")
+            # 調試用 MA：與實際趨勢濾網一致，使用 SMA_40
+            ma_dbg = last.get("SMA_40") or last.get("MA") or last.get("SMA_100")
             atr_dbg = last.get("ATR")
             ma_dbg_val = float(ma_dbg) if ma_dbg is not None and not pd.isna(ma_dbg) else float("nan")
             atr_dbg_val = float(atr_dbg) if atr_dbg is not None and not pd.isna(atr_dbg) else float("nan")
@@ -382,25 +387,26 @@ def compute_signal(
 
     last = df_1h.iloc[-1]
     close = float(last["Close"])
-    ma = last.get("MA") or last.get("SMA_100")
+    # 趨勢濾網使用較快的 SMA_40，必要時回退到原本 MA/SMA_100
+    ma = last.get("SMA_40") or last.get("MA") or last.get("SMA_100")
     atr_val = float(last["ATR"])
     if pd.isna(atr_val) or atr_val <= 0:
         logger.warning("[ORB] ATR 無效，跳過本輪")
         return None
 
-    # MA 趨勢濾網 (GOLD_ORB: 多單僅在 close > MA100)
+    # MA 趨勢濾網：多單僅在 close > SMA40、空單僅在 close < SMA40
     if signal == SIGNAL_LONG:
         if ma is not None and not pd.isna(ma) and close <= float(ma):
-            logger.info("[ORB] 有多單突破但 MA 濾網未過（收盤 %.2f <= MA100 %.2f）", close, float(ma))
+            logger.info("[ORB] 有多單突破但 MA 濾網未過（收盤 %.2f <= SMA40 %.2f）", close, float(ma))
             return None
         direction = "long"
-        trend_strength = "多頭 (收盤 > MA100)"
+        trend_strength = "多頭 (收盤 > SMA40)"
     else:
         if ma is not None and not pd.isna(ma) and close >= float(ma):
-            logger.info("[ORB] 有空單突破但 MA 濾網未過（收盤 %.2f >= MA100 %.2f）", close, float(ma))
+            logger.info("[ORB] 有空單突破但 MA 濾網未過（收盤 %.2f >= SMA40 %.2f）", close, float(ma))
             return None
         direction = "short"
-        trend_strength = "空頭 (收盤 < MA100)"
+        trend_strength = "空頭 (收盤 < SMA40)"
 
     sl, tp = compute_sl_tp(
         direction,
