@@ -55,6 +55,33 @@ def format_signal_message(
     )
 
 
+def format_tp_sl_hit_message(
+    hit_type: str,
+    direction: str,
+    entry: float,
+    sl: float,
+    tp: float,
+) -> str:
+    """觸及止盈或止損時的推播文案。hit_type 為 'tp' 或 'sl'。"""
+    side_emoji = "🟢" if direction == "long" else "🔴"
+    side_text = "多單" if direction == "long" else "空單"
+    if hit_type == "tp":
+        title = "🎯 觸及止盈"
+    else:
+        title = "🛑 觸及止損"
+    time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return (
+        f"{side_emoji} XAUUSD {side_text} {title}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 原進場：{entry:,.2f}\n"
+        f"🛑 止損：{sl:,.2f}\n"
+        f"🎯 止盈：{tp:,.2f}\n"
+        f"⏰ 時間：{time_str}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "#XAUUSD #黃金 #平倉"
+    )
+
+
 def send_telegram(
     bot_token: str,
     chat_id: str,
