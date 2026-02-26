@@ -2957,6 +2957,7 @@ def build_report_message_tiered(
                 x["tp1_label"] = tp1_label
                 x["tp1_real_str"] = tp1_real_str
                 x["tp1_real_note"] = tp1_real_note
+                x["r_tp1"] = r_tp1
                 # 風報比過低不推播：止盈 < 門檻 R 代表賠率差，寧可少出手保勝率
                 if r_tp1 is not None and r_tp1 < MIN_TP1_R_FOR_PUSH:
                     logger.info(f"狙擊鏡跳過 {sym}: 止盈 風報比 {r_tp1}R < {MIN_TP1_R_FOR_PUSH}R，不推播")
@@ -3563,11 +3564,28 @@ def fetch_position_change():
         n_closed = len(closed_today)
         n_pushed = len(pushed_today)
         win_rate = (n_win / (n_win + n_sl) * 100) if (n_win + n_sl) else None
+        # R 統計：以各單 realized_R 加總
+        sum_r = sum(
+            float(e.get("realized_R") or 0.0)
+            for e in closed_today
+            if isinstance(e, dict)
+        )
+        sum_r_win = sum(
+            float(e.get("realized_R") or 0.0)
+            for e in closed_today
+            if isinstance(e, dict) and (e.get("realized_R") or 0.0) > 0
+        )
+        sum_r_loss = sum(
+            float(e.get("realized_R") or 0.0)
+            for e in closed_today
+            if isinstance(e, dict) and (e.get("realized_R") or 0.0) < 0
+        )
         summary_lines = [
             f"📊 *【{summary_date} 每日績效總結】*",
             f"",
             f"📤 當日推播：{n_pushed} 單",
             f"✅ 已結案：{n_closed} 單（止盈 {n_tp1}｜止損 {n_sl}｜超時撤退 {n_timeout}｜籌碼反轉 {n_reversal}）",
+            f"🎯 R 統計：贏 {sum_r_win:.2f}R｜輸 {sum_r_loss:.2f}R｜淨 {sum_r:.2f}R",
             f"※ 只要碰到 TP1 即計入贏局；止盈算贏、止損算輸（timeout / reversal 視為平局）→ {n_win} 贏 / {n_sl} 輸",
         ]
         if win_rate is not None:
@@ -3714,10 +3732,17 @@ def fetch_position_change():
                             entry["notified_exit"] = True
                             entry["closed"] = True
                             entry["exit_reason"] = "tp1_sl"
+                            base_r = entry.get("r_tp1")
+                            try:
+                                base_r = float(base_r) if base_r is not None else 1.0
+                            except (TypeError, ValueError):
+                                base_r = 1.0
+                            # 假設 TP1 已落袋 60% 倉位、剩餘 40% 約在保本附近 → 整體約 +0.6R
+                            entry["realized_R"] = round(0.6 * base_r, 3)
                             entry["closed_ts"] = int(now_ts)
                             exit_notified_set.add(sym_base)
                             price_closed = True
-                            logger.info(f"倉位追蹤已發送: {sym_base} 剩餘倉位觸及止損 (tp1_sl，整體獲利結案)")
+                            logger.info(f"倉位追蹤已發送: {sym_base} 剩餘倉位觸及止損 (tp1_sl，整體獲利結案，realized_R={entry.get('realized_R')})")
                         else:
                             sl_copy = random.choice(SL_STOPLOSS_COPY)
                             exit_msg = (
@@ -3729,10 +3754,12 @@ def fetch_position_change():
                             entry["notified_exit"] = True
                             entry["closed"] = True
                             entry["exit_reason"] = "sl"
+                            # 止損一律視為 -1R（風險單位）
+                            entry["realized_R"] = -1.0
                             entry["closed_ts"] = int(now_ts)
                             exit_notified_set.add(sym_base)
                             price_closed = True
-                            logger.info(f"倉位追蹤已發送: {sym_base} 觸發止損 (本倉結案)")
+                            logger.info(f"倉位追蹤已發送: {sym_base} 觸發止損 (本倉結案，realized_R={entry.get('realized_R')})")
                 # 1-2) 若未止損，檢查止盈：列車達 TP1 即結案；賭鬼達 TP1 僅建議部位減倉，不結案
                 tp1_lbl = entry.get("tp1_label") or "主力成本"
                 if not price_closed and tp1_level is not None:
@@ -3761,10 +3788,16 @@ def fetch_position_change():
                             entry["notified_exit"] = True
                             entry["closed"] = True
                             entry["exit_reason"] = "tp1"
+                            base_r = entry.get("r_tp1")
+                            try:
+                                base_r = float(base_r) if base_r is not None else 1.0
+                            except (TypeError, ValueError):
+                                base_r = 1.0
+                            entry["realized_R"] = round(base_r, 3)
                             entry["closed_ts"] = int(now_ts)
                             exit_notified_set.add(sym_base)
                             price_closed = True
-                            logger.info(f"倉位追蹤已發送: {sym_base} 已達止盈({tp1_lbl}) (本倉完結)")
+                            logger.info(f"倉位追蹤已發送: {sym_base} 已達止盈({tp1_lbl}) (本倉完結，realized_R={entry.get('realized_R')})")
                 if not price_closed:
                     logger.info(
                         f"比對價格: {sym_base} 現價 {cur_price} | "
@@ -3785,6 +3818,7 @@ def fetch_position_change():
             entry["notified_exit"] = True
             entry["closed"] = True
             entry["exit_reason"] = "timeout"
+            entry["realized_R"] = 0.0
             entry["closed_ts"] = int(now_ts)
             exit_notified_set.add(sym_base)
             logger.info(f"倉位追蹤已發送: {sym_base} 動能衰竭超過4小時，建議保本/小虧出場 (本倉結案)")
@@ -3827,9 +3861,10 @@ def fetch_position_change():
             entry["notified_exit"] = True
             entry["closed"] = True
             entry["exit_reason"] = "reversal"
+            entry["realized_R"] = 0.0
             entry["closed_ts"] = int(now_ts)
             exit_notified_set.add(sym_base)
-            logger.info(f"出場提示已發送: {sym_base} (當初{pushed_dir}，本輪{cur_cat} 籌碼反轉)")
+            logger.info(f"出場提示已發送: {sym_base} (當初{pushed_dir}，本輪{cur_cat} 籌碼反轉，realized_R={entry.get('realized_R')})")
             continue
         # 2b) 籌碼同向：主力/倉位還在，可持續持有（不建議加碼，僅提醒遵守停損停利）
         same_side_strength = False
@@ -3991,6 +4026,7 @@ def fetch_position_change():
                     "tp1_label": x.get("tp1_label") or "主力成本",
                     "tp1_notified": False,
                     "stars": x.get("stars") or 0,
+                    "r_tp1": x.get("r_tp1"),
                 }
                 new_push_entries.append(entry)
                 # 48h 內同標的已有推播：同方向提醒調整防守、不同方向提醒可考慮反手
