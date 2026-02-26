@@ -42,6 +42,12 @@ jobs:
           pip install -r requirements.txt
           pip install yfinance
 
+      - name: Restore gold signal state (追蹤用，避免同向訊號重疊)
+        uses: actions/cache@v4
+        with:
+          path: gold_signal_state
+          key: gold-signal-state-${{ github.ref }}
+
       - name: Run gold signal
         env:
           GOLD_DATA_SOURCE: bingx
