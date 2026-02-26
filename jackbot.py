@@ -3784,31 +3784,20 @@ def fetch_position_change():
                             hit_sl = True
                         elif kline_high is None and cur_price is not None and cur_price >= sl_level:
                             hit_sl = True
-                # TP 觸發條件：多單看 high >= TP1；空單看 low <= TP1；如無 high/low 則退回收盤價
-                if tp1_level is not None:
-                    if is_long:
-                        if kline_high is not None and kline_high >= tp1_level:
-                            hit_tp = True
-                        elif kline_high is None and cur_price is not None and cur_price >= tp1_level:
-                            hit_tp = True
-                    else:
-                        if kline_low is not None and kline_low <= tp1_level:
-                            hit_tp = True
-                        elif kline_low is None and cur_price is not None and cur_price <= tp1_level:
-                            hit_tp = True
+                # TP 觸發條件：只用「收盤價/現價」達標才算，避免插針後收回仍誤發 TP1 達標
+                # （SL 仍用 K 線 high/low，以免漏判止損）
+                if tp1_level is not None and cur_price is not None:
+                    if is_long and cur_price >= tp1_level:
+                        hit_tp = True
+                    elif not is_long and cur_price <= tp1_level:
+                        hit_tp = True
 
-                # TP2 觸發條件（僅統計賭鬼 A 級的虛擬 TP2 命中，不改變實際出場邏輯）
-                if tp2_level is not None:
-                    if is_long:
-                        if kline_high is not None and kline_high >= tp2_level:
-                            hit_tp2 = True
-                        elif kline_high is None and cur_price is not None and cur_price >= tp2_level:
-                            hit_tp2 = True
-                    else:
-                        if kline_low is not None and kline_low <= tp2_level:
-                            hit_tp2 = True
-                        elif kline_low is None and cur_price is not None and cur_price <= tp2_level:
-                            hit_tp2 = True
+                # TP2 觸發條件：同上，僅收盤價/現價達標才統計
+                if tp2_level is not None and cur_price is not None:
+                    if is_long and cur_price >= tp2_level:
+                        hit_tp2 = True
+                    elif not is_long and cur_price <= tp2_level:
+                        hit_tp2 = True
 
                 logger.info(
                     f"【倉位追蹤比對】{sym_base} dir={pushed_dir} "
