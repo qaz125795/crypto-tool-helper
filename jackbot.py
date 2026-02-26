@@ -2906,12 +2906,15 @@ def build_report_message_tiered(
                 if is_elite_sig:
                     tier_emoji = "✈️"
                     star_display = "✈️【頭等機艙】(高信心) ⭐⭐⭐⭐⭐"
+                    x["tier"] = "elite"
                 elif stars >= 5:
                     tier_emoji = "🚅"
                     star_display = "🚅【穩健列車】(標準倉) ⭐⭐⭐"
+                    x["tier"] = "train"
                 else:
                     tier_emoji = "👻"
                     star_display = "👻【賭鬼樂透】(高風險)💣"
+                    x["tier"] = "gambler"
 
                 # 策略與風控建議（策略前加分級 emoji）
                 atr_val, current_price = x.get("atr"), x.get("current_price")
@@ -3580,6 +3583,22 @@ def fetch_position_change():
             for e in closed_today
             if isinstance(e, dict) and (e.get("realized_R") or 0.0) < 0
         )
+        # 分級工具：依 tier / stars 判斷列車 / 賭鬼 / 飛機
+        def _entry_tier(e: Dict[str, Any]) -> str:
+            t = (e.get("tier") or "").strip()
+            if t:
+                return t
+            stars_val = e.get("stars")
+            try:
+                stars_val = int(stars_val) if stars_val is not None else None
+            except (TypeError, ValueError):
+                stars_val = None
+            if stars_val is not None and stars_val >= 5:
+                return "train"
+            if stars_val is not None and stars_val < 5:
+                return "gambler"
+            return "unknown"
+
         summary_lines = [
             f"📊 *【{summary_date} 每日績效總結】*",
             f"",
@@ -3590,6 +3609,27 @@ def fetch_position_change():
         ]
         if win_rate is not None:
             summary_lines.append(f"📈 整體勝率：{win_rate:.1f}%")
+        summary_lines.append(f"")
+        # 依等級（飛機/列車/賭鬼）細分績效
+        tier_defs = [
+            ("elite", "✈️ 飛機 (S+)"),
+            ("train", "🚅 列車 (S)"),
+            ("gambler", "👻 賭鬼 (A)"),
+        ]
+        for tier_key, tier_label in tier_defs:
+            pushed_t = [e for e in pushed_today if isinstance(e, dict) and _entry_tier(e) == tier_key]
+            closed_t = [e for e in closed_today if isinstance(e, dict) and _entry_tier(e) == tier_key]
+            if not pushed_t and not closed_t:
+                continue
+            n_sl_t = sum(1 for e in closed_t if e.get("exit_reason") == "sl")
+            n_tp1_t = sum(1 for e in closed_t if e.get("exit_reason") in ("tp1", "tp1_sl"))
+            win_rate_t = (n_tp1_t / (n_tp1_t + n_sl_t) * 100) if (n_tp1_t + n_sl_t) else None
+            sum_r_t = sum(float(e.get("realized_R") or 0.0) for e in closed_t)
+            wr_str_t = f"{win_rate_t:.1f}%" if win_rate_t is not None else "-"
+            summary_lines.append(
+                f"{tier_label}：推播 {len(pushed_t)}｜結案 {len(closed_t)}（止盈 {n_tp1_t}｜止損 {n_sl_t}）"
+                f" 勝率 {wr_str_t}｜淨 {sum_r_t:.2f}R"
+            )
         summary_lines.append(f"")
         # 各分類（多單/空單）勝率
         for _dir, _label in (("多", "多單"), ("空", "空單")):
