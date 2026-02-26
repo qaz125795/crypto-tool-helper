@@ -3067,9 +3067,19 @@ def build_report_message_tiered(
                     r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
                     lines.append(f"✅ 止盈：`{tp1_val}` ({t1_note}){r1}")
                 else:
-                    # 賭鬼：1.0R TP1 + 放飛剩餘 40%
+                    # 賭鬼：1.0R TP1 + 放飛剩餘 40% + 顯示 TP2 理論目標（供評估與管理）
                     lines.append(f"🛑 止損：`{sl_val}` (防洗盤標準) {cap_note}")
                     lines.append(f"✅ TP1(落袋60%)：`{tp1_val}` (1.0R 保底)")
+                    # 若有計算出 TP2，顯示理論目標價與對應 R
+                    tp2_str = x.get("tp2_price_str") or "-"
+                    r2 = x.get("r_tp2")
+                    if tp2_str != "-" and r2 is not None:
+                        try:
+                            r2_val = float(r2)
+                        except (TypeError, ValueError):
+                            r2_val = None
+                        if r2_val is not None:
+                            lines.append(f"🎯 TP2 理論目標：`{tp2_str}` (~{r2_val:.1f}R)")
                     lines.append("🚀 剩餘 40%：不設止盈！推保本後沿著均線移動止損，讓利潤奔跑！")
                 # 6. Warnings
                 if x.get("low_liquidity_warning"):
