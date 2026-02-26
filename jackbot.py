@@ -2961,6 +2961,9 @@ def build_report_message_tiered(
                 x["tp1_real_str"] = tp1_real_str
                 x["tp1_real_note"] = tp1_real_note
                 x["r_tp1"] = r_tp1
+                # 賭鬼虛擬 TP2 目標：僅用於績效評估與 TP2 命中統計，不改變實際出場邏輯
+                x["tp2_price_str"] = tp2_val
+                x["r_tp2"] = r_tp2
                 # 風報比過低不推播：止盈 < 門檻 R 代表賠率差，寧可少出手保勝率
                 if r_tp1 is not None and r_tp1 < MIN_TP1_R_FOR_PUSH:
                     logger.info(f"狙擊鏡跳過 {sym}: 止盈 風報比 {r_tp1}R < {MIN_TP1_R_FOR_PUSH}R，不推播")
@@ -3626,10 +3629,25 @@ def fetch_position_change():
             win_rate_t = (n_tp1_t / (n_tp1_t + n_sl_t) * 100) if (n_tp1_t + n_sl_t) else None
             sum_r_t = sum(float(e.get("realized_R") or 0.0) for e in closed_t)
             wr_str_t = f"{win_rate_t:.1f}%" if win_rate_t is not None else "-"
-            summary_lines.append(
-                f"{tier_label}：推播 {len(pushed_t)}｜結案 {len(closed_t)}（止盈 {n_tp1_t}｜止損 {n_sl_t}）"
-                f" 勝率 {wr_str_t}｜淨 {sum_r_t:.2f}R"
-            )
+            if tier_key == "gambler":
+                # 賭鬼：額外統計 TP2 命中次數與理論 R
+                n_tp2_t = sum(
+                    1 for e in closed_t
+                    if e.get("tp2_hit") and (e.get("tp2_R") is not None)
+                )
+                sum_tp2_r_t = sum(
+                    float(e.get("tp2_R") or 0.0)
+                    for e in closed_t
+                    if e.get("tp2_hit") and (e.get("tp2_R") is not None)
+                )
+                summary_lines.append(
+                    f"{tier_label}：TP1 {n_tp1_t} 單｜TP2 命中 {n_tp2_t} 單（理論 +{sum_tp2_r_t:.2f}R）｜淨 {sum_r_t:.2f}R"
+                )
+            else:
+                summary_lines.append(
+                    f"{tier_label}：推播 {len(pushed_t)}｜結案 {len(closed_t)}（止盈 {n_tp1_t}｜止損 {n_sl_t}）"
+                    f" 勝率 {wr_str_t}｜淨 {sum_r_t:.2f}R"
+                )
         summary_lines.append(f"")
         # 各分類（多單/空單）勝率
         for _dir, _label in (("多", "多單"), ("空", "空單")):
@@ -3681,6 +3699,7 @@ def fetch_position_change():
         # 1) 價格追蹤：觸及 SL 或 TP 即結案（以 BingX 30m K 線 high/low 判斷是否曾經打到價位）
         sl_level = entry.get("sl")
         tp1_level = entry.get("tp1")
+        tp2_level = entry.get("tp2")
         price_closed = False
 
         if sl_level is not None or tp1_level is not None:
@@ -3721,11 +3740,12 @@ def fetch_position_change():
                 else:
                     logger.info(f"【倉位追蹤快照】{sym_base} full_symbol={full_sym} cur_price={cur_price}")
 
-            # 以 high/low 為主、收盤價為輔，檢查是否曾觸及 SL/TP
+            # 以 high/low 為主、收盤價為輔，檢查是否曾觸及 SL/TP/TP2
             if cur_price is not None or (kline_high is not None and kline_low is not None):
                 is_long = pushed_dir == "多"
                 hit_sl = False
                 hit_tp = False
+                hit_tp2 = False
                 # SL 觸發條件：多單看 low <= SL；空單看 high >= SL；如無 high/low 則退回收盤價判斷一次
                 if sl_level is not None:
                     if is_long:
@@ -3751,11 +3771,24 @@ def fetch_position_change():
                         elif kline_low is None and cur_price is not None and cur_price <= tp1_level:
                             hit_tp = True
 
+                # TP2 觸發條件（僅統計賭鬼 A 級的虛擬 TP2 命中，不改變實際出場邏輯）
+                if tp2_level is not None:
+                    if is_long:
+                        if kline_high is not None and kline_high >= tp2_level:
+                            hit_tp2 = True
+                        elif kline_high is None and cur_price is not None and cur_price >= tp2_level:
+                            hit_tp2 = True
+                    else:
+                        if kline_low is not None and kline_low <= tp2_level:
+                            hit_tp2 = True
+                        elif kline_low is None and cur_price is not None and cur_price <= tp2_level:
+                            hit_tp2 = True
+
                 logger.info(
                     f"【倉位追蹤比對】{sym_base} dir={pushed_dir} "
-                    f"sl={sl_level} tp1={tp1_level} "
+                    f"sl={sl_level} tp1={tp1_level} tp2={tp2_level} "
                     f"cur_price={cur_price} high_30m={kline_high} low_30m={kline_low} "
-                    f"hit_sl={hit_sl} hit_tp={hit_tp}"
+                    f"hit_sl={hit_sl} hit_tp={hit_tp} hit_tp2={hit_tp2}"
                 )
 
                 # 1-1) 先檢查止損：一旦觸及 SL 即結案（賭鬼若已吃過 TP1，視為整體獲利結束）
@@ -3838,10 +3871,32 @@ def fetch_position_change():
                             exit_notified_set.add(sym_base)
                             price_closed = True
                             logger.info(f"倉位追蹤已發送: {sym_base} 已達止盈({tp1_lbl}) (本倉完結，realized_R={entry.get('realized_R')})")
+
+                # 1-2-延伸) 賭鬼 TP2 命中統計（僅紀錄命中與 R，不改變實際出場邏輯）
+                if not price_closed and tp2_level is not None and hit_tp2:
+                    stars_val = entry.get("stars", 5)
+                    if stars_val < 5:
+                        if not entry.get("tp2_hit"):
+                            r_tp2 = entry.get("r_tp2")
+                            try:
+                                r_tp2_val = float(r_tp2) if r_tp2 is not None else None
+                            except (TypeError, ValueError):
+                                r_tp2_val = None
+                            entry["tp2_hit"] = True
+                            if r_tp2_val is not None:
+                                entry["tp2_R"] = r_tp2_val
+                            tp2_msg = (
+                                f"🎯 *【TP2 理論目標達成】*\n"
+                                f"台灣時間 *{pushed_at_tw}* 推的賭鬼 *{dir_label}* 標的 `{sym_base}` 價格已觸及理論 TP2 `{tp2_level}`。\n"
+                                f"此為績效評估用的虛擬目標（約 {r_tp2_val or '3.0'}R），實際策略仍以 TP1 落袋 60% + 剩餘 40% 放飛為主。"
+                            )
+                            send_telegram_message(tp2_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+                            exit_notified_set.add(sym_base)
+                            logger.info(f"倉位追蹤已發送: {sym_base} 賭鬼 TP2 理論目標達成 (tp2_hit=True, tp2_R={entry.get('tp2_R')})")
                 if not price_closed:
                     logger.info(
                         f"比對價格: {sym_base} 現價 {cur_price} | "
-                        f"K線高低 ({kline_high}, {kline_low}) | 止損 {sl_level} 止盈 {tp1_level} -> 未觸發"
+                        f"K線高低 ({kline_high}, {kline_low}) | 止損 {sl_level} 止盈 {tp1_level} TP2 {tp2_level} -> 未觸發"
                     )
         else:
             # 紀錄缺 sl/tp 欄位（舊格式或寫入時無價位），本輪僅做進場理由與籌碼追蹤
@@ -4067,6 +4122,9 @@ def fetch_position_change():
                     "tp1_notified": False,
                     "stars": x.get("stars") or 0,
                     "r_tp1": x.get("r_tp1"),
+                    "tp2": _parse_price_str(x.get("tp2_price_str")),
+                    "r_tp2": x.get("r_tp2"),
+                    "tp2_hit": False,
                 }
                 new_push_entries.append(entry)
                 # 48h 內同標的已有推播：同方向提醒調整防守、不同方向提醒可考慮反手
