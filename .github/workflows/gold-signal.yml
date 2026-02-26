@@ -45,7 +45,7 @@ jobs:
       - name: Restore gold signal state (追蹤用，避免同向訊號重疊)
         uses: actions/cache@v4
         with:
-          path: gold_signal_state
+          path: gold_signal_bot/gold_signal_state
           key: gold-signal-state-${{ github.ref }}
 
       - name: Run gold signal
