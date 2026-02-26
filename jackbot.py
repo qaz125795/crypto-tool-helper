@@ -6971,7 +6971,7 @@ def run_gold_signal():
         from data_provider import fetch_ohlc
         from strategy_orb import compute_signal
         from filters import apply_filters
-        from telegram_sender import format_signal_message, get_gold_chart_keyboard
+        from telegram_sender import format_signal_message, format_tp_sl_hit_message, get_gold_chart_keyboard
         logger.info("[黃金訊號] 模組 import 成功")
     except ImportError as e:
         logger.exception("[黃金訊號] 模組 import 失敗: %s", e)
@@ -6995,6 +6995,58 @@ def run_gold_signal():
         return
     logger.info("[黃金訊號] 黃金 1h 數據 OK，共 %s 根 | 時間範圍: %s ~ %s",
                 n_rows, df_1h.index.min() if hasattr(df_1h.index, 'min') and len(df_1h) else "N/A", df_1h.index.max() if hasattr(df_1h.index, 'max') and len(df_1h) else "N/A")
+
+    # 狀態檔路徑（可被 GitHub Actions cache 還原）
+    state_dir = cwd / "gold_signal_state"
+    state_path = state_dir / "state.json"
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        state_path = cwd / "gold_signal_state.json"
+
+    def _load_gold_state():
+        try:
+            if state_path.exists():
+                with open(state_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.warning("[黃金訊號] 讀取狀態檔失敗: %s", e)
+        return {}
+
+    def _save_gold_state(s):
+        try:
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(s, f, ensure_ascii=False, indent=0)
+        except Exception as e:
+            logger.warning("[黃金訊號] 寫入狀態檔失敗: %s", e)
+
+    state = _load_gold_state()
+    last_bar_row = df_1h.iloc[-1]
+    bar_high = float(last_bar_row["High"])
+    bar_low = float(last_bar_row["Low"])
+    last_dir = state.get("last_direction")
+    last_sl = state.get("last_sl")
+    last_tp = state.get("last_tp")
+    last_entry = state.get("last_entry")
+    if last_dir and last_sl is not None and last_tp is not None and last_entry is not None:
+        hit = None
+        if last_dir == "long":
+            if bar_high >= last_tp:
+                hit = "tp"
+            elif bar_low <= last_sl:
+                hit = "sl"
+        else:
+            if bar_low <= last_tp:
+                hit = "tp"
+            elif bar_high >= last_sl:
+                hit = "sl"
+        if hit:
+            msg_tpsl = format_tp_sl_hit_message(hit, last_dir, last_entry, last_sl, last_tp)
+            send_telegram_message(msg_tpsl, TG_THREAD_IDS.get("gold_signal", 254), parse_mode=None)
+            logger.info("[黃金訊號] 已推播 %s 觸及", "止盈" if hit == "tp" else "止損")
+            state = {}
+            _save_gold_state(state)
+
     df_dxy = None
     if cfg.USE_DXY_FILTER:
         df_dxy = fetch_ohlc(cfg.SYMBOL_DXY, interval="1h", period="5d", config=None)
@@ -7024,10 +7076,22 @@ def run_gold_signal():
     if not ok:
         logger.info("[黃金訊號] 訊號被濾網拒絕: %s", reason)
         return
+    # 同向訊號過濾：該倉未結束或尚未出現反向訊號前，不再推同向
+    if state.get("last_direction") == signal.direction:
+        logger.info("[黃金訊號] 同向訊號重疊（目前仍有 %s 倉），跳過推播", signal.direction)
+        return
     thread_id = TG_THREAD_IDS.get("gold_signal", 254)
     msg = format_signal_message(signal, data_cutoff_utc=last_bar_utc)
     keyboard = get_gold_chart_keyboard()
     sent = send_telegram_message(msg, thread_id, parse_mode=None, reply_markup=keyboard)
+    if sent:
+        _save_gold_state({
+            "last_direction": signal.direction,
+            "last_entry": signal.entry,
+            "last_sl": signal.sl,
+            "last_tp": signal.tp,
+            "last_time_utc": datetime.now(timezone.utc).isoformat(),
+        })
     logger.info("[黃金訊號] 推播完成 | thread_id=%s 發送結果=%s", thread_id, sent)
 
 
