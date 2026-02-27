@@ -56,6 +56,28 @@ jobs:
           echo " 清除完成，下一輪 position_change 將全新開始"
           echo "=============================================="
 
+      # ── 刪除所有舊 data cache ──────────────────────────────────────────
+      # 問題根源：restore-keys 前綴配對偶爾會撿到 reset 之前的舊 cache，
+      # 導致下一輪 position-change 還原到有資料的舊狀態。
+      # 解法：reset 後主動透過 GitHub API 刪除所有 data-position-change-* cache，
+      # 讓下一輪只能找到本次 reset 存入的空快取。
+      - name: 刪除所有舊 data cache（防止下一輪還原舊資料）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "🗑️ 開始刪除所有 data-position-change 快取..."
+          REPO="${{ github.repository }}"
+          # 列出所有符合前綴的 cache ID 並逐一刪除
+          CACHE_IDS=$(gh api "repos/$REPO/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | startswith("data-position-change-")) | .id' 2>/dev/null || echo "")
+          if [ -z "$CACHE_IDS" ]; then
+            echo "✅ 無舊 cache 需要刪除"
+          else
+            echo "$CACHE_IDS" | xargs -r -I{} sh -c \
+              'gh api -X DELETE "repos/${{ github.repository }}/actions/caches/{}" && echo "  ✅ 已刪除 cache ID: {}" || echo "  ⚠️ 刪除失敗 ID: {}"'
+            echo "✅ 舊 cache 清除完畢，下一輪將從空資料開始"
+          fi
+
       - name: 確認清除結果
         run: |
           echo "--- data/ 目錄內容 ---"
