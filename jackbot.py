@@ -4453,80 +4453,103 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
 
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
-    # ── 嘗試 coins-markets（標準版完整端點）────────────────────────────────
-    def _try_coins_markets() -> List[Dict]:
+    # ── 嘗試 coins-markets（標準版完整端點，帶分頁抓取全市場）───────────────
+    def _parse_cg_item(item: Dict) -> Optional[Dict]:
+        """解析單一 CoinGlass coins-markets item 為統一格式，失敗回傳 None。"""
+        if not isinstance(item, dict):
+            return None
+        sym_raw = (
+            item.get("symbol") or item.get("coin") or
+            item.get("coinSymbol") or item.get("base") or ""
+        )
+        sym = str(sym_raw).replace("USDT", "").replace("USDT-PERP", "") \
+            .replace("-", "").replace("_", "").strip().upper()
+        if not sym or len(sym) > 14:
+            return None
+        p15 = (
+            item.get("priceChangePercent15m") or
+            item.get("price_change_percent_15m") or
+            item.get("priceChangePercent30m") or
+            item.get("price_change_percent_30m") or
+            item.get("change15m") or item.get("change_15m")
+        )
+        p24 = (
+            item.get("priceChangePercent24h") or
+            item.get("price_change_percent_24h") or
+            item.get("priceChange24h") or item.get("change_24h")
+        )
+        vol = (
+            item.get("volUsd24h") or item.get("volumeUsd24h") or
+            item.get("volume24h") or item.get("vol24h") or
+            item.get("quoteVolume24h") or item.get("usdtVolume")
+        )
         try:
-            r = requests.get(
-                f"{CG_API_BASE}/api/futures/coins-markets",
-                headers=headers, timeout=15
-            )
-            if r.status_code != 200:
-                logger.info(f"coins-markets HTTP {r.status_code}，嘗試備援端點")
-                return []
-            j = r.json()
-            if j.get("code") not in (0, "0", 200, "200", None):
-                logger.info(f"coins-markets code={j.get('code')}，嘗試備援端點")
-                return []
-            raw = j.get("data", j.get("list", j if isinstance(j, list) else []))
-            if not isinstance(raw, list) or not raw:
-                return []
-            out = []
-            for item in raw:
-                if not isinstance(item, dict):
-                    continue
-                sym_raw = (
-                    item.get("symbol") or item.get("coin") or
-                    item.get("coinSymbol") or item.get("base") or ""
+            p15 = float(p15) if p15 is not None else None
+        except (TypeError, ValueError):
+            p15 = None
+        try:
+            p24 = float(p24) if p24 is not None else None
+        except (TypeError, ValueError):
+            p24 = None
+        try:
+            vol = float(vol) if vol is not None else None
+        except (TypeError, ValueError):
+            vol = None
+        return {
+            "symbol": sym,
+            "coin": sym,
+            "price_change_percent_30m": p15,
+            "price_change_percent_24h": p24,
+            "_cg_volume_usd": vol,
+            "_raw_cg": item,
+        }
+
+    def _try_coins_markets() -> List[Dict]:
+        """帶分頁的全市場抓取：pageSize=1000，while 迴圈直到抓完所有幣種（通常 300~500 個）。"""
+        out: List[Dict] = []
+        page_num = 1
+        page_size = 1000
+        seen_syms: set = set()
+        try:
+            while True:
+                _respect_coinglass_rate_limit()
+                r = requests.get(
+                    f"{CG_API_BASE}/api/futures/coins-markets",
+                    headers=headers,
+                    params={"pageSize": page_size, "pageNum": page_num},
+                    timeout=15,
                 )
-                # 標準化為 base 格式（去除 USDT、連字符、底線）
-                sym = str(sym_raw).replace("USDT", "").replace("USDT-PERP", "") \
-                    .replace("-", "").replace("_", "").strip().upper()
-                if not sym or len(sym) > 14:
-                    continue
-                # 15m / 短週期漲跌幅（多個可能欄位名）
-                p15 = (
-                    item.get("priceChangePercent15m") or
-                    item.get("price_change_percent_15m") or
-                    item.get("priceChangePercent30m") or
-                    item.get("price_change_percent_30m") or
-                    item.get("change15m") or item.get("change_15m")
+                if r.status_code != 200:
+                    logger.info(f"coins-markets page={page_num} HTTP {r.status_code}，停止翻頁")
+                    break
+                j = r.json()
+                if j.get("code") not in (0, "0", 200, "200", None):
+                    logger.info(f"coins-markets page={page_num} code={j.get('code')}，停止翻頁")
+                    break
+                raw = j.get("data", j.get("list", j if isinstance(j, list) else []))
+                if not isinstance(raw, list) or not raw:
+                    break  # 空頁 → 翻頁結束
+                page_added = 0
+                for item in raw:
+                    parsed = _parse_cg_item(item)
+                    if parsed and parsed["symbol"] not in seen_syms:
+                        seen_syms.add(parsed["symbol"])
+                        out.append(parsed)
+                        page_added += 1
+                logger.info(
+                    f"[CoinGlass 分頁] page={page_num} 本頁 {len(raw)} 筆 / 新增 {page_added} 個 / 累計 {len(out)} 個"
                 )
-                # 24h 漲跌幅
-                p24 = (
-                    item.get("priceChangePercent24h") or
-                    item.get("price_change_percent_24h") or
-                    item.get("priceChange24h") or item.get("change_24h")
-                )
-                # 24h 成交量（USD）
-                vol = (
-                    item.get("volUsd24h") or item.get("volumeUsd24h") or
-                    item.get("volume24h") or item.get("vol24h") or
-                    item.get("quoteVolume24h") or item.get("usdtVolume")
-                )
-                try:
-                    p15 = float(p15) if p15 is not None else None
-                except (TypeError, ValueError):
-                    p15 = None
-                try:
-                    p24 = float(p24) if p24 is not None else None
-                except (TypeError, ValueError):
-                    p24 = None
-                try:
-                    vol = float(vol) if vol is not None else None
-                except (TypeError, ValueError):
-                    vol = None
-                out.append({
-                    "symbol": sym,
-                    "coin": sym,
-                    "price_change_percent_30m": p15,  # 15m 作為「30m 槽位」供現有邏輯讀取
-                    "price_change_percent_24h": p24,
-                    "_cg_volume_usd": vol,
-                    "_raw_cg": item,
-                })
-            return out
+                # 若本頁結果少於 pageSize，代表已是最後一頁
+                if len(raw) < page_size:
+                    break
+                page_num += 1
+                # 安全上限：防止無限迴圈（正常市場最多 5 頁）
+                if page_num > 10:
+                    logger.warning("[CoinGlass 分頁] 已翻 10 頁，強制停止避免無限迴圈")
+                    break
         except Exception as e:
-            logger.warning(f"coins-markets 異常: {e}")
-            return []
+            logger.warning(f"coins-markets 分頁抓取異常: {e}")
+        return out
 
     # ── 嘗試 coins-price-change（備援端點）──────────────────────────────────
     def _try_coins_price_change() -> List[Dict]:
@@ -4623,29 +4646,35 @@ def fetch_position_change():
         logger.info(f"[熔斷器✅] 正常模式（連續429={_cb_cnt}）")
 
     logger.info("🚀 傑克船長 2.0 閃電版正式啟動 | 測試模式：75折門檻 | 頻率：15M")
-    logger.info("【CoinGlass-First】開始執行 15M 持倉狙擊掃描...")
+    logger.info("【巨鯨高效漏斗】開始執行 15M 持倉狙擊掃描...")
 
-    # ── Step 1：CoinGlass 全市場數據（不預先受限於 BingX 幣種）────────────────
-    # base_to_symbol / allowed_bases 延遲至 enrichment 前再載入（節省首輪時間）
-    base_to_symbol: Dict[str, str] = {}
+    # ════════════════════════════════════════════════════════
+    # 漏斗 Step 0：提前獲取 BingX 支援名單（BingX Filter First）
+    # ════════════════════════════════════════════════════════
+    logger.info("📊 [掃描漏斗] Step 0：預先抓取 BingX 支援合約名單...")
     allowed_bases: Set[str] = set()
+    base_to_symbol: Dict[str, str] = {}
+    _ab0, base_to_symbol, _ = fetch_bingx_contracts()
+    if _ab0:
+        allowed_bases = _ab0
+        logger.info(f"📊 [掃描漏斗] Step 0：BingX 支援 {len(allowed_bases)} 個 base 幣種（含1000x別名）")
+    else:
+        logger.warning("📊 [掃描漏斗] Step 0：BingX 合約名單取得失敗，BingX 過濾將略過（不阻斷主流程）")
 
+    # ════════════════════════════════════════════════════════
+    # 漏斗 Step 1：CoinGlass 全市場數據（帶分頁，抓取 300~500 個幣種）
+    # ════════════════════════════════════════════════════════
     all_symbols_data = fetch_coinglass_coins_markets()
     if not all_symbols_data:
-        # 備援：舊式 BingX-first 流程
-        logger.warning("[CoinGlass-First] 主流端點失敗，啟用 BingX 備援流程")
-        _ab, base_to_symbol, _bfp = fetch_bingx_contracts()
-        allowed_bases = _ab
-        if _bfp:
-            all_symbols_data = _fetch_coins_price_change_fallback(_bfp)
-            logger.info(f"[備援] BingX 取得 {len(all_symbols_data)} 個幣種 15m 價格數據")
-        else:
+        # 備援：舊式流程
+        logger.warning("[巨鯨漏斗] CoinGlass 主流端點失敗，啟用備援流程")
+        if _ab0:
             all_symbols_data = fetch_coins_price_change()
             logger.info(f"[備援] CoinGlass coins-price-change 取得 {len(all_symbols_data)} 個幣種")
         if not all_symbols_data:
             send_telegram_message("⚠️ 無法取得幣種漲跌資料，請稍後再試。", TG_THREAD_IDS['position_change'])
             return
-    logger.info(f"[CoinGlass-First] 取得 {len(all_symbols_data)} 個幣種市場數據，開始篩選流程")
+    logger.info(f"📊 [掃描漏斗] 1. CoinGlass 全網共 {len(all_symbols_data)} 幣種")
 
     # ── 24h 漲跌幅快取（CoinGlass 已含此欄位，直接讀取）────────────────────────
     coinglass_24h_map: Dict[str, float] = {}
@@ -4659,27 +4688,48 @@ def fetch_position_change():
     if not coinglass_24h_map:
         coinglass_24h_map = _fetch_coinglass_24h_map()
 
-    # ── Step 2：價格門檻過濾（CoinGlass 15m/1h 漲跌幅）──────────────────────
+    # ════════════════════════════════════════════════════════
+    # 漏斗 Step 2：BingX 支援過濾（第一道防線，淘汰 BingX 不支援的標的）
+    # ════════════════════════════════════════════════════════
+    if allowed_bases:
+        bingx_filtered: List[Dict] = []
+        for coin in all_symbols_data:
+            _sym = (coin.get("symbol") or "").replace("USDT", "").replace("-", "").upper()
+            if _sym in allowed_bases:
+                bingx_filtered.append(coin)
+        logger.info(
+            f"📊 [掃描漏斗] 2. 經 BingX 支援過濾剩餘 {len(bingx_filtered)} 幣種"
+            f"（淘汰 {len(all_symbols_data) - len(bingx_filtered)} 個不支援標的）"
+        )
+    else:
+        # BingX 名單取得失敗時，放行全部（不阻斷，後續 enrichment 再做驗證）
+        bingx_filtered = all_symbols_data
+        logger.warning(f"📊 [掃描漏斗] 2. BingX 名單不可用，放行全部 {len(bingx_filtered)} 個幣種繼續篩選")
+
+    # ════════════════════════════════════════════════════════
+    # 漏斗 Step 3：價格波動過濾（|15m 漲跌幅| >= PRICE_GATEKEEPER）
+    # ════════════════════════════════════════════════════════
     PRICE_GATEKEEPER = 0.45  # 測試模式：原 0.6 × 0.75
-    active_symbols = []
-    for coin in all_symbols_data:
+    active_symbols: List[Dict] = []
+    for coin in bingx_filtered:
         p_change = extract_price_change_30m(coin)
         if abs(p_change) >= PRICE_GATEKEEPER:
             active_symbols.append(coin)
     logger.info(
-        f"🔍 [CoinGlass] 價格門檻篩選: {len(all_symbols_data)} → {len(active_symbols)} 個活躍標的 "
-        f"(|漲跌| >= {PRICE_GATEKEEPER}%) 進入 OI 檢查"
+        f"📊 [掃描漏斗] 3. 經價格波動(>={PRICE_GATEKEEPER}%)過濾，最終 {len(active_symbols)} 幣種進入 OI 運算"
+        f"（淘汰 {len(bingx_filtered) - len(active_symbols)} 個低波動標的）"
     )
 
-    # ── Step 3：成交量預篩（直接讀 CoinGlass _cg_volume_usd，免去大量 BingX ticker 呼叫）──
+    # ════════════════════════════════════════════════════════
+    # 漏斗 Step 4：成交量預篩（直接讀 CoinGlass _cg_volume_usd）
+    # ════════════════════════════════════════════════════════
     VOLUME_PREFILTER_MIN_USD = 3_000_000
     active_above_volume: List[Dict[str, Any]] = []
-    vol_no_data = 0    # CoinGlass 無成交量欄位（保守放行）
-    vol_below = 0      # 低於門檻剔除
+    vol_no_data = 0
+    vol_below = 0
     for coin in active_symbols:
         cg_vol = coin.get("_cg_volume_usd")
         if cg_vol is None:
-            # CoinGlass 沒有成交量資訊 → 保守放行（避免漏掉小市值爆發訊號）
             vol_no_data += 1
             coin["_volume_usd"] = float(VOLUME_PREFILTER_MIN_USD)
             active_above_volume.append(coin)
@@ -4694,9 +4744,8 @@ def fetch_position_change():
                 coin["_volume_usd"] = vol
                 active_above_volume.append(coin)
     logger.info(
-        f"📊 [CoinGlass] 成交量預篩: 門檻 {VOLUME_PREFILTER_MIN_USD/1e6:.0f}M USD | "
-        f"通過 {len(active_above_volume)} 個 (無量資料放行 {vol_no_data} 個) | "
-        f"低於門檻刷除 {vol_below} 個 → 進入 OI 檢查"
+        f"📊 [掃描漏斗] 4. 成交量預篩(>={VOLUME_PREFILTER_MIN_USD/1e6:.0f}M USD)："
+        f"通過 {len(active_above_volume)} 個（無量資料放行 {vol_no_data} 個，低量淘汰 {vol_below} 個）"
     )
 
     # ── Step 4：排序 + 限制數量（前 50 固定，其餘隨機保多樣性）─────────────────
@@ -4880,15 +4929,11 @@ def fetch_position_change():
     top_short_close = short_close[:3]
     logger.info(f"四類 TOP 候選數: 多方開倉 {len(top_long_open)}, 多方平倉 {len(top_long_close)}, 空方開倉 {len(top_short_open)}, 空方平倉 {len(top_short_close)}（各類取前 3，供後續分類/成交量/冷卻/風報篩選）")
 
-    # ── Step 7：延遲取得 BingX 支援名單（OI 篩選後再取，節省無效 API 呼叫）────────
-    # 主流程（CoinGlass-First）時 base_to_symbol 為空，此時才補取；備援流程時已有值
-    if not base_to_symbol:
-        _ab2, base_to_symbol, _ = fetch_bingx_contracts()
-        if _ab2:
-            allowed_bases = _ab2
-            logger.info(f"[BingX延遲載入] 取得 {len(allowed_bases)} 個支援交易對，用於 enrichment 與最終驗證")
-        else:
-            logger.warning("[BingX延遲載入] 取得失敗，enrichment 將使用通用格式推導，最終驗證將略過")
+    # BingX 支援名單已在漏斗 Step 0 預先載入，此處直接使用 allowed_bases / base_to_symbol
+    logger.info(
+        f"[漏斗確認] enrichment 開始，BingX 名單 {len(allowed_bases)} 個 base，"
+        f"base_to_symbol {len(base_to_symbol)} 個映射"
+    )
 
     # 對 top 標的取 RSI/布林帶（僅 4 星以上候選，3 星不計算）
     time.sleep(2)
