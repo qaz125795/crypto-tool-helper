@@ -12545,6 +12545,64 @@ def run_api_health_check(symbol: str = "BTC") -> None:
     logger.info("=" * 70)
 
 
+# ==================== 資料重置工具 ====================
+
+def run_reset_data() -> None:
+    """
+    清除所有冷卻、推播紀錄、績效報告，讓系統全新重啟。
+    呼叫方式：python jackbot.py reset_data
+
+    清除範圍：
+      ✅ sniper_cooldown.json   - 冷卻歷史 + 推播紀錄（含倉位追蹤）
+      ✅ performance_history.json - 每日績效累積（週/月 R 值）
+      ✅ last_summary_date.json  - 每日績效總結發送日期鎖
+      ✅ backup_state.json       - 關鍵狀態備份
+    """
+    logger.info("=" * 60)
+    logger.info("【資料重置】開始清除所有冷卻與績效記錄...")
+
+    files_to_reset: list[tuple[str, object]] = [
+        ("sniper_cooldown.json",     {"history": [], "signals": []}),
+        ("performance_history.json", []),
+        ("last_summary_date.json",   {}),
+        ("backup_state.json",        {}),
+    ]
+
+    cleared = []
+    for fname, empty_val in files_to_reset:
+        fpath = DATA_DIR / fname
+        try:
+            save_json_file(fpath, empty_val)
+            logger.info(f"  ✅ 已清除: {fname}")
+            cleared.append(fname)
+        except Exception as e:
+            logger.warning(f"  ⚠️ 清除失敗 {fname}: {e}")
+
+    logger.info(f"【資料重置】完成，共清除 {len(cleared)} 個檔案：{cleared}")
+    logger.info("=" * 60)
+
+    # 發送 Telegram 通知
+    from datetime import datetime as _dt
+    _now_str = _dt.now(TAIPEI_TZ).strftime("%m/%d %H:%M")
+    _msg = (
+        f"🔄 *【系統重置】資料已全部清除*\n"
+        f"🕐 {_now_str} (台灣)\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"✅ 冷卻歷史 & 推播紀錄：已清空\n"
+        f"✅ 倉位追蹤記錄：已清空\n"
+        f"✅ 績效歷史（週/月 R 值）：已清空\n"
+        f"✅ 每日總結發送鎖：已清空\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"📌 下一輪掃描將從零開始記錄，無冷卻限制。"
+    )
+    try:
+        _thread = TG_THREAD_IDS.get("sniper", 0) or int(CHAT_ID or 0)
+        send_telegram_message(_msg, _thread, parse_mode="Markdown")
+        logger.info("【資料重置】Telegram 通知已發送")
+    except Exception as e:
+        logger.warning(f"【資料重置】Telegram 通知失敗（不影響重置結果）: {e}")
+
+
 # ==================== 主程序 ====================
 
 if __name__ == "__main__":
@@ -12585,6 +12643,8 @@ if __name__ == "__main__":
             run_hyperliquid_monitor_once()
         elif function_name == "gold_signal":
             run_gold_signal()
+        elif function_name == "reset_data":
+            run_reset_data()
         else:
             print("可用的功能:")
             print("  sector_ranking   - 主流板塊排行榜推播")
@@ -12601,6 +12661,7 @@ if __name__ == "__main__":
             print("  hyperliquid           - Hyperliquid 聰明錢監控")
             print("  gold_signal           - 黃金 XAUUSD 多空訊號（ORB+MA）")
             print("  api_check             - API 健康檢查（驗證所有端點是否可用）")
+            print("  reset_data            - 清除所有冷卻/推播/績效記錄，全新重啟")
     else:
         print("請指定要執行的功能，例如: python jackbot.py sector_ranking")
 
