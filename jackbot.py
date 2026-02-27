@@ -3147,17 +3147,22 @@ def fetch_taker_bvs_ratio(symbol: str, interval: str = "15m", limit: int = 4) ->
         return result
     logger.warning(f"[主動買賣-A❌] {base}: 方案A無效數據（rows={len(rows_a) if rows_a else 0}），改用方案B")
 
-    # ── 方案B：單交易對歷史（Binance）────────────────────────────
+    # ── 方案B：單交易對歷史（多交易所輪詢備援）─────────────────
     sym_param = base + "USDT"
-    logger.debug(f"[主動買賣-B] {base} endpoint={CG_EP['taker_pair_history']} sym={sym_param}")
-    j_b = _cg_get(CG_EP["taker_pair_history"], {"symbol": sym_param, "exchange": "Binance", "interval": interval, "limit": limit})
-    rows_b = j_b.get("data") or j_b.get("list") or [] if j_b else []
-    result = _parse_taker_ratio_from_rows(rows_b)
-    if result is not None:
-        logger.info(f"[主動買賣-B✅] {base}: 方案B成功（Binance單所），買盤佔比={result:.1f}%")
-        _flow_cache[cache_key] = (result, now)
-        return result
-    logger.warning(f"[主動買賣-B❌] {base}: 方案B無效，改用方案C（各所快照）")
+    # 依序嘗試主要交易所，SIREN 等小幣可能只在 OKX/Bybit 等有數據
+    _b_exchanges = ["Binance", "OKX", "Bybit", "BingX", "Bitget"]
+    for _b_ex in _b_exchanges:
+        logger.debug(f"[主動買賣-B] {base} exchange={_b_ex} sym={sym_param}")
+        j_b = _cg_get(CG_EP["taker_pair_history"], {"symbol": sym_param, "exchange": _b_ex,
+                                                     "interval": interval, "limit": limit})
+        rows_b = j_b.get("data") or j_b.get("list") or [] if j_b else []
+        result = _parse_taker_ratio_from_rows(rows_b)
+        if result is not None:
+            logger.info(f"[主動買賣-B✅] {base}: {_b_ex} 單所成功，買盤佔比={result:.1f}%")
+            _flow_cache[cache_key] = (result, now)
+            return result
+        logger.debug(f"[主動買賣-B] {base} {_b_ex} 無有效數據（rows={len(rows_b)}）")
+    logger.warning(f"[主動買賣-B❌] {base}: 所有交易所均無有效數據，改用方案C（各所快照）")
 
     # ── 方案C：各所當前快照（沒有歷史，但能判斷當下方向）────────
     logger.debug(f"[主動買賣-C] {base} endpoint={CG_EP['taker_exchange_list']}")
@@ -4331,34 +4336,49 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
         pass
 
     # ── 方案B：exchange-list（全量，可一次取得所有幣種）─────────────
-    logger.debug(f"[資金費率-B] 全量費率列表 endpoint={CG_EP['fr_exchange_list']}")
-    url = f"{CG_API_BASE}{CG_EP['fr_exchange_list']}"
+    # 新路徑(camelCase) → 舊路徑(kebab-case) 雙重備援
+    fr_ep_candidates = [CG_EP["fr_exchange_list"], CG_EP["fr_exchange_list_old"]]
     lst = []
-    for attempt in range(2):
-        try:
-            _respect_coinglass_rate_limit()
-            r = requests.get(url, headers=headers, timeout=12)
-            if r.status_code == 429:
-                logger.warning("資金費率 API 429 Too Many Requests，2 秒後重試一次")
-                time.sleep(2)
-                continue
-            if r.status_code != 200:
-                logger.warning(f"資金費率-B status={r.status_code} body={r.text[:200]}")
-                break
-            data = r.json()
-            if data.get("code") not in (0, "0", 200, "200", None):
-                logger.warning(f"資金費率-B code={data.get('code')} msg={data.get('msg')}")
-                break
-            lst = data.get("data", [])
-            if isinstance(lst, list):
-                break
-        except Exception as e:
-            if attempt == 0:
-                logger.warning(f"資金費率-B 請求異常: {e}，重試一次")
-                time.sleep(1)
-            else:
-                logger.warning(f"資金費率-B 全部失敗: {e}")
-                return out
+    url_used = ""
+    for fr_ep_path in fr_ep_candidates:
+        url = f"{CG_API_BASE}{fr_ep_path}"
+        logger.debug(f"[資金費率-B] 嘗試全量費率列表 endpoint={fr_ep_path}")
+        succeeded = False
+        for attempt in range(2):
+            try:
+                _respect_coinglass_rate_limit()
+                r = requests.get(url, headers=headers, timeout=12)
+                if r.status_code == 429:
+                    logger.warning("資金費率 API 429 Too Many Requests，2 秒後重試一次")
+                    time.sleep(2)
+                    continue
+                if r.status_code == 404:
+                    logger.info(f"[資金費率-B] {fr_ep_path} 404，切換備援路徑")
+                    break  # 嘗試下一個 endpoint
+                if r.status_code != 200:
+                    logger.warning(f"資金費率-B status={r.status_code} body={r.text[:200]}")
+                    break
+                data = r.json()
+                if data.get("code") not in (0, "0", 200, "200", None):
+                    logger.warning(f"資金費率-B code={data.get('code')} msg={data.get('msg')}")
+                    break
+                candidate = data.get("data", [])
+                if isinstance(candidate, list) and candidate:
+                    lst = candidate
+                    url_used = fr_ep_path
+                    succeeded = True
+                    logger.info(f"[資金費率-B✅] 使用 {fr_ep_path} 取得 {len(lst)} 筆費率資料")
+                    break
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"資金費率-B 請求異常: {e}，重試一次")
+                    time.sleep(1)
+                else:
+                    logger.warning(f"資金費率-B 全部失敗: {e}")
+        if succeeded:
+            break
+    if not lst:
+        logger.warning(f"[資金費率-B❌] 新舊路徑均無法取得費率資料，返回空表")
 
     try:
         for item in (lst if isinstance(lst, list) else []):
@@ -6701,69 +6721,81 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             "_raw_cg": item,
         }
 
+    def _fetch_one_coins_markets_page(sort_field: str = "", sort_type: str = "0",
+                                       seen: Optional[set] = None) -> List[Dict]:
+        """抓取一頁 coins-markets，回傳解析後的列表（去重用 seen set）。"""
+        if seen is None:
+            seen = set()
+        out_page: List[Dict] = []
+        try:
+            _respect_coinglass_rate_limit()
+            params: Dict = {"pageSize": 100}
+            if sort_field:
+                params["sortField"] = sort_field
+                params["sortType"] = sort_type  # "0"=降序 "1"=升序
+            r = requests.get(
+                f"{CG_API_BASE}/api/futures/coins-markets",
+                headers=headers,
+                params=params,
+                timeout=15,
+            )
+            if r.status_code != 200:
+                logger.debug(f"[CoinGlass多排序] sortField={sort_field} HTTP {r.status_code}")
+                return out_page
+            j = r.json()
+            if j.get("code") not in (0, "0", 200, "200", None):
+                return out_page
+            raw = j.get("data", j.get("list", j if isinstance(j, list) else []))
+            if not isinstance(raw, list):
+                return out_page
+            added = 0
+            for item in raw:
+                parsed = _parse_cg_item(item)
+                if parsed and parsed["symbol"] not in seen:
+                    seen.add(parsed["symbol"])
+                    out_page.append(parsed)
+                    added += 1
+            logger.info(f"[CoinGlass多排序] sortField={sort_field or '(default)'} 新增 {added} 個 / 本次共 {len(raw)} 筆")
+        except Exception as e:
+            logger.debug(f"[CoinGlass多排序] sortField={sort_field} 異常: {e}")
+        return out_page
+
     def _try_coins_markets() -> List[Dict]:
-        """帶自動翻頁的全市場抓取：持續翻頁直到空頁為止，抓取全市場 300~500 個合約幣種。
-        CoinGlass API 每頁硬限制約 100 筆，停止條件：
-        1. 頁面回傳空資料（最後一頁）
-        2. 本頁新增幣種 = 0（已全部讀完，無新幣）
-        3. 安全上限 15 頁（防無限迴圈，最多抓 ~1500 個）
+        """多排序策略抓取全市場合約幣種。
+        由於 CoinGlass coins-markets 的 pageNum 參數被忽略（永遠回傳同一批），
+        改採「多個 sortField」輪流抓取，合併去重以擴大掃描範圍至 300~500 個幣種。
+        排序維度：預設(OI) → priceChangePercent(24h漲幅) → openInterestChange(OI變化量)
+                  → volChangePercent(成交量變化) → fundingRate(費率極端)
         """
         out: List[Dict] = []
-        page_num = 1
         seen_syms: set = set()
-        natural_page_size: int = 0  # 自動偵測 API 每頁自然大小
-        try:
-            while True:
-                _respect_coinglass_rate_limit()
-                r = requests.get(
-                    f"{CG_API_BASE}/api/futures/coins-markets",
-                    headers=headers,
-                    params={"pageSize": 100, "pageNum": page_num},
-                    timeout=15,
-                )
-                if r.status_code != 200:
-                    logger.info(f"[CoinGlass 分頁] page={page_num} HTTP {r.status_code}，停止翻頁")
-                    break
-                j = r.json()
-                if j.get("code") not in (0, "0", 200, "200", None):
-                    logger.info(f"[CoinGlass 分頁] page={page_num} code={j.get('code')}，停止翻頁")
-                    break
-                raw = j.get("data", j.get("list", j if isinstance(j, list) else []))
-                if not isinstance(raw, list) or len(raw) == 0:
-                    logger.info(f"[CoinGlass 分頁] page={page_num} 回傳空頁，翻頁完成")
-                    break
-                # 第一頁：記錄自然每頁大小
-                if page_num == 1:
-                    natural_page_size = len(raw)
-                page_added = 0
-                for item in raw:
-                    parsed = _parse_cg_item(item)
-                    if parsed and parsed["symbol"] not in seen_syms:
-                        seen_syms.add(parsed["symbol"])
-                        out.append(parsed)
-                        page_added += 1
-                logger.info(
-                    f"[CoinGlass 分頁] page={page_num} 本頁 {len(raw)} 筆 / 新增 {page_added} 個"
-                    f" / 累計 {len(out)} 個"
-                )
-                # 停止條件 A：本頁無任何新幣（已全部讀完）
-                if page_added == 0:
-                    logger.info(f"[CoinGlass 分頁] page={page_num} 無新幣種，已全部抓完")
-                    break
-                # 停止條件 B：本頁筆數 < 自然每頁大小（最後一頁，筆數不滿）
-                if natural_page_size > 0 and len(raw) < natural_page_size:
-                    logger.info(
-                        f"[CoinGlass 分頁] page={page_num} 本頁 {len(raw)} < 每頁上限 {natural_page_size}，已到最後一頁"
-                    )
-                    break
-                page_num += 1
-                # 安全上限：最多 15 頁（防無限迴圈）
-                if page_num > 15:
-                    logger.warning(f"[CoinGlass 分頁] 已翻 15 頁、累計 {len(out)} 個，強制停止")
-                    break
-        except Exception as e:
-            logger.warning(f"[CoinGlass 分頁] 抓取異常: {e}")
-        logger.info(f"[CoinGlass-First] coins-markets 分頁完成，共 {len(out)} 個幣種（翻了 {page_num} 頁）")
+
+        # 排序欄位列表：(sortField, sortType, 說明)
+        # 每個維度最多補充 100 個新幣，預期最終 300~500 個
+        sort_variants = [
+            ("", "0",                  "預設排序(OI大到小)"),
+            ("priceChangePercent", "0", "24h漲幅↓"),
+            ("priceChangePercent", "1", "24h漲幅↑(跌最多)"),
+            ("openInterestChange", "0", "OI變化↓"),
+            ("openInterestChange", "1", "OI變化↑"),
+            ("volChangePercent",   "0", "成交量變化↓"),
+        ]
+
+        for sort_field, sort_type, label in sort_variants:
+            before = len(out)
+            batch = _fetch_one_coins_markets_page(sort_field, sort_type, seen_syms)
+            out.extend(batch)
+            added = len(out) - before
+            logger.info(f"[CoinGlass掃描] {label}: +{added} 個 / 累計 {len(out)} 個")
+            if added == 0 and sort_field != "":
+                # 如果沒有新幣了，後續排序大概率也沒有，可以提前停止
+                logger.info(f"[CoinGlass掃描] 本次無新幣，後續排序可能已全覆蓋，停止補充")
+                break
+            # 禮貌性間隔，避免觸發 429
+            if sort_field != sort_variants[-1][0]:
+                time.sleep(0.3)
+
+        logger.info(f"[CoinGlass-First] coins-markets 多排序掃描完成，共 {len(out)} 個唯一幣種")
         return out
 
     # ── 嘗試 coins-price-change（備援端點）──────────────────────────────────
