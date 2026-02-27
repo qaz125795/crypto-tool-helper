@@ -5536,14 +5536,15 @@ PRICE_TOP_MIN = -3.0   # 摸頭：15m 跌幅 ≥ -3% 才算高位，跌破改標
 # 24H 趨勢門檻（保守山寨）：12% 以上才當假抄底/假摸頭，適應日波動
 TREND_24H_THRESHOLD = 12.0
 
-# 持倉異常策略（略放寬 5星/鑽石門檻以增加 S/頭等艙訊號，勝率邏輯不變）
-# ┌────────┬────────────────────────────┬─────────────┬────────────────────────────────────────┐
-# │ 訊號   │ 門檻                        │ 倉位比例    │ 說明                                   │
-# ├────────┼────────────────────────────┼─────────────┼────────────────────────────────────────┤
-# │ 💎鑽石 │ 摸頭/抄底+5星+OI≥3.5%+量≥5M  │ 滿倉 7%   │ 量≥5M + 鯨魚有數據 + 摸頭RSI≥60/抄底≤40  │
-# │ ⭐5星  │ OI≥3.5%+CVD同向              │ 標準倉 5% │ 穩健列車                                 │
-# │ ⭐4星  │ OI≥3.3%+方向                │ 減半倉 2.5%│ 賭鬼樂透                                 │
-# └────────┴────────────────────────────┴─────────────┴────────────────────────────────────────┘
+# ── 訊號分級策略設計 ────────────────────────────────────────────────────────
+# ┌──────────────┬──────────────────────────────────┬──────────────┬─────────────────────────────────────────────┐
+# │ 訊號         │ 門檻                              │ 倉位         │ 目標勝率 / 說明                              │
+# ├──────────────┼──────────────────────────────────┼──────────────┼─────────────────────────────────────────────┤
+# │ 👻賭鬼 ⭐×4  │ OI≥2.2%，CVD 未確認              │ 試單 2.5%    │ 樂透策略，低勝率高風報比 TP2 可達 2.5~4R     │
+# │ 🚅列車 ⭐×5  │ OI≥3.0%+CVD 同向確認             │ 標準倉 5%    │ 目標勝率 ≥65%，TP1=1.2R TP2=2~3R            │
+# │ ✈️頭等 ⭐×6  │ 5★+摸頭/抄底+量≥1M+訂單流有數據  │ 重倉 7%      │ 目標勝率 ≥75%，RSI 極端位確認               │
+# │ 💎鑽石 ⭐×7  │ 頭等+5M共振+全網共識（或RSI極端） │ 重倉 10%     │ 最高確信，三重確認，勝率最高                  │
+# └──────────────┴──────────────────────────────────┴──────────────┴─────────────────────────────────────────────┘
 # 價格位階：抄底 15m≤3%；摸頭 15m≥-3%。24h 假訊號門檻 12%。主流幣 OI≥3.0% 才進榜。
 
 # 鑽石 RSI 輔助：摸頭≥60 / 抄底≤40，無 RSI 不擋
@@ -5554,7 +5555,7 @@ RSI_FILTER_BREAKOUT_SHORT_MAX = 55  # v3.0 追跌時 RSI 不高於 55
 # 鑽石級 CVD 驗證：CVD 變化量需至少佔 OI 變化的一定比例，避免主力對敲假量
 CVD_ELITE_MIN_RATIO = 0.3
 # 鑽石級 24h 成交量門檻（略放寬：5M 即給頭等艙）
-VOLUME_ELITE_MIN_USD = 5_000_000
+VOLUME_ELITE_MIN_USD = 1_000_000   # 山寨幣成交量普遍較低，1M 即可
 # A 級費率硬過濾：資金費率 > 0.05% 視為多頭擁擠，不推 A 級防接盤殺多
 FUNDING_A_GRADE_MAX = 0.0005
 
@@ -6067,6 +6068,32 @@ def build_report_message_tiered(
             if r_tp1 is None and tp1_price is not None:
                 r_tp1 = round(((tp1_price - price) / risk_dist) if is_long else ((price - tp1_price) / risk_dist), 1)
 
+            # 列車/頭等艙 TP2：延伸目標 2.0R~3.0R（高信心訊號有更遠空間）
+            # 腳步圖有遠端阻力（> TP1 且 ≤ 5.0R）→ 用腳步圖，否則依波動度給 2.0~3.0R
+            _atr2_train = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
+            _target_r2_train = 2.5
+            if _atr2_train is not None and price > 0:
+                _vp2_train = (_atr2_train / price) * 100.0
+                if _vp2_train >= 3.0:
+                    _target_r2_train = 2.0   # 高波動：目標保守
+                elif _vp2_train <= 1.5:
+                    _target_r2_train = 3.0   # 低波動：目標遠一些
+                else:
+                    _ratio_train = (_vp2_train - 1.5) / (3.0 - 1.5)
+                    _target_r2_train = 3.0 - _ratio_train * 1.0
+            _target_r2_train = max(2.0, min(3.0, _target_r2_train))
+            if _fp_res_valid:
+                _fp_r2_val = float(fp_resistance)
+                _r_fp2_train = abs(_fp_r2_val - price) / risk_dist
+                if _r_fp2_train > (r_tp1 or 1.2) and _r_fp2_train <= 5.0:
+                    tp2_price = _fp_r2_val
+                    tp2_label = f"腳步圖阻力({_r_fp2_train:.1f}R)"
+                    r_tp2 = round(_r_fp2_train, 1)
+            if tp2_price is None:
+                tp2_price = price + _target_r2_train * risk_dist if is_long else price - _target_r2_train * risk_dist
+                tp2_label = f"{_target_r2_train:.1f}R"
+                r_tp2 = round(_target_r2_train, 1)
+
         # 賭鬼 (A)：TP1 優先腳步圖阻力(0.8R~2.5R 內才採)，否則固定 1.0R；TP2 理論目標
         else:
             # TP1：嘗試腳步圖阻力
@@ -6129,7 +6156,8 @@ def build_report_message_tiered(
             return rsi is not None and rsi <= RSI_FILTER_BREAKOUT_SHORT_MAX
         return True
 
-    # 極品 💎 = 摸頭/抄底 + 5星 + |OI|>=OI_FOR_ELITE + 24h 成交量≥15M + RSI 輔助 + 鯨魚指數有數據（數據完整才給鑽石）
+    # 頭等艙 ✈️ = 摸頭/抄底 + 5星 + |OI|>=OI_FOR_ELITE + 成交量≥1M + 至少一項訂單流數據 + RSI 輔助
+    # 鯨魚指數不強制（山寨幣普遍無覆蓋）；成交量門檻放寬（山寨幣量級較低）
     def _is_elite(x: Dict) -> bool:
         if (x.get("stars") or 0) != 5:
             return False
@@ -6139,9 +6167,16 @@ def build_report_message_tiered(
         if abs(x.get("oiChange30m") or 0) < OI_FOR_ELITE:
             return False
         if (x.get("volume_usd") or 0) < VOLUME_ELITE_MIN_USD:
-            return False  # 鑽石級須流動性足夠，否則只顯示 5 星
-        if x.get("whale_index") is None:
-            return False  # 鑽石級須鯨魚指數有數據，數據完整才觸發
+            return False  # 最低流動性門檻（1M），避免極端冷門幣
+        # 至少一項訂單流數據（taker/大戶多空比/OI趨勢任一有值）
+        # 三項全 None 代表市場微結構資料完全缺失，無法確認方向，不給頭等艙
+        _has_flow_data = (
+            x.get("taker_ratio") is not None or
+            x.get("top_ls_ratio") is not None or
+            x.get("oi_trend") is not None
+        )
+        if not _has_flow_data:
+            return False
         rsi = x.get("rsi")
         if rsi is not None and isinstance(rsi, (int, float)):
             if z == ZONE_TOP:
@@ -6360,19 +6395,19 @@ def build_report_message_tiered(
 
                 if is_diamond_sig:
                     tier_emoji = "💎"
-                    star_display = f"💎【鑽石共振】三重確認‼️ ⭐⭐⭐⭐⭐{resonance_tag}{consensus_tag}"
+                    star_display = f"💎【鑽石共振】最高確信 ⭐⭐⭐⭐⭐⭐⭐{resonance_tag}{consensus_tag}"
                     x["tier"] = "diamond"
                 elif is_elite_sig:
                     tier_emoji = "✈️"
-                    star_display = f"✈️【頭等機艙】(高信心) ⭐⭐⭐⭐⭐{resonance_tag}{consensus_tag}"
+                    star_display = f"✈️【頭等機艙】高勝率 ⭐⭐⭐⭐⭐⭐{resonance_tag}{consensus_tag}"
                     x["tier"] = "elite"
                 elif stars >= 5:
                     tier_emoji = "🚅"
-                    star_display = f"🚅【穩健列車】(標準倉) ⭐⭐⭐{resonance_tag}{consensus_tag}"
+                    star_display = f"🚅【穩健列車】標準倉 ⭐⭐⭐⭐⭐{resonance_tag}{consensus_tag}"
                     x["tier"] = "train"
                 else:
                     tier_emoji = "👻"
-                    star_display = f"👻【賭鬼樂透】(高風險)💣{resonance_tag}{consensus_tag}"
+                    star_display = f"👻【賭鬼樂透】高風報比💣{resonance_tag}{consensus_tag}"
                     x["tier"] = "gambler"
 
                 # 策略與風控建議（策略前加分級 emoji）
@@ -7856,8 +7891,8 @@ def fetch_position_change():
     logger.info(f"[CoinGlass-First] 全部 {len(all_top)} 個訊號進入推播流程（訊號以 CoinGlass 為準）")
 
     # 用 BingX ticker 取現價 + 24h 成交額（僅標示低流動性與 5 星降星，不再做成交量門檻過濾）
-    VOLUME_SOFT_MIN_USD = 5_000_000   # <5M 標示「成交量極低 小心滑價」
-    VOLUME_5STAR_MIN_USD = 5_000_000   # 5 星僅允許 >5M，≤ 降為 4 星
+    VOLUME_SOFT_MIN_USD = 500_000      # <500K 才標示低流動性（山寨幣量級調低）
+    VOLUME_5STAR_MIN_USD = 500_000     # 5星僅在確認 <500K 時才降為 4星
     for x in all_top:
         sym = x.get("symbol", "")
         clean_base = sym.replace("USDT", "").replace("-", "").upper()
@@ -7887,18 +7922,17 @@ def fetch_position_change():
             if vol is not None:
                 x["low_liquidity_warning"] = vol < VOLUME_SOFT_MIN_USD
                 x["volume_usd"] = float(vol)
+                # 只在確認量 < 500K 時才降星（山寨幣量級低，不應因無量數據而懲罰）
                 if (x.get("stars") or 0) == 5 and vol <= VOLUME_5STAR_MIN_USD:
                     x["stars"] = 4
             else:
+                # BingX ticker 未回傳量數據時：不降星，CoinGlass 預篩已過濾超小幣
                 x["low_liquidity_warning"] = False
                 x["volume_usd"] = 0
-                if (x.get("stars") or 0) == 5:
-                    x["stars"] = 4
         else:
+            # BingX ticker 完全失敗時：同上，不降星
             x["low_liquidity_warning"] = False
             x["volume_usd"] = 0
-            if (x.get("stars") or 0) == 5:
-                x["stars"] = 4
     low_liq_count = sum(1 for x in all_top if x.get("low_liquidity_warning"))
     logger.info(f"本輪 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<{VOLUME_SOFT_MIN_USD/1e6:.1f}M)")
     if len(all_top) == 0:
