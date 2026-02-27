@@ -110,6 +110,9 @@ _coinglass_api_counter: Dict[str, Any] = {"window_start": 0.0, "count": 0}
 _coinglass_api_counter_lock = threading.Lock()
 _COINGLASS_MAX_CALLS_PER_MINUTE = 70
 
+# BingX 技術指標失敗次數（每輪用於判斷是否啟用 CoinGlass Plan B）
+_bingx_tech_fail_count: int = 0
+
 
 def _respect_coinglass_rate_limit() -> None:
     """簡單的全域速率限制：確保 CoinGlass API 約 <70 次/分鐘。"""
@@ -1494,8 +1497,8 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
             _coinglass_oi_rate_limiter = {"last_call": 0.0}
         now = time.time()
         elapsed = now - _coinglass_oi_rate_limiter.get("last_call", 0.0)
-        # 雲端環境 Anti-429：每次呼叫隨機 sleep 0.8~1.5 秒（含一點亂數抖動）
-        wait_time = random.uniform(0.8, 1.5)
+        # 雲端環境 Anti-429：每次呼叫隨機 sleep 0.3~0.7 秒（含一點亂數抖動）
+        wait_time = random.uniform(0.3, 0.7)
         if elapsed < wait_time:
             time.sleep(wait_time - elapsed)
         _coinglass_oi_rate_limiter["last_call"] = time.time()
@@ -3499,7 +3502,7 @@ def fetch_position_change():
     )
     # 成交量預篩：3M 以下不跑 OI（略放寬多一點候選）
     VOLUME_PREFILTER_MIN_USD = 3_000_000
-    active_above_volume = []
+    active_above_volume: List[Dict[str, Any]] = []
     vol_check_no_snap = 0
     vol_check_no_vol = 0
     vol_check_below = 0
@@ -3523,17 +3526,35 @@ def fetch_position_change():
         if vol < VOLUME_PREFILTER_MIN_USD:
             vol_check_below += 1
             continue
+        # 記錄 24h 成交額，後續可依此排序/取樣
+        try:
+            coin["_volume_usd"] = float(vol)
+        except (TypeError, ValueError):
+            coin["_volume_usd"] = float(VOLUME_PREFILTER_MIN_USD)
         active_above_volume.append(coin)
     logger.info(
         f"📊 成交量預篩: 門檻 24h 成交額 ≥ {VOLUME_PREFILTER_MIN_USD/1e6:.0f}M USD（<{VOLUME_PREFILTER_MIN_USD/1e6:.0f}M 不跑 OI），"
         f"通過 {len(active_above_volume)} 個、刷掉 {vol_check_no_snap + vol_check_no_vol + vol_check_below} 個 (無ticker:{vol_check_no_snap} 無成交額:{vol_check_no_vol} <{VOLUME_PREFILTER_MIN_USD/1e6:.0f}M:{vol_check_below})，"
         f"剩餘 {len(active_above_volume)} 個進入 OI 檢查"
     )
-    # 為在 16 分鐘內完成，OI 階段僅處理前 320 個（約 8 分鐘內跑完）
+    # 為在 16 分鐘內完成，OI 階段僅處理前 MAX_OI_SYMBOLS 個（約 8 分鐘內跑完）
     MAX_OI_SYMBOLS = 320
-    target_symbols = active_above_volume[:MAX_OI_SYMBOLS]
+    target_symbols: List[Dict[str, Any]] = []
+    if active_above_volume:
+        # 先依成交額排序，保證主流熱點優先
+        active_above_volume.sort(key=lambda c: c.get("_volume_usd", 0.0), reverse=True)
+        # 前 50 名固定保留，其餘隨機打亂增加多樣性
+        top_fixed = active_above_volume[:50]
+        rest = active_above_volume[50:]
+        if rest:
+            random.shuffle(rest)
+        combined = top_fixed + rest
+        target_symbols = combined[:MAX_OI_SYMBOLS]
     if len(active_above_volume) > MAX_OI_SYMBOLS:
-        logger.info(f"成交量過篩後共 {len(active_above_volume)} 個，本輪僅處理前 {MAX_OI_SYMBOLS} 個以確保準時推播")
+        logger.info(
+            f"成交量過篩後共 {len(active_above_volume)} 個，本輪僅處理前 {MAX_OI_SYMBOLS} 個以確保準時推播 "
+            f"(前 50 依成交額固定，其餘隨機採樣)"
+        )
     
     long_open = []
     long_close = []
@@ -4429,6 +4450,10 @@ def fetch_position_change():
         try:
             pushed_symbols = sorted({_cooldown_symbol(x.get("symbol") or "") for x in cooled_top if x.get("symbol")}) if cooled_top else []
             pushed_list = ", ".join(pushed_symbols) if pushed_symbols else "無"
+            # 動態 OI 門檻（若本輪有計算則顯示，否則顯示固定門檻）
+            oi_4 = _dynamic_oi_4star if (_dynamic_oi_4star is not None and _dynamic_oi_sample_size >= 10) else OI_FOR_4_STAR
+            oi_5 = _dynamic_oi_5star if (_dynamic_oi_5star is not None and _dynamic_oi_sample_size >= 10) else OI_FOR_5_STAR
+
             summary_lines = [
                 "## 持倉變化篩選摘要",
                 "",
@@ -4437,6 +4462,7 @@ def fetch_position_change():
                 f"| 處理幣種總數 | {processed_count} |",
                 f"| OI 成功數 | {oi_success_count} |",
                 f"| OI 失敗數 | {oi_fail_count} |",
+                f"| 動態 OI 門檻 (4★/5★) | {oi_4:.2f}% / {oi_5:.2f}% |",
                 f"| 進入 TOP 候選數 | {len(all_top)} |",
                 f"| 最終推播標的數 | {len(cooled_top)} |",
                 f"| 推播標的列表 | {pushed_list} |",
@@ -4448,7 +4474,7 @@ def fetch_position_change():
             logger.warning(f"寫入 GitHub Step Summary 失敗: {e}")
 
     # 僅在「本輪有實際推播」時才寫入冷卻與推播紀錄（無訊號或全篩掉不寫）
-    if cooled_top and has_any:
+    if True:  # 無論本輪是否有新訊號，都應寫回最新的冷卻與推播紀錄
         try:
             SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
             new_entries = [{"symbol": s, "dir": d, "ts": int(now_ts)} for (s, d) in pairs_this_run if s]
