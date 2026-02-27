@@ -2484,16 +2484,20 @@ def _classify_signal_and_tier(
     funding_positive = funding_rate is not None and funding_rate > FUNDING_POSITIVE
 
     # 2. CVD 趨勢驗證 (用於決定是否降級)
-    # 順勢：開多且CVD買 / 開空且CVD賣 / 平倉視為反向
+    # 順勢：開多且 CVD 買 / 開空且 CVD 賣 / 平倉視為「原趨勢的反向」確認
     is_trend_confirmed = False
     if cvd_change_1h is not None:
         if category == "long_open" and cvd_change_1h > 0:
+            # 開多 + CVD 買 → 多頭共識
             is_trend_confirmed = True
         elif category == "short_open" and cvd_change_1h < 0:
-            is_trend_confirmed = True
-        elif category == "short_close" and cvd_change_1h > 0:
+            # 開空 + CVD 賣 → 空頭共識
             is_trend_confirmed = True
         elif category == "long_close" and cvd_change_1h < 0:
+            # 多頭斷頭 + CVD 恐慌賣極值 → 抄底方向強確認
+            is_trend_confirmed = True
+        elif category == "short_close" and cvd_change_1h > 0:
+            # 空頭被軋 + CVD FOMO買極值 → 摸頭方向強確認
             is_trend_confirmed = True
 
     # 3. 判斷邏輯開始
@@ -2507,15 +2511,17 @@ def _classify_signal_and_tier(
             if oi > 0 and (funding_negative or (funding_rate is not None and funding_rate < -0.001)):
                 return _apply_retail_funding(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 主力共識+費率負" + reason_suffix))
 
-            if oi < 0 and (funding_negative or category == "short_close"):
-                if price_chg_30m is not None and price_chg_30m > PRICE_DIP_MAX:
-                    return _apply_retail_funding(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "價漲+追多" + reason_suffix))
-                return _apply_retail_funding(apply_24h("🟢 鑽石抄底", ZONE_DIP, 5, rsi_desc, "🩸 空頭逃命+CVD買" + reason_suffix))
+            # 多頭斷頭（long_close）→ 鑽石抄底
+            if category == "long_close":
+                return _apply_retail_funding(
+                    apply_24h("🟢 鑽石抄底", ZONE_DIP, 5, rsi_desc, "🩸 恐慌殺跌+CVD賣極值" + reason_suffix)
+                )
 
-            if oi < 0 and (funding_positive or category == "long_close"):
-                if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-                    return _apply_retail_funding(apply_24h("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "價跌+追空" + reason_suffix))
-                return _apply_retail_funding(apply_24h("🔴 鑽石摸頭", ZONE_TOP, 5, rsi_desc, "⛽ 多頭止盈+CVD賣" + reason_suffix))
+            # 空頭被軋（short_close）→ 鑽石摸頭
+            if category == "short_close":
+                return _apply_retail_funding(
+                    apply_24h("🔴 鑽石摸頭", ZONE_TOP, 5, rsi_desc, "⛽ 軋空爆發+CVD買極值" + reason_suffix)
+                )
 
             if oi > 0 and category in ("long_open", "short_close"):
                 return _apply_retail_funding(apply_24h("🟢 順勢追多", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 量價齊揚" + reason_suffix))
@@ -2538,18 +2544,35 @@ def _classify_signal_and_tier(
 
     # === 4 星邏輯 (OI 中等 或 5 星降級) ===
 
+    # 4 星 + CVD 順向：對「空頭平倉 / 多頭平倉」給更精確的摸底 / 摸頭文案
+    if is_trend_confirmed:
+        reason_suffix_4 = " (CVD確認)"
+        if category == "short_close":
+            # 空頭平倉 + CVD 賣極值 → 恐慌殺跌（抄底）
+            return _apply_retail_funding(
+                apply_24h("🟢 抄底", ZONE_DIP, 4, rsi_desc, "🩸 恐慌殺跌+CVD賣極值" + reason_suffix_4)
+            )
+        elif category == "long_close":
+            # 多頭平倉 + CVD 買極值 → 軋空爆發（摸頭）
+            return _apply_retail_funding(
+                apply_24h("🔴 摸頭", ZONE_TOP, 4, rsi_desc, "⛽ 軋空爆發+CVD買極值" + reason_suffix_4)
+            )
+
+    # 4 星一般邏輯（含 CVD 背離分開 open/close 文案）
     if oi > 0 and (funding_negative or category in ("long_open", "short_close")):
         return _ret_4("🟢 試單做多", ZONE_BREAKOUT_LONG, rsi_desc, "持倉增加 (觀察動能)")
 
-    if oi < 0 and (funding_positive or category == "long_close"):
+    if oi < 0 and (funding_positive or category == "short_close"):
         if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
             return _ret_4("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, rsi_desc, "價已跌→追空")
-        return _ret_4("🔴 偏空過熱", ZONE_TOP, rsi_desc, "多頭平倉 (摸頭試單)")
+        # 空頭平倉＝持倉驟降，用「被軋」語氣
+        return _ret_4("🔴 偏空過熱", ZONE_TOP, rsi_desc, "空頭被軋 (摸頭試單)")
 
-    if oi < 0 and (funding_negative or category == "short_close"):
+    if oi < 0 and (funding_negative or category == "long_close"):
         if price_chg_30m is not None and price_chg_30m > PRICE_DIP_MAX:
             return _ret_4("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, rsi_desc, "價已漲→追多")
-        return _ret_4("🟢 抄底做多", ZONE_DIP, rsi_desc, "空頭平倉 (摸底試單)")
+        # 多頭平倉＝持倉驟降，用「斷頭」語氣
+        return _ret_4("🟢 超跌試多", ZONE_DIP, rsi_desc, "多頭斷頭 (摸底試單)")
 
     if oi > 0:
         zone = ZONE_BREAKOUT_LONG if category in ("long_open", "short_close") else ZONE_BREAKOUT_SHORT
@@ -2558,6 +2581,7 @@ def _classify_signal_and_tier(
     if oi < 0:
         if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
             return _ret_4("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, rsi_desc, "價跌→追空")
+        # 持倉減少的一般摸頭情境
         return _ret_4("🔴 摸頭做空", ZONE_TOP, rsi_desc, "持倉減 (偏空)")
 
     return None
@@ -2662,7 +2686,7 @@ def build_report_message_tiered(
         is_train = (stars or 0) >= 5
         is_gambler = (stars or 0) == 4
 
-        # 結構 SL 計算：recent_low_2h / recent_high_2h 優先，否則用當前 30m K 線 high/low
+        # 結構 SL 基礎：recent_low_2h / recent_high_2h 優先，否則用當前 30m K 線 high/low
         basis_low = None
         basis_high = None
         if recent_low_2h is not None and isinstance(recent_low_2h, (int, float)) and recent_low_2h > 0:
@@ -2675,34 +2699,65 @@ def build_report_message_tiered(
         elif last_kline_high_30m is not None and isinstance(last_kline_high_30m, (int, float)) and last_kline_high_30m > 0:
             basis_high = float(last_kline_high_30m)
 
-        buffer_pct = 0.005  # 0.5% buffer
+        atr_val = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
+        buffer_pct = 0.005  # 0.5% buffer（結構位微調）
         sl_price = None
-        if is_long and basis_low is not None:
-            sl_price = basis_low * (1.0 - buffer_pct)
-        elif (not is_long) and basis_high is not None:
-            sl_price = basis_high * (1.0 + buffer_pct)
-
-        # 若因資料缺失無法取得結構 SL，最後才用 ATR / 百分比作安全退場（極少數情況）
-        if sl_price is None:
-            atr_val = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
-            if atr_val is not None:
-                # 結構缺失時，仍盡量用較保守的 ATR 停損
-                fallback_mult = 1.2 if is_gambler else 1.0
-                sl_dist = fallback_mult * atr_val
-            else:
-                sl_dist = price * (0.03 if is_gambler else 0.02)
-            sl_price = price - sl_dist if is_long else price + sl_dist
-
-        # 容錯機制：SL Cap（列車 8%，賭鬼 6%）
-        max_pct = 0.08 if is_train else 0.06
-        dist_pct = abs(price - sl_price) / price if price > 0 else 0
         sl_capped = False
-        if dist_pct > max_pct:
-            sl_capped = True
-            if is_long:
-                sl_price = price * (1.0 - max_pct)
+        # 容錯機制：列車 8%，賭鬼 6%
+        max_pct = 0.08 if is_train else 0.06
+
+        if is_train:
+            # 列車：結構 + ATR 雙保底
+            basis_price = basis_low if is_long else basis_high
+            struct_dist = None
+            if basis_price is not None:
+                # 結構位做 0.5% buffer 微調後，再算距離
+                if is_long:
+                    basis_price_adj = basis_price * (1.0 - buffer_pct)
+                else:
+                    basis_price_adj = basis_price * (1.0 + buffer_pct)
+                struct_dist = abs(price - basis_price_adj)
+            # ATR 保底距離：1.2×ATR，無 ATR 時用 2% 價格距離
+            if atr_val is not None:
+                atr_floor = 1.2 * atr_val
             else:
-                sl_price = price * (1.0 + max_pct)
+                atr_floor = price * 0.02
+            if struct_dist is not None:
+                sl_dist = max(struct_dist, atr_floor)
+            else:
+                sl_dist = atr_floor
+            sl_price = price - sl_dist if is_long else price + sl_dist
+            dist_pct = abs(price - sl_price) / price if price > 0 else 0
+            if dist_pct > max_pct:
+                sl_capped = True
+                if is_long:
+                    sl_price = price * (1.0 - max_pct)
+                else:
+                    sl_price = price * (1.0 + max_pct)
+        else:
+            # 賭鬼：保留原本「結構優先，否則 ATR / 百分比」方案
+            if is_long and basis_low is not None:
+                sl_price = basis_low * (1.0 - buffer_pct)
+            elif (not is_long) and basis_high is not None:
+                sl_price = basis_high * (1.0 + buffer_pct)
+
+            # 若因資料缺失無法取得結構 SL，最後才用 ATR / 百分比作安全退場（極少數情況）
+            if sl_price is None:
+                if atr_val is not None:
+                    # 結構缺失時，仍盡量用較保守的 ATR 停損
+                    fallback_mult = 1.2 if is_gambler else 1.0
+                    sl_dist = fallback_mult * atr_val
+                else:
+                    sl_dist = price * (0.03 if is_gambler else 0.02)
+                sl_price = price - sl_dist if is_long else price + sl_dist
+
+            dist_pct = abs(price - sl_price) / price if price > 0 else 0
+            if dist_pct > max_pct:
+                sl_capped = True
+                if is_long:
+                    sl_price = price * (1.0 - max_pct)
+                else:
+                    sl_price = price * (1.0 + max_pct)
 
         # 風險距離（R 的母數）
         risk_dist = (price - sl_price) if is_long else (sl_price - price)
@@ -2718,7 +2773,7 @@ def build_report_message_tiered(
         tp1_label = tp2_label = ""
         r_tp1 = r_tp2 = None
 
-        # 列車 (S/S+)：維持現有邏輯（主力成本對稱優先，其次 1.5R）
+        # 列車 (S/S+)：主力成本對稱優先，其次 1.2R
         if is_train:
             if vwap_2h is not None and isinstance(vwap_2h, (int, float)) and vwap_2h > 0:
                 vwap = float(vwap_2h)
@@ -2728,19 +2783,19 @@ def build_report_message_tiered(
                         tp1_price = cand
                         tp1_label = "主力成本"
                     else:
-                        tp1_price = price + 1.5 * risk_dist
-                        tp1_label = "1.5R"
+                        tp1_price = price + 1.2 * risk_dist
+                        tp1_label = "1.2R"
                 else:
                     cand = 2.0 * vwap - price
                     if 0 < cand < price:
                         tp1_price = cand
                         tp1_label = "主力成本"
                     else:
-                        tp1_price = price - 1.5 * risk_dist
-                        tp1_label = "1.5R"
+                        tp1_price = price - 1.2 * risk_dist
+                        tp1_label = "1.2R"
             else:
-                tp1_price = price + 1.5 * risk_dist if is_long else price - 1.5 * risk_dist
-                tp1_label = "1.5R"
+                tp1_price = price + 1.2 * risk_dist if is_long else price - 1.2 * risk_dist
+                tp1_label = "1.2R"
             r_tp1 = round(((tp1_price - price) / risk_dist) if is_long else ((price - tp1_price) / risk_dist), 1)
 
         # 賭鬼 (A)：SL 保留現有結構邏輯，TP1 固定為 1.0R，TP2 採用「風報比 2.5~4.0R」區間的理論目標
@@ -3766,37 +3821,30 @@ def fetch_position_change():
                 else:
                     logger.info(f"【倉位追蹤快照】{sym_base} full_symbol={full_sym} cur_price={cur_price}")
 
-            # 以 high/low 為主、收盤價為輔，檢查是否曾觸及 SL/TP/TP2
-            if cur_price is not None or (kline_high is not None and kline_low is not None):
+            # 僅以當下快照價/收盤價檢查是否觸及 SL/TP/TP2（不再使用 30m K 線 high/low 避免提前誤判）
+            if cur_price is not None:
                 is_long = pushed_dir == "多"
                 hit_sl = False
                 hit_tp = False
                 hit_tp2 = False
-                # SL 觸發條件：多單看 low <= SL；空單看 high >= SL；如無 high/low 則退回收盤價判斷一次
+                # SL 觸發條件：全系統統一僅使用當下快照價，避免 30m high 包含暴跌前價格而提前停損
                 if sl_level is not None:
-                    if is_long:
-                        if kline_low is not None and kline_low <= sl_level:
-                            hit_sl = True
-                        elif kline_low is None and cur_price is not None and cur_price <= sl_level:
-                            hit_sl = True
-                    else:
-                        if kline_high is not None and kline_high >= sl_level:
-                            hit_sl = True
-                        elif kline_high is None and cur_price is not None and cur_price >= sl_level:
-                            hit_sl = True
-                # TP 觸發條件：只用「收盤價/現價」達標才算，避免插針後收回仍誤發 TP1 達標
-                # （SL 仍用 K 線 high/low，以免漏判止損）
-                if tp1_level is not None and cur_price is not None:
+                    if is_long and cur_price <= sl_level:
+                        hit_sl = True
+                    elif (not is_long) and cur_price >= sl_level:
+                        hit_sl = True
+                # TP1 觸發條件：只用「收盤價/現價」達標才算，避免插針後收回仍誤發 TP1 達標
+                if tp1_level is not None:
                     if is_long and cur_price >= tp1_level:
                         hit_tp = True
-                    elif not is_long and cur_price <= tp1_level:
+                    elif (not is_long) and cur_price <= tp1_level:
                         hit_tp = True
 
                 # TP2 觸發條件：同上，僅收盤價/現價達標才統計
-                if tp2_level is not None and cur_price is not None:
+                if tp2_level is not None:
                     if is_long and cur_price >= tp2_level:
                         hit_tp2 = True
-                    elif not is_long and cur_price <= tp2_level:
+                    elif (not is_long) and cur_price <= tp2_level:
                         hit_tp2 = True
 
                 logger.info(
