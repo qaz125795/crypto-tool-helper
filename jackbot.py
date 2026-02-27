@@ -130,6 +130,61 @@ _dynamic_oi_sample_size: int = 0
 _emergency_sniper_state: Dict[str, Any] = {}
 _emergency_sniper_path: Optional[str] = None
 
+# ── API 熔斷器 (Circuit Breaker) ──────────────────────────────────────────────
+# 若連續出現 5 次 429，自動將 MAX_WORKERS 降為 1 並將 wait_time 加倍，持續 5 分鐘
+_circuit_breaker: Dict[str, Any] = {
+    "consecutive_429": 0,
+    "tripped": False,
+    "trip_time": 0.0,
+    "trip_duration": 300.0,  # 5 分鐘保護期
+}
+_circuit_breaker_lock = threading.Lock()
+
+
+def _cb_record_429() -> None:
+    """記錄一次 429 錯誤；達到 5 次時自動啟動熔斷。"""
+    with _circuit_breaker_lock:
+        _circuit_breaker["consecutive_429"] += 1
+        cnt = _circuit_breaker["consecutive_429"]
+        if cnt >= 5 and not _circuit_breaker["tripped"]:
+            _circuit_breaker["tripped"] = True
+            _circuit_breaker["trip_time"] = time.time()
+            logger.warning(
+                f"[熔斷器啟動🚨] 連續 {cnt} 次 429，"
+                f"自動降為單執行緒並加倍等待，持續 {_circuit_breaker['trip_duration']/60:.0f} 分鐘"
+            )
+
+
+def _cb_record_success() -> None:
+    """記錄一次成功請求，重置連續 429 計數。"""
+    with _circuit_breaker_lock:
+        if _circuit_breaker["consecutive_429"] > 0:
+            _circuit_breaker["consecutive_429"] = 0
+
+
+def _cb_is_tripped() -> bool:
+    """判斷熔斷器是否仍在保護期；到期自動恢復。"""
+    with _circuit_breaker_lock:
+        if not _circuit_breaker["tripped"]:
+            return False
+        elapsed = time.time() - _circuit_breaker["trip_time"]
+        if elapsed >= _circuit_breaker["trip_duration"]:
+            _circuit_breaker["tripped"] = False
+            _circuit_breaker["consecutive_429"] = 0
+            logger.info("[熔斷器恢復✅] 5 分鐘保護期結束，恢復正常並行數與等待時間")
+            return False
+        return True
+
+
+def _cb_get_max_workers(default: int = 4) -> int:
+    """根據熔斷器狀態返回建議最大執行緒數。"""
+    return 1 if _cb_is_tripped() else default
+
+
+def _cb_get_wait_multiplier() -> float:
+    """根據熔斷器狀態返回 wait_time 倍率（熔斷中 → 2×）。"""
+    return 2.0 if _cb_is_tripped() else 1.0
+
 
 def _emergency_save_sniper_state() -> None:
     """緊急備援寫入：atexit 與 SIGTERM handler 共用。
@@ -227,18 +282,42 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
 
 
 def load_json_file(filepath: Path, default: Any = None) -> Any:
-    """從文件加載 JSON 數據"""
-    if filepath.exists():
+    """從文件加載 JSON 數據；若主文件損毀或為空，自動嘗試從備份恢復。"""
+    def _try_load(path: Path) -> Any:
+        if not path.exists():
+            return None
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"讀取文件失敗 {filepath}: {str(e)}")
+            text = path.read_text(encoding='utf-8').strip()
+            if not text:
+                return None
+            return json.loads(text)
+        except Exception:
+            return None
+
+    result = _try_load(filepath)
+    if result is not None:
+        return result
+
+    # 主文件損毀或不存在，嘗試備份
+    backup_path = DATA_DIR / "backup_state.json"
+    if backup_path.exists() and backup_path != filepath:
+        try:
+            backup_all: Dict[str, Any] = json.loads(backup_path.read_text(encoding='utf-8'))
+            key = str(filepath.name)
+            backed = backup_all.get(key)
+            if backed is not None:
+                logger.warning(f"[備份還原] 主文件 {filepath.name} 損毀/為空，已從 backup_state.json 恢復")
+                return backed
+        except Exception as be:
+            logger.debug(f"[備份還原] 讀取備份失敗: {be}")
+
+    if filepath.exists():
+        logger.error(f"讀取文件失敗（內容無效）{filepath}")
     return default if default is not None else []
 
 
 def save_json_file(filepath: Path, data: Any) -> bool:
-    """保存數據到 JSON 文件（帶 fsync，儘量確保寫入落盤）。"""
+    """保存數據到 JSON 文件（帶 fsync）；若是 sniper_cooldown.json 同步寫入備份。"""
     try:
         tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
         filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -248,9 +327,33 @@ def save_json_file(filepath: Path, data: Any) -> bool:
             try:
                 os.fsync(f.fileno())
             except OSError:
-                # 某些環境可能不支援 fsync，忽略即可
                 pass
         os.replace(tmp_path, filepath)
+
+        # 備份寫入：將 sniper_cooldown.json 同步寫入 data/backup_state.json
+        if filepath.name == "sniper_cooldown.json":
+            backup_path = DATA_DIR / "backup_state.json"
+            try:
+                if backup_path.exists():
+                    try:
+                        backup_all: Dict[str, Any] = json.loads(backup_path.read_text(encoding='utf-8'))
+                    except Exception:
+                        backup_all = {}
+                else:
+                    backup_all = {}
+                backup_all[filepath.name] = data
+                backup_tmp = backup_path.with_suffix(".tmp")
+                with open(backup_tmp, 'w', encoding='utf-8') as bf:
+                    json.dump(backup_all, bf, ensure_ascii=False, indent=2)
+                    bf.flush()
+                    try:
+                        os.fsync(bf.fileno())
+                    except OSError:
+                        pass
+                os.replace(backup_tmp, backup_path)
+            except Exception as be:
+                logger.warning(f"[備份寫入] backup_state.json 寫入失敗（不影響主要功能）: {be}")
+
         return True
     except Exception as e:
         logger.error(f"保存文件失敗 {filepath}: {str(e)}")
@@ -1556,8 +1659,8 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
             _coinglass_oi_rate_limiter = {"last_call": 0.0}
         now = time.time()
         elapsed = now - _coinglass_oi_rate_limiter.get("last_call", 0.0)
-        # 雲端環境 Anti-429：每次呼叫隨機 sleep 0.3~0.7 秒（含一點亂數抖動）
-        wait_time = random.uniform(0.3, 0.7)
+        # 雲端環境 Anti-429：熔斷器啟動時 wait_time 自動加倍
+        wait_time = random.uniform(0.3, 0.7) * _cb_get_wait_multiplier()
         if elapsed < wait_time:
             time.sleep(wait_time - elapsed)
         _coinglass_oi_rate_limiter["last_call"] = time.time()
@@ -1578,15 +1681,18 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
                     data_list = result.get("data", result.get("list", []))
                     change = _parse_oi_change_from_data_list(data_list)
                     if change is not None:
+                        _cb_record_success()
                         return change
                 msg = result.get("msg", "")
                 if "Too Many Requests" in msg or result.get("code") in ("400", "429"):
+                    _cb_record_429()
                     sleep_for = backoff + random.uniform(0, 1.0)
                     logger.warning(f"[GITHUB_IP_THROTTLED] CoinGlass 限流 ({base_symbol})，休息 {sleep_for:.1f} 秒（第 {attempt+1} 次重試）...")
                     time.sleep(sleep_for)
                     backoff *= 2.0
                     continue
             elif response.status_code == 429:
+                _cb_record_429()
                 sleep_for = backoff + random.uniform(0, 1.0)
                 logger.warning(f"[GITHUB_IP_THROTTLED] CoinGlass HTTP 429 限流 ({base_symbol})，休息 {sleep_for:.1f} 秒（第 {attempt+1} 次重試）...")
                 time.sleep(sleep_for)
@@ -3350,8 +3456,18 @@ def build_report_message_tiered(
                 # 止損與止盈顯示
                 t1_note = x.get("tp1_real_note") or x.get("tp1_label") or "ATR"
                 if stars >= 5:
-                    # 列車：維持原有排版
-                    lines.append(f"🛑 止損：`{sl_val}` (標準) {cap_note}")
+                    # 列車：若 SL 距現價 >5%，標注「深空防護」提示跟單者不要輕易移動止損
+                    _sl_deep_note = ""
+                    try:
+                        _sl_price_f = float(sl_val.replace(",", "")) if sl_val and sl_val != "-" else None
+                        _cur_p = x.get("current_price")
+                        if _sl_price_f and _cur_p and float(_cur_p) > 0:
+                            _sl_dist_pct = abs(float(_cur_p) - _sl_price_f) / float(_cur_p) * 100
+                            if _sl_dist_pct > 5.0:
+                                _sl_deep_note = " 🔐(深空防護)"
+                    except (TypeError, ValueError):
+                        pass
+                    lines.append(f"🛑 止損：`{sl_val}` (標準){_sl_deep_note} {cap_note}")
                     r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
                     lines.append(f"✅ 止盈：`{tp1_val}` ({t1_note}){r1}")
                 else:
@@ -3613,8 +3729,10 @@ def fetch_position_change():
     oi_success_count = 0
     oi_fail_count = 0
     
-    # 並行處理配置：CoinGlass 專用慢速模式，避免瞬間請求過多
-    MAX_WORKERS = 4
+    # 並行處理配置：CoinGlass 專用慢速模式；熔斷器啟動時自動降為 1 執行緒
+    MAX_WORKERS = _cb_get_max_workers(default=4)
+    if MAX_WORKERS == 1:
+        logger.warning("[熔斷器作用中] MAX_WORKERS 已降為 1，本輪採單執行緒保護模式")
     start_time = time.time()
     MAX_EXECUTION_TIME = 16 * 60  # 強制結束上限 16 分鐘（雙重保護用）
     
@@ -3978,110 +4096,161 @@ def fetch_position_change():
     now_tw = datetime.fromtimestamp(now_ts, tz=TAIPEI_TZ)
     if now_tw.hour == 0 and now_tw.minute < 30:
         summary_date = (now_tw - timedelta(days=1)).date()
-        pushed_today = [e for e in push_log_signals if isinstance(e, dict) and e.get("ts") and datetime.fromtimestamp(e["ts"], tz=TAIPEI_TZ).date() == summary_date]
-        closed_today = [e for e in push_log_signals if isinstance(e, dict) and e.get("closed") and e.get("closed_ts") and datetime.fromtimestamp(e["closed_ts"], tz=TAIPEI_TZ).date() == summary_date]
-        # 勝負只計「止盈(tp1/tp1_sl) / 止損(sl)」，timeout / reversal 視為平局，不納入分母
-        n_sl = sum(1 for e in closed_today if e.get("exit_reason") == "sl")
-        n_tp1 = sum(1 for e in closed_today if e.get("exit_reason") in ("tp1", "tp1_sl"))
-        n_timeout = sum(1 for e in closed_today if e.get("exit_reason") == "timeout")
-        n_reversal = sum(1 for e in closed_today if e.get("exit_reason") == "reversal")
-        n_win = n_tp1
-        n_closed = len(closed_today)
-        n_pushed = len(pushed_today)
-        win_rate = (n_win / (n_win + n_sl) * 100) if (n_win + n_sl) else None
-        # R 統計：以各單 realized_R 加總
-        sum_r = sum(
-            float(e.get("realized_R") or 0.0)
-            for e in closed_today
-            if isinstance(e, dict)
-        )
-        sum_r_win = sum(
-            float(e.get("realized_R") or 0.0)
-            for e in closed_today
-            if isinstance(e, dict) and (e.get("realized_R") or 0.0) > 0
-        )
-        sum_r_loss = sum(
-            float(e.get("realized_R") or 0.0)
-            for e in closed_today
-            if isinstance(e, dict) and (e.get("realized_R") or 0.0) < 0
-        )
-        # 分級工具：依 tier / stars 判斷列車 / 賭鬼 / 飛機
-        def _entry_tier(e: Dict[str, Any]) -> str:
-            t = (e.get("tier") or "").strip()
-            if t:
-                return t
-            stars_val = e.get("stars")
-            try:
-                stars_val = int(stars_val) if stars_val is not None else None
-            except (TypeError, ValueError):
-                stars_val = None
-            if stars_val is not None and stars_val >= 5:
-                return "train"
-            if stars_val is not None and stars_val < 5:
-                return "gambler"
-            return "unknown"
 
-        summary_lines = [
-            f"📊 *【{summary_date} 每日績效總結】*",
-            f"",
-            f"📤 當日推播：{n_pushed} 單",
-            f"✅ 已結案：{n_closed} 單（止盈 {n_tp1}｜止損 {n_sl}｜超時撤退 {n_timeout}｜籌碼反轉 {n_reversal}）",
-            f"🎯 R 統計：贏 {sum_r_win:.2f}R｜輸 {sum_r_loss:.2f}R｜淨 {sum_r:.2f}R",
-            f"※ 只要碰到 TP1 即計入贏局；止盈算贏、止損算輸（timeout / reversal 視為平局）→ {n_win} 贏 / {n_sl} 輸",
-        ]
-        if win_rate is not None:
-            summary_lines.append(f"📈 整體勝率：{win_rate:.1f}%")
-        summary_lines.append(f"")
-        # 依等級（飛機/列車/賭鬼）細分績效
-        tier_defs = [
-            ("elite", "✈️ 飛機 (S+)"),
-            ("train", "🚅 列車 (S)"),
-            ("gambler", "👻 賭鬼 (A)"),
-        ]
-        for tier_key, tier_label in tier_defs:
-            pushed_t = [e for e in pushed_today if isinstance(e, dict) and _entry_tier(e) == tier_key]
-            closed_t = [e for e in closed_today if isinstance(e, dict) and _entry_tier(e) == tier_key]
-            if not pushed_t and not closed_t:
-                continue
-            n_sl_t = sum(1 for e in closed_t if e.get("exit_reason") == "sl")
-            n_tp1_t = sum(1 for e in closed_t if e.get("exit_reason") in ("tp1", "tp1_sl"))
-            win_rate_t = (n_tp1_t / (n_tp1_t + n_sl_t) * 100) if (n_tp1_t + n_sl_t) else None
-            sum_r_t = sum(float(e.get("realized_R") or 0.0) for e in closed_t)
-            wr_str_t = f"{win_rate_t:.1f}%" if win_rate_t is not None else "-"
-            if tier_key == "gambler":
-                # 賭鬼：額外統計 TP2 命中次數與理論 R
-                n_tp2_t = sum(
-                    1 for e in closed_t
-                    if e.get("tp2_hit") and (e.get("tp2_R") is not None)
-                )
-                sum_tp2_r_t = sum(
-                    float(e.get("tp2_R") or 0.0)
-                    for e in closed_t
-                    if e.get("tp2_hit") and (e.get("tp2_R") is not None)
-                )
-                summary_lines.append(
-                    f"{tier_label}：TP1 {n_tp1_t} 單｜TP2 命中 {n_tp2_t} 單（理論 +{sum_tp2_r_t:.2f}R）｜淨 {sum_r_t:.2f}R"
-                )
+        # ── 防重複發送：檢查 last_summary_date.json ────────────────────────────
+        _last_summary_file = DATA_DIR / "last_summary_date.json"
+        _last_summary_data = load_json_file(_last_summary_file, default={})
+        _last_sent_str = _last_summary_data.get("last_sent_date", "")
+        if _last_sent_str == str(summary_date):
+            logger.info(f"每日績效總結今日已發送過（{summary_date}），跳過重複推播")
+        else:
+            pushed_today = [e for e in push_log_signals if isinstance(e, dict) and e.get("ts") and datetime.fromtimestamp(e["ts"], tz=TAIPEI_TZ).date() == summary_date]
+            closed_today = [e for e in push_log_signals if isinstance(e, dict) and e.get("closed") and e.get("closed_ts") and datetime.fromtimestamp(e["closed_ts"], tz=TAIPEI_TZ).date() == summary_date]
+            # 勝負只計「止盈(tp1/tp1_sl) / 止損(sl)」，timeout / reversal 視為平局，不納入分母
+            n_sl = sum(1 for e in closed_today if e.get("exit_reason") == "sl")
+            n_tp1 = sum(1 for e in closed_today if e.get("exit_reason") in ("tp1", "tp1_sl"))
+            n_timeout = sum(1 for e in closed_today if e.get("exit_reason") == "timeout")
+            n_reversal = sum(1 for e in closed_today if e.get("exit_reason") == "reversal")
+            n_win = n_tp1
+            n_closed = len(closed_today)
+            n_pushed = len(pushed_today)
+            win_rate = (n_win / (n_win + n_sl) * 100) if (n_win + n_sl) else None
+            # R 統計：以各單 realized_R 加總
+            sum_r = sum(
+                float(e.get("realized_R") or 0.0)
+                for e in closed_today
+                if isinstance(e, dict)
+            )
+            sum_r_win = sum(
+                float(e.get("realized_R") or 0.0)
+                for e in closed_today
+                if isinstance(e, dict) and (e.get("realized_R") or 0.0) > 0
+            )
+            sum_r_loss = sum(
+                float(e.get("realized_R") or 0.0)
+                for e in closed_today
+                if isinstance(e, dict) and (e.get("realized_R") or 0.0) < 0
+            )
+
+            # ── 週/月累積 R 值：從 performance_history.json 讀取歷史日資料 ──
+            _perf_hist_file = DATA_DIR / "performance_history.json"
+            _perf_hist: List[Dict] = load_json_file(_perf_hist_file, default=[])
+            if not isinstance(_perf_hist, list):
+                _perf_hist = []
+            # 寫入今日資料（先移除同日舊記錄再追加）
+            _perf_hist = [r for r in _perf_hist if isinstance(r, dict) and r.get("date") != str(summary_date)]
+            _perf_hist.append({
+                "date": str(summary_date),
+                "net_r": round(sum_r, 4),
+                "n_win": n_win,
+                "n_sl": n_sl,
+                "n_pushed": n_pushed,
+            })
+            # 只保留最近 35 天
+            _perf_hist = sorted(_perf_hist, key=lambda r: r.get("date", ""))[-35:]
+            save_json_file(_perf_hist_file, _perf_hist)
+
+            # 計算週累積（最近 7 筆）與月累積（最近 30 筆）
+            _week_records = _perf_hist[-7:] if len(_perf_hist) >= 7 else _perf_hist
+            _month_records = _perf_hist[-30:] if len(_perf_hist) >= 30 else _perf_hist
+            sum_r_week = sum(float(r.get("net_r") or 0.0) for r in _week_records)
+            sum_r_month = sum(float(r.get("net_r") or 0.0) for r in _month_records)
+            week_days = len(_week_records)
+            month_days = len(_month_records)
+
+            # ── 動態戰報標題：正/負 R 值給不同開頭 ──────────────────────────
+            if sum_r >= 0:
+                battle_header = f"🏆 【昨日戰報：船長帶隊穩定收割】"
             else:
-                summary_lines.append(
-                    f"{tier_label}：推播 {len(pushed_t)}｜結案 {len(closed_t)}（止盈 {n_tp1_t}｜止損 {n_sl_t}）"
-                    f" 勝率 {wr_str_t}｜淨 {sum_r_t:.2f}R"
-                )
-        summary_lines.append(f"")
-        # 各分類（多單/空單）勝率
-        for _dir, _label in (("多", "多單"), ("空", "空單")):
-            p_d = [e for e in pushed_today if (e.get("dir") or "").strip() == _dir]
-            c_d = [e for e in closed_today if (e.get("dir") or "").strip() == _dir]
-            sl_d = sum(1 for e in c_d if e.get("exit_reason") == "sl")
-            tp_win_d = sum(1 for e in c_d if e.get("exit_reason") in ("tp1", "tp1_sl"))
-            w_d = tp_win_d + sl_d
-            wr_d = (tp_win_d / w_d * 100) if w_d else None
-            _wr_str = f"{wr_d:.1f}%" if wr_d is not None else "-"
-            summary_lines.append(f"　{_label}：推播 {len(p_d)}｜結案 {len(c_d)}（止盈 {tp_win_d}｜止損 {sl_d}）勝率 {_wr_str}")
-        summary_lines.append(f"")
-        summary_lines.append(f"🕐 {now_tw.strftime('%Y-%m-%d %H:%M')} 台灣")
-        send_telegram_message("\n".join(summary_lines), TG_THREAD_IDS["position_change"], parse_mode="Markdown")
-        logger.info(f"每日績效總結已發送: {summary_date} 推播 {n_pushed} 結案 {n_closed} 止盈 {n_tp1} 止損 {n_sl} 超時 {n_timeout} 反轉 {n_reversal} 勝率 {win_rate}%")
+                battle_header = f"🛡️ 【昨日戰報：風控機制有效保護本金】"
+
+            # 分級工具：依 tier / stars 判斷列車 / 賭鬼 / 飛機
+            def _entry_tier(e: Dict[str, Any]) -> str:
+                t = (e.get("tier") or "").strip()
+                if t:
+                    return t
+                stars_val = e.get("stars")
+                try:
+                    stars_val = int(stars_val) if stars_val is not None else None
+                except (TypeError, ValueError):
+                    stars_val = None
+                if stars_val is not None and stars_val >= 5:
+                    return "train"
+                if stars_val is not None and stars_val < 5:
+                    return "gambler"
+                return "unknown"
+
+            summary_lines = [
+                f"*{battle_header}*",
+                f"📊 *【{summary_date} 每日績效總結】*",
+                f"",
+                f"📤 當日推播：{n_pushed} 單",
+                f"✅ 已結案：{n_closed} 單（止盈 {n_tp1}｜止損 {n_sl}｜超時撤退 {n_timeout}｜籌碼反轉 {n_reversal}）",
+                f"🎯 R 統計：贏 {sum_r_win:.2f}R｜輸 {sum_r_loss:.2f}R｜淨 {sum_r:.2f}R",
+                f"※ 只要碰到 TP1 即計入贏局；止盈算贏、止損算輸（timeout / reversal 視為平局）→ {n_win} 贏 / {n_sl} 輸",
+            ]
+            if win_rate is not None:
+                summary_lines.append(f"📈 整體勝率：{win_rate:.1f}%")
+            summary_lines.append(f"")
+            # 週/月累積 R 值
+            week_sign = "+" if sum_r_week >= 0 else ""
+            month_sign = "+" if sum_r_month >= 0 else ""
+            summary_lines.append(f"📅 *複利統計（累積 R 值）*")
+            summary_lines.append(f"　📆 近 {week_days} 日（週）：{week_sign}{sum_r_week:.2f}R")
+            summary_lines.append(f"　🗓️ 近 {month_days} 日（月）：{month_sign}{sum_r_month:.2f}R")
+            summary_lines.append(f"")
+            # 依等級（飛機/列車/賭鬼）細分績效
+            tier_defs = [
+                ("elite", "✈️ 飛機 (S+)"),
+                ("train", "🚅 列車 (S)"),
+                ("gambler", "👻 賭鬼 (A)"),
+            ]
+            for tier_key, tier_label in tier_defs:
+                pushed_t = [e for e in pushed_today if isinstance(e, dict) and _entry_tier(e) == tier_key]
+                closed_t = [e for e in closed_today if isinstance(e, dict) and _entry_tier(e) == tier_key]
+                if not pushed_t and not closed_t:
+                    continue
+                n_sl_t = sum(1 for e in closed_t if e.get("exit_reason") == "sl")
+                n_tp1_t = sum(1 for e in closed_t if e.get("exit_reason") in ("tp1", "tp1_sl"))
+                win_rate_t = (n_tp1_t / (n_tp1_t + n_sl_t) * 100) if (n_tp1_t + n_sl_t) else None
+                sum_r_t = sum(float(e.get("realized_R") or 0.0) for e in closed_t)
+                wr_str_t = f"{win_rate_t:.1f}%" if win_rate_t is not None else "-"
+                if tier_key == "gambler":
+                    # 賭鬼：額外統計 TP2 命中次數與理論 R
+                    n_tp2_t = sum(
+                        1 for e in closed_t
+                        if e.get("tp2_hit") and (e.get("tp2_R") is not None)
+                    )
+                    sum_tp2_r_t = sum(
+                        float(e.get("tp2_R") or 0.0)
+                        for e in closed_t
+                        if e.get("tp2_hit") and (e.get("tp2_R") is not None)
+                    )
+                    summary_lines.append(
+                        f"{tier_label}：TP1 {n_tp1_t} 單｜TP2 命中 {n_tp2_t} 單（理論 +{sum_tp2_r_t:.2f}R）｜淨 {sum_r_t:.2f}R"
+                    )
+                else:
+                    summary_lines.append(
+                        f"{tier_label}：推播 {len(pushed_t)}｜結案 {len(closed_t)}（止盈 {n_tp1_t}｜止損 {n_sl_t}）"
+                        f" 勝率 {wr_str_t}｜淨 {sum_r_t:.2f}R"
+                    )
+            summary_lines.append(f"")
+            # 各分類（多單/空單）勝率
+            for _dir, _label in (("多", "多單"), ("空", "空單")):
+                p_d = [e for e in pushed_today if (e.get("dir") or "").strip() == _dir]
+                c_d = [e for e in closed_today if (e.get("dir") or "").strip() == _dir]
+                sl_d = sum(1 for e in c_d if e.get("exit_reason") == "sl")
+                tp_win_d = sum(1 for e in c_d if e.get("exit_reason") in ("tp1", "tp1_sl"))
+                w_d = tp_win_d + sl_d
+                wr_d = (tp_win_d / w_d * 100) if w_d else None
+                _wr_str = f"{wr_d:.1f}%" if wr_d is not None else "-"
+                summary_lines.append(f"　{_label}：推播 {len(p_d)}｜結案 {len(c_d)}（止盈 {tp_win_d}｜止損 {sl_d}）勝率 {_wr_str}")
+            summary_lines.append(f"")
+            summary_lines.append(f"🕐 {now_tw.strftime('%Y-%m-%d %H:%M')} 台灣")
+            send_telegram_message("\n".join(summary_lines), TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+            # 記錄已發送，防止本輪後續迭代重複推播
+            save_json_file(_last_summary_file, {"last_sent_date": str(summary_date)})
+            logger.info(f"每日績效總結已發送: {summary_date} 推播 {n_pushed} 結案 {n_closed} 止盈 {n_tp1} 止損 {n_sl} 超時 {n_timeout} 反轉 {n_reversal} 勝率 {win_rate}% | 週R={sum_r_week:.2f} 月R={sum_r_month:.2f}")
     # 倉位追蹤依賴「上一輪（及之前）寫入的推播紀錄」；若 data 目錄在排程間未持久化（如 CI 無 cache），此處會一直是 0 筆
     in_window = [
         e for e in push_log_signals
@@ -4248,10 +4417,12 @@ def fetch_position_change():
                             except (TypeError, ValueError):
                                 be_price_f = None
                             be_str = f"`{be_price_f}`" if be_price_f else "進場價"
+                            _locked_time = datetime.now(TAIPEI_TZ).strftime("%H:%M")
                             tp_msg = (
                                 f"🛡️ *【盾牌啟動・此單已零風險】*\n"
                                 f"✅ TP1 達標 | 台灣時間 *{pushed_at_tw}* 推的賭鬼 *{dir_label}* 標的 `{sym_base}`\n"
-                                f"TP1 `{tp1_level}` 已觸及，恭喜入袋為安！\n\n"
+                                f"TP1 `{tp1_level}` 已觸及，恭喜入袋為安！\n"
+                                f"✅ *已鎖定利潤* `{_locked_time}` 台灣\n\n"
                                 f"📌 *建議立即操作：*\n"
                                 f"  1️⃣ 先獲利了結 *60%* 倉位\n"
                                 f"  2️⃣ 剩餘 40%：將止損移動至進場價 {be_str}（保本）\n"
@@ -6834,125 +7005,163 @@ def run_altseason_radar_once():
 # ==================== 10. Hyperliquid 聰明錢監控 ====================
 
 HYPERLIQUID_SENT_ALERTS_FILE = DATA_DIR / "hyperliquid_sent_alerts.json"
-WHALE_ALERT_THRESHOLD = 200_000  # $20萬 USD（放寬門檻，捕捉更多大額交易）
+WHALE_ALERT_THRESHOLD = 200_000  # 保留供其他地方引用，實際邏輯改為動態門檻
 SMART_MONEY_PNL_MIN = 50_000  # $50k USD（放寬）
 MONEY_PRINTER_PNL_MIN = 500_000  # $50萬 USD（放寬）
 
+# 動態門檻配置
+_WHALE_MAINSTREAM_COINS = {"BTC", "ETH", "SOL"}
+_WHALE_THRESHOLD_MAINSTREAM = 500_000   # 主流幣 $50萬
+_WHALE_THRESHOLD_ALTCOIN_RATIO = 0.005  # 山寨幣：24h 成交量的 0.5%
+_WHALE_THRESHOLD_ALTCOIN_DEFAULT = 50_000  # 山寨幣備援門檻 $5萬
+
+
+def _get_whale_threshold(symbol: str, alert: Dict) -> float:
+    """根據幣種計算動態鯨魚門檻。
+    主流幣 (BTC/ETH/SOL) → $50萬固定；山寨幣 → 24h 成交量 × 0.5%（無資料則 $5萬）。
+    """
+    base = symbol.replace("USDT", "").replace("-PERP", "").replace("PERP", "").strip().upper()
+    if base in _WHALE_MAINSTREAM_COINS:
+        return _WHALE_THRESHOLD_MAINSTREAM
+
+    # 嘗試從 alert 中提取 24h 成交量
+    vol_keys = [
+        'volume_24h', 'vol_24h', 'volume24h', 'daily_volume', 'turnover_24h',
+        'quoteVolume24h', 'quote_volume_24h',
+    ]
+    vol_24h: Optional[float] = None
+    for k in vol_keys:
+        raw = alert.get(k)
+        if raw is not None:
+            try:
+                v = float(str(raw).replace(',', '').replace('$', '').strip())
+                if v > 0:
+                    vol_24h = v
+                    break
+            except (TypeError, ValueError):
+                pass
+
+    if vol_24h and vol_24h > 0:
+        dynamic = vol_24h * _WHALE_THRESHOLD_ALTCOIN_RATIO
+        return max(dynamic, 10_000)  # 最低 $1 萬保護
+
+    return _WHALE_THRESHOLD_ALTCOIN_DEFAULT
+
 
 def fetch_hyperliquid_whale_alert() -> List[Dict]:
-    """獲取 Hyperliquid 鯨魚提醒（大額交易，改進版：降低門檻並添加調試）"""
+    """獲取 Hyperliquid 鯨魚提醒（動態門檻版：主流幣 $50萬；山寨幣 24h 量 0.5%）"""
     url = f"{CG_API_BASE}/api/hyperliquid/whale-alert"
     headers = {
         "CG-API-KEY": CG_API_KEY,
         "accept": "application/json"
     }
-    
+
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             logger.error(f"Hyperliquid Whale Alert API 錯誤: {response.status_code}")
             return []
-        
+
         result = response.json()
         if result.get('code') not in ['0', 0, 200, '200']:
             logger.error(f"Hyperliquid Whale Alert API 返回錯誤: {result}")
             return []
-        
+
         data_list = result.get('data', [])
         if not isinstance(data_list, list):
             logger.warning(f"Hyperliquid Whale Alert 數據格式異常: {type(data_list)}")
             return []
-        
+
         # 調試：記錄原始數據
         logger.info(f"Hyperliquid Whale Alert 原始數據: {len(data_list)} 條")
         if data_list:
             sample = data_list[0]
             logger.info(f"數據樣本欄位: {list(sample.keys())}")
             logger.info(f"數據樣本完整內容: {json.dumps(sample, ensure_ascii=False, indent=2)}")
-        
-        # 篩選名目價值 >= 門檻的提醒（門檻已降低）
+
         filtered_alerts = []
-        value_stats = []  # 記錄所有數值用於調試
-        
+        value_stats = []  # 調試用
+
         for idx, alert in enumerate(data_list):
-            # 嘗試多種可能的欄位名稱（擴展更多可能性）
             value = None
             value_key = None
-            
-            # 按優先順序嘗試各種字段名稱（優先使用 position_value_usd，這是正確的USD價值）
+
+            # 按優先順序嘗試各種字段名稱（優先使用 position_value_usd）
             possible_keys = [
-                'position_value_usd', 'positionValueUsd', 'position_value', 'positionValue',  # 最優先：持倉USD價值
+                'position_value_usd', 'positionValueUsd', 'position_value', 'positionValue',
                 'notional_value', 'notionalValue', 'notional', 'notional_usd',
                 'value', 'value_usd', 'usd_value', 'usdValue',
-                'size_usd', 'sizeUSD', 'size',  # size 可能是數量，不是價值
+                'size_usd', 'sizeUSD', 'size',
                 'amount', 'amount_usd', 'amountUSD',
                 'volume', 'volume_usd', 'volumeUSD',
                 'trade_value', 'tradeValue', 'trade_value_usd',
                 'order_value', 'orderValue', 'order_value_usd',
                 'total_value', 'totalValue', 'total_value_usd'
             ]
-            
+
             for key in possible_keys:
                 if key in alert and alert[key] is not None:
                     value = alert[key]
                     value_key = key
                     break
-            
-            # 如果還是找不到，嘗試遍歷所有數值字段（排除明顯不是價值的字段）
+
             if value is None:
-                excluded_keys = ['entry_price', 'liq_price', 'mark_price', 'leverage', 'position_size', 'create_time', 'update_time']
+                excluded_keys = {'entry_price', 'liq_price', 'mark_price', 'leverage',
+                                 'position_size', 'create_time', 'update_time'}
                 for key, val in alert.items():
                     if key.lower() in excluded_keys:
-                        continue  # 跳過明顯不是價值的字段
-                    if isinstance(val, (int, float)) and val > 0:
-                        # 可能是數值字段，但需要判斷是否合理（通常交易金額 > 1000）
-                        if val >= 1000:
-                            value = val
-                            value_key = key
-                            break
-            
+                        continue
+                    if isinstance(val, (int, float)) and val >= 1000:
+                        value = val
+                        value_key = key
+                        break
+
             if value is None:
                 logger.warning(f"Alert #{idx} 無法找到數值字段，所有字段: {list(alert.keys())}")
                 continue
-            
+
             try:
-                # 處理字符串格式（可能包含逗號或單位）
                 if isinstance(value, str):
-                    # 移除逗號、空格、$符號等
                     value_clean = value.replace(',', '').replace('$', '').replace(' ', '').replace('USD', '').replace('usd', '')
                     value_float = float(value_clean)
                 else:
                     value_float = float(value)
-                
-                # 記錄統計信息（前10條）
+
+                sym_raw = alert.get('symbol') or alert.get('coin') or alert.get('asset') or '未知'
+                # 計算動態門檻
+                threshold = _get_whale_threshold(str(sym_raw), alert)
+                base_sym = str(sym_raw).replace("USDT", "").replace("-PERP", "").replace("PERP", "").strip().upper()
+                threshold_label = (
+                    f"主流幣 ${threshold/10000:.0f}萬"
+                    if base_sym in _WHALE_MAINSTREAM_COINS
+                    else f"山寨動態 ${threshold/10000:.1f}萬"
+                )
+
                 if idx < 10:
-                    symbol = alert.get('symbol') or alert.get('coin') or alert.get('asset') or '未知'
                     value_stats.append({
-                        'symbol': symbol,
+                        'symbol': sym_raw,
                         'key': value_key,
                         'value': value_float,
-                        'formatted': f"${value_float/10000:.2f}萬"
+                        'threshold': threshold,
+                        'formatted': f"${value_float/10000:.2f}萬 (門檻:{threshold_label})"
                     })
-                
-                if value_float >= WHALE_ALERT_THRESHOLD:
+
+                if value_float >= threshold:
                     filtered_alerts.append(alert)
-                    symbol = alert.get('symbol') or alert.get('coin') or alert.get('asset') or '未知'
-                    logger.info(f"✅ 符合門檻的 Alert: {symbol} - ${value_float/10000:.2f}萬 (字段: {value_key})")
+                    logger.info(f"✅ 聰明錢進場: {sym_raw} - ${value_float/10000:.2f}萬 ≥ {threshold_label} (字段: {value_key})")
                 else:
-                    if idx < 5:  # 只記錄前5條未達門檻的
-                        symbol = alert.get('symbol') or alert.get('coin') or alert.get('asset') or '未知'
-                        logger.info(f"❌ 未達門檻: {symbol} - ${value_float/10000:.2f}萬 < ${WHALE_ALERT_THRESHOLD/10000:.2f}萬 (字段: {value_key})")
+                    if idx < 5:
+                        logger.info(f"❌ 未達動態門檻: {sym_raw} - ${value_float/10000:.2f}萬 < {threshold_label} (字段: {value_key})")
             except (TypeError, ValueError) as e:
                 logger.warning(f"Alert #{idx} 數值解析失敗: 字段={value_key}, 值={value}, 錯誤: {str(e)}")
                 continue
-        
-        # 輸出統計信息
+
         if value_stats:
-            logger.info(f"前10條數據的數值統計:")
+            logger.info("前10條數據的數值統計:")
             for stat in value_stats:
                 logger.info(f"  {stat['symbol']}: {stat['formatted']} (字段: {stat['key']})")
-        
-        logger.info(f"符合門檻的 Whale Alert: {len(filtered_alerts)} 條（門檻: ${WHALE_ALERT_THRESHOLD/10000:.2f}萬）")
+
+        logger.info(f"符合動態門檻的 Whale Alert: {len(filtered_alerts)} 條（主流幣 ${_WHALE_THRESHOLD_MAINSTREAM/10000:.0f}萬 | 山寨幣動態0.5%量）")
         return filtered_alerts
     except Exception as e:
         logger.error(f"獲取 Hyperliquid Whale Alert 失敗: {str(e)}")
