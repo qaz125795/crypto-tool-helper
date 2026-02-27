@@ -2612,23 +2612,41 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
         if now - cached_ts < _CONSENSUS_CACHE_TTL:
             return cached_val
 
-    url = f"{CG_API_BASE}/api/futures/open-interest/exchange-list"
+    # 使用 CG_EP 定義的路徑（自動處理新舊路徑差異），同時準備舊路徑備援
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
     params = {"symbol": base_symbol}
 
-    try:
-        _respect_coinglass_rate_limit()
-        response = requests.get(url, params=params, headers=headers, timeout=8)
-        if response.status_code != 200:
-            _consensus_cache[cache_key] = (False, now)
-            return False
-        result = response.json()
-        if result.get("code") not in ("0", 0, 200, "200"):
-            _consensus_cache[cache_key] = (False, now)
-            return False
+    # 嘗試新路徑 (camelCase) → 舊路徑 (kebab-case)
+    _consensus_ep_paths = [
+        CG_EP.get("oi_exchange_list", "/api/futures/openInterest/exchange-list"),
+        "/api/futures/open-interest/exchange-list",   # 舊路徑備援
+    ]
+    data_list = []
+    for _ep_path in _consensus_ep_paths:
+        try:
+            _respect_coinglass_rate_limit()
+            response = requests.get(f"{CG_API_BASE}{_ep_path}",
+                                    params=params, headers=headers, timeout=8)
+            if response.status_code == 404:
+                logger.debug(f"[多所共識] {_ep_path} 404，嘗試備援路徑")
+                continue
+            if response.status_code != 200:
+                logger.debug(f"[多所共識] {_ep_path} HTTP={response.status_code}")
+                break
+            result = response.json()
+            if result.get("code") not in ("0", 0, 200, "200", None):
+                logger.debug(f"[多所共識] {_ep_path} code={result.get('code')}")
+                break
+            candidate = result.get("data", [])
+            if isinstance(candidate, list) and candidate:
+                data_list = candidate
+                logger.debug(f"[多所共識] 使用路徑 {_ep_path}，取得 {len(data_list)} 筆")
+                break
+        except Exception as e_ep:
+            logger.debug(f"[多所共識] {_ep_path} 異常: {e_ep}")
 
-        data_list = result.get("data", [])
-        if not isinstance(data_list, list) or not data_list:
+    try:
+        if not data_list:
             _consensus_cache[cache_key] = (False, now)
             return False
 
@@ -2636,28 +2654,39 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
         positive_count = 0  # OI 增加
         negative_count = 0  # OI 減少
         found_exchanges = 0
+        # 記錄第一筆欄位名，方便 debug
+        _sample_keys = list(data_list[0].keys()) if data_list and isinstance(data_list[0], dict) else []
+        logger.debug(f"[多所共識] 回應欄位樣本: {_sample_keys[:10]}")
 
         for entry in data_list:
             exch = (entry.get("exchange") or entry.get("exchangeName") or "").strip()
             if exch not in _CONSENSUS_MAJOR_EXCHANGES:
                 continue
             found_exchanges += 1
-            # 嘗試各種可能的 OI 變化欄位
+            # 擴充 OI 變化欄位匹配（覆蓋新舊 API 格式）
             oi_chg = (
                 entry.get("openInterestChangePercent15m")
                 or entry.get("oiChange15m")
                 or entry.get("openInterestChange")
                 or entry.get("openInterestChangePercent")
                 or entry.get("changePercent")
+                or entry.get("oiChangePercent")
+                or entry.get("h4Change")       # 部分端點用 4h 變化
+                or entry.get("h1Change")       # 1h 變化
             )
             if oi_chg is None:
-                # fallback: 計算 h 和 o 的差值方向
-                oi_now = entry.get("openInterest") or entry.get("oi") or 0
-                oi_prev = entry.get("openInterestPrev") or entry.get("oiPrev") or 0
+                # 最後手段：用 openInterest - openInterestPrev 計算方向
+                oi_now  = entry.get("openInterest") or entry.get("oi") or entry.get("currentOI") or 0
+                oi_prev = (entry.get("openInterestPrev") or entry.get("oiPrev") or
+                           entry.get("prevOI") or entry.get("previousOI") or 0)
                 try:
-                    oi_chg = float(oi_now) - float(oi_prev)
+                    diff = float(oi_now) - float(oi_prev)
+                    oi_chg = diff if diff != 0 else None
                 except (TypeError, ValueError):
-                    continue
+                    pass
+            if oi_chg is None:
+                logger.debug(f"[多所共識] {exch}: 找不到 OI 變化欄位 keys={list(entry.keys())[:8]}")
+                continue
             try:
                 chg_val = float(oi_chg)
                 if chg_val > 0:
@@ -2679,29 +2708,33 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
             return True
 
         # ── 方案B：exchange-history-chart 多棒趨勢確認（單點無共識時改用歷史棒）
-        # 若快照無法確定（3家以上同向），嘗試用歷史K線判斷是否「持續」同向
         logger.debug(f"[多所共識-B] {base_symbol} 快照無共識，嘗試 exchange-history-chart 多棒分析")
         try:
             hist_positive = 0
             hist_negative = 0
             checked_hist = 0
-            for exch in _CONSENSUS_MAJOR_EXCHANGES[:5]:
-                j_h = _cg_get(CG_EP["oi_exchange_history"],
-                               {"symbol": base_symbol + "USDT", "exchange": exch,
-                                "interval": "15m", "limit": 3})
-                if not j_h:
-                    continue
-                rows_h = j_h.get("data") or j_h.get("list") or []
-                bars = _parse_oi_bars_from_rows(rows_h)
-                if len(bars) < 2:
-                    continue
-                checked_hist += 1
-                # 看最後2棒趨勢
-                recent_trend = bars[-1] - bars[-2]
-                if recent_trend > 0:
-                    hist_positive += 1
-                elif recent_trend < 0:
-                    hist_negative += 1
+            # 15m 不支援時降級到 1h 再試（部分端點不支援短時間粒度）
+            for _b_interval in ["15m", "1h"]:
+                hist_positive = hist_negative = checked_hist = 0
+                for exch in _CONSENSUS_MAJOR_EXCHANGES[:5]:
+                    j_h = _cg_get(CG_EP["oi_exchange_history"],
+                                   {"symbol": base_symbol + "USDT", "exchange": exch,
+                                    "interval": _b_interval, "limit": 3})
+                    if not j_h:
+                        continue
+                    rows_h = j_h.get("data") or j_h.get("list") or []
+                    bars = _parse_oi_bars_from_rows(rows_h)
+                    if len(bars) < 2:
+                        continue
+                    checked_hist += 1
+                    recent_trend = bars[-1] - bars[-2]
+                    if recent_trend > 0:
+                        hist_positive += 1
+                    elif recent_trend < 0:
+                        hist_negative += 1
+                if checked_hist >= 2:
+                    logger.debug(f"[多所共識-B] interval={_b_interval} checked={checked_hist}")
+                    break  # 有數據就用這個間隔
             consensus_b = checked_hist >= 3 and ((hist_positive >= 3) or (hist_negative >= 3))
             logger.info(
                 f"[多所共識-B] {base_symbol}: 歷史K線分析 checked={checked_hist}"
@@ -5884,7 +5917,8 @@ def build_report_message_tiered(
 
         # energy_exhausted / cvd_divergence 保留為附註旗標
         energy_exhausted = bool(cvd_divergence)
-        tp1_note = f"{tp1_label}（{sl_source}止損）"
+        # tp1_note 只保留乾淨的 R 比值標籤，不混入止損來源（避免 tp_plain_desc 解析出錯）
+        tp1_note = tp1_label
         return _ret(sl_price, tp1_price, tp2_price, r_tp1, r_tp2, tp1_label, tp2_label, sl_capped, energy_exhausted, tp1_note)
 
     def _is_bull(x: Dict) -> bool:
@@ -6781,19 +6815,23 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             ("volChangePercent",   "0", "成交量變化↓"),
         ]
 
+        # 連續 3 組排序都沒有新幣才停（API 可能忽略 sortField，但仍全部嘗試）
+        consecutive_zero = 0
         for sort_field, sort_type, label in sort_variants:
             before = len(out)
             batch = _fetch_one_coins_markets_page(sort_field, sort_type, seen_syms)
             out.extend(batch)
             added = len(out) - before
             logger.info(f"[CoinGlass掃描] {label}: +{added} 個 / 累計 {len(out)} 個")
-            if added == 0 and sort_field != "":
-                # 如果沒有新幣了，後續排序大概率也沒有，可以提前停止
-                logger.info(f"[CoinGlass掃描] 本次無新幣，後續排序可能已全覆蓋，停止補充")
-                break
+            if added == 0:
+                consecutive_zero += 1
+                if consecutive_zero >= 3:
+                    logger.info(f"[CoinGlass掃描] 連續 {consecutive_zero} 組無新幣，停止補充（API 可能忽略 sortField）")
+                    break
+            else:
+                consecutive_zero = 0
             # 禮貌性間隔，避免觸發 429
-            if sort_field != sort_variants[-1][0]:
-                time.sleep(0.3)
+            time.sleep(0.3)
 
         logger.info(f"[CoinGlass-First] coins-markets 多排序掃描完成，共 {len(out)} 個唯一幣種")
         return out
