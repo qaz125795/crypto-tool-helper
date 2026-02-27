@@ -1509,6 +1509,81 @@ def fetch_supported_futures_coins() -> List[str]:
         return []
 
 
+# ── CoinGlass exchange-pairs BingX 支援快取 ────────────────────────────────
+_cg_bingx_bases_cache: Dict[str, Any] = {"ts": 0.0, "bases": set()}
+_CG_BINGX_BASES_TTL = 3600  # 1 小時快取，交易所上幣不頻繁
+
+
+def fetch_cg_bingx_supported_bases() -> Set[str]:
+    """從 CoinGlass /api/futures/supported-exchange-pairs 取得 BingX 支援的幣種 base set。
+    帶 1 小時 TTL 快取，避免每輪重複呼叫。
+    回傳格式：{"BTC", "ETH", "SOL", ...}（大寫 base，已去掉 USDT/- 等後綴）
+    """
+    global _cg_bingx_bases_cache
+    now = time.time()
+    if now - _cg_bingx_bases_cache["ts"] < _CG_BINGX_BASES_TTL and _cg_bingx_bases_cache["bases"]:
+        return _cg_bingx_bases_cache["bases"]
+
+    if not CG_API_KEY:
+        return set()
+
+    bingx_bases: Set[str] = set()
+    try:
+        _respect_coinglass_rate_limit()
+        r = requests.get(
+            f"{CG_API_BASE}/api/futures/supported-exchange-pairs",
+            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            logger.warning(f"[CG支援查詢] supported-exchange-pairs HTTP {r.status_code}")
+            return bingx_bases
+        j = r.json()
+        data = j.get("data", j)
+
+        # 回應格式 A：dict keyed by exchange name
+        # {"BingX": [{"instrument_id": "BTCUSDT", "base_asset": "BTC"}, ...], ...}
+        if isinstance(data, dict):
+            bingx_key = next((k for k in data if "bingx" in k.lower() or "bing" in k.lower()), None)
+            if bingx_key:
+                for item in (data[bingx_key] or []):
+                    base = (
+                        item.get("base_asset") or item.get("baseAsset") or item.get("base") or ""
+                    )
+                    if not base:
+                        inst = (item.get("instrument_id") or item.get("instrumentId")
+                                or item.get("symbol") or item.get("pair") or "")
+                        base = (inst.replace("USDT", "").replace("USDT-PERP", "")
+                                .replace("-PERP", "").replace("_USDT", "")
+                                .replace("-USDT", "").replace("-", "").replace("_", "").upper())
+                    base = base.strip().upper()
+                    if base and len(base) <= 12:
+                        bingx_bases.add(base)
+                logger.info(
+                    f"[CG支援查詢] BingX ({bingx_key}) 支援 {len(bingx_bases)} 個幣種"
+                    f"（來源：CoinGlass supported-exchange-pairs）"
+                )
+            else:
+                logger.warning(f"[CG支援查詢] 回應中未找到 BingX key，可用 key: {list(data.keys())[:10]}")
+
+        # 回應格式 B：list of {"symbol": "BTC", "exchanges": [...]}
+        elif isinstance(data, list):
+            for item in data:
+                exch_list = item.get("exchanges") or item.get("exchangeList") or []
+                if any("bingx" in str(e).lower() for e in exch_list):
+                    sym = (item.get("symbol") or item.get("coin") or "").strip().upper()
+                    if sym and len(sym) <= 12:
+                        bingx_bases.add(sym)
+            logger.info(f"[CG支援查詢] BingX 支援 {len(bingx_bases)} 個幣種（格式B）")
+
+    except Exception as e:
+        logger.warning(f"[CG支援查詢] fetch_cg_bingx_supported_bases 異常: {e}")
+
+    if bingx_bases:
+        _cg_bingx_bases_cache = {"ts": now, "bases": bingx_bases}
+    return bingx_bases
+
+
 # Fallback 時僅記錄第一次 Binance 失敗原因，避免刷屏
 _binance_fallback_first_failure_logged = False
 
@@ -1975,7 +2050,9 @@ def fetch_oi_resonance_5m(symbol: str, category: str) -> Optional[bool]:
 
 def fetch_rsi_5m(symbol: str) -> Optional[float]:
     """抓取 5m RSI(14)，供「RSI超賣鑽石升等」邏輯使用。
-    使用 BingX 5m K 線本地計算，快取 30 秒避免重複 API 呼叫。
+    優先使用 CoinGlass /api/futures/indicators/rsi（interval=5m）；
+    失敗時備援 BingX 5m K 線本地計算。
+    快取 30 秒避免重複 API 呼叫。
     Returns: RSI float (0-100) 或 None (無法取得)
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
@@ -1986,41 +2063,72 @@ def fetch_rsi_5m(symbol: str) -> Optional[float]:
         if now - cached_ts < 30.0:
             return cached_val  # type: ignore[return-value]
 
+    # ── 優先：CoinGlass indicators/rsi ────────────────────────────────────
     try:
-        bingx_sym = f"{base}-USDT"
-        url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
-        resp = requests.get(url, params={"symbol": bingx_sym, "interval": "5m", "limit": 20}, timeout=6)
-        if resp.status_code != 200:
-            _resonance_cache[cache_key] = (None, now)
-            return None
-        raw = resp.json()
-        candles = raw.get("data") or raw.get("result") or (raw if isinstance(raw, list) else None)
-        if not candles or len(candles) < 15:
-            _resonance_cache[cache_key] = (None, now)
-            return None
-        closes = []
-        for c in candles:
-            if isinstance(c, dict):
-                closes.append(float(c.get("close") or c.get("c") or 0))
-            elif isinstance(c, (list, tuple)) and len(c) >= 5:
-                closes.append(float(c[4]))
-        if len(closes) < 15:
-            _resonance_cache[cache_key] = (None, now)
-            return None
-        deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
-        gains = [max(d, 0.0) for d in deltas]
-        losses = [max(-d, 0.0) for d in deltas]
-        avg_gain = sum(gains[-14:]) / 14.0
-        avg_loss = sum(losses[-14:]) / 14.0
-        rsi = 100.0 if avg_loss == 0 else 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
-        rsi_rounded = round(rsi, 1)
-        _resonance_cache[cache_key] = (rsi_rounded, now)
-        logger.info(f"[5m RSI] {base}: RSI={rsi_rounded}")
-        return rsi_rounded
+        _respect_coinglass_rate_limit()
+        r_cg = requests.get(
+            f"{CG_API_BASE}/api/futures/indicators/rsi",
+            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+            params={"symbol": base, "interval": "5m"},
+            timeout=8,
+        )
+        if r_cg.status_code == 200:
+            j_cg = r_cg.json()
+            if j_cg.get("code") in (0, "0", 200, "200", None):
+                data_cg = j_cg.get("data") or {}
+                # 支援多種回應格式
+                rsi_raw = (
+                    data_cg.get("rsi") or data_cg.get("rsi14") or data_cg.get("value")
+                    if isinstance(data_cg, dict) else None
+                )
+                # 若 data 是列表，取最後一筆
+                if rsi_raw is None and isinstance(data_cg, list) and data_cg:
+                    last = data_cg[-1]
+                    rsi_raw = (last.get("rsi") or last.get("value") or last.get("rsi14")
+                               if isinstance(last, dict) else None)
+                if rsi_raw is not None:
+                    rsi = float(rsi_raw)
+                    logger.info(f"[5m RSI-CG] {base}: RSI={rsi:.1f}")
+                    _resonance_cache[cache_key] = (rsi, now)
+                    return rsi
     except Exception as e:
-        logger.debug(f"[5m RSI] {base} 查詢失敗: {e}")
-        _resonance_cache[cache_key] = (None, now)
-        return None
+        logger.debug(f"[5m RSI-CG] {base} CoinGlass 失敗，備援 BingX K線: {e}")
+
+    # ── 備援：CoinGlass price/history 5m K 線本地計算 ──────────────────────
+    try:
+        for ex, sym_pair in [("Binance", f"{base}USDT"), ("OKX", f"{base}USDT")]:
+            _respect_coinglass_rate_limit()
+            r2 = requests.get(
+                f"{CG_API_BASE}/api/futures/price/history",
+                headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+                params={"exchange": ex, "symbol": sym_pair, "interval": "5m", "limit": 20},
+                timeout=8,
+            )
+            if r2.status_code != 200:
+                continue
+            j2 = r2.json()
+            if j2.get("code") not in (0, "0", 200, "200", None):
+                continue
+            raw2 = j2.get("data") or j2.get("list") or []
+            if not isinstance(raw2, list) or len(raw2) < 15:
+                continue
+            _, _, _, closes2, _ = _parse_kline_rows(raw2)
+            if len(closes2) < 15:
+                continue
+            deltas = [closes2[i] - closes2[i - 1] for i in range(1, len(closes2))]
+            gains = [max(d, 0.0) for d in deltas]
+            losses = [max(-d, 0.0) for d in deltas]
+            avg_gain = sum(gains[-14:]) / 14.0
+            avg_loss = sum(losses[-14:]) / 14.0
+            rsi = 100.0 if avg_loss == 0 else 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
+            rsi_rounded = round(rsi, 1)
+            _resonance_cache[cache_key] = (rsi_rounded, now)
+            logger.info(f"[5m RSI-CG K線] {base} ({ex}): RSI={rsi_rounded}")
+            return rsi_rounded
+    except Exception as e:
+        logger.debug(f"[5m RSI-CG K線] {base} 異常: {e}")
+    _resonance_cache[cache_key] = (None, now)
+    return None
 
 
 # ── 標準版特有：多所共識檢查 ─────────────────────────────────────────────────
@@ -2293,6 +2401,9 @@ def check_orderbook_wall(
 ) -> Optional[Dict[str, Any]]:
     """【大額掛單牆】掃描進場方向的巨量訂單層。
 
+    優先使用 CoinGlass /api/futures/orderbook/large-limit-order（直接提供大額掛單）。
+    CoinGlass 失敗時備援 BingX /openApi/swap/v2/quote/depth（掃描前 50 層）。
+
     做多：掃描現價「上方 scan_pct%」內的大額 Asks（賣牆/阻力）
     做空：掃描現價「下方 scan_pct%」內的大額 Bids（買牆/支撐）
 
@@ -2313,82 +2424,70 @@ def check_orderbook_wall(
         if now - ts < _OB_WALL_TTL:
             return cached
 
-    # BingX 期貨掛單深度 API
-    sym_bingx = preferred_symbol or f"{base}-USDT"
-    url = "https://open-api.bingx.com/openApi/swap/v2/quote/depth"
-    params = {"symbol": sym_bingx, "limit": 50}  # 前 50 個掛單層
+    scan_limit_hi = current_price * (1 + scan_pct / 100)
+    scan_limit_lo = current_price * (1 - scan_pct / 100)
 
+    def _build_result(wall_usd: float, wall_price: float) -> Optional[Dict]:
+        if wall_usd < _OB_WALL_MIN_USD:
+            return None
+        direction = "上方賣壓" if is_long else "下方買盤"
+        pct_away = abs(wall_price - current_price) / current_price * 100
+        lbl = (
+            f"🧱 {direction}牆 ${wall_usd/1e6:.2f}M "
+            f"@ {wall_price:.6g} "
+            f"(距現價 {pct_away:.2f}%)"
+        )
+        logger.info(f"[掛單牆] {base}: {lbl}")
+        return {"wall_usd": wall_usd, "wall_price": wall_price,
+                "pct_away": pct_away, "label": lbl}
+
+    # ── 優先：CoinGlass large-limit-order ─────────────────────────────────
     try:
-        r = requests.get(url, params=params, timeout=6)
-        if r.status_code != 200:
-            _orderbook_wall_cache[cache_key] = (None, now)
-            return None
-        j = r.json()
-        if j.get("code") != 0:
-            _orderbook_wall_cache[cache_key] = (None, now)
-            return None
-        depth_data = j.get("data", {})
-        # 掃描方向：做多掃 asks（阻力），做空掃 bids（支撐）
-        side_key = "asks" if is_long else "bids"
-        levels = depth_data.get(side_key, [])
-        if not isinstance(levels, list) or not levels:
-            _orderbook_wall_cache[cache_key] = (None, now)
-            return None
-
-        best_wall: Optional[Dict] = None
-        best_usd = 0.0
-        scan_limit = current_price * (1 + scan_pct / 100) if is_long else current_price * (1 - scan_pct / 100)
-
-        for level in levels:
-            # 格式可能是 [price, qty] 或 {"price": x, "qty": y}
-            try:
-                if isinstance(level, (list, tuple)) and len(level) >= 2:
-                    price_l, qty_l = float(level[0]), float(level[1])
-                elif isinstance(level, dict):
-                    price_l = float(level.get("price") or level.get("p") or 0)
-                    qty_l = float(level.get("qty") or level.get("q") or level.get("amount") or 0)
-                else:
-                    continue
-                if price_l <= 0 or qty_l <= 0:
-                    continue
-            except (TypeError, ValueError):
-                continue
-
-            # 只看掃描範圍內的層
-            if is_long and price_l > scan_limit:
-                break
-            if not is_long and price_l < scan_limit:
-                break
-
-            wall_usd = price_l * qty_l
-            if wall_usd > best_usd:
-                best_usd = wall_usd
-                best_wall = {
-                    "wall_usd": wall_usd,
-                    "wall_price": price_l,
-                    "pct_away": abs(price_l - current_price) / current_price * 100,
-                }
-
-        result: Optional[Dict] = None
-        if best_wall and best_wall["wall_usd"] >= _OB_WALL_MIN_USD:
-            direction = "上方賣壓" if is_long else "下方買盤"
-            best_wall["label"] = (
-                f"🧱 {direction}牆 ${best_wall['wall_usd']/1e6:.2f}M "
-                f"@ {best_wall['wall_price']:.4f} "
-                f"(距現價 {best_wall['pct_away']:.2f}%)"
-            )
-            result = best_wall
-            logger.info(
-                f"[掛單牆] {base}: {result['label']}"
-            )
-
-        _orderbook_wall_cache[cache_key] = (result, now)
-        return result
-
+        _respect_coinglass_rate_limit()
+        cg_side = "asks" if is_long else "bids"
+        r_cg = requests.get(
+            f"{CG_API_BASE}/api/futures/orderbook/large-limit-order",
+            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+            params={"symbol": base, "side": cg_side},
+            timeout=8,
+        )
+        if r_cg.status_code == 200:
+            j_cg = r_cg.json()
+            if j_cg.get("code") in (0, "0", 200, "200", None):
+                orders = j_cg.get("data") or j_cg.get("list") or []
+                if isinstance(orders, list) and orders:
+                    best_usd, best_price = 0.0, 0.0
+                    for order in orders:
+                        try:
+                            p = float(order.get("price") or order.get("p") or 0)
+                            # 金額可能直接給 USD，或給數量需自行換算
+                            usd = float(order.get("amount_usd") or order.get("amountUsd")
+                                        or order.get("value") or order.get("size") or 0)
+                            qty = float(order.get("qty") or order.get("amount")
+                                        or order.get("quantity") or 0)
+                            if usd == 0 and qty > 0 and p > 0:
+                                usd = qty * p
+                            if p <= 0 or usd <= 0:
+                                continue
+                            # 只取掃描範圍內的單
+                            if is_long and not (current_price < p <= scan_limit_hi):
+                                continue
+                            if not is_long and not (scan_limit_lo <= p < current_price):
+                                continue
+                            if usd > best_usd:
+                                best_usd, best_price = usd, p
+                        except (TypeError, ValueError):
+                            continue
+                    if best_usd >= _OB_WALL_MIN_USD:
+                        result = _build_result(best_usd, best_price)
+                        _orderbook_wall_cache[cache_key] = (result, now)
+                        return result
     except Exception as e:
-        logger.debug(f"[掛單牆] {base} 查詢異常: {e}")
-        _orderbook_wall_cache[cache_key] = (None, now)
-        return None
+        logger.debug(f"[掛單牆-CG] {base} CoinGlass large-limit-order 失敗: {e}")
+
+    # CoinGlass large-limit-order 無資料時，直接返回 None（不再呼叫 BingX）
+    _orderbook_wall_cache[cache_key] = (None, now)
+    return None
 
 
 def normalize_symbol(coin: Dict) -> Optional[str]:
@@ -3141,146 +3240,221 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     return out
 
 
-def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _calc_indicators_from_ohlcv(
+    opens: list, highs: list, lows: list, closes: list, volumes: list,
+    clean: str, source_label: str, real_symbol: str,
+) -> Optional[Dict[str, Any]]:
+    """共用指標計算核心：輸入 OHLCV list，輸出與 _fetch_bingx_klines_and_calc 相同格式的 dict。
+    被 _fetch_cg_klines_and_calc 與 _fetch_bingx_klines_and_calc 共用，避免重複邏輯。
     """
-    技術指標：
-    - Plan A = BingX 15m K 線本地計算（RSI/布林/EMA20/VWAP_2h/ATR/MACD/結構高低點）
-    - Plan B = CoinGlass API（RSI/BOLL/ATR/EMA），僅在 BingX K 線不可用時作為後備。
-    下游 SL/TP 與推播邏輯一律以 BingX 結構為主，確保與實際交易所一致。
-    """
-    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-
-    # Plan A：優先使用 BingX K 線本地計算（適用所有幣種，只要 BingX 有合約）
-    logger.info(f"[技術指標] {base}: 優先使用 BingX 15m K 線本地計算技術指標與結構")
-    tech = _fetch_bingx_klines_and_calc(symbol, preferred_symbol=bingx_symbol_override)
-    if tech:
-        # 明確標記為 BingX Plan A（plan_b_used=False 已在 _fetch_bingx_klines_and_calc 設定）
-        tech["source"] = "BingX"
-        logger.info(
-            f"[技術指標] {base}: 使用 BingX 本地計算完成 "
-            f"RSI={tech.get('rsi')} 布林上={tech.get('ub_value')} 布林下={tech.get('lb_value')} "
-            f"ATR={tech.get('atr')} VWAP_2h={tech.get('vwap_2h')} EMA20={tech.get('ema20_close')}"
-        )
-        return tech
-
-    # Plan B：僅當 BingX K 線連續失敗多次時，才退回 CoinGlass API
-    logger.warning(f"[技術指標] {base}: BingX K 線本地計算失敗，記錄一次 BingX 失敗計數")
-    global _bingx_tech_fail_count
-    with _bingx_tech_fail_lock:
-        _bingx_tech_fail_count += 1
-        _local_fail_count = _bingx_tech_fail_count
-    if _local_fail_count <= 3:  # 連續失敗前三次，寧可放棄該幣種也不直接用 CoinGlass
-        logger.warning(f"[技術指標] {base}: BingX 失敗次數={_local_fail_count} ≤ 3，本輪放棄技術指標以避免數據源偏差")
+    if len(closes) < 20:
+        logger.warning(f"[指標計算] {clean}: 有效 K 線根數 {len(closes)} < 20，無法計算")
         return None
 
-    logger.warning(f"[技術指標] {base}: BingX 連續失敗超過 3 次（本輪={_local_fail_count}），啟用 CoinGlass 作為後備 Plan B（可能存在數據源偏差）")
-    plan_b_used = True
-    logger.info(f"[技術指標] {base}: 查詢 CoinGlass API RSI...")
-    backoff = 2.0
-    rsi_data = None
-    for attempt in range(3):
-        _respect_coinglass_rate_limit()
-        rsi_data = _fetch_coinglass_rsi(symbol)
-        if rsi_data is not None:
-            break
-        logger.warning(f"[GITHUB_IP_THROTTLED] CoinGlass RSI 取得失敗或限流 ({base})，第 {attempt+1} 次嘗試，休息 {backoff:.1f} 秒後重試")
-        time.sleep(backoff + random.uniform(0, 1.0))
-        backoff *= 2.0
-    if rsi_data is None:
-        logger.warning(f"[技術指標] {base}: CoinGlass RSI 亦無數據，技術指標取得失敗")
+    # EMA20
+    ema20_close = None
+    period = 20
+    alpha = 2.0 / (period + 1)
+    ema = float(np.mean(closes[:period]))
+    for i in range(period, len(closes)):
+        ema = alpha * float(closes[i]) + (1.0 - alpha) * ema
+    ema20_close = ema
+
+    # VWAP_2h（最近 8 根 15m K 線）
+    vwap_2h = None
+    if len(closes) >= 8 and len(volumes) >= 8 and sum(volumes[-8:]) > 0:
+        uc, uh, ul, uv = closes[-8:], highs[-8:], lows[-8:], volumes[-8:]
+        typical = [(uh[i] + ul[i] + uc[i]) / 3.0 for i in range(len(uc))]
+        vwap_2h = sum(typical[i] * uv[i] for i in range(len(typical))) / sum(uv)
+        logger.info(f"[指標計算] {clean}: VWAP_2h 使用最近 8 根 K 線成交量加權 (典型價 H+L+C/3)")
+
+    series = pd.Series(closes)
+    rsi_series = _rsi(series, period=14)
+    if rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
+        logger.warning(f"[指標計算] {clean}: RSI(14) 計算無效")
         return None
+    rsi_val = float(rsi_series.iloc[-1])
 
-    _respect_coinglass_rate_limit()
-    boll_data = _fetch_coinglass_boll(symbol)
+    upper_bb, _, lower_bb = _bbands(series, length=20, std_dev=2.0)
+    ub_value = float(upper_bb.iloc[-1]) if not pd.isna(upper_bb.iloc[-1]) else None
+    lb_value = float(lower_bb.iloc[-1]) if not pd.isna(lower_bb.iloc[-1]) else None
 
-    rsi_val = None
-    data_rsi = rsi_data.get("data", rsi_data.get("list", []))
-    if isinstance(data_rsi, list) and data_rsi:
-        last = data_rsi[-1] if isinstance(data_rsi[-1], dict) else None
-        if last is not None:
-            for k in ("rsi", "value", "rsi_value"):
-                if last.get(k) is not None:
-                    try:
-                        rsi_val = float(last[k])
-                        break
-                    except (TypeError, ValueError):
-                        pass
-    elif isinstance(data_rsi, dict):
-        for k in ("rsi", "value", "rsi_value"):
-            if data_rsi.get(k) is not None:
-                try:
-                    rsi_val = float(data_rsi[k])
-                    break
-                except (TypeError, ValueError):
-                    pass
-    if rsi_val is None:
-        logger.warning(f"[技術指標] {base}: CoinGlass RSI 結構無有效數值，技術指標取得失敗")
-        return None
+    current_price = float(closes[-1])
+    touch_upper = ub_value is not None and current_price >= ub_value
+    touch_lower = lb_value is not None and current_price <= lb_value
 
-    ub_value = None
-    lb_value = None
-    current_price = None
-    data_boll = boll_data.get("data", boll_data.get("list", [])) if boll_data else []
-    if isinstance(data_boll, list) and data_boll:
-        last_b = data_boll[-1] if isinstance(data_boll[-1], dict) else None
-        if last_b:
-            ub_value = last_b.get("ub_value") or last_b.get("upper") or last_b.get("ub")
-            lb_value = last_b.get("lb_value") or last_b.get("lower") or last_b.get("lb")
-            current_price = last_b.get("price") or last_b.get("close") or last_b.get("c")
-    elif isinstance(data_boll, dict):
-        ub_value = data_boll.get("ub_value") or data_boll.get("upper")
-        lb_value = data_boll.get("lb_value") or data_boll.get("lower")
-        current_price = data_boll.get("price") or data_boll.get("close")
-    try:
-        ub_value = float(ub_value) if ub_value is not None else None
-        lb_value = float(lb_value) if lb_value is not None else None
-        current_price = float(current_price) if current_price is not None else None
-    except (TypeError, ValueError):
-        pass
+    # ATR(14)
+    atr_val = None
+    if len(highs) >= 15:
+        df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
+        prev_close = df["close"].shift(1)
+        tr = np.maximum(df["high"] - df["low"],
+                        np.maximum((df["high"] - prev_close).abs(),
+                                   (df["low"] - prev_close).abs()))
+        atr_s = tr.rolling(14).mean()
+        if not atr_s.empty and not pd.isna(atr_s.iloc[-1]) and atr_s.iloc[-1] > 0:
+            atr_val = float(atr_s.iloc[-1])
 
-    touch_upper = touch_lower = False
-    if current_price is not None and ub_value is not None:
-        touch_upper = current_price >= ub_value
-    if current_price is not None and lb_value is not None:
-        touch_lower = current_price <= lb_value
-    if current_price is None and (ub_value is not None or lb_value is not None):
-        current_price = ub_value or lb_value
+    # MACD(12,26,9) 能量背離
+    energy_exhausted = False
+    if len(closes) >= 35:
+        ser = pd.Series(closes, dtype=float)
+        ema12 = ser.ewm(span=12, adjust=False).mean()
+        ema26 = ser.ewm(span=26, adjust=False).mean()
+        macd_hist = ema12 - ema26 - (ema12 - ema26).ewm(span=9, adjust=False).mean()
+        lookback = 5
+        if len(closes) >= lookback and len(macd_hist) >= 3:
+            recent_hist = macd_hist.iloc[-3:].tolist()
+            price_new_high = closes[-1] >= max(closes[-lookback:])
+            hist_shortening = len(recent_hist) >= 2 and recent_hist[-1] < recent_hist[-2]
+            if price_new_high and hist_shortening:
+                energy_exhausted = True
 
-    _respect_coinglass_rate_limit()
-    atr_val = _fetch_coinglass_atr(symbol, "1d")
-    vwap_2h = ema20_close = None
-    # Plan B 加分項：EMA、MACD（API 失敗不影響 plan_b_used）
-    _respect_coinglass_rate_limit()
-    _respect_coinglass_rate_limit()
-    ema20_api = _fetch_coinglass_ema(symbol, "15m")
-    if ema20_api is not None:
-        ema20_close = ema20_api
-    _respect_coinglass_rate_limit()
-    macd_data = _fetch_coinglass_macd(symbol, "15m")
-    logger.info(
-        f"[技術指標-15m] {base}: 使用 CoinGlass API 數據 RSI={rsi_val} BOLL上={ub_value} "
-        f"BOLL下={lb_value} 現價={current_price} ATR={atr_val} EMA20={ema20_close} plan_b_used={plan_b_used}"
-    )
+    # 爆量偵測
+    vol_spike_ratio: Optional[float] = None
+    if len(volumes) >= 10:
+        sample = volumes[:-1][-min(96, len(volumes) - 1):]
+        avg_vol = float(np.mean(sample)) if sample else 0.0
+        if avg_vol > 0 and volumes[-1] > 0:
+            vol_spike_ratio = volumes[-1] / avg_vol
+            if vol_spike_ratio >= 1.5:
+                logger.info(f"[指標計算] {clean}: ⚡ 爆量 最新={volumes[-1]:.2f} 均={avg_vol:.2f} {vol_spike_ratio:.2f}×")
 
-    out = {
-        "rsi": rsi_val,
-        "touch_upper": touch_upper,
-        "touch_lower": touch_lower,
-        "current_price": current_price,
-        "ub_value": ub_value,
-        "lb_value": lb_value,
-        "atr": atr_val,
-        "source": "CoinGlass",
-        "plan_b_used": plan_b_used,
-        "data_source_warning": True,  # BingX 多次失敗後才啟用 CoinGlass，標記可能存在數據源偏差
+    out: Dict[str, Any] = {
+        "rsi": rsi_val, "touch_upper": touch_upper, "touch_lower": touch_lower,
+        "current_price": current_price, "ub_value": ub_value, "lb_value": lb_value,
+        "atr": atr_val, "source": source_label, "plan_b_used": False,
+        "real_symbol": real_symbol, "energy_exhausted": energy_exhausted,
+        "vol_spike_ratio": vol_spike_ratio,
     }
+    if opens and highs and lows and closes:
+        out["last_kline_open_30m"] = float(opens[-1])
+        out["last_kline_high_30m"] = float(highs[-1])
+        out["last_kline_low_30m"] = float(lows[-1])
+        out["last_kline_close_30m"] = float(closes[-1])
     if vwap_2h is not None:
         out["vwap_2h"] = vwap_2h
     if ema20_close is not None:
         out["ema20_close"] = ema20_close
-    if macd_data is not None:
-        out["macd"] = macd_data
+    if len(highs) >= 8:
+        out["recent_high_2h"] = max(highs[-8:])
+        out["recent_low_2h"] = min(lows[-8:])
+
+    logger.info(
+        f"[{source_label}指標] {clean}: RSI={rsi_val:.2f} BB上={ub_value} BB下={lb_value} "
+        f"現價={current_price} ATR={atr_val} VWAP_2h={vwap_2h} EMA20={ema20_close} "
+        f"2h高低=({out.get('recent_high_2h')}, {out.get('recent_low_2h')}) "
+        f"末K=({out.get('last_kline_open_30m')},{out.get('last_kline_high_30m')},"
+        f"{out.get('last_kline_low_30m')},{out.get('last_kline_close_30m')})"
+    )
     return out
+
+
+def _parse_kline_rows(raw: list) -> Tuple[list, list, list, list, list]:
+    """解析 OHLCV K 線列表（相容 dict 格式與 [ts,o,h,l,c,v] 格式）。"""
+    opens, highs, lows, closes, volumes = [], [], [], [], []
+    for row in raw:
+        o = h = l = c = vol = None
+        if isinstance(row, dict):
+            o = row.get("open") or row.get("o") or row.get("openPrice")
+            h = row.get("high") or row.get("h") or row.get("highPrice")
+            l = row.get("low") or row.get("l") or row.get("lowPrice")
+            c = row.get("close") or row.get("c") or row.get("closePrice") or row.get("close_price")
+            vol = row.get("volume") or row.get("v") or row.get("vol") or row.get("baseVolume")
+        elif isinstance(row, (list, tuple)) and len(row) >= 5:
+            o, h, l, c = row[1], row[2], row[3], row[4]
+            vol = row[5] if len(row) > 5 else None
+        if o is not None and c is not None:
+            try:
+                opens.append(float(o)); highs.append(float(h or c))
+                lows.append(float(l or c)); closes.append(float(c))
+                volumes.append(float(vol) if vol is not None else 0.0)
+            except (TypeError, ValueError):
+                pass
+    return opens, highs, lows, closes, volumes
+
+
+def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 60) -> Optional[Dict[str, Any]]:
+    """【CoinGlass-First K 線】使用 CoinGlass /api/futures/price/history 取 OHLCV，
+    本地計算 RSI/布林帶/ATR/EMA20/VWAP_2h/MACD/結構高低點，回傳與 BingX 版本相同格式。
+    依序嘗試 Binance → OKX → Bybit，直到取得足夠 K 線。
+    """
+    clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    # CoinGlass symbol 格式：通常為 {base}USDT（如 BTCUSDT）或 1000PEPEUSDT
+    try_pairs = [f"{clean}USDT", f"1000{clean}USDT"]
+    exchanges_to_try = ["Binance", "OKX", "Bybit"]
+    headers_cg = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+
+    for exchange in exchanges_to_try:
+        for sym_pair in try_pairs:
+            try:
+                _respect_coinglass_rate_limit()
+                r = requests.get(
+                    f"{CG_API_BASE}/api/futures/price/history",
+                    headers=headers_cg,
+                    params={"exchange": exchange, "symbol": sym_pair,
+                            "interval": interval, "limit": limit},
+                    timeout=10,
+                )
+                if r.status_code == 429:
+                    logger.warning(f"[CG K線] {clean} 429 限流，短暫等待")
+                    time.sleep(1.5)
+                    continue
+                if r.status_code != 200:
+                    continue
+                j = r.json()
+                if j.get("code") not in (0, "0", 200, "200", None):
+                    continue
+                raw = j.get("data") or j.get("list") or []
+                if not isinstance(raw, list) or len(raw) < 20:
+                    continue
+                opens, highs, lows, closes, volumes = _parse_kline_rows(raw)
+                if len(closes) < 20:
+                    continue
+                logger.info(
+                    f"[CG K線] {clean}: {exchange} {sym_pair} {interval} {len(raw)} 根，"
+                    f"開始計算 RSI/BB/ATR/EMA/VWAP"
+                )
+                result = _calc_indicators_from_ohlcv(
+                    opens, highs, lows, closes, volumes,
+                    clean, f"CoinGlass/{exchange}", sym_pair,
+                )
+                if result:
+                    result["source"] = "CoinGlass"
+                    return result
+            except Exception as e:
+                logger.debug(f"[CG K線] {clean}/{exchange}/{sym_pair} 異常: {e}")
+                continue
+
+    logger.warning(f"[CG K線] {clean}: 所有交易所/交易對均無法取得足夠 K 線（嘗試 {exchanges_to_try}）")
+    return None
+
+
+def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    技術指標：
+    - Plan A = CoinGlass futures/price/history K 線本地計算（RSI/布林/EMA20/VWAP_2h/ATR/MACD/結構高低點）
+    - Plan B = BingX 15m K 線本地計算（CoinGlass 不可用時備援）
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+
+    # ── Plan A：CoinGlass futures/price/history K 線（主數據源）────────────
+    logger.info(f"[技術指標] {base}: Plan A CoinGlass K 線計算技術指標")
+    tech = _fetch_cg_klines_and_calc(symbol)
+    if tech:
+        tech["source"] = "CoinGlass"
+        return tech
+
+    # ── Plan B：BingX K 線備援（CoinGlass 不可用時）─────────────────────────
+    logger.warning(f"[技術指標] {base}: CoinGlass K 線失敗，切換 Plan B BingX 備援")
+    tech_bx = _fetch_bingx_klines_and_calc(symbol, preferred_symbol=bingx_symbol_override)
+    if tech_bx:
+        tech_bx["source"] = "BingX"
+        logger.info(f"[技術指標] {base}: Plan B BingX 完成 RSI={tech_bx.get('rsi')}")
+        return tech_bx
+
+    logger.warning(f"[技術指標] {base}: CoinGlass 與 BingX 均無法取得 K 線，技術指標失敗")
+    return None
 
 
 # 四區塊 + 五星制：zone 為推播區塊名，stars 1=最差 5=最佳
@@ -4323,6 +4497,12 @@ def build_report_message_tiered(
                 # ── 低流動性警示 ────────────────────────────────────────────
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
+                # 數據源提示：CoinGlass 為主，顯示 BingX 支援狀態
+                _bingx_ok = x.get("bingx_supported")
+                if _bingx_ok is True:
+                    lines.append("📍 *數據源：CoinGlass* | ✅ BingX 確認支援此標的")
+                else:
+                    lines.append("📍 *數據源：CoinGlass* | ⚠️ BingX 查無此標的，請至各交易所自行查詢")
                 lines.append("")
 
     return "\n".join(lines), has_any
@@ -4666,17 +4846,26 @@ def fetch_position_change():
     logger.info("【巨鯨高效漏斗】開始執行 15M 持倉狙擊掃描...")
 
     # ════════════════════════════════════════════════════════
-    # 漏斗 Step 0：提前獲取 BingX 支援名單（BingX Filter First）
+    # 漏斗 Step 0：預先抓取 BingX 合約對照表（僅供 K 線查詢，不做過濾）
+    # CoinGlass 已是主數據源，BingX 僅作為技術指標 K 線來源
     # ════════════════════════════════════════════════════════
-    logger.info("📊 [掃描漏斗] Step 0：預先抓取 BingX 支援合約名單...")
+    logger.info("📊 [掃描漏斗] Step 0：預先抓取 BingX K線合約對照表 + CoinGlass 交易所支援名單...")
     allowed_bases: Set[str] = set()
     base_to_symbol: Dict[str, str] = {}
     _ab0, base_to_symbol, _ = fetch_bingx_contracts()
     if _ab0:
         allowed_bases = _ab0
-        logger.info(f"📊 [掃描漏斗] Step 0：BingX 支援 {len(allowed_bases)} 個 base 幣種（含1000x別名）")
+        logger.info(f"📊 [掃描漏斗] Step 0a：BingX API 對照表載入 {len(allowed_bases)} 個幣種（K線查詢備用）")
     else:
-        logger.warning("📊 [掃描漏斗] Step 0：BingX 合約名單取得失敗，BingX 過濾將略過（不阻斷主流程）")
+        logger.warning("📊 [掃描漏斗] Step 0a：BingX 對照表取得失敗，K線改用 CoinGlass 價格備援")
+    # CoinGlass supported-exchange-pairs：用於訊息中標示各幣 BingX 支援狀態
+    cg_bingx_supported: Set[str] = fetch_cg_bingx_supported_bases()
+    # 合併兩個來源：BingX API + CoinGlass exchange-pairs → 最完整的支援集合
+    all_bingx_supported: Set[str] = allowed_bases | cg_bingx_supported
+    logger.info(
+        f"📊 [掃描漏斗] Step 0b：CoinGlass 交易所支援 BingX {len(cg_bingx_supported)} 個"
+        f"，合併後共 {len(all_bingx_supported)} 個 BingX 支援幣種"
+    )
 
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 1：CoinGlass 全市場數據（帶分頁，抓取 300~500 個幣種）
@@ -4706,22 +4895,13 @@ def fetch_position_change():
         coinglass_24h_map = _fetch_coinglass_24h_map()
 
     # ════════════════════════════════════════════════════════
-    # 漏斗 Step 2：BingX 支援過濾（第一道防線，淘汰 BingX 不支援的標的）
+    # 漏斗 Step 2：CoinGlass 全市場放行（訊號以 CoinGlass 為準，不做 BingX 過濾）
+    # 訊息中會加上提示，請用戶自行確認交易所是否支援此標的
     # ════════════════════════════════════════════════════════
-    if allowed_bases:
-        bingx_filtered: List[Dict] = []
-        for coin in all_symbols_data:
-            _sym = (coin.get("symbol") or "").replace("USDT", "").replace("-", "").upper()
-            if _sym in allowed_bases:
-                bingx_filtered.append(coin)
-        logger.info(
-            f"📊 [掃描漏斗] 2. 經 BingX 支援過濾剩餘 {len(bingx_filtered)} 幣種"
-            f"（淘汰 {len(all_symbols_data) - len(bingx_filtered)} 個不支援標的）"
-        )
-    else:
-        # BingX 名單取得失敗時，放行全部（不阻斷，後續 enrichment 再做驗證）
-        bingx_filtered = all_symbols_data
-        logger.warning(f"📊 [掃描漏斗] 2. BingX 名單不可用，放行全部 {len(bingx_filtered)} 個幣種繼續篩選")
+    bingx_filtered = all_symbols_data  # 直接放行全部 CoinGlass 幣種
+    logger.info(
+        f"📊 [掃描漏斗] 2. CoinGlass 全市場放行 {len(bingx_filtered)} 幣種（不做 BingX 過濾，訊號以 CoinGlass 為準）"
+    )
 
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 3：價格波動過濾（|15m 漲跌幅| >= PRICE_GATEKEEPER）
@@ -4952,6 +5132,14 @@ def fetch_position_change():
         f"base_to_symbol {len(base_to_symbol)} 個映射"
     )
 
+    # 批次預載全市場 15m RSI（一次 API 呼叫，enrichment 直接查表，節省大量單幣請求）
+    _cg_rsi_map: Dict[str, Optional[float]] = fetch_cg_rsi_bulk(interval="15m")
+    logger.info(f"[RSI批次] 預載完成，共 {len(_cg_rsi_map)} 個幣種 15m RSI 可直接查表")
+
+    # 批次預載全市場 Funding Rate（CoinGlass exchange-list，一次取全部）
+    _cg_fr_map: Dict[str, float] = _fetch_funding_rate_map()
+    logger.info(f"[FR批次] CoinGlass Funding Rate 預載完成，共 {len(_cg_fr_map)} 個幣種")
+
     # 對 top 標的取 RSI/布林帶（僅 4 星以上候選，3 星不計算）
     time.sleep(2)
     all_top = []
@@ -4963,7 +5151,11 @@ def fetch_position_change():
             preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
         time.sleep(0.2)
         tech = calculate_technicals(sym, bingx_symbol_override=preferred)
-        funding_rate = _fetch_bingx_funding_rate(sym, preferred_symbol=preferred)
+        # Funding Rate：優先 CoinGlass 預載批次表，找不到再逐幣呼叫 BingX 備援
+        _base_fr = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+        funding_rate = _cg_fr_map.get(_base_fr)
+        if funding_rate is None:
+            funding_rate = _fetch_bingx_funding_rate(sym, preferred_symbol=preferred)
         price_24h = item.get("priceChange24h") if isinstance(item.get("priceChange24h"), (int, float)) else None
         if price_24h is None:
             price_24h = coinglass_24h_map.get(clean_base)
@@ -4995,6 +5187,12 @@ def fetch_position_change():
             continue  # 未達 4 星門檻或被濾掉，直接略過
         signal_label, zone, stars, rsi_desc, reason = classified
         rsi_val = tech.get("rsi") if tech else None
+        # 若 BingX K 線未能計算出 RSI，嘗試用預載的 CoinGlass RSI 批次表補齊
+        if rsi_val is None:
+            _base_key_rsi = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+            rsi_val = _cg_rsi_map.get(_base_key_rsi)
+            if rsi_val is not None:
+                logger.debug(f"[RSI批次補齊] {sym}: RSI={rsi_val:.1f}（CoinGlass 批次表）")
         ub_val = tech.get("ub_value") if tech else None
         lb_val = tech.get("lb_value") if tech else None
         atr_val = tech.get("atr") if tech else None
@@ -5067,6 +5265,10 @@ def fetch_position_change():
                 whale_sync = True
                 reason = reason + f" 🐋主力同步做空({whale_idx:.0f})"
 
+        # 判斷此幣 BingX 是否支援（合併 BingX API + CoinGlass exchange-pairs 兩個來源）
+        _base_key = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+        _bingx_ok = _base_key in all_bingx_supported
+
         all_top.append({
             **item,
             "priceChange24h": price_24h,
@@ -5106,6 +5308,7 @@ def fetch_position_change():
             "liq_nearby": liq_nearby,     # 爆倉熱力圖
             "ob_wall": ob_wall,           # 掛單牆
             "whale_sync": whale_sync,     # 主力同步
+            "bingx_supported": _bingx_ok,  # BingX 是否支援（CoinGlass exchange-pairs 驗證）
         })
         resonance_str = "🔥共振" if resonance_5m is True else ("⚠️已竭" if resonance_5m is False else "❓未知")
         vol_str = f"⚡{vol_spike_ratio:.1f}×" if has_vol_spike else "-"
@@ -5114,25 +5317,9 @@ def fetch_position_change():
             f"5M={resonance_str} 爆量={vol_str} 鯨魚={whale_idx} | {reason}"
         )
 
-    # ── BingX 支援驗證守門（CoinGlass-First 架構：最終推播前確認 BingX 有此標的）────
-    if allowed_bases:
-        _before_bingx_check = len(all_top)
-        _verified = []
-        for _x in all_top:
-            _cb = (_x.get("symbol") or "").replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
-            if _cb in allowed_bases:
-                _verified.append(_x)
-            else:
-                logger.info(
-                    f"[BingX驗證] {_cb} 不在 BingX 支援名單，移除"
-                    f"（CoinGlass 有此訊號但 BingX 無對應合約，無法取 K 線/費率）"
-                )
-        _removed = _before_bingx_check - len(_verified)
-        if _removed > 0:
-            logger.info(f"[BingX驗證] 移除 {_removed} 個不支援標的，剩餘 {len(_verified)} 個進入推播流程")
-        all_top = _verified
-    else:
-        logger.info("[BingX驗證] BingX 名單未取得（備援），跳過此守門步驟")
+    # ── CoinGlass-First 架構：不做 BingX 守門過濾，訊號全數保留 ────
+    # 訊息中已加入數據源提示，用戶自行確認交易所是否支援
+    logger.info(f"[CoinGlass-First] 全部 {len(all_top)} 個訊號進入推播流程（訊號以 CoinGlass 為準）")
 
     # 用 BingX ticker 取現價 + 24h 成交額（僅標示低流動性與 5 星降星，不再做成交量門檻過濾）
     VOLUME_SOFT_MIN_USD = 5_000_000   # <5M 標示「成交量極低 小心滑價」
@@ -7655,40 +7842,70 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
 
 def _fetch_liq_radar_analysis_1m(symbol: str) -> Dict:
     """為撿屍雷達抓取 1m K 線，計算 RSI 與長下影線（針形態）。
+    優先使用 CoinGlass /api/futures/price/history（interval=1m）；
+    失敗時備援 BingX 1m K 線。
     返回：{"rsi": float|None, "has_pin": bool, "lower_shadow_ratio": float,
            "cur_price": float|None, "entry_zone_low": float|None, "entry_zone_high": float|None}
-    長下影線（下針）定義：下影線長度 > 實體的 2 倍，且下影線 > K 線總振幅的 40%
     """
     result: Dict = {"rsi": None, "has_pin": False, "lower_shadow_ratio": 0.0,
                     "cur_price": None, "entry_zone_low": None, "entry_zone_high": None}
+    clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+
+    opens, highs, lows, closes = [], [], [], []
+
+    # ── 優先：CoinGlass futures/price/history 1m ──────────────────────────
     try:
-        bingx_sym = f"{symbol}-USDT"
-        url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
-        params = {"symbol": bingx_sym, "interval": "1m", "limit": 50}
-        resp = requests.get(url, params=params, timeout=8)
-        if resp.status_code != 200:
-            return result
-        raw = resp.json()
-        candles = raw.get("data") or raw.get("result") or (raw if isinstance(raw, list) else None)
-        if not candles or len(candles) < 16:
-            return result
+        for ex, sym_pair in [("Binance", f"{clean}USDT"), ("OKX", f"{clean}USDT")]:
+            _respect_coinglass_rate_limit()
+            r = requests.get(
+                f"{CG_API_BASE}/api/futures/price/history",
+                headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+                params={"exchange": ex, "symbol": sym_pair, "interval": "1m", "limit": 50},
+                timeout=8,
+            )
+            if r.status_code == 200:
+                j = r.json()
+                if j.get("code") in (0, "0", 200, "200", None):
+                    raw_cg = j.get("data") or j.get("list") or []
+                    if isinstance(raw_cg, list) and len(raw_cg) >= 16:
+                        _o, _h, _l, _c, _ = _parse_kline_rows(raw_cg)
+                        if len(_c) >= 16:
+                            opens, highs, lows, closes = _o, _h, _l, _c
+                            break
+    except Exception as e:
+        logger.debug(f"[撿屍雷達-CG] {clean} 1m K線異常: {e}")
 
-        opens, highs, lows, closes = [], [], [], []
-        for c in candles:
-            if isinstance(c, dict):
-                opens.append(float(c.get("open") or c.get("o") or 0))
-                highs.append(float(c.get("high") or c.get("h") or 0))
-                lows.append(float(c.get("low") or c.get("l") or 0))
-                closes.append(float(c.get("close") or c.get("c") or 0))
-            elif isinstance(c, (list, tuple)) and len(c) >= 5:
-                opens.append(float(c[1]))
-                highs.append(float(c[2]))
-                lows.append(float(c[3]))
-                closes.append(float(c[4]))
+    # ── 備援：BingX 1m K 線 ───────────────────────────────────────────────
+    if len(closes) < 16:
+        try:
+            bingx_sym = f"{clean}-USDT"
+            r2 = requests.get(
+                "https://open-api.bingx.com/openApi/swap/v3/quote/klines",
+                params={"symbol": bingx_sym, "interval": "1m", "limit": 50},
+                timeout=8,
+            )
+            if r2.status_code == 200:
+                raw2 = r2.json()
+                candles = raw2.get("data") or raw2.get("result") or (raw2 if isinstance(raw2, list) else [])
+                if isinstance(candles, list) and len(candles) >= 16:
+                    for c in candles:
+                        if isinstance(c, dict):
+                            opens.append(float(c.get("open") or c.get("o") or 0))
+                            highs.append(float(c.get("high") or c.get("h") or 0))
+                            lows.append(float(c.get("low") or c.get("l") or 0))
+                            closes.append(float(c.get("close") or c.get("c") or 0))
+                        elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                            opens.append(float(c[1]))
+                            highs.append(float(c[2]))
+                            lows.append(float(c[3]))
+                            closes.append(float(c[4]))
+        except Exception as e:
+            logger.debug(f"[撿屍雷達-BX] {clean} 1m K線異常: {e}")
 
-        if len(closes) < 15:
-            return result
+    if len(closes) < 15:
+        return result
 
+    try:
         # RSI 14 期
         deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
         gains = [max(d, 0.0) for d in deltas]
@@ -8037,6 +8254,81 @@ def fetch_rsi_list() -> List[Dict]:
     return result
 
 
+# ── 全市場 RSI 批次快取（供掃描周期前一次性預載，enrichment 直接查表）─────────────
+_cg_rsi_bulk_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}  # {base: {rsi_15m, rsi_1h, ...}}
+_CG_RSI_BULK_TTL = 120.0  # 2 分鐘 TTL，配合 15m 週期
+
+
+def fetch_cg_rsi_bulk(interval: str = "15m") -> Dict[str, Optional[float]]:
+    """批次取得全市場 RSI（CoinGlass /api/futures/rsi/list）。
+    回傳 {base_symbol: rsi_float} dict；快取 2 分鐘。
+    在 fetch_position_change 掃描開始前呼叫一次，enrichment 階段直接 dict 查表，
+    不需要對每個幣種單獨呼叫 API。
+    """
+    global _cg_rsi_bulk_cache
+    now = time.time()
+    if now - _cg_rsi_bulk_cache["ts"] < _CG_RSI_BULK_TTL and _cg_rsi_bulk_cache["data"]:
+        return _cg_rsi_bulk_cache["data"]
+
+    if not CG_API_KEY:
+        return {}
+
+    try:
+        _respect_coinglass_rate_limit()
+        r = requests.get(
+            f"{CG_API_BASE}/api/futures/rsi/list",
+            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+            params={"interval": interval},
+            timeout=12,
+        )
+        if r.status_code != 200:
+            logger.debug(f"[RSI批次] HTTP {r.status_code}")
+            return _cg_rsi_bulk_cache.get("data", {})
+        j = r.json()
+        if j.get("code") not in (0, "0", 200, "200", None):
+            logger.debug(f"[RSI批次] code={j.get('code')}")
+            return _cg_rsi_bulk_cache.get("data", {})
+
+        raw = j.get("data") or j.get("list") or (j if isinstance(j, list) else [])
+        out: Dict[str, Optional[float]] = {}
+        for item in (raw if isinstance(raw, list) else []):
+            if not isinstance(item, dict):
+                continue
+            # symbol 欄位
+            sym = (item.get("symbol") or item.get("pair") or item.get("coin") or "").upper()
+            sym = sym.replace("USDT", "").replace("-", "").replace("_", "").strip()
+            if not sym:
+                continue
+            # RSI 值：優先指定 interval，再試各種欄位名
+            rsi_val = None
+            interval_key = interval.lower().replace("m", "m").replace("h", "h")
+            for k in item:
+                kl = k.lower()
+                if "rsi" in kl and (interval_key in kl or kl in ("rsi", "rsivalue", "rsi_value")):
+                    try:
+                        rsi_val = float(item[k])
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            # 若未找到，嘗試直接的 rsi 欄位
+            if rsi_val is None:
+                for k in ("rsi", "RSI", "rsiValue", "rsi_value", "value"):
+                    if k in item and item[k] is not None:
+                        try:
+                            rsi_val = float(item[k])
+                            break
+                        except (TypeError, ValueError):
+                            pass
+            out[sym] = rsi_val
+
+        logger.info(f"[RSI批次] 取得 {len(out)} 個幣種 {interval} RSI（CoinGlass rsi/list）")
+        _cg_rsi_bulk_cache = {"ts": now, "data": out}
+        return out
+    except Exception as e:
+        logger.debug(f"[RSI批次] 異常: {e}")
+        return _cg_rsi_bulk_cache.get("data", {})
+
+
 def fetch_buy_ratio(symbol: str) -> Optional[float]:
     """
     近似計算某幣種的 Buy Ratio（由聚合掛單深度近似，bids / (bids + asks)）
@@ -8124,69 +8416,106 @@ def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict
 
 
 def fetch_aggregated_cvd_history(symbol: str, interval: str = "1h") -> Optional[List[Dict]]:
-    """獲取聚合累計成交量差值（CVD）歷史數據"""
-    url = "https://open-api-v4.coinglass.com/api/futures/aggregated-cvd/history"
-    params = {
-        "exchange_list": "Binance",
-        "symbol": symbol,
-        "interval": interval
-    }
-    headers = {
-        "CG-API-KEY": CG_API_KEY,
-        "accept": "application/json"
-    }
-    
+    """獲取聚合累計成交量差值（CVD）歷史數據。
+    優先嘗試 /api/futures/aggregated-cvd/history（跨交易所聚合）；
+    失敗時備援 /api/futures/cvd/history（單一交易所，預設 Binance）。
+    統一回傳標準化 list[dict]（含 time/cvd 欄位）。
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    headers_cg = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+
+    def _parse_cvd_list(data_list: list) -> Optional[List[Dict]]:
+        if not isinstance(data_list, list) or not data_list:
+            return None
+        # 標準化欄位：統一為 {"time": ts, "cvd": value}
+        out = []
+        for item in data_list:
+            if not isinstance(item, dict):
+                continue
+            ts = (item.get("time") or item.get("timestamp") or item.get("t")
+                  or item.get("createTime") or 0)
+            cvd = None
+            for k in ("cum_vol_delta", "cvd", "value", "cvdValue",
+                      "cumulativeVolumeDelta", "volumeDelta", "netVolume"):
+                if item.get(k) is not None:
+                    try:
+                        cvd = float(item[k])
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            if cvd is not None:
+                out.append({"time": int(ts), "cvd": cvd, "_raw": item})
+        return out if out else None
+
+    # ── 優先：聚合 CVD（多所 aggregated）────────────────────────────────────
     try:
-        logger.debug(f"嘗試獲取 CVD 歷史 {symbol}")
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        if response.status_code != 200:
-            logger.debug(f"聚合 CVD API 返回狀態碼: {response.status_code} for {symbol}")
-            return None
-        
-        data = response.json()
-        if data.get('code') not in ['0', 0, 200, '200']:
-            error_msg = data.get('msg') or data.get('message') or '未知錯誤'
-            logger.debug(f"聚合 CVD API 返回錯誤: {error_msg} (code: {data.get('code')}) for {symbol}")
-            return None
-        
-        data_list = data.get('data', [])
-        if isinstance(data_list, list) and len(data_list) > 0:
-            logger.debug(f"成功獲取 CVD 歷史 {symbol}: {len(data_list)} 條")
-            # 輸出數據樣本以便調試
-            if len(data_list) > 0:
-                sample = data_list[0]
-                logger.debug(f"CVD 數據樣本 {symbol}: 字段 {list(sample.keys())[:10]}")
-            return data_list
-        else:
-            logger.debug(f"聚合 CVD API 返回空數據 for {symbol}")
-            return None
+        _respect_coinglass_rate_limit()
+        r = requests.get(
+            f"{CG_API_BASE}/api/futures/aggregated-cvd/history",
+            headers=headers_cg,
+            params={"exchange_list": "Binance,OKX,Bybit", "symbol": base, "interval": interval},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            j = r.json()
+            if j.get("code") in ("0", 0, 200, "200"):
+                result = _parse_cvd_list(j.get("data") or j.get("list") or [])
+                if result:
+                    logger.debug(f"[CVD-聚合] {base} {interval}: {len(result)} 條")
+                    return result
     except Exception as e:
-        logger.debug(f"獲取聚合 CVD 歷史失敗 {symbol}: {str(e)}")
-        import traceback
-        logger.debug(traceback.format_exc())
-        return None
+        logger.debug(f"[CVD-聚合] {base} 異常: {e}")
+
+    # ── 備援：單所 CVD（Binance）────────────────────────────────────────────
+    try:
+        _respect_coinglass_rate_limit()
+        r2 = requests.get(
+            f"{CG_API_BASE}/api/futures/cvd/history",
+            headers=headers_cg,
+            params={"exchange": "Binance", "symbol": base, "interval": interval},
+            timeout=10,
+        )
+        if r2.status_code == 200:
+            j2 = r2.json()
+            if j2.get("code") in ("0", 0, 200, "200"):
+                result2 = _parse_cvd_list(j2.get("data") or j2.get("list") or [])
+                if result2:
+                    logger.debug(f"[CVD-單所] {base} {interval}: {len(result2)} 條")
+                    return result2
+    except Exception as e:
+        logger.debug(f"[CVD-單所] {base} 異常: {e}")
+
+    logger.debug(f"[CVD] {base} {interval} 兩個端點均無數據")
+    return None
 
 
 def _cvd_change_last2(symbol: str, interval: str = "1h") -> Optional[float]:
-    """取 1h CVD 最近 2 根 K 的變化值 (Current_CVD - Prev_CVD)。用於過濾量價背離。"""
+    """取最近 2 根 K 的 CVD 變化值 (Current - Prev)，用於過濾量價背離。
+    fetch_aggregated_cvd_history 已回傳標準化 {"time", "cvd"} 格式，直接使用。
+    """
     data = fetch_aggregated_cvd_history(symbol, interval)
     if not data or len(data) < 2:
         return None
-    sort_key = lambda x: int(x.get("time") or x.get("timestamp") or x.get("t") or 0)
-    sorted_data = sorted(data, key=sort_key)
+    sorted_data = sorted(data, key=lambda x: x.get("time", 0))
     last_two = sorted_data[-2:]
     cvd_vals = []
     for item in last_two:
-        v = None
-        for key in ("cum_vol_delta", "cvd", "value", "cvdValue", "cumulativeVolumeDelta", "volumeDelta"):
-            if item.get(key) is not None:
-                try:
-                    v = float(item[key])
-                    break
-                except (TypeError, ValueError):
-                    pass
+        # 優先取標準化欄位 "cvd"，再試舊式欄位名（相容舊資料）
+        v = item.get("cvd")
+        if v is None:
+            for key in ("value", "cvdValue", "cumulativeVolumeDelta",
+                        "cum_vol_delta", "volumeDelta", "netVolume"):
+                if item.get(key) is not None:
+                    try:
+                        v = float(item[key])
+                        break
+                    except (TypeError, ValueError):
+                        pass
         if v is not None:
-            cvd_vals.append(v)
+            try:
+                cvd_vals.append(float(v))
+            except (TypeError, ValueError):
+                pass
     if len(cvd_vals) != 2:
         return None
     return cvd_vals[1] - cvd_vals[0]
