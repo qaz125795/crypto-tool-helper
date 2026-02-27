@@ -1844,7 +1844,11 @@ def fetch_cg_bingx_supported_bases() -> Set[str]:
                         _tmp_map.setdefault(_b, set()).add(ex_name)
             if _tmp_map:
                 _cg_full_exchange_map = _tmp_map
-                logger.info(f"[CG支援查詢] 反向對照表建立完成：{len(_tmp_map)} 個幣種跨 {len(data)} 個交易所")
+                _ex_names = sorted(data.keys())
+                logger.info(
+                    f"[CG支援查詢] 反向對照表建立完成：{len(_tmp_map)} 個幣種跨 {len(data)} 個交易所"
+                    f" | 交易所名稱樣本: {_ex_names[:10]}"
+                )
 
             bingx_key = next((k for k in data if "bingx" in k.lower() or "bing" in k.lower()), None)
             if bingx_key:
