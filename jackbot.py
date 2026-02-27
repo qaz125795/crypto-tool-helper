@@ -17,6 +17,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import random
+import contextlib
 import pandas as pd
 import numpy as np
 
@@ -104,6 +105,31 @@ logging.getLogger().addHandler(_fh)
 # CoinGlass OI 呼叫限速（初創版 80 次/分鐘，global 必須在函數內「最先」宣告再賦值）
 _coinglass_oi_rate_limiter = None
 
+# CoinGlass API 全域呼叫計數（保守抓 70/min），避免觸發嚴格限流
+_coinglass_api_counter: Dict[str, Any] = {"window_start": 0.0, "count": 0}
+_coinglass_api_counter_lock = threading.Lock()
+_COINGLASS_MAX_CALLS_PER_MINUTE = 70
+
+
+def _respect_coinglass_rate_limit() -> None:
+    """簡單的全域速率限制：確保 CoinGlass API 約 <70 次/分鐘。"""
+    now = time.time()
+    with _coinglass_api_counter_lock:
+        window_start = _coinglass_api_counter.get("window_start", 0.0)
+        count = _coinglass_api_counter.get("count", 0)
+        if now - window_start >= 60.0:
+            window_start = now
+            count = 0
+        if count >= _COINGLASS_MAX_CALLS_PER_MINUTE:
+            sleep_for = 60.0 - (now - window_start)
+            if sleep_for > 0:
+                logger.info(f"[CoinGlass 限流保護] 本分鐘 API 已達 {count} 次，休息 {sleep_for:.1f} 秒再繼續")
+                time.sleep(sleep_for)
+            window_start = time.time()
+            count = 0
+        _coinglass_api_counter["window_start"] = window_start
+        _coinglass_api_counter["count"] = count + 1
+
 # ==================== 工具函數 ====================
 
 def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown", reply_markup: Optional[Dict] = None) -> bool:
@@ -150,10 +176,19 @@ def load_json_file(filepath: Path, default: Any = None) -> Any:
 
 
 def save_json_file(filepath: Path, data: Any) -> bool:
-    """保存數據到 JSON 文件"""
+    """保存數據到 JSON 文件（帶 fsync，儘量確保寫入落盤）。"""
     try:
-        with open(filepath, 'w', encoding='utf-8') as f:
+        tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                # 某些環境可能不支援 fsync，忽略即可
+                pass
+        os.replace(tmp_path, filepath)
         return True
     except Exception as e:
         logger.error(f"保存文件失敗 {filepath}: {str(e)}")
@@ -1459,7 +1494,8 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
             _coinglass_oi_rate_limiter = {"last_call": 0.0}
         now = time.time()
         elapsed = now - _coinglass_oi_rate_limiter.get("last_call", 0.0)
-        wait_time = 0.7 + random.uniform(0.1, 0.2)
+        # 雲端環境 Anti-429：每次呼叫隨機 sleep 0.8~1.5 秒（含一點亂數抖動）
+        wait_time = random.uniform(0.8, 1.5)
         if elapsed < wait_time:
             time.sleep(wait_time - elapsed)
         _coinglass_oi_rate_limiter["last_call"] = time.time()
@@ -1469,8 +1505,10 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
     params = {"symbol": base_symbol, "interval": "30m", "limit": 5}
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
-    for attempt in range(2):
+    backoff = 2.0
+    for attempt in range(4):
         try:
+            _respect_coinglass_rate_limit()
             response = requests.get(url, params=params, headers=headers, timeout=10)
             if response.status_code == 200:
                 result = response.json()
@@ -1480,16 +1518,22 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
                     if change is not None:
                         return change
                 msg = result.get("msg", "")
-                if "Too Many Requests" in msg or result.get("code") == "400":
-                    logger.warning(f"CoinGlass 限流 ({base_symbol})，休息 3 秒...")
-                    time.sleep(3)
+                if "Too Many Requests" in msg or result.get("code") in ("400", "429"):
+                    sleep_for = backoff + random.uniform(0, 1.0)
+                    logger.warning(f"[GITHUB_IP_THROTTLED] CoinGlass 限流 ({base_symbol})，休息 {sleep_for:.1f} 秒（第 {attempt+1} 次重試）...")
+                    time.sleep(sleep_for)
+                    backoff *= 2.0
                     continue
             elif response.status_code == 429:
-                time.sleep(3)
+                sleep_for = backoff + random.uniform(0, 1.0)
+                logger.warning(f"[GITHUB_IP_THROTTLED] CoinGlass HTTP 429 限流 ({base_symbol})，休息 {sleep_for:.1f} 秒（第 {attempt+1} 次重試）...")
+                time.sleep(sleep_for)
+                backoff *= 2.0
                 continue
         except Exception as e:
             logger.debug(f"OI 請求異常 {base_symbol}: {e}")
-            time.sleep(1)
+            time.sleep(backoff)
+            backoff *= 2.0
     return None
 
 
@@ -2250,15 +2294,36 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
         )
         return tech
 
-    # Plan B：僅當 BingX K 線完全不可用時，才退回 CoinGlass API
-    logger.warning(f"[技術指標] {base}: BingX K 線本地計算失敗，改用 CoinGlass API 作為後備 Plan B")
+    # Plan B：僅當 BingX K 線連續失敗多次時，才退回 CoinGlass API
+    logger.warning(f"[技術指標] {base}: BingX K 線本地計算失敗，記錄一次 BingX 失敗計數")
+    global _bingx_tech_fail_count
+    try:
+        _bingx_tech_fail_count  # type: ignore[name-defined]
+    except NameError:
+        _bingx_tech_fail_count = 0  # type: ignore[assignment]
+    _bingx_tech_fail_count += 1  # type: ignore[operator]
+    if _bingx_tech_fail_count <= 3:  # 連續失敗前三次，寧可放棄該幣種也不直接用 CoinGlass
+        logger.warning(f"[技術指標] {base}: BingX 失敗次數={_bingx_tech_fail_count} ≤ 3，本輪放棄技術指標以避免數據源偏差")
+        return None
+
+    logger.warning(f"[技術指標] {base}: BingX 連續失敗超過 3 次，啟用 CoinGlass 作為後備 Plan B（可能存在數據源偏差）")
     plan_b_used = True
     logger.info(f"[技術指標] {base}: 查詢 CoinGlass API RSI...")
-    rsi_data = _fetch_coinglass_rsi(symbol)
+    backoff = 2.0
+    rsi_data = None
+    for attempt in range(3):
+        _respect_coinglass_rate_limit()
+        rsi_data = _fetch_coinglass_rsi(symbol)
+        if rsi_data is not None:
+            break
+        logger.warning(f"[GITHUB_IP_THROTTLED] CoinGlass RSI 取得失敗或限流 ({base})，第 {attempt+1} 次嘗試，休息 {backoff:.1f} 秒後重試")
+        time.sleep(backoff + random.uniform(0, 1.0))
+        backoff *= 2.0
     if rsi_data is None:
         logger.warning(f"[技術指標] {base}: CoinGlass RSI 亦無數據，技術指標取得失敗")
         return None
 
+    _respect_coinglass_rate_limit()
     boll_data = _fetch_coinglass_boll(symbol)
 
     rsi_val = None
@@ -2314,12 +2379,16 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
     if current_price is None and (ub_value is not None or lb_value is not None):
         current_price = ub_value or lb_value
 
+    _respect_coinglass_rate_limit()
     atr_val = _fetch_coinglass_atr(symbol, "1d")
     vwap_2h = ema20_close = None
     # Plan B 加分項：EMA、MACD（API 失敗不影響 plan_b_used）
+    _respect_coinglass_rate_limit()
+    _respect_coinglass_rate_limit()
     ema20_api = _fetch_coinglass_ema(symbol, "30m")
     if ema20_api is not None:
         ema20_close = ema20_api
+    _respect_coinglass_rate_limit()
     macd_data = _fetch_coinglass_macd(symbol, "30m")
     logger.info(
         f"[技術指標] {base}: 使用 CoinGlass API 數據 RSI={rsi_val} BOLL上={ub_value} "
@@ -2336,6 +2405,7 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
         "atr": atr_val,
         "source": "CoinGlass",
         "plan_b_used": plan_b_used,
+        "data_source_warning": True,  # BingX 多次失敗後才啟用 CoinGlass，標記可能存在數據源偏差
     }
     if vwap_2h is not None:
         out["vwap_2h"] = vwap_2h
@@ -2362,10 +2432,17 @@ MAIN_COINS = {"BTC", "ETH"}   # 主流幣
 OI_MAIN_COIN_MIN = 5.5       # 主流幣須 |OI 30m| >= 5.5% 才進榜（門檻極高，實務上排除）
 OI_ALTCOIN_MIN = 1.5         # 山寨幣初選門檻（後續再用 OI_FOR_4_STAR 篩）
 
-# 星等門檻（嚴一點保勝率：5星/鑽石 3.5%、4星 3.3%）
-OI_FOR_5_STAR = 3.5    # 5星：主力量明確才給
-OI_FOR_4_STAR = 3.3    # 4星
+# 星等門檻（基礎值；實際 4/5 星門檻會在 runtime 依 OI 分佈動態調整，以適應不同波動環境）
+OI_FOR_5_STAR = 3.5    # 5星：主力量明確才給（基礎值，動態門檻下限）
+OI_FOR_4_STAR = 3.3    # 4星（基礎值，動態門檻下限）
 OI_FOR_ELITE = 3.5     # 鑽石 💎：與 5 星對齊
+
+# 動態 OI 門檻統計（每輪由 fetch_position_change 根據當前樣本分佈更新）
+_dynamic_oi_mean_30m: Optional[float] = None
+_dynamic_oi_std_30m: Optional[float] = None
+_dynamic_oi_4star: Optional[float] = None
+_dynamic_oi_5star: Optional[float] = None
+_dynamic_oi_sample_size: int = 0
 
 # 狙擊鏡止盈風報門檻：止盈若低於此 R 不推播（避免賠率差、維持勝率品質）
 MIN_TP1_R_FOR_PUSH = 0.65
@@ -2392,6 +2469,8 @@ RSI_FILTER_TOP_MIN = 60
 RSI_FILTER_DIP_MAX = 40
 RSI_FILTER_BREAKOUT_LONG_MIN = 45   # v3.0 追漲時 RSI 不低於 45
 RSI_FILTER_BREAKOUT_SHORT_MAX = 55  # v3.0 追跌時 RSI 不高於 55
+# 鑽石級 CVD 驗證：CVD 變化量需至少佔 OI 變化的一定比例，避免主力對敲假量
+CVD_ELITE_MIN_RATIO = 0.3
 # 鑽石級 24h 成交量門檻（略放寬：5M 即給頭等艙）
 VOLUME_ELITE_MIN_USD = 5_000_000
 # A 級費率硬過濾：資金費率 > 0.05% 視為多頭擁擠，不推 A 級防接盤殺多
@@ -2417,13 +2496,32 @@ def _classify_signal_and_tier(
     # 0. 效率過濾：OI 未達 4 星門檻，直接丟棄，不進行後續運算
     oi = item.get("oiChange30m") or 0
     abs_oi = abs(oi)
-    if abs_oi < OI_FOR_4_STAR:
+
+    # 動態 OI 門檻：若本輪樣本數足夠，採用「平均 + k*標準差」作為 4/5 星實際門檻，
+    # 讓 5 星只落在極端 OI 爆發（>2σ）的標的上，適應牛熊不同波動環境。
+    global _dynamic_oi_4star, _dynamic_oi_5star, _dynamic_oi_sample_size
+    oi_4 = OI_FOR_4_STAR
+    oi_5 = OI_FOR_5_STAR
+    if _dynamic_oi_sample_size and _dynamic_oi_sample_size >= 10:
+        if _dynamic_oi_4star is not None:
+            oi_4 = max(OI_FOR_4_STAR, _dynamic_oi_4star)
+        if _dynamic_oi_5star is not None:
+            oi_5 = max(OI_FOR_5_STAR, _dynamic_oi_5star)
+
+    if abs_oi < oi_4:
         return None
 
-    # A 級費率硬過濾：賭鬼樂透(A級) 且 資金費率 > 0.05% 不推，防接盤殺多
+    # A 級費率硬過濾：
+    # - 多單：賭鬼樂透(A級) 且 資金費率 > 0.05% 不推，防接盤殺多
+    # - 空單：賭鬼樂透(A級) 且 資金費率 < -0.05% 不推，防錯殺空頭（費率過度負值）
     def _ret_4(label: str, zone: str, rsi_desc: str, reason: str):
-        if funding_rate is not None and funding_rate > FUNDING_A_GRADE_MAX:
-            return None
+        if funding_rate is not None:
+            # 多單 A 級：費率過高不推
+            if zone in (ZONE_BREAKOUT_LONG, ZONE_DIP) and funding_rate > FUNDING_A_GRADE_MAX:
+                return None
+            # 空單 A 級：費率過負不推
+            if zone in (ZONE_BREAKOUT_SHORT, ZONE_TOP) and funding_rate < -FUNDING_A_GRADE_MAX:
+                return None
         return _apply_retail_funding(apply_24h(label, zone, 4, rsi_desc, reason))
 
     # 輔助函數：24H 趨勢修正 (Truth Protocol)
@@ -2488,6 +2586,7 @@ def _classify_signal_and_tier(
     # 2. CVD 趨勢驗證 (用於決定是否降級)
     # 順勢：開多且 CVD 買 / 開空且 CVD 賣 / 平倉視為「原趨勢的反向」確認
     is_trend_confirmed = False
+    cvd_price_divergent = False
     if cvd_change_1h is not None:
         if category == "long_open" and cvd_change_1h > 0:
             # 開多 + CVD 買 → 多頭共識
@@ -2502,10 +2601,18 @@ def _classify_signal_and_tier(
             # 空頭被軋 + CVD FOMO買極值 → 摸頭方向強確認
             is_trend_confirmed = True
 
+    # CVD 與價格 30m 方向相反 → 強制僅視為賭鬼級 (4 星) 或不推播
+    price_chg_30m = item.get("priceChange30m")
+    if isinstance(price_chg_30m, (int, float)) and cvd_change_1h is not None and isinstance(cvd_change_1h, (int, float)):
+        if price_chg_30m > 0 and cvd_change_1h < 0:
+            cvd_price_divergent = True
+        elif price_chg_30m < 0 and cvd_change_1h > 0:
+            cvd_price_divergent = True
+
     # 3. 判斷邏輯開始
 
     # === 5 星邏輯 (需 OI 達標 且 CVD 確認) ===
-    if abs_oi >= OI_FOR_5_STAR:
+    if abs_oi >= oi_5 and not cvd_price_divergent:
         if is_trend_confirmed:
             # [真 5 星]：量大 + 方向對 = 共識盤
             reason_suffix = " (CVD確認)"
@@ -2705,8 +2812,12 @@ def build_report_message_tiered(
         buffer_pct = 0.005  # 0.5% buffer（結構位微調）
         sl_price = None
         sl_capped = False
-        # 容錯機制：列車 8%，賭鬼 6%
+        # 容錯機制：列車 8%，賭鬼 6%；高波動標的(vol_pct>3%) 動態放寬至 12% / 10%
         max_pct = 0.08 if is_train else 0.06
+        if atr_val is not None and price > 0:
+            vol_pct = (atr_val / price) * 100.0
+            if vol_pct > 3.0:
+                max_pct = 0.12 if is_train else 0.10
 
         if is_train:
             # 列車：結構 + ATR 雙保底
@@ -2881,33 +2992,79 @@ def build_report_message_tiered(
         return "做多" if is_bull else "做空"
 
     def _reason_plain(reason: str) -> str:
-        """把邏輯裡的持倉/費率轉成白話（空方/多方 持倉變化）。"""
+        """
+        把邏輯裡的持倉 / 費率 / CVD 專業術語，轉成跟單者聽得懂的白話說明。
+        盡量描述「主力在做什麼」與「對我代表什麼風險 / 機會」。
+        """
         if not reason:
             return "籌碼有異動"
         r = (reason or "").strip()
-        # 持倉變化白話（依關鍵字替換）
+
+        # 1) 平倉 / 減倉類：多頭平倉 / 空頭平倉
         if "持倉大減 (空頭平倉→摸底)" in r or ("空頭平倉" in r and "摸底" in r):
-            r = r.replace("持倉大減 (空頭平倉→摸底)", "空方在減倉，籌碼鬆動，有機會抄底")
+            r = r.replace(
+                "持倉大減 (空頭平倉→摸底)",
+                "做空的人正在陸續回補，空方力量在退場，這裡有機會變成短線低點"
+            )
         if "持倉大減 (多頭平倉→摸頭)" in r or ("多頭平倉" in r and "摸頭" in r):
-            r = r.replace("持倉大減 (多頭平倉→摸頭)", "多方在減倉，漲多易回，可考慮放空")
+            r = r.replace(
+                "持倉大減 (多頭平倉→摸頭)",
+                "做多的人開始一批一批賣出，短線漲多容易回跌，適合考慮短空"
+            )
+
+        # 2) 持倉大增 + 費率：解釋為主力加碼 / 軋空 / 殺多
         if "持倉大增+費率負" in r:
-            r = r.replace("持倉大增+費率負 (嘎空潛力)", "多方加碼、費率又負，容易嘎空")
+            r = r.replace(
+                "持倉大增+費率負 (嘎空潛力)",
+                "主力瘋狂買入，做空的人反而要付錢，空單隨時可能被軋爆，上漲動能非常強"
+            )
         if "持倉大增 (追多)" in r:
-            r = r.replace("持倉大增 (追多)", "多方加碼，順勢做多")
+            r = r.replace(
+                "持倉大增 (追多)",
+                "多頭大舉加碼，市場正在順勢往上走"
+            )
         if "費率/持倉偏多" in r:
-            r = r.replace("費率/持倉偏多", "籌碼與費率都偏多")
+            r = r.replace(
+                "費率/持倉偏多",
+                "多頭人數和成本都偏多，短線偏向上漲，但要留意一旦反轉會殺多"
+            )
         if "費率正/多頭平倉 (摸頭)" in r:
-            r = r.replace("費率正/多頭平倉 (摸頭)", "多方在平倉，偏空摸頭")
+            r = r.replace(
+                "費率正/多頭平倉 (摸頭)",
+                "做多的人在高位慢慢出貨，還要付高費率持倉，這裡容易變成短線高點"
+            )
         if "費率負/空頭平倉 (摸底)" in r:
-            r = r.replace("費率負/空頭平倉 (摸底)", "空方在平倉，偏多摸底")
+            r = r.replace(
+                "費率負/空頭平倉 (摸底)",
+                "做空的人在低位回補了結，多頭還拿著負費率優勢，這裡容易變成短線低點"
+            )
+
+        # 3) 強勢嘎空 / 大漲描述：告訴使用者是「一路噴」的盤
         if "強勢嘎空 (24h漲" in r:
-            r = r.replace("🔥 強勢嘎空 (24h漲 ", "24h 漲 ")
-            if "%)" in r and "有嘎空" not in r:
-                r = r.replace("%)", "%，有嘎空空間", 1)
+            # 例: "🔥 強勢嘎空 (24h漲 25.0%)" → "24h 上漲 25.0%，空單一路被軋，行情非常強勢"
+            r = r.replace("🔥 強勢嘎空 (24h漲 ", "24h 上漲 ")
+            if "%)" in r and "空單一路被軋" not in r:
+                r = r.replace("%)", "%，空單一路被軋，行情非常強勢", 1)
+
+        # 4) 其它較生硬的描述，盡量講成「誰在出貨 / 誰在吸籌」
         if "持倉大減 (多頭平倉" in r and "摸頭" in r:
-            r = r.replace("⛽ 持倉大減 (多頭平倉→摸頭)", "多方在減倉，漲多易回，可放空")
+            r = r.replace(
+                "⛽ 持倉大減 (多頭平倉→摸頭)",
+                "原本做多的人正在賣出離場，這裡屬於高位轉弱區，適合找空點"
+            )
         if "持倉減 (偏空)" in r:
-            r = r.replace("持倉減 (偏空)", "持倉減，偏空")
+            r = r.replace(
+                "持倉減 (偏空)",
+                "合約部位在縮小，整體籌碼略偏空"
+            )
+
+        # 5) CVD / 大單確認：補上「大單實打實」的白話說明
+        if " (CVD確認)" in r:
+            r = r.replace(
+                " (CVD確認)",
+                " —— 大單實打實成交，並非虛假掛單，主力真的有在進出"
+            )
+
         return r if r.strip() else "籌碼有異動"
 
     # 四象限：只推 4 星以上（3 星不推播）
@@ -3052,9 +3209,16 @@ def build_report_message_tiered(
                     price_str = "—"
                 atr_for_log = x.get("atr")
                 cap_note = " (SL已觸發10%上限限制)" if sl_capped else ""
-                logger.info(
-                    f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈={tp1_val}{cap_note}"
-                )
+                source = (x.get("source") or "").strip()
+                data_src_warn = bool(x.get("data_source_warning"))
+                if data_src_warn:
+                    logger.warning(
+                        f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈={tp1_val}{cap_note} | 數據源={source} (數據源偏差預警：BingX 多次失敗改用 CoinGlass)"
+                    )
+                else:
+                    logger.info(
+                        f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈={tp1_val}{cap_note} | 數據源={source or 'BingX'}"
+                    )
 
                 # 1. Header: 標的＋換方向＋波動提示（精簡，不顯示數據來源與分級標籤）
                 sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
@@ -3094,6 +3258,22 @@ def build_report_message_tiered(
                 reason = x.get("reason", "籌碼異動")
                 if flip:
                     reason = (reason or "") + " 趨勢已改變，舊單失效。"
+                # 籌碼背離預警：OI 漲但價格跌幅收斂 → 底部吸籌；OI 跌但價格漲幅收斂 → 頂部出貨
+                p30 = x.get("priceChange30m")
+                oi30 = x.get("oiChange30m")
+                try:
+                    p30_val = float(p30) if isinstance(p30, (int, float, str)) and p30 is not None else None
+                except (TypeError, ValueError):
+                    p30_val = None
+                try:
+                    oi30_val = float(oi30) if isinstance(oi30, (int, float, str)) and oi30 is not None else None
+                except (TypeError, ValueError):
+                    oi30_val = None
+                if p30_val is not None and oi30_val is not None:
+                    if oi30_val > 0 and p30_val < 0 and abs(p30_val) < abs(oi30_val):
+                        reason = (reason or "") + " ⚠️ 底部吸籌跡象"
+                    elif oi30_val < 0 and p30_val > 0 and abs(p30_val) < abs(oi30_val):
+                        reason = (reason or "") + " ⚠️ 頂部出貨跡象"
                 cvd_in_reason = " (CVD確認)" in (reason or "")
                 if cvd_in_reason:
                     reason_display = (reason or "").replace(" (CVD確認)", "").strip()
@@ -3420,12 +3600,46 @@ def fetch_position_change():
     below_oi_threshold = oi_success_count - in_four
     logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個 | 總用時: {total_time/60:.1f} 分鐘")
     logger.info(f"分類結果: 多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}（共 {in_four} 個達 OI 初選門檻｜其餘 {below_oi_threshold} 個 OI 成功但 |OI 變化| 未達門檻未入四類）")
-    
-    # 只統計與計算 4 星以上：|OI| < OI_FOR_4_STAR 的不進 top、不跑後續運算
-    long_open = [x for x in long_open if abs(x.get('oiChange30m') or 0) >= OI_FOR_4_STAR]
-    long_close = [x for x in long_close if abs(x.get('oiChange30m') or 0) >= OI_FOR_4_STAR]
-    short_open = [x for x in short_open if abs(x.get('oiChange30m') or 0) >= OI_FOR_4_STAR]
-    short_close = [x for x in short_close if abs(x.get('oiChange30m') or 0) >= OI_FOR_4_STAR]
+
+    # 動態 OI 門檻計算：以本輪四類樣本的 |OI 30m| 分佈計算平均與標準差，
+    # 4 星實際門檻 = max(固定 4 星門檻, mean + 1σ)
+    # 5 星實際門檻 = max(固定 5 星門檻, mean + 2σ)
+    global _dynamic_oi_mean_30m, _dynamic_oi_std_30m, _dynamic_oi_4star, _dynamic_oi_5star, _dynamic_oi_sample_size
+    oi_samples: List[float] = []
+    for _lst in (long_open, long_close, short_open, short_close):
+        for _x in _lst:
+            try:
+                v = float(_x.get("oiChange30m") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if v == v:
+                oi_samples.append(abs(v))
+    _dynamic_oi_sample_size = len(oi_samples)
+    if _dynamic_oi_sample_size >= 10:
+        arr = np.array(oi_samples, dtype=float)
+        _dynamic_oi_mean_30m = float(arr.mean())
+        _dynamic_oi_std_30m = float(arr.std())
+        _dynamic_oi_4star = max(OI_FOR_4_STAR, _dynamic_oi_mean_30m + 1.0 * _dynamic_oi_std_30m)
+        _dynamic_oi_5star = max(OI_FOR_5_STAR, _dynamic_oi_mean_30m + 2.0 * _dynamic_oi_std_30m)
+        logger.info(
+            f"【動態 OI 門檻】樣本 {_dynamic_oi_sample_size} 個 | 平均 {_dynamic_oi_mean_30m:.2f}% σ {_dynamic_oi_std_30m:.2f}% → "
+            f"4星門檻 {_dynamic_oi_4star:.2f}% 5星門檻 {_dynamic_oi_5star:.2f}%"
+        )
+    else:
+        _dynamic_oi_mean_30m = None
+        _dynamic_oi_std_30m = None
+        _dynamic_oi_4star = None
+        _dynamic_oi_5star = None
+        logger.info(
+            f"【動態 OI 門檻】樣本數 {_dynamic_oi_sample_size} < 10，沿用固定門檻 4星 {OI_FOR_4_STAR}% / 5星 {OI_FOR_5_STAR}%"
+        )
+
+    # 只統計與計算 4 星以上：|OI| < 實際 4 星門檻 的不進 top、不跑後續運算
+    oi_threshold_4 = _dynamic_oi_4star if (_dynamic_oi_4star is not None and _dynamic_oi_sample_size >= 10) else OI_FOR_4_STAR
+    long_open = [x for x in long_open if abs(x.get('oiChange30m') or 0) >= oi_threshold_4]
+    long_close = [x for x in long_close if abs(x.get('oiChange30m') or 0) >= oi_threshold_4]
+    short_open = [x for x in short_open if abs(x.get('oiChange30m') or 0) >= oi_threshold_4]
+    short_close = [x for x in short_close if abs(x.get('oiChange30m') or 0) >= oi_threshold_4]
     long_open.sort(key=lambda x: x['oiChange30m'], reverse=True)
     long_close.sort(key=lambda x: x['oiChange30m'])
     short_open.sort(key=lambda x: x['oiChange30m'], reverse=True)
@@ -3501,6 +3715,7 @@ def fetch_position_change():
             "last_kline_low_30m": tech.get("last_kline_low_30m") if tech else None,
             "last_kline_close_30m": tech.get("last_kline_close_30m") if tech else None,
             "whale_index": whale_idx,
+            "cvd_change_1h": cvd_change_1h,
             "signal_label": signal_label,
             "zone": zone,
             "stars": stars,
@@ -3599,50 +3814,94 @@ def fetch_position_change():
     history_sec = HISTORY_HOURS * 3600
     history: List[Dict] = []
     push_log_signals: List[Dict] = []
-    try:
-        if SNIPER_COOLDOWN_FILE.exists():
-            raw = json.loads(SNIPER_COOLDOWN_FILE.read_text(encoding="utf-8"))
-            history = raw.get("history") or []
-            # 推播紀錄與冷卻同一檔：有 "signals" 就用，無則 []；相容舊版僅有 history
-            push_log_signals = raw.get("signals") or []
-            # 遷移：狀態檔無 signals 但舊檔存在則讀入一次
-            if not push_log_signals:
-                _legacy = SNIPER_COOLDOWN_FILE.parent / "sniper_push_log.json"
-                if _legacy.exists():
+    # 檔案鎖：避免 CI 或多進程同時寫入導致 JSON 損毀
+    lock_file = SNIPER_COOLDOWN_FILE.with_suffix(".lock")
+
+    @contextlib.contextmanager
+    def _sniper_file_lock(timeout: float = 10.0, poll_interval: float = 0.2):
+        start = time.time()
+        while True:
+            try:
+                fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.write(fd, str(os.getpid()).encode("utf-8"))
+                os.close(fd)
+                try:
+                    yield
+                finally:
                     try:
-                        leg = json.loads(_legacy.read_text(encoding="utf-8"))
+                        os.unlink(str(lock_file))
+                    except FileNotFoundError:
+                        pass
+                break
+            except FileExistsError:
+                if time.time() - start > timeout:
+                    logger.warning("取得狙擊狀態檔鎖超時，放棄鎖定直接讀寫（可能存在競爭風險）")
+                    yield
+                    break
+                time.sleep(poll_interval + random.uniform(0, poll_interval))
+
+    try:
+        with _sniper_file_lock():
+            if SNIPER_COOLDOWN_FILE.exists():
+                raw = json.loads(SNIPER_COOLDOWN_FILE.read_text(encoding="utf-8"))
+                history = raw.get("history") or []
+                # 推播紀錄與冷卻同一檔：有 "signals" 就用，無則 []；相容舊版僅有 history
+                push_log_signals = raw.get("signals") or []
+                # 遷移：狀態檔無 signals 但舊檔存在則讀入一次
+                if not push_log_signals:
+                    _legacy = SNIPER_COOLDOWN_FILE.parent / "sniper_push_log.json"
+                    if _legacy.exists():
+                        try:
+                            leg = json.loads(_legacy.read_text(encoding="utf-8"))
+                            push_log_signals = leg.get("signals") or []
+                            if push_log_signals:
+                                logger.info(f"已從舊檔遷移推播紀錄 {len(push_log_signals)} 筆（sniper_push_log.json），將併入狀態檔")
+                        except Exception:
+                            pass
+                # 相容舊格式：只有 last_round 時轉成 history（ts 設為 1 小時前，讓本輪仍可能冷卻）
+                if not history and raw.get("last_round"):
+                    last_round = raw.get("last_round") or []
+                    if last_round and isinstance(last_round[0], dict):
+                        history = [{"symbol": str(p.get("symbol")), "dir": str(p.get("dir")), "ts": int(now_ts) - 3600} for p in last_round if p.get("symbol") and p.get("dir")]
+                    else:
+                        history = [{"symbol": str(p[0]), "dir": str(p[1]), "ts": int(now_ts) - 3600} for p in last_round if isinstance(p, (list, tuple)) and len(p) >= 2]
+                _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
+                logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆 | 推播紀錄 {len(push_log_signals)} 筆 -> 同幣同方向才冷卻（換方向可推）")
+            else:
+                logger.info(f"狀態檔不存在，本輪無冷卻限制、無推播紀錄: {_cooldown_path_abs}")
+                # 遷移：若舊版 sniper_push_log.json 存在，讀入一次併入本輪 state，下次寫回即合併
+                _legacy_push = SNIPER_COOLDOWN_FILE.parent / "sniper_push_log.json"
+                if _legacy_push.exists():
+                    try:
+                        leg = json.loads(_legacy_push.read_text(encoding="utf-8"))
                         push_log_signals = leg.get("signals") or []
                         if push_log_signals:
                             logger.info(f"已從舊檔遷移推播紀錄 {len(push_log_signals)} 筆（sniper_push_log.json），將併入狀態檔")
                     except Exception:
                         pass
-            # 相容舊格式：只有 last_round 時轉成 history（ts 設為 1 小時前，讓本輪仍可能冷卻）
-            if not history and raw.get("last_round"):
-                last_round = raw.get("last_round") or []
-                if last_round and isinstance(last_round[0], dict):
-                    history = [{"symbol": str(p.get("symbol")), "dir": str(p.get("dir")), "ts": int(now_ts) - 3600} for p in last_round if p.get("symbol") and p.get("dir")]
-                else:
-                    history = [{"symbol": str(p[0]), "dir": str(p[1]), "ts": int(now_ts) - 3600} for p in last_round if isinstance(p, (list, tuple)) and len(p) >= 2]
-            _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
-            logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆 | 推播紀錄 {len(push_log_signals)} 筆 -> 同幣同方向才冷卻（換方向可推）")
-        else:
-            logger.info(f"狀態檔不存在，本輪無冷卻限制、無推播紀錄: {_cooldown_path_abs}")
-            # 遷移：若舊版 sniper_push_log.json 存在，讀入一次併入本輪 state，下次寫回即合併
-            _legacy_push = SNIPER_COOLDOWN_FILE.parent / "sniper_push_log.json"
-            if _legacy_push.exists():
-                try:
-                    leg = json.loads(_legacy_push.read_text(encoding="utf-8"))
-                    push_log_signals = leg.get("signals") or []
-                    if push_log_signals:
-                        logger.info(f"已從舊檔遷移推播紀錄 {len(push_log_signals)} 筆（sniper_push_log.json），將併入狀態檔")
-                except Exception:
-                    pass
     except Exception as e:
         history = []
         push_log_signals = []
         logger.warning(f"讀取狀態檔失敗，本輪無冷卻限制、無推播紀錄: {e}")
     PUSH_LOG_RETENTION_HOURS = 48
     EXIT_CHECK_WINDOW_HOURS = 48
+    # 讀檔後先做一次 retention 清理，避免舊訊號長期堆積
+    if push_log_signals:
+        def _retain_for_read(e: Dict[str, Any]) -> bool:
+            if not isinstance(e, dict):
+                return False
+            t = e.get("ts") or 0
+            ct = e.get("closed_ts") or t
+            if e.get("closed"):
+                return (now_ts - ct) <= PUSH_LOG_RETENTION_HOURS * 3600
+            return (now_ts - t) <= PUSH_LOG_RETENTION_HOURS * 3600
+
+        before_clean = len(push_log_signals)
+        push_log_signals = [e for e in push_log_signals if _retain_for_read(e)]
+        after_clean = len(push_log_signals)
+        if before_clean != after_clean:
+            logger.info(f"推播紀錄讀取後已清理過期訊號: 由 {before_clean} 筆壓縮為 {after_clean} 筆 (保留 {PUSH_LOG_RETENTION_HOURS}h)")
+
     # 每日 00:00 那一輪（台灣時間 0:00~0:29）發送「昨日」績效總結
     now_tw = datetime.fromtimestamp(now_ts, tz=TAIPEI_TZ)
     if now_tw.hour == 0 and now_tw.minute < 30:
@@ -3909,7 +4168,7 @@ def fetch_position_change():
                     if hit_tp:
                         stars_val = entry.get("stars", 5)
                         if stars_val < 5 and not entry.get("tp1_notified"):
-                            # 賭鬼單：TP1 達標僅提醒先落袋 60%，剩餘 40% 放飛，不結案
+                            # 賭鬼單：TP1 達標僅提醒先落袋 60%，剩餘 40% 改為保本移動止損，不立即結案
                             tp_msg = (
                                 f"✅ *【TP1 達標・建議落袋 60%】*\n"
                                 f"台灣時間 *{pushed_at_tw}* 推的賭鬼 *{dir_label}* 標的 `{sym_base}` 已達 TP1 `{tp1_level}`。\n"
@@ -3917,6 +4176,14 @@ def fetch_position_change():
                             )
                             send_telegram_message(tp_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
                             entry["tp1_notified"] = True
+                            # 將追蹤止損上移/下移至進場價（保本），若無 entry_price 則維持原 SL
+                            be_price = entry.get("entry_price")
+                            try:
+                                be_price_f = float(be_price) if be_price is not None else None
+                            except (TypeError, ValueError):
+                                be_price_f = None
+                            if be_price_f is not None and be_price_f > 0:
+                                entry["sl"] = be_price_f
                             exit_notified_set.add(sym_base)
                             logger.info(f"倉位追蹤已發送: {sym_base} 賭鬼 TP1 達標 (僅提醒落袋，不結案)")
                         else:
@@ -3942,27 +4209,32 @@ def fetch_position_change():
                             price_closed = True
                             logger.info(f"倉位追蹤已發送: {sym_base} 已達止盈({tp1_lbl}) (本倉完結，realized_R={entry.get('realized_R')})")
 
-                # 1-2-延伸) 賭鬼 TP2 命中統計（僅紀錄命中與 R，不改變實際出場邏輯）
+                # 1-2-延伸) 賭鬼 TP2 命中：視為滿貫結案（先 TP1 再 TP2）
                 if not price_closed and tp2_level is not None and hit_tp2:
                     stars_val = entry.get("stars", 5)
                     if stars_val < 5:
-                        if not entry.get("tp2_hit"):
-                            r_tp2 = entry.get("r_tp2")
-                            try:
-                                r_tp2_val = float(r_tp2) if r_tp2 is not None else None
-                            except (TypeError, ValueError):
-                                r_tp2_val = None
-                            entry["tp2_hit"] = True
-                            if r_tp2_val is not None:
-                                entry["tp2_R"] = r_tp2_val
-                            tp2_msg = (
-                                f"🎯 *【TP2 理論目標達成】*\n"
-                                f"台灣時間 *{pushed_at_tw}* 推的賭鬼 *{dir_label}* 標的 `{sym_base}` 價格已觸及理論 TP2 `{tp2_level}`。\n"
-                                f"此為績效評估用的虛擬目標（約 {r_tp2_val or '3.0'}R），實際策略仍以 TP1 落袋 60% + 剩餘 40% 放飛為主。"
-                            )
-                            send_telegram_message(tp2_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
-                            exit_notified_set.add(sym_base)
-                            logger.info(f"倉位追蹤已發送: {sym_base} 賭鬼 TP2 理論目標達成 (tp2_hit=True, tp2_R={entry.get('tp2_R')})")
+                        r_tp2 = entry.get("r_tp2")
+                        try:
+                            r_tp2_val = float(r_tp2) if r_tp2 is not None else None
+                        except (TypeError, ValueError):
+                            r_tp2_val = None
+                        exit_msg = (
+                            f"🎯 *【TP2 滿貫結案】*\n"
+                            f"台灣時間 *{pushed_at_tw}* 推的賭鬼 *{dir_label}* 標的 `{sym_base}` 價格已觸及 TP2 `{tp2_level}`。\n"
+                            f"本單已完成 TP1 + TP2 滿貫，建議全數了結部位。"
+                        )
+                        send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+                        entry["notified_exit"] = True
+                        entry["closed"] = True
+                        entry["exit_reason"] = "tp2"
+                        if r_tp2_val is not None:
+                            entry["realized_R"] = round(r_tp2_val, 3)
+                        else:
+                            entry["realized_R"] = entry.get("realized_R") or 0.0
+                        entry["closed_ts"] = int(now_ts)
+                        exit_notified_set.add(sym_base)
+                        price_closed = True
+                        logger.info(f"倉位追蹤已發送: {sym_base} 賭鬼 TP2 滿貫結案 (realized_R={entry.get('realized_R')})")
                 if not price_closed:
                     logger.info(
                         f"比對價格: {sym_base} 現價 {cur_price} | "
@@ -4051,10 +4323,8 @@ def fetch_position_change():
         try:
             SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
             state = {"history": history, "signals": push_log_signals}
-            SNIPER_COOLDOWN_FILE.write_text(
-                json.dumps(state, ensure_ascii=False),
-                encoding="utf-8"
-            )
+            with _sniper_file_lock():
+                save_json_file(SNIPER_COOLDOWN_FILE, state)
         except Exception as e:
             logger.warning(f"寫入狀態檔(出場標記)失敗: {e}")
     # 肉眼可見：本輪倉位追蹤結果摘要
@@ -4141,6 +4411,9 @@ def fetch_position_change():
     if cooled_top:
         msg, has_any = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
         if has_any:
+            logger.info(
+                f"【推播總結】本輪最終推播 {len(cooled_top)} 檔，處理幣種 {processed_count} 個，OI 成功 {oi_success_count} 個"
+            )
             send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
         else:
             logger.info(f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，但風報比篩選後 0 筆可推播（止盈風報比 < {MIN_TP1_R_FOR_PUSH}R），不發送主報表")
@@ -4149,6 +4422,30 @@ def fetch_position_change():
             logger.info(f"【未推播原因】本輪無達 OI 門檻之標的（四類皆 0 筆），不發送主報表")
         else:
             logger.info(f"【未推播原因】本輪 {len(all_top)} 筆候選皆被冷卻（4h 內同幣同方向已推過），不發送主報表")
+
+    # GitHub Step Summary：若在 GitHub Actions 環境中，輸出本輪關鍵統計摘要
+    step_summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if step_summary_path:
+        try:
+            pushed_symbols = sorted({_cooldown_symbol(x.get("symbol") or "") for x in cooled_top if x.get("symbol")}) if cooled_top else []
+            pushed_list = ", ".join(pushed_symbols) if pushed_symbols else "無"
+            summary_lines = [
+                "## 持倉變化篩選摘要",
+                "",
+                "| 指標 | 數值 |",
+                "| --- | --- |",
+                f"| 處理幣種總數 | {processed_count} |",
+                f"| OI 成功數 | {oi_success_count} |",
+                f"| OI 失敗數 | {oi_fail_count} |",
+                f"| 進入 TOP 候選數 | {len(all_top)} |",
+                f"| 最終推播標的數 | {len(cooled_top)} |",
+                f"| 推播標的列表 | {pushed_list} |",
+                "",
+            ]
+            with open(step_summary_path, "a", encoding="utf-8") as f:
+                f.write("\n".join(summary_lines) + "\n")
+        except Exception as e:
+            logger.warning(f"寫入 GitHub Step Summary 失敗: {e}")
 
     # 僅在「本輪有實際推播」時才寫入冷卻與推播紀錄（無訊號或全篩掉不寫）
     if cooled_top and has_any:
@@ -4186,6 +4483,7 @@ def fetch_position_change():
                     "pushed_at_tw": pushed_at_tw,
                     "notified_exit": False,
                     "closed": False,
+                    "entry_price": _parse_price_str(x.get("current_price")),
                     "sl": _parse_price_str(sl_str),
                     "tp1": _parse_price_str(tp1_str),
                     "tp1_label": x.get("tp1_label") or "主力成本",
@@ -4247,10 +4545,8 @@ def fetch_position_change():
                 return (now_ts - t) <= PUSH_LOG_RETENTION_HOURS * 3600
             push_log_signals = [e for e in push_log_signals if _retain_signal(e)]
             state = {"history": history, "signals": push_log_signals}
-            SNIPER_COOLDOWN_FILE.write_text(
-                json.dumps(state, ensure_ascii=False),
-                encoding="utf-8"
-            )
+            with _sniper_file_lock():
+                save_json_file(SNIPER_COOLDOWN_FILE, state)
             logger.info(f"冷卻檔已寫入: 本輪 {len(pairs_this_run)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h) -> {_cooldown_path_abs}")
             logger.info(f"推播紀錄已寫入: 本輪 {len(new_push_entries)} 筆，共 {len(push_log_signals)} 筆 (保留 {PUSH_LOG_RETENTION_HOURS}h)")
         except Exception as e:
