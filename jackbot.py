@@ -66,7 +66,7 @@ if thread_ids_str:
             'funding_rate': 244,
             'long_term_index': 248,
             'liquidity_radar': 3,
-            'altseason_radar': 254,
+            'altseason_radar': 11044,
             'hyperliquid': 252,
             'gold_signal': 254,  # 黃金 XAUUSD 訊號（可改為專用 topic 的 thread_id）
         }
@@ -80,7 +80,7 @@ else:
         'funding_rate': int(os.environ.get('TG_THREAD_FUNDING_RATE', 244)),
         'long_term_index': int(os.environ.get('TG_THREAD_LONG_TERM_INDEX', 248)),
         'liquidity_radar': int(os.environ.get('TG_THREAD_LIQUIDITY_RADAR', 3)),
-        'altseason_radar': int(os.environ.get('TG_THREAD_ALTSEASON_RADAR', 254)),
+        'altseason_radar': int(os.environ.get('TG_THREAD_ALTSEASON_RADAR', 11044)),
         'hyperliquid': int(os.environ.get('TG_THREAD_HYPERLIQUID', 252)),
         'gold_signal': int(os.environ.get('TG_THREAD_GOLD_SIGNAL') or 254),
     }
