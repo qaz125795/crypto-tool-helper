@@ -67,8 +67,8 @@ CG_EP = {
     "oi_agg_history":        "/api/futures/openInterest/ohlc-aggregated-history",   # 聚合持倉K線（主力）
     "oi_agg_stable":         "/api/futures/openInterest/ohlc-aggregated-stablecoin",# 穩定幣保證金持倉
     "oi_agg_coin":           "/api/futures/openInterest/ohlc-aggregated-coin-margin-history", # 幣本位持倉
-    "oi_exchange_list":      "/api/futures/openInterest/exchange-list",              # 各所持倉列表
-    "oi_exchange_history":   "/api/futures/openInterest/exchange-history-chart",    # 各所持倉歷史圖表
+    "oi_exchange_list":      "/api/futures/open-interest/exchange-list",              # 各所持倉列表（文檔確認 kebab-case）
+    "oi_exchange_history":   "/api/futures/open-interest/exchange-history-chart",    # 各所持倉歷史圖表（文檔確認 kebab-case）
     # ── 舊路徑備援（部分 API 可能只支援新路徑）──
     "oi_history_old":        "/api/futures/open-interest/history",
     "oi_agg_history_old":    "/api/futures/open-interest/aggregated-history",
@@ -119,8 +119,8 @@ CG_EP = {
     "ob_large_order_hist":   "/api/futures/orderbook/large-limit-order-history",    # 大額掛單歷史
 
     # ════════════════ 主動買賣（合約） ════════════════
-    "taker_exchange_list":   "/api/futures/taker-buy-sell-volume/exchange-list",    # 各所主動買賣比
-    "taker_pair_history":    "/api/futures/taker-buy-sell-volume/history",          # 交易對主動買賣歷史
+    "taker_exchange_list":   "/api/futures/taker-buy-sell-volume/exchange-list",    # 各所主動買賣比（參數用 range=h1）
+    "taker_pair_history":    "/api/futures/v2/taker-buy-sell-volume/history",       # 交易對主動買賣歷史 v2（文檔確認）
     "taker_agg_history":     "/api/futures/aggregated-taker-buy-sell-volume/history",# 幣種聚合主動買賣（主力）
 
     # ════════════════ 訂單簿（現貨） ════════════════
@@ -2292,35 +2292,49 @@ def fetch_top_account_ls_ratio(symbol: str, interval: str = "1h", limit: int = 3
                     pass
         return None
 
-    # ── 方案A：大戶帳戶數多空比 ──────────────────────────────────
     sym_param = base + "USDT"
-    logger.debug(f"[大戶L/S-A] {base} endpoint={CG_EP['ls_top_account']} sym={sym_param} interval={interval}")
-    j_a = _cg_get(CG_EP["ls_top_account"], {"symbol": sym_param, "interval": interval, "limit": limit})
-    result = _parse_ls_ratio(j_a)
-    if result is not None:
-        logger.info(f"[大戶L/S-A✅] {base}: 方案A成功，大戶帳戶多空比={result:.3f}")
-        _flow_cache[cache_key] = (result, now)
-        return result
-    logger.warning(f"[大戶L/S-A❌] {base}: 方案A無效，改用方案B（大戶持倉多空比）")
+    # interval 格式轉換（文檔確認：此端點使用 h1/m15 格式，非 1h/15m）
+    _cg_iv = _cg_interval(interval)  # 1h → h1
+    # 文檔確認必填 exchange=Binance，小幣自動嘗試其他所
+    _ls_exchanges = ["Binance", "OKX", "Bybit"]
+
+    # ── 方案A：大戶帳戶數多空比（文檔確認必填 exchange=）──────────
+    for _ls_ex in _ls_exchanges:
+        logger.debug(f"[大戶L/S-A] {base} endpoint={CG_EP['ls_top_account']} exchange={_ls_ex} sym={sym_param} interval={_cg_iv}")
+        j_a = _cg_get(CG_EP["ls_top_account"], {"symbol": sym_param, "exchange": _ls_ex,
+                                                  "interval": _cg_iv, "limit": limit})
+        result = _parse_ls_ratio(j_a)
+        if result is not None:
+            logger.info(f"[大戶L/S-A✅] {base}: {_ls_ex} 帳戶多空比={result:.3f}")
+            _flow_cache[cache_key] = (result, now)
+            return result
+        logger.debug(f"[大戶L/S-A] {base} {_ls_ex} 無效數據")
+    logger.warning(f"[大戶L/S-A❌] {base}: 方案A（帳戶數比）無效，改用方案B（大戶持倉比）")
 
     # ── 方案B：大戶持倉多空比（不同維度，仍有參考價值）─────────────
-    logger.debug(f"[大戶L/S-B] {base} endpoint={CG_EP['ls_top_position']}")
-    j_b = _cg_get(CG_EP["ls_top_position"], {"symbol": sym_param, "interval": interval, "limit": limit})
-    result = _parse_ls_ratio(j_b)
-    if result is not None:
-        logger.info(f"[大戶L/S-B✅] {base}: 方案B成功（持倉量比），多空比={result:.3f}")
-        _flow_cache[cache_key] = (result, now)
-        return result
-    logger.warning(f"[大戶L/S-B❌] {base}: 方案B無效，改用方案C（全市場散戶L/S）")
+    for _ls_ex in _ls_exchanges:
+        logger.debug(f"[大戶L/S-B] {base} endpoint={CG_EP['ls_top_position']} exchange={_ls_ex}")
+        j_b = _cg_get(CG_EP["ls_top_position"], {"symbol": sym_param, "exchange": _ls_ex,
+                                                   "interval": _cg_iv, "limit": limit})
+        result = _parse_ls_ratio(j_b)
+        if result is not None:
+            logger.info(f"[大戶L/S-B✅] {base}: {_ls_ex} 大戶持倉多空比={result:.3f}")
+            _flow_cache[cache_key] = (result, now)
+            return result
+        logger.debug(f"[大戶L/S-B] {base} {_ls_ex} 無效數據")
+    logger.warning(f"[大戶L/S-B❌] {base}: 方案B（持倉量比）無效，改用方案C（全市場散戶L/S）")
 
     # ── 方案C：全市場帳戶多空比（散戶數據，精準度最低但一般有值）──
-    logger.debug(f"[大戶L/S-C] {base} endpoint={CG_EP['ls_global_history']}")
-    j_c = _cg_get(CG_EP["ls_global_history"], {"symbol": sym_param, "interval": interval, "limit": limit})
-    result = _parse_ls_ratio(j_c)
-    if result is not None:
-        logger.info(f"[大戶L/S-C✅] {base}: 方案C成功（全市場L/S，精準度較低），多空比={result:.3f}")
-        _flow_cache[cache_key] = (result, now)
-        return result
+    for _ls_ex in _ls_exchanges:
+        logger.debug(f"[大戶L/S-C] {base} endpoint={CG_EP['ls_global_history']} exchange={_ls_ex}")
+        j_c = _cg_get(CG_EP["ls_global_history"], {"symbol": sym_param, "exchange": _ls_ex,
+                                                     "interval": _cg_iv, "limit": limit})
+        result = _parse_ls_ratio(j_c)
+        if result is not None:
+            logger.info(f"[大戶L/S-C✅] {base}: {_ls_ex} 全市場多空比={result:.3f}（散戶視角）")
+            _flow_cache[cache_key] = (result, now)
+            return result
+        logger.debug(f"[大戶L/S-C] {base} {_ls_ex} 無效數據")
 
     logger.warning(f"[大戶L/S-全失敗] {base}: A/B/C 三個方案均無法獲取多空比，返回 None")
     _flow_cache[cache_key] = (None, now)
@@ -2656,7 +2670,7 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
         found_exchanges = 0
         # 記錄第一筆欄位名，方便 debug
         _sample_keys = list(data_list[0].keys()) if data_list and isinstance(data_list[0], dict) else []
-        logger.debug(f"[多所共識] 回應欄位樣本: {_sample_keys[:10]}")
+        logger.info(f"[多所共識] API 回應欄位樣本（第一筆）: {_sample_keys}")
 
         for entry in data_list:
             exch = (entry.get("exchange") or entry.get("exchangeName") or "").strip()
@@ -2673,6 +2687,12 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
                 or entry.get("oiChangePercent")
                 or entry.get("h4Change")       # 部分端點用 4h 變化
                 or entry.get("h1Change")       # 1h 變化
+                or entry.get("openInterestChangeH4")
+                or entry.get("openInterestChangeH1")
+                or entry.get("openInterestChangePercent4h")
+                or entry.get("openInterestChangePercent1h")
+                or entry.get("h4OiChange")
+                or entry.get("h1OiChange")
             )
             if oi_chg is None:
                 # 最後手段：用 openInterest - openInterestPrev 計算方向
@@ -2685,7 +2705,8 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
                 except (TypeError, ValueError):
                     pass
             if oi_chg is None:
-                logger.debug(f"[多所共識] {exch}: 找不到 OI 變化欄位 keys={list(entry.keys())[:8]}")
+                # 升級為 INFO，讓使用者看到實際欄位名稱以便除錯
+                logger.info(f"[多所共識⚠️] {exch}: 找不到 OI 變化欄位 | 實際 keys={list(entry.keys())}")
                 continue
             try:
                 chg_val = float(oi_chg)
@@ -2707,19 +2728,20 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
             _consensus_cache[cache_key] = (True, now)
             return True
 
-        # ── 方案B：exchange-history-chart 多棒趨勢確認（單點無共識時改用歷史棒）
+        # ── 方案B：exchange-history-chart 多棒趨勢確認（文檔確認：用 range= 而非 interval=）
+        # 文檔：/open-interest/exchange-history-chart?symbol=BTC&range=12h
+        # symbol 用 BTC（base only），range 用 4h/12h 表示歷史視窗
         logger.debug(f"[多所共識-B] {base_symbol} 快照無共識，嘗試 exchange-history-chart 多棒分析")
         try:
             hist_positive = 0
             hist_negative = 0
             checked_hist = 0
-            # 15m 不支援時降級到 1h 再試（部分端點不支援短時間粒度）
-            for _b_interval in ["15m", "1h"]:
+            # range 降級：先用 4h（最近），無數據再試 12h
+            for _b_range in ["4h", "12h"]:
                 hist_positive = hist_negative = checked_hist = 0
                 for exch in _CONSENSUS_MAJOR_EXCHANGES[:5]:
                     j_h = _cg_get(CG_EP["oi_exchange_history"],
-                                   {"symbol": base_symbol + "USDT", "exchange": exch,
-                                    "interval": _b_interval, "limit": 3})
+                                   {"symbol": base_symbol, "range": _b_range})
                     if not j_h:
                         continue
                     rows_h = j_h.get("data") or j_h.get("list") or []
@@ -2733,8 +2755,8 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
                     elif recent_trend < 0:
                         hist_negative += 1
                 if checked_hist >= 2:
-                    logger.debug(f"[多所共識-B] interval={_b_interval} checked={checked_hist}")
-                    break  # 有數據就用這個間隔
+                    logger.debug(f"[多所共識-B] range={_b_range} checked={checked_hist}")
+                    break  # 有數據就用這個視窗
             consensus_b = checked_hist >= 3 and ((hist_positive >= 3) or (hist_negative >= 3))
             logger.info(
                 f"[多所共識-B] {base_symbol}: 歷史K線分析 checked={checked_hist}"
@@ -3106,6 +3128,23 @@ _FLOW_TTL = 90.0   # 90 秒快取（訂單流數據更新頻率高）
 _FOOTPRINT_TTL = 120.0  # 腳步圖快取 2 分鐘
 
 
+def _cg_interval(interval: str) -> str:
+    """將標準時間格式轉換為 CoinGlass API 要求的格式。
+    文檔確認：taker/net-pos/L-S ratio 等端點使用 h1/m15 格式，非 1h/15m。
+    OI history 等端點仍接受 15m，此 helper 統一處理兩邊格式。
+    """
+    _map = {
+        "1m": "m1",  "3m": "m3",  "5m": "m5",  "15m": "m15", "30m": "m30",
+        "1h": "h1",  "2h": "h2",  "4h": "h4",  "6h": "h6",
+        "8h": "h8",  "12h": "h12","1d": "d1",  "1w": "w1",
+        # 已經是正確格式的，原樣返回
+        "m1": "m1",  "m3": "m3",  "m5": "m5",  "m15": "m15", "m30": "m30",
+        "h1": "h1",  "h2": "h2",  "h4": "h4",  "h6": "h6",
+        "h8": "h8",  "h12": "h12","d1": "d1",  "w1": "w1",
+    }
+    return _map.get(interval, interval)
+
+
 def _cg_get(path: str, params: Dict) -> Optional[Dict]:
     """輕量 CoinGlass GET wrapper，帶速率限制與統一錯誤處理。"""
     if not CG_API_KEY:
@@ -3169,25 +3208,30 @@ def fetch_taker_bvs_ratio(symbol: str, interval: str = "15m", limit: int = 4) ->
             logger.debug(f"[主動買賣-快取] {base} ratio={cached}")
             return cached
 
+    # interval 格式轉換（文檔確認：此端點使用 m15/h1 格式，非 15m/1h）
+    _cg_iv = _cg_interval(interval)  # 15m → m15, 1h → h1
+
     # ── 方案A：聚合歷史（最精準）──────────────────────────────────
-    logger.debug(f"[主動買賣-A] {base} endpoint={CG_EP['taker_agg_history']} interval={interval} limit={limit}")
-    j_a = _cg_get(CG_EP["taker_agg_history"], {"symbol": base, "interval": interval, "limit": limit})
+    logger.debug(f"[主動買賣-A] {base} endpoint={CG_EP['taker_agg_history']} interval={_cg_iv} limit={limit}")
+    j_a = _cg_get(CG_EP["taker_agg_history"], {"symbol": base, "interval": _cg_iv, "limit": limit})
     rows_a = j_a.get("data") or j_a.get("list") or [] if j_a else []
     result = _parse_taker_ratio_from_rows(rows_a)
     if result is not None:
         logger.info(f"[主動買賣-A✅] {base}: 方案A成功，買盤佔比={result:.1f}% (賣盤={100-result:.1f}%) 共{len(rows_a)}棒")
         _flow_cache[cache_key] = (result, now)
         return result
-    logger.warning(f"[主動買賣-A❌] {base}: 方案A無效數據（rows={len(rows_a) if rows_a else 0}），改用方案B")
+    _a_raw_keys = list(rows_a[0].keys()) if rows_a and isinstance(rows_a[0], dict) else "空陣列"
+    logger.warning(f"[主動買賣-A❌] {base}: 方案A無效（rows={len(rows_a) if rows_a else 0}）"
+                   f" | interval={_cg_iv} | code={j_a.get('code') if j_a else 'None'}"
+                   f" | 首筆欄位={_a_raw_keys}，改用方案B")
 
-    # ── 方案B：單交易對歷史（多交易所輪詢備援）─────────────────
+    # ── 方案B：單交易對歷史 v2（多交易所輪詢，文檔確認路徑）─────────────────
     sym_param = base + "USDT"
-    # 依序嘗試主要交易所，SIREN 等小幣可能只在 OKX/Bybit 等有數據
     _b_exchanges = ["Binance", "OKX", "Bybit", "BingX", "Bitget"]
     for _b_ex in _b_exchanges:
-        logger.debug(f"[主動買賣-B] {base} exchange={_b_ex} sym={sym_param}")
+        logger.debug(f"[主動買賣-B] {base} exchange={_b_ex} sym={sym_param} interval={_cg_iv}")
         j_b = _cg_get(CG_EP["taker_pair_history"], {"symbol": sym_param, "exchange": _b_ex,
-                                                     "interval": interval, "limit": limit})
+                                                     "interval": _cg_iv, "limit": limit})
         rows_b = j_b.get("data") or j_b.get("list") or [] if j_b else []
         result = _parse_taker_ratio_from_rows(rows_b)
         if result is not None:
@@ -3197,9 +3241,11 @@ def fetch_taker_bvs_ratio(symbol: str, interval: str = "15m", limit: int = 4) ->
         logger.debug(f"[主動買賣-B] {base} {_b_ex} 無有效數據（rows={len(rows_b)}）")
     logger.warning(f"[主動買賣-B❌] {base}: 所有交易所均無有效數據，改用方案C（各所快照）")
 
-    # ── 方案C：各所當前快照（沒有歷史，但能判斷當下方向）────────
-    logger.debug(f"[主動買賣-C] {base} endpoint={CG_EP['taker_exchange_list']}")
-    j_c = _cg_get(CG_EP["taker_exchange_list"], {"symbol": base})
+    # ── 方案C：各所當前快照（文檔確認：使用 range= 而非 interval=）────────
+    # 文檔：/exchange-list?symbol=BTC&range=h1
+    _range_iv = _cg_iv  # h1 / m15
+    logger.debug(f"[主動買賣-C] {base} endpoint={CG_EP['taker_exchange_list']} range={_range_iv}")
+    j_c = _cg_get(CG_EP["taker_exchange_list"], {"symbol": base, "range": _range_iv})
     rows_c = j_c.get("data") or j_c.get("list") or [] if j_c else []
     result = _parse_taker_ratio_from_rows(rows_c)
     if result is not None:
@@ -3252,27 +3298,40 @@ def fetch_net_position_delta(symbol: str, interval: str = "15m", limit: int = 3)
             return cached
 
     sym_param = base + "USDT"
+    # interval 格式轉換（文檔確認：此端點使用 h1/m15 格式）
+    _cg_iv = _cg_interval(interval)  # 15m → m15, 1h → h1
+    # 文檔必填參數：exchange=Binance（缺少此參數會回傳空陣列）
+    # 若 Binance 無此幣，自動嘗試其他大所
+    _np_exchanges = ["Binance", "OKX", "Bybit"]
 
-    # ── 方案A：v2 版（欄位更豐富）────────────────────────────────
-    logger.debug(f"[淨多倉-A] {base} endpoint={CG_EP['net_pos_v2']} sym={sym_param} interval={interval}")
-    j_a = _cg_get(CG_EP["net_pos_v2"], {"symbol": sym_param, "interval": interval, "limit": limit})
-    rows_a = j_a.get("data") or j_a.get("list") or [] if j_a else []
-    result = _parse_net_position_from_rows(rows_a)
-    if result is not None:
-        logger.info(f"[淨多倉-A✅] {base}: 方案A成功，淨多倉方向={result:+.3f}（+接近1=大量加多倉，-接近1=大量加空倉）")
-        _flow_cache[cache_key] = (result, now)
-        return result
-    logger.warning(f"[淨多倉-A❌] {base}: 方案A無效（rows={len(rows_a) if rows_a else 0}），改用方案B")
+    # ── 方案A：v2 版（欄位更豐富，文檔確認必填 exchange=）─────────────────
+    for _np_ex in _np_exchanges:
+        logger.debug(f"[淨多倉-A] {base} endpoint={CG_EP['net_pos_v2']} exchange={_np_ex} sym={sym_param} interval={_cg_iv}")
+        j_a = _cg_get(CG_EP["net_pos_v2"], {"symbol": sym_param, "exchange": _np_ex,
+                                              "interval": _cg_iv, "limit": limit})
+        rows_a = j_a.get("data") or j_a.get("list") or [] if j_a else []
+        result = _parse_net_position_from_rows(rows_a)
+        if result is not None:
+            logger.info(f"[淨多倉-A✅] {base}: {_np_ex} 方案A成功，淨多倉方向={result:+.3f}")
+            _flow_cache[cache_key] = (result, now)
+            return result
+        logger.debug(f"[淨多倉-A] {base} {_np_ex} 無效（rows={len(rows_a)}）")
+    _np_a_keys = list(rows_a[0].keys()) if rows_a and isinstance(rows_a[0], dict) else "空陣列"
+    logger.warning(f"[淨多倉-A❌] {base}: v2 所有交易所無效（interval={_cg_iv}）"
+                   f" | 首筆欄位={_np_a_keys}，改用 v1 方案B")
 
-    # ── 方案B：v1 版（備援）──────────────────────────────────────
-    logger.debug(f"[淨多倉-B] {base} endpoint={CG_EP['net_pos_v1']}")
-    j_b = _cg_get(CG_EP["net_pos_v1"], {"symbol": sym_param, "interval": interval, "limit": limit})
-    rows_b = j_b.get("data") or j_b.get("list") or [] if j_b else []
-    result = _parse_net_position_from_rows(rows_b)
-    if result is not None:
-        logger.info(f"[淨多倉-B✅] {base}: 方案B成功（v1），淨多倉方向={result:+.3f}")
-        _flow_cache[cache_key] = (result, now)
-        return result
+    # ── 方案B：v1 版（備援，同樣帶 exchange 輪詢）────────────────
+    for _np_ex in _np_exchanges:
+        logger.debug(f"[淨多倉-B] {base} endpoint={CG_EP['net_pos_v1']} exchange={_np_ex}")
+        j_b = _cg_get(CG_EP["net_pos_v1"], {"symbol": sym_param, "exchange": _np_ex,
+                                              "interval": _cg_iv, "limit": limit})
+        rows_b = j_b.get("data") or j_b.get("list") or [] if j_b else []
+        result = _parse_net_position_from_rows(rows_b)
+        if result is not None:
+            logger.info(f"[淨多倉-B✅] {base}: {_np_ex} 方案B成功（v1），淨多倉方向={result:+.3f}")
+            _flow_cache[cache_key] = (result, now)
+            return result
+        logger.debug(f"[淨多倉-B] {base} {_np_ex} 無效（rows={len(rows_b)}）")
 
     logger.warning(f"[淨多倉-全失敗] {base}: A/B 均無效，返回 None（不影響其他指標評分）")
     _flow_cache[cache_key] = (None, now)
@@ -4369,8 +4428,9 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
         pass
 
     # ── 方案B：exchange-list（全量，可一次取得所有幣種）─────────────
-    # 新路徑(camelCase) → 舊路徑(kebab-case) 雙重備援
-    fr_ep_candidates = [CG_EP["fr_exchange_list"], CG_EP["fr_exchange_list_old"]]
+    # 優先使用與 fetch_funding_fortune_list（費率排行榜）完全相同的 kebab-case 端點（已驗證有效）
+    # camelCase 版本曾回傳 404，作為次要備援
+    fr_ep_candidates = [CG_EP["fr_exchange_list_old"], CG_EP["fr_exchange_list"]]
     lst = []
     url_used = ""
     for fr_ep_path in fr_ep_candidates:
@@ -4413,35 +4473,59 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
     if not lst:
         logger.warning(f"[資金費率-B❌] 新舊路徑均無法取得費率資料，返回空表")
 
+    # ── 解析邏輯：與 fetch_funding_fortune_list 完全對齊（幣安 stablecoin_margin_list 優先）──
     try:
-        for item in (lst if isinstance(lst, list) else []):
-            if not isinstance(item, dict):
+        for coin_data in (lst if isinstance(lst, list) else []):
+            if not isinstance(coin_data, dict):
                 continue
-            base = item.get("symbol") or item.get("coin") or item.get("base")
+            base = coin_data.get("symbol") or coin_data.get("coin") or coin_data.get("base")
             if not base:
                 continue
             base = str(base).strip().upper()
-            margin_list = item.get("stablecoin_margin_list") or item.get("margin_list") or []
-            rate_binance = rate_bingx = None
-            for m in (margin_list if isinstance(margin_list, list) else []):
-                if not isinstance(m, dict):
+
+            rate_found: Optional[float] = None
+
+            # 優先：USDT 永續（stablecoin_margin_list → Binance）
+            stablecoin_list = coin_data.get("stablecoin_margin_list") or []
+            for item in (stablecoin_list if isinstance(stablecoin_list, list) else []):
+                if not isinstance(item, dict):
                     continue
-                ex = m.get("exchange")
+                if item.get("exchange") != "Binance":
+                    continue
+                raw_rate = item.get("funding_rate")
+                if raw_rate is None:
+                    continue
                 try:
-                    v = float(m.get("funding_rate") or m.get("fundingRate") or 0)
+                    rate_found = float(raw_rate)
+                    break
                 except (TypeError, ValueError):
                     continue
-                if ex == "Binance":
-                    rate_binance = v
-                elif ex == "BingX":
-                    rate_bingx = v
-            rate = rate_binance if rate_binance is not None else rate_bingx
-            if rate is not None:
-                out[base] = rate
+
+            # 備援：幣本位永續（token_margin_list → Binance）
+            if rate_found is None:
+                token_list = coin_data.get("token_margin_list") or []
+                for item in (token_list if isinstance(token_list, list) else []):
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("exchange") != "Binance":
+                        continue
+                    raw_rate = item.get("funding_rate")
+                    if raw_rate is None:
+                        continue
+                    try:
+                        rate_found = float(raw_rate)
+                        break
+                    except (TypeError, ValueError):
+                        continue
+
+            if rate_found is not None:
+                out[base] = rate_found
+
         if out:
-            logger.debug(f"[資金費率-B✅] 成功解析 {len(out)} 幣種費率")
+            logger.info(f"[資金費率✅] 成功解析 {len(out)} 幣種幣安費率（stablecoin_margin_list 優先）")
         elif lst:
-            logger.warning(f"[資金費率-B⚠️] 解析 0 筆，首筆 keys={list(lst[0].keys()) if lst and isinstance(lst[0], dict) else 'n/a'}")
+            _sample = list(lst[0].keys()) if lst and isinstance(lst[0], dict) else "n/a"
+            logger.warning(f"[資金費率⚠️] 解析 0 筆，首筆結構 keys={_sample}")
     except Exception as e:
         logger.warning(f"資金費率解析異常: {e}")
     return out
@@ -6904,13 +6988,25 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             logger.warning(f"coins-price-change 異常: {e}")
             return []
 
-    result = _try_coins_markets()
-    if result:
+    # ── 同時呼叫兩個端點並合併（解決 coins-markets 只回傳 100 個的問題）──────
+    result_markets = _try_coins_markets()
+    result_pc = _try_coins_price_change()
+
+    if result_markets and result_pc:
+        seen_syms = {item["symbol"] for item in result_markets}
+        extra = [item for item in result_pc if item["symbol"] not in seen_syms]
+        if extra:
+            logger.info(f"[CoinGlass-First] coins-price-change 額外補充 {len(extra)} 個 coins-markets 未涵蓋的幣種")
+        result = result_markets + extra
+        logger.info(f"[CoinGlass-First] 合併後總計 {len(result)} 個唯一幣種（markets={len(result_markets)} + pc補充={len(extra)}）")
         return result
-    result = _try_coins_price_change()
-    if result:
-        logger.info(f"[CoinGlass-First] coins-price-change 備援取得 {len(result)} 個幣種")
-    return result
+    elif result_markets:
+        logger.info(f"[CoinGlass-First] 僅 coins-markets 有效，共 {len(result_markets)} 個幣種")
+        return result_markets
+    elif result_pc:
+        logger.info(f"[CoinGlass-First] coins-markets 無效，改用 coins-price-change，共 {len(result_pc)} 個幣種")
+        return result_pc
+    return []
 
 
 def fetch_position_change():
