@@ -8227,6 +8227,8 @@ def fetch_position_change():
             cur_price = None
             kline_high = None
             kline_low = None
+            recent_high_2h = None
+            recent_low_2h = None
             if kline_tech:
                 try:
                     cur_price = float(kline_tech.get("current_price")) if kline_tech.get("current_price") is not None else None
@@ -8240,10 +8242,42 @@ def fetch_position_change():
                     kline_low = float(kline_tech.get("last_kline_low_30m")) if kline_tech.get("last_kline_low_30m") is not None else None
                 except (TypeError, ValueError):
                     kline_low = None
+                try:
+                    recent_high_2h = float(kline_tech.get("recent_high_2h")) if kline_tech.get("recent_high_2h") is not None else None
+                except (TypeError, ValueError):
+                    recent_high_2h = None
+                try:
+                    recent_low_2h = float(kline_tech.get("recent_low_2h")) if kline_tech.get("recent_low_2h") is not None else None
+                except (TypeError, ValueError):
+                    recent_low_2h = None
                 logger.info(
                     f"【倉位追蹤K線】{sym_base} full_symbol={full_sym} "
-                    f"cur_price={cur_price} last_high_30m={kline_high} last_low_30m={kline_low}"
+                    f"cur_price={cur_price} last_high_30m={kline_high} last_low_30m={kline_low} "
+                    f"recent_2h=({recent_high_2h},{recent_low_2h})"
                 )
+
+            # ── 進場價 2h 範圍保護（最強防護）───────────────────────────────────
+            # 若進場價完全超出近2小時K線高低點 5% 以外，代表進場價是假數據（CoinGlass 瞬間異常）
+            # → 靜默取消，不記 -R
+            _entry_price_raw = entry.get("entry_price")
+            if _entry_price_raw and isinstance(_entry_price_raw, (int, float)) and _entry_price_raw > 0:
+                _ep = float(_entry_price_raw)
+                _is_long_pos = pushed_dir == "多"
+                _outside_range = False
+                if recent_high_2h and recent_low_2h and recent_high_2h > 0 and recent_low_2h > 0:
+                    if _is_long_pos and _ep > recent_high_2h * 1.05:
+                        _outside_range = True
+                    elif (not _is_long_pos) and _ep < recent_low_2h * 0.95:
+                        _outside_range = True
+                if _outside_range:
+                    logger.warning(
+                        f"[進場價範圍保護] {sym_base}: 進場={_ep} 但近2h高低=({recent_high_2h},{recent_low_2h})，"
+                        f"進場價在BingX從未成交，判定為 CoinGlass 假數據，靜默取消"
+                    )
+                    entry["notified_exit"] = True
+                    entry["closed"] = True
+                    entry["exit_reason"] = "entry_price_error"
+                    continue
             # 若 K 線不可用，退回到 ticker 快照（確保不會整體失效）
             if kline_tech is None or cur_price is None:
                 if kline_tech is None:
@@ -8280,7 +8314,7 @@ def fetch_position_change():
                 # ── 進場價異常保護：推播後 10 分鐘內觸損 + 現價與 SL 方向差距 > 2倍 SL 距離
                 # 代表進場價是異常 Ticker 快照（閃崩/stale），而非市場真的突破 SL
                 # → 不記 -1R，直接取消這筆紀錄
-                if hit_sl and sl_level is not None and pushed_ts and (now_ts - pushed_ts) < 600:
+                if hit_sl and sl_level is not None and pushed_ts and (now_ts - pushed_ts) < 1800:
                     _entry_price = entry.get("entry_price")
                     if _entry_price and isinstance(_entry_price, (int, float)) and _entry_price > 0:
                         _sl_dist = abs(_entry_price - sl_level)
