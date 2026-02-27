@@ -111,7 +111,9 @@ _coinglass_api_counter_lock = threading.Lock()
 _COINGLASS_MAX_CALLS_PER_MINUTE = 250
 
 # BingX 技術指標失敗次數（每輪用於判斷是否啟用 CoinGlass Plan B）
+# 加鎖確保 ThreadPoolExecutor 並發環境下計數正確
 _bingx_tech_fail_count: int = 0
+_bingx_tech_fail_lock = threading.Lock()
 
 # OI API 最後一次呼叫的 HTTP 狀態碼與錯誤訊息（供 process_single_symbol 診斷回報）
 _oi_last_status: Dict[str, int] = {}
@@ -134,56 +136,100 @@ _emergency_sniper_path: Optional[str] = None
 # 若連續出現 5 次 429，自動將 MAX_WORKERS 降為 1 並將 wait_time 加倍，持續 5 分鐘
 _circuit_breaker: Dict[str, Any] = {
     "consecutive_429": 0,
-    "tripped": False,
+    "warned": False,       # 3+ 次 429：進入「警戒」模式，MAX_WORKERS→2
+    "tripped": False,      # 5+ 次 429：進入「熔斷」模式，MAX_WORKERS→1
     "trip_time": 0.0,
-    "trip_duration": 300.0,  # 5 分鐘保護期
+    "trip_duration": 300.0,  # 5 分鐘保護期（tripped 狀態）
+    "warn_duration": 120.0,  # 2 分鐘警戒期（warned 狀態）
+    "warn_time": 0.0,
 }
 _circuit_breaker_lock = threading.Lock()
 
 
 def _cb_record_429() -> None:
-    """記錄一次 429 錯誤；達到 5 次時自動啟動熔斷。"""
+    """記錄一次 429 錯誤。
+    ≥3 次：進入警戒（MAX_WORKERS→2，輕量保護）。
+    ≥5 次：進入熔斷（MAX_WORKERS→1，完全保護）。
+    """
     with _circuit_breaker_lock:
         _circuit_breaker["consecutive_429"] += 1
         cnt = _circuit_breaker["consecutive_429"]
+        now = time.time()
+        # 警戒階段（3-4 次）
+        if cnt >= 3 and not _circuit_breaker["warned"] and not _circuit_breaker["tripped"]:
+            _circuit_breaker["warned"] = True
+            _circuit_breaker["warn_time"] = now
+            logger.warning(
+                f"[熔斷器警戒⚠️] 連續 {cnt} 次 429，"
+                f"MAX_WORKERS 降至 2，持續 {_circuit_breaker['warn_duration']:.0f} 秒保護"
+            )
+        # 熔斷階段（5+ 次）
         if cnt >= 5 and not _circuit_breaker["tripped"]:
             _circuit_breaker["tripped"] = True
-            _circuit_breaker["trip_time"] = time.time()
+            _circuit_breaker["trip_time"] = now
             logger.warning(
                 f"[熔斷器啟動🚨] 連續 {cnt} 次 429，"
-                f"自動降為單執行緒並加倍等待，持續 {_circuit_breaker['trip_duration']/60:.0f} 分鐘"
+                f"MAX_WORKERS 降至 1，持續 {_circuit_breaker['trip_duration']/60:.0f} 分鐘完全保護"
             )
 
 
 def _cb_record_success() -> None:
-    """記錄一次成功請求，重置連續 429 計數。"""
+    """記錄一次成功請求，重置連續 429 計數與警戒狀態。"""
     with _circuit_breaker_lock:
         if _circuit_breaker["consecutive_429"] > 0:
             _circuit_breaker["consecutive_429"] = 0
+        _circuit_breaker["warned"] = False
 
 
 def _cb_is_tripped() -> bool:
-    """判斷熔斷器是否仍在保護期；到期自動恢復。"""
+    """判斷熔斷器是否仍在「完全熔斷」保護期；到期自動恢復。"""
     with _circuit_breaker_lock:
         if not _circuit_breaker["tripped"]:
             return False
         elapsed = time.time() - _circuit_breaker["trip_time"]
         if elapsed >= _circuit_breaker["trip_duration"]:
             _circuit_breaker["tripped"] = False
+            _circuit_breaker["warned"] = False
             _circuit_breaker["consecutive_429"] = 0
             logger.info("[熔斷器恢復✅] 5 分鐘保護期結束，恢復正常並行數與等待時間")
             return False
         return True
 
 
+def _cb_is_warned() -> bool:
+    """判斷熔斷器是否仍在「警戒」狀態（3-4 次 429）；到期自動解除。"""
+    with _circuit_breaker_lock:
+        if not _circuit_breaker["warned"] or _circuit_breaker["tripped"]:
+            return False
+        elapsed = time.time() - _circuit_breaker["warn_time"]
+        if elapsed >= _circuit_breaker["warn_duration"]:
+            _circuit_breaker["warned"] = False
+            _circuit_breaker["consecutive_429"] = max(0, _circuit_breaker["consecutive_429"] - 2)
+            logger.info("[熔斷器警戒解除🟡] 警戒期結束，MAX_WORKERS 回升至預設值")
+            return False
+        return True
+
+
 def _cb_get_max_workers(default: int = 12) -> int:
-    """根據熔斷器狀態返回建議最大執行緒數（標準版預設 12）。"""
-    return 1 if _cb_is_tripped() else default
+    """根據熔斷器狀態返回建議最大執行緒數。
+    正常 → default(12)；警戒(3次429) → 2；完全熔斷(5次429) → 1
+    """
+    if _cb_is_tripped():
+        return 1
+    if _cb_is_warned():
+        return 2
+    return default
 
 
 def _cb_get_wait_multiplier() -> float:
-    """根據熔斷器狀態返回 wait_time 倍率（熔斷中 → 2×）。"""
-    return 2.0 if _cb_is_tripped() else 1.0
+    """根據熔斷器狀態返回 wait_time 倍率。
+    正常 → 1×；警戒 → 1.5×；完全熔斷 → 2×
+    """
+    if _cb_is_tripped():
+        return 2.0
+    if _cb_is_warned():
+        return 1.5
+    return 1.0
 
 
 def _emergency_save_sniper_state() -> None:
@@ -316,22 +362,33 @@ def load_json_file(filepath: Path, default: Any = None) -> Any:
     return default if default is not None else []
 
 
-def save_json_file(filepath: Path, data: Any) -> bool:
-    """保存數據到 JSON 文件（帶 fsync）；若是 sniper_cooldown.json 同步寫入備份。"""
+def save_json_file_safe(filepath: Path, data: Any) -> bool:
+    """原子安全寫入 JSON 檔案。
+    實作流程（GitHub Actions 超時中斷保護）：
+      1. 寫入 <filepath>.tmp 暫存檔（含 fsync）
+      2. os.replace() 原子改名 → 確保目標檔案永不處於半寫入狀態
+      3. 若為關鍵狀態檔（sniper_cooldown.json / last_summary_date.json），
+         同步更新 data/backup_state.json 多重保護
+
+    建議所有持久狀態 JSON 都改用此函數替代 open()/json.dump()。
+    """
     try:
-        tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
+        filepath = Path(filepath)
         filepath.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = filepath.with_suffix(filepath.suffix + ".tmp")
+
         with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.flush()
             try:
                 os.fsync(f.fileno())
             except OSError:
-                pass
-        os.replace(tmp_path, filepath)
+                pass  # Windows/某些 FS 不支援 fsync，忽略
+        os.replace(tmp_path, filepath)  # 原子改名，絕不產生中間損毀態
 
-        # 備份寫入：將 sniper_cooldown.json 同步寫入 data/backup_state.json
-        if filepath.name == "sniper_cooldown.json":
+        # 關鍵狀態檔：同步寫入 backup_state.json（多重保護）
+        _critical_files = {"sniper_cooldown.json", "last_summary_date.json", "performance_history.json"}
+        if filepath.name in _critical_files:
             backup_path = DATA_DIR / "backup_state.json"
             try:
                 if backup_path.exists():
@@ -342,22 +399,26 @@ def save_json_file(filepath: Path, data: Any) -> bool:
                 else:
                     backup_all = {}
                 backup_all[filepath.name] = data
-                backup_tmp = backup_path.with_suffix(".tmp")
-                with open(backup_tmp, 'w', encoding='utf-8') as bf:
+                bak_tmp = backup_path.with_suffix(".tmp")
+                with open(bak_tmp, 'w', encoding='utf-8') as bf:
                     json.dump(backup_all, bf, ensure_ascii=False, indent=2)
                     bf.flush()
                     try:
                         os.fsync(bf.fileno())
                     except OSError:
                         pass
-                os.replace(backup_tmp, backup_path)
+                os.replace(bak_tmp, backup_path)
             except Exception as be:
-                logger.warning(f"[備份寫入] backup_state.json 寫入失敗（不影響主要功能）: {be}")
-
+                logger.warning(f"[備份寫入] backup_state.json 更新失敗（不影響主流程）: {be}")
         return True
     except Exception as e:
-        logger.error(f"保存文件失敗 {filepath}: {str(e)}")
+        logger.error(f"[safe寫入失敗] {filepath}: {e}")
         return False
+
+
+def save_json_file(filepath: Path, data: Any) -> bool:
+    """向後相容包裝器，實際委派給 save_json_file_safe。"""
+    return save_json_file_safe(filepath, data)
 
 
 def translate_text(text: str, target_lang: str = 'zh-tw') -> str:
@@ -1053,6 +1114,28 @@ def calculate_oi_change(data_list: List[Dict]) -> Optional[Dict]:
     return result
 
 
+def _fetch_usdt_premium() -> Optional[float]:
+    """查詢 USDT/USD 溢價率（正值=溢價=真實買盤，負值=折價=搬磚套利）。
+    使用 Binance 公開 API 抓取 USDCUSDT 匯率，USDC 理論上 = 1 USD，
+    故 premium = (1.0 / USDCUSDT - 1.0) * 100，
+    USDCUSDT < 1.0 代表 1 USDC 買不到 1 USDT → USDT 溢價（需求旺盛）
+    USDCUSDT > 1.0 代表 1 USDC > 1 USDT → USDT 折價（搬磚套利為主）
+    """
+    try:
+        url = "https://api.binance.com/api/v3/ticker/price"
+        resp = requests.get(url, params={"symbol": "USDCUSDT"}, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            usdc_usdt = float(data.get("price", 1.0))
+            if usdc_usdt > 0:
+                premium_pct = (1.0 / usdc_usdt - 1.0) * 100.0
+                logger.info(f"[USDT溢價] USDCUSDT={usdc_usdt:.6f} → 溢價率={premium_pct:+.4f}%")
+                return round(premium_pct, 4)
+    except Exception as e:
+        logger.warning(f"[USDT溢價] 查詢失敗: {e}")
+    return None
+
+
 def buying_power_monitor():
     """【牛市燃料監控】資金進場=發車，判斷大盤動能"""
     logger.info("開始執行牛市燃料監控...")
@@ -1064,14 +1147,28 @@ def buying_power_monitor():
         logger.warning("牛市燃料監控：無法取得市值或 OI 數據，跳過推播")
         return
 
+    # 抓取 USDT 溢價率（判斷場外資金是真正進場還是套利）
+    usdt_premium = _fetch_usdt_premium()
+
     mcap_1h = mcap_change.get("change_1h") or 0
     oi_1h = oi_change.get("change_1h") or 0
+
+    # USDT 溢價加權：溢價>0.1% 代表市場對 USDT 需求旺盛 → 真實買盤，調高穩定幣流入信號強度
+    premium_boost = False
+    if usdt_premium is not None and usdt_premium > 0.1:
+        premium_boost = True
+        logger.info(f"[牛市燃料] USDT 溢價 {usdt_premium:+.4f}% > 0.1%，視為真實買盤，加權燃料等級")
+        # 若溢價>0.1%，穩定幣流入閾值下放一半（0.025 → 0.05 的效果），讓信號更容易觸發加權
+        mcap_1h_effective = mcap_1h + 0.03
+    else:
+        mcap_1h_effective = mcap_1h
+
     trend = "➡️ 震盪蓄力"
     advice = "多看少動，等待方向"
     color = "🟡"
-    if mcap_1h > 0.05 and oi_1h > 1.0:
+    if mcap_1h_effective > 0.05 and oi_1h > 1.0:
         trend, advice, color = "🚀 火力全開 (雙重利好)", "資金+槓桿雙噴，回調就是買點！", "🟢"
-    elif mcap_1h > 0.05:
+    elif mcap_1h_effective > 0.05:
         trend, advice, color = "💰 資金進場 (現貨買盤)", "場外資金流入，底部墊高，偏多操作。", "🟢"
     elif oi_1h > 1.5:
         trend, advice, color = "⚠️ 槓桿過熱 (高波動預警)", "只有槓桿在堆，小心插針畫門。", "🔴"
@@ -1083,12 +1180,19 @@ def buying_power_monitor():
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} (台灣)")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append(f"🌡️ *市場狀態：{color} {trend}*")
+    if premium_boost:
+        lines.append(f"🔥 *USDT 溢價確認真實買盤* (+{usdt_premium:.3f}%)")
+    elif usdt_premium is not None and usdt_premium < -0.1:
+        lines.append(f"⚠️ *USDT 折價 ({usdt_premium:+.3f}%)：疑似搬磚套利，非真實買盤*")
     lines.append("")
     mcap_val = (mcap_change.get("latest_mcap") or 0) / 1_000_000_000
     mcap_emoji = "📈" if mcap_1h > 0 else "📉"
     lines.append("💵 *穩定幣 (場外資金)*")
     lines.append(f"• 總量：${mcap_val:.2f}B")
     lines.append(f"• 變動：{mcap_emoji} {mcap_1h:+.3f}% (1H)")
+    if usdt_premium is not None:
+        _p_emoji = "🟢" if usdt_premium > 0.1 else ("🔴" if usdt_premium < -0.1 else "🟡")
+        lines.append(f"• USDT 溢價：{_p_emoji} `{usdt_premium:+.3f}%`")
     lines.append("")
     oi_val = (oi_change.get("latest_oi") or 0) / 1_000_000_000
     oi_emoji = "🔥" if oi_1h > 0 else "❄️"
@@ -1894,6 +1998,282 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
         return False
 
 
+# ── 爆倉熱力圖預警 ─────────────────────────────────────────────────────────────
+
+_liq_heatmap_cache: Dict[str, Tuple[Optional[Dict], float]] = {}
+_LIQ_HEATMAP_TTL = 120.0  # 2 分鐘快取（爆倉位置不會快速移動）
+
+
+def fetch_liq_heatmap_nearby(
+    symbol: str,
+    current_price: float,
+    is_long: bool,
+    proximity_pct: float = 3.0,
+) -> Optional[Dict[str, Any]]:
+    """【爆倉熱力圖】查詢進場點附近的爆倉密集區。
+
+    對做多訊號：尋找「下方」的爆倉池（支撐層）
+    對做空訊號：尋找「上方」的爆倉池（阻力層）
+
+    回傳：
+        {"pct": float, "side": "多單爆倉"|"空單爆倉",
+         "label": str, "usd": float}
+        或 None（API 失敗 / 附近無明顯爆倉池）
+    """
+    if not CG_API_KEY or not current_price or current_price <= 0:
+        return None
+
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = f"{base}:{'long' if is_long else 'short'}"
+    now = time.time()
+
+    if cache_key in _liq_heatmap_cache:
+        cached, ts = _liq_heatmap_cache[cache_key]
+        if now - ts < _LIQ_HEATMAP_TTL:
+            return cached
+
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+
+    def _parse_result(data_list: list) -> Optional[Dict[str, Any]]:
+        """從 API 回傳列表中找出最近的大型爆倉聚集位置。"""
+        best: Optional[Dict] = None
+        best_pct = proximity_pct + 1
+
+        for entry in (data_list or []):
+            if not isinstance(entry, dict):
+                continue
+            # 嘗試多種欄位名：price / liqPrice / liquidationPrice / level / priceLevel
+            p_raw = (
+                entry.get("price") or entry.get("liqPrice") or
+                entry.get("liquidationPrice") or entry.get("level") or
+                entry.get("priceLevel")
+            )
+            # 爆倉量：longLiqUsd / shortLiqUsd / value / amount
+            long_usd = float(entry.get("longLiqUsd") or entry.get("longAmount") or
+                             entry.get("long") or 0)
+            short_usd = float(entry.get("shortLiqUsd") or entry.get("shortAmount") or
+                              entry.get("short") or 0)
+            try:
+                liq_price = float(p_raw) if p_raw is not None else None
+            except (TypeError, ValueError):
+                liq_price = None
+            if liq_price is None or liq_price <= 0:
+                continue
+
+            pct_dist = abs(liq_price - current_price) / current_price * 100.0
+            if pct_dist > proximity_pct:
+                continue
+
+            # 做多：關注「下方」空單爆倉（會推升價格）和多單爆倉（支撐被擊穿）
+            # 做空：關注「上方」多單爆倉（會下壓價格）和空單爆倉（阻力被突破）
+            total_usd = long_usd + short_usd
+            if total_usd < 500_000:  # 低於 50 萬 USD 忽略
+                continue
+
+            if pct_dist < best_pct:
+                best_pct = pct_dist
+                # 判斷哪方向的爆倉更多
+                if long_usd >= short_usd:
+                    side_label = "多單爆倉"
+                    dominant_usd = long_usd
+                else:
+                    side_label = "空單爆倉"
+                    dominant_usd = short_usd
+                # 對做多信號：下方空單爆倉池 = 支撐（嘎空）；下方多單爆倉 = 危險
+                if is_long:
+                    if liq_price < current_price and side_label == "空單爆倉":
+                        interp = "🔥 下方爆倉支撐池（嘎空動力）"
+                    elif liq_price < current_price:
+                        interp = "⚠️ 下方多單爆倉池（止損群聚）"
+                    else:
+                        interp = "🧱 上方爆倉阻力"
+                else:
+                    if liq_price > current_price and side_label == "多單爆倉":
+                        interp = "🔥 上方爆倉支撐池（嘎多動力）"
+                    elif liq_price > current_price:
+                        interp = "⚠️ 上方空單爆倉池（止損群聚）"
+                    else:
+                        interp = "🧱 下方爆倉阻力"
+                best = {
+                    "pct": round(pct_dist, 2),
+                    "price": round(liq_price, 6),
+                    "side": side_label,
+                    "usd": dominant_usd,
+                    "total_usd": total_usd,
+                    "label": interp,
+                }
+        return best
+
+    result: Optional[Dict] = None
+
+    # ── 嘗試 CoinGlass 爆倉等級端點 ───────────────────────────────────────
+    for endpoint in [
+        "/api/futures/liquidation/estimated-levels",
+        "/api/futures/liquidation/heatmap",
+        "/api/futures/liquidation/level",
+    ]:
+        try:
+            _respect_coinglass_rate_limit()
+            r = requests.get(
+                f"{CG_API_BASE}{endpoint}",
+                params={"symbol": base, "exchange": "Binance"},
+                headers=headers, timeout=8
+            )
+            if r.status_code == 404:
+                continue
+            if r.status_code != 200:
+                break
+            j = r.json()
+            if j.get("code") not in (0, "0", 200, "200", None):
+                continue
+            raw = j.get("data", j.get("list", []))
+            if isinstance(raw, list) and raw:
+                result = _parse_result(raw)
+                if result:
+                    break
+            elif isinstance(raw, dict):
+                # 有些端點把多空兩側分開
+                longs = raw.get("long", raw.get("longs", []))
+                shorts = raw.get("short", raw.get("shorts", []))
+                combined = []
+                for it in (longs or []):
+                    if isinstance(it, dict):
+                        it["_side"] = "long"
+                        combined.append(it)
+                for it in (shorts or []):
+                    if isinstance(it, dict):
+                        it["_side"] = "short"
+                        combined.append(it)
+                result = _parse_result(combined)
+                if result:
+                    break
+        except Exception as e:
+            logger.debug(f"[爆倉熱力圖] {base} {endpoint} 異常: {e}")
+            continue
+
+    _liq_heatmap_cache[cache_key] = (result, now)
+    if result:
+        logger.info(
+            f"[爆倉熱力圖] {base}: {result['label']} 距離 {result['pct']:.2f}% "
+            f"規模 ${result['total_usd']/1e6:.2f}M"
+        )
+    return result
+
+
+# ── 大額掛單牆監控 ─────────────────────────────────────────────────────────────
+
+_orderbook_wall_cache: Dict[str, Tuple[Optional[Dict], float]] = {}
+_OB_WALL_TTL = 45.0       # 45 秒快取（掛單牆變動較快）
+_OB_WALL_MIN_USD = 800_000  # 80 萬 USD 以上才算「巨量牆」
+
+
+def check_orderbook_wall(
+    symbol: str,
+    current_price: float,
+    is_long: bool,
+    preferred_symbol: Optional[str] = None,
+    scan_pct: float = 2.0,
+) -> Optional[Dict[str, Any]]:
+    """【大額掛單牆】掃描進場方向的巨量訂單層。
+
+    做多：掃描現價「上方 scan_pct%」內的大額 Asks（賣牆/阻力）
+    做空：掃描現價「下方 scan_pct%」內的大額 Bids（買牆/支撐）
+
+    回傳：
+        {"wall_usd": float, "wall_price": float,
+         "pct_away": float, "label": str}
+        或 None（無明顯大牆 / API 失敗）
+    """
+    if not current_price or current_price <= 0:
+        return None
+
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = f"{base}:{'ask' if is_long else 'bid'}"
+    now = time.time()
+
+    if cache_key in _orderbook_wall_cache:
+        cached, ts = _orderbook_wall_cache[cache_key]
+        if now - ts < _OB_WALL_TTL:
+            return cached
+
+    # BingX 期貨掛單深度 API
+    sym_bingx = preferred_symbol or f"{base}-USDT"
+    url = "https://open-api.bingx.com/openApi/swap/v2/quote/depth"
+    params = {"symbol": sym_bingx, "limit": 50}  # 前 50 個掛單層
+
+    try:
+        r = requests.get(url, params=params, timeout=6)
+        if r.status_code != 200:
+            _orderbook_wall_cache[cache_key] = (None, now)
+            return None
+        j = r.json()
+        if j.get("code") != 0:
+            _orderbook_wall_cache[cache_key] = (None, now)
+            return None
+        depth_data = j.get("data", {})
+        # 掃描方向：做多掃 asks（阻力），做空掃 bids（支撐）
+        side_key = "asks" if is_long else "bids"
+        levels = depth_data.get(side_key, [])
+        if not isinstance(levels, list) or not levels:
+            _orderbook_wall_cache[cache_key] = (None, now)
+            return None
+
+        best_wall: Optional[Dict] = None
+        best_usd = 0.0
+        scan_limit = current_price * (1 + scan_pct / 100) if is_long else current_price * (1 - scan_pct / 100)
+
+        for level in levels:
+            # 格式可能是 [price, qty] 或 {"price": x, "qty": y}
+            try:
+                if isinstance(level, (list, tuple)) and len(level) >= 2:
+                    price_l, qty_l = float(level[0]), float(level[1])
+                elif isinstance(level, dict):
+                    price_l = float(level.get("price") or level.get("p") or 0)
+                    qty_l = float(level.get("qty") or level.get("q") or level.get("amount") or 0)
+                else:
+                    continue
+                if price_l <= 0 or qty_l <= 0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+
+            # 只看掃描範圍內的層
+            if is_long and price_l > scan_limit:
+                break
+            if not is_long and price_l < scan_limit:
+                break
+
+            wall_usd = price_l * qty_l
+            if wall_usd > best_usd:
+                best_usd = wall_usd
+                best_wall = {
+                    "wall_usd": wall_usd,
+                    "wall_price": price_l,
+                    "pct_away": abs(price_l - current_price) / current_price * 100,
+                }
+
+        result: Optional[Dict] = None
+        if best_wall and best_wall["wall_usd"] >= _OB_WALL_MIN_USD:
+            direction = "上方賣壓" if is_long else "下方買盤"
+            best_wall["label"] = (
+                f"🧱 {direction}牆 ${best_wall['wall_usd']/1e6:.2f}M "
+                f"@ {best_wall['wall_price']:.4f} "
+                f"(距現價 {best_wall['pct_away']:.2f}%)"
+            )
+            result = best_wall
+            logger.info(
+                f"[掛單牆] {base}: {result['label']}"
+            )
+
+        _orderbook_wall_cache[cache_key] = (result, now)
+        return result
+
+    except Exception as e:
+        logger.debug(f"[掛單牆] {base} 查詢異常: {e}")
+        _orderbook_wall_cache[cache_key] = (None, now)
+        return None
+
+
 def normalize_symbol(coin: Dict) -> Optional[str]:
     """從幣種數據中提取 symbol"""
     return coin.get('symbol') or coin.get('pair') or coin.get('name') or coin.get('coin') or coin.get('symbolName')
@@ -2591,6 +2971,21 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
                 energy_exhausted = True
                 logger.info(f"[本地換算] {clean}: 能量背離偵測 價格創高但 MACD 柱狀縮短 → energy_exhausted=True")
 
+    # ── ⚡ 爆量偵測：最新一根 15m 成交量 vs 前 96 根（24h）均值 ────────────────
+    # vol_spike_ratio > 2.0 = 超過均值 2 倍 → 爆量啟動訊號
+    vol_spike_ratio: Optional[float] = None
+    if len(volumes) >= 10:
+        _compare_window = volumes[:-1]  # 排除可能仍在形成中的最後一根
+        _sample = _compare_window[-min(96, len(_compare_window)):]
+        _avg_vol = float(np.mean(_sample)) if _sample else 0.0
+        if _avg_vol > 0 and volumes[-1] > 0:
+            vol_spike_ratio = volumes[-1] / _avg_vol
+            if vol_spike_ratio >= 1.5:
+                logger.info(
+                    f"[本地換算] {clean}: ⚡ 爆量偵測 最新根={volumes[-1]:.2f} "
+                    f"均值={_avg_vol:.2f} 比率={vol_spike_ratio:.2f}×"
+                )
+
     out: Dict[str, Any] = {
         "rsi": rsi_val,
         "touch_upper": touch_upper,
@@ -2600,10 +2995,10 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         "lb_value": lb_value,
         "atr": atr_val,
         "source": "BingX",
-        # plan_b_used 改為「是否使用 CoinGlass Fallback」，BingX 作為 Plan A 故此處固定 False
         "plan_b_used": False,
         "real_symbol": found_symbol,
         "energy_exhausted": energy_exhausted,
+        "vol_spike_ratio": vol_spike_ratio,  # ⚡ 爆量倍率（None=無法計算）
     }
     # 最後一根 15m K 線的 open/high/low/close（觸發訊號當下 K 線結構）
     if opens and highs and lows and closes:
@@ -2654,12 +3049,14 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
     # Plan B：僅當 BingX K 線連續失敗多次時，才退回 CoinGlass API
     logger.warning(f"[技術指標] {base}: BingX K 線本地計算失敗，記錄一次 BingX 失敗計數")
     global _bingx_tech_fail_count
-    _bingx_tech_fail_count += 1
-    if _bingx_tech_fail_count <= 3:  # 連續失敗前三次，寧可放棄該幣種也不直接用 CoinGlass
-        logger.warning(f"[技術指標] {base}: BingX 失敗次數={_bingx_tech_fail_count} ≤ 3，本輪放棄技術指標以避免數據源偏差")
+    with _bingx_tech_fail_lock:
+        _bingx_tech_fail_count += 1
+        _local_fail_count = _bingx_tech_fail_count
+    if _local_fail_count <= 3:  # 連續失敗前三次，寧可放棄該幣種也不直接用 CoinGlass
+        logger.warning(f"[技術指標] {base}: BingX 失敗次數={_local_fail_count} ≤ 3，本輪放棄技術指標以避免數據源偏差")
         return None
 
-    logger.warning(f"[技術指標] {base}: BingX 連續失敗超過 3 次，啟用 CoinGlass 作為後備 Plan B（可能存在數據源偏差）")
+    logger.warning(f"[技術指標] {base}: BingX 連續失敗超過 3 次（本輪={_local_fail_count}），啟用 CoinGlass 作為後備 Plan B（可能存在數據源偏差）")
     plan_b_used = True
     logger.info(f"[技術指標] {base}: 查詢 CoinGlass API RSI...")
     backoff = 2.0
@@ -2881,7 +3278,7 @@ def _classify_signal_and_tier(
                 return ("🟢 深跌反彈", ZONE_DIP, stars, rsi_desc, f"📉 深跌反彈 (24h跌 {abs(price_chg_24h):.1f}%)")
         return (label, zone, stars, rsi_desc, reason)
 
-    # 輔助函數：v3.0 散戶濾網 & 極端費率
+    # 輔助函數：v3.0 散戶濾網 & 極端費率 & 槓桿擁擠聯合降級
     def _apply_retail_funding(tup: Tuple[str, str, int, str, str]) -> Tuple[str, str, int, str, str]:
         label, zone, stars, rsi_desc, reason = tup
         # 做多訊號：突破追漲(long_open) 或 多軍斷頭抄底(long_close)
@@ -2892,12 +3289,29 @@ def _classify_signal_and_tier(
         # 散戶過熱降級
         if retail_ratio is not None and retail_ratio > 1.45:
             if is_long:
-                stars = max(4, stars - 1)  # 最低降到 4，因為 3 星已刪除
+                stars = max(4, stars - 1)
                 reason = reason + " ⚠️ 散戶過熱"
             elif is_short:
                 reason = reason + " ✅ 散戶接盤"
 
-        # 極端費率標註
+        # 【槓桿極度擁擠聯合濾網】
+        # Funding > 0.1% + L/S Ratio > 2.0 → 多頭擠壓（Short Squeeze 的反面）前兆
+        # 大量多頭以高費率堆積，一旦行情反轉，連鎖爆倉極易產生插針
+        _fr = funding_rate if isinstance(funding_rate, (int, float)) else None
+        _rr = retail_ratio if isinstance(retail_ratio, (int, float)) else None
+        if _fr is not None and _rr is not None:
+            if _fr > 0.001 and _rr > 2.0:  # 0.1% 費率 且 散戶多空比 > 2.0
+                if stars == 5:
+                    stars = 4
+                    reason = reason + f" ⚠️槓桿極度擁擠(FR={_fr*100:.3f}% L/S={_rr:.1f})，謹防插針"
+                    logger.info(
+                        f"[槓桿擁擠降星] {item.get('symbol','')} "
+                        f"FR={_fr*100:.3f}% L/S={_rr:.1f} → 5星降4星"
+                    )
+                else:
+                    reason = reason + f" ⚠️槓桿擁擠(FR={_fr*100:.3f}%)"
+
+        # 極端費率方向性標註
         if funding_rate is not None:
             if funding_rate < -FUNDING_EXTREME and is_long:
                 reason = reason + " 🔥 費率負(嘎空)"
@@ -3158,27 +3572,36 @@ def build_report_message_tiered(
         buffer_pct = 0.005  # 0.5% buffer（結構位微調）
         sl_price = None
         sl_capped = False
-        # 容錯機制：列車 8%，賭鬼 6%；高波動標的(vol_pct>3%) 動態放寬至 12% / 10%
-        max_pct = 0.08 if is_train else 0.06
-        if atr_val is not None and price > 0:
-            vol_pct = (atr_val / price) * 100.0
-            if vol_pct > 3.0:
-                max_pct = 0.12 if is_train else 0.10
+
+        # ── ATR 波動等級分類（決定 ATR 倍率與上限）────────────────────────────
+        # vol_pct = ATR/Price (%)
+        # < 2%   : 低波動（常規）→ ATR 保底 1.2×
+        # 2~3%   : 中波動           → ATR 保底 1.35×
+        # > 3%   : 高波動（PEPE/SOL 系等）→ ATR 保底 1.5×，避免 15M 正常波動洗出場
+        vol_pct = (atr_val / price) * 100.0 if (atr_val is not None and price > 0) else 0.0
+        if vol_pct > 3.0:
+            atr_mult = 1.5    # 高波動：放寬止損，減少被正常波動掃出場
+            max_pct = 0.12 if is_train else 0.10
+        elif vol_pct > 2.0:
+            atr_mult = 1.35   # 中波動：適度放寬
+            max_pct = 0.10 if is_train else 0.08
+        else:
+            atr_mult = 1.2    # 低波動：保守
+            max_pct = 0.08 if is_train else 0.06
 
         if is_train:
-            # 列車：結構 + ATR 雙保底
+            # 列車：結構 + ATR 雙保底（ATR 倍率動態）
             basis_price = basis_low if is_long else basis_high
             struct_dist = None
             if basis_price is not None:
-                # 結構位做 0.5% buffer 微調後，再算距離
                 if is_long:
                     basis_price_adj = basis_price * (1.0 - buffer_pct)
                 else:
                     basis_price_adj = basis_price * (1.0 + buffer_pct)
                 struct_dist = abs(price - basis_price_adj)
-            # ATR 保底距離：1.2×ATR，無 ATR 時用 2% 價格距離
+            # ATR 保底距離（動態倍率）：高波動用 1.5×，中波動 1.35×，低波動 1.2×
             if atr_val is not None:
-                atr_floor = 1.2 * atr_val
+                atr_floor = atr_mult * atr_val
             else:
                 atr_floor = price * 0.02
             if struct_dist is not None:
@@ -3194,18 +3617,16 @@ def build_report_message_tiered(
                 else:
                     sl_price = price * (1.0 + max_pct)
         else:
-            # 賭鬼：保留原本「結構優先，否則 ATR / 百分比」方案
+            # 賭鬼：結構優先，否則 ATR（動態倍率）/ 百分比
             if is_long and basis_low is not None:
                 sl_price = basis_low * (1.0 - buffer_pct)
             elif (not is_long) and basis_high is not None:
                 sl_price = basis_high * (1.0 + buffer_pct)
 
-            # 若因資料缺失無法取得結構 SL，最後才用 ATR / 百分比作安全退場（極少數情況）
             if sl_price is None:
                 if atr_val is not None:
-                    # 結構缺失時，仍盡量用較保守的 ATR 停損
-                    fallback_mult = 1.2 if is_gambler else 1.0
-                    sl_dist = fallback_mult * atr_val
+                    # 結構缺失時，用動態 ATR 倍率（高波動自動放寬，避免誤觸）
+                    sl_dist = atr_mult * atr_val
                 else:
                     sl_dist = price * (0.03 if is_gambler else 0.02)
                 sl_price = price - sl_dist if is_long else price + sl_dist
@@ -3719,7 +4140,31 @@ def build_report_message_tiered(
                         if r2_val is not None:
                             lines.append(f"🎯 TP2 理論目標：`{tp2_str}` (~{r2_val:.1f}R)")
                     lines.append("🚀 剩餘 40%：不設止盈！推保本後沿著均線移動止損，讓利潤奔跑！")
-                # 6. Warnings
+                # 6. 進階情報警示（新功能：爆量 / 爆倉熱力圖 / 掛單牆 / 主力同步）
+                # ── ⚡ 爆量啟動 ────────────────────────────────────────────
+                _vsr = x.get("vol_spike_ratio")
+                if isinstance(_vsr, (int, float)) and _vsr >= 2.0:
+                    lines.append(f"⚡ *爆量啟動* 成交量 `{_vsr:.1f}×` 均值（量價配合，信號可信度↑）")
+                elif isinstance(_vsr, (int, float)) and _vsr >= 1.5:
+                    lines.append(f"📊 成交量 `{_vsr:.1f}×` 均值（溫和放量）")
+                # ── 🔥 爆倉熱力圖 ──────────────────────────────────────────
+                _liq = x.get("liq_nearby")
+                if isinstance(_liq, dict) and _liq.get("pct") is not None:
+                    _liq_usd_m = (_liq.get("total_usd") or 0) / 1e6
+                    lines.append(
+                        f"🔥 {_liq.get('label','')} "
+                        f"| 規模 `${_liq_usd_m:.1f}M` 距現價 `{_liq.get('pct',0):.2f}%`"
+                    )
+                # ── 🧱 大額掛單牆 ──────────────────────────────────────────
+                _wall = x.get("ob_wall")
+                if isinstance(_wall, dict) and _wall.get("wall_usd"):
+                    lines.append(f"{_wall.get('label','')}")
+                # ── 🐋 主力同步建倉 ────────────────────────────────────────
+                if x.get("whale_sync"):
+                    _wi = x.get("whale_index")
+                    _wi_str = f"指數={_wi:.0f}" if isinstance(_wi, (int, float)) else ""
+                    lines.append(f"🐋 *主力同步建倉* {_wi_str}（大戶與訊號方向一致，跟單心理穩定）")
+                # ── 低流動性警示 ────────────────────────────────────────────
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
                 lines.append("")
@@ -4011,6 +4456,16 @@ def fetch_position_change():
     """
     global _coinglass_oi_first_failure_logged
     _coinglass_oi_first_failure_logged = False
+
+    # 熔斷器狀態報告（每輪開始時印出，便於 GitHub Actions 日誌診斷）
+    _cb_cnt = _circuit_breaker.get("consecutive_429", 0)
+    if _cb_is_tripped():
+        logger.warning(f"[熔斷器🚨] 本輪以 MAX_WORKERS=1 單執行緒模式啟動（連續429={_cb_cnt}）")
+    elif _cb_is_warned():
+        logger.warning(f"[熔斷器⚠️] 本輪以 MAX_WORKERS=2 警戒模式啟動（連續429={_cb_cnt}）")
+    else:
+        logger.info(f"[熔斷器✅] 正常模式（連續429={_cb_cnt}）")
+
     logger.info("【CoinGlass-First】開始執行 15M 持倉狙擊掃描...")
 
     # ── Step 1：CoinGlass 全市場數據（不預先受限於 BingX 幣種）────────────────
@@ -4280,24 +4735,47 @@ def fetch_position_change():
 
         # ── 5M 動能共振驗證（標準版核心濾網）────────────────────────────────
         resonance_5m = fetch_oi_resonance_5m(sym, cat)
-        # 5M 方向明確相反 → 動能已竭，5 星降為 4 星（保留推播但降低信心）
         if resonance_5m is False and stars == 5:
             stars = 4
             reason = f"{reason} ⚠️[5M動能已竭:已降星]"
             logger.info(f"[5M共振] {sym} 5M OI 與 15M 反向，5星降為4星")
 
+        # ── 爆量偵測（從 K 線計算結果讀取）──────────────────────────────────
+        vol_spike_ratio = tech.get("vol_spike_ratio") if tech else None
+        has_vol_spike = isinstance(vol_spike_ratio, (int, float)) and vol_spike_ratio >= 2.0
+
+        # ── 爆倉熱力圖 + 掛單牆（僅 4/5 星候選，降低 API 負擔）────────────────
+        _cur_price = tech.get("current_price") if tech else None
+        _is_long_signal = cat in ("long_open", "long_close")
+        liq_nearby: Optional[Dict] = None
+        ob_wall: Optional[Dict] = None
+        if _cur_price and isinstance(_cur_price, (int, float)) and _cur_price > 0:
+            liq_nearby = fetch_liq_heatmap_nearby(sym, _cur_price, _is_long_signal)
+            time.sleep(0.1)
+            ob_wall = check_orderbook_wall(sym, _cur_price, _is_long_signal, preferred_symbol=preferred)
+
+        # ── 🐋 主力同步建倉判斷 ─────────────────────────────────────────────
+        # 鯨魚指數 > 65 且做多 / < 35 且做空 → 主力與訊號同向
+        whale_sync = False
+        if whale_idx is not None and isinstance(whale_idx, (int, float)):
+            if _is_long_signal and whale_idx >= 65:
+                whale_sync = True
+                reason = reason + f" 🐋主力同步做多({whale_idx:.0f})"
+            elif not _is_long_signal and whale_idx <= 35:
+                whale_sync = True
+                reason = reason + f" 🐋主力同步做空({whale_idx:.0f})"
+
         all_top.append({
             **item,
             "priceChange24h": price_24h,
             "category": cat,
-            "current_price": tech.get("current_price") if tech else None,
+            "current_price": _cur_price,
             "rsi": rsi_val,
             "atr": atr_val,
             "ub_value": tech.get("ub_value") if tech else None,
             "lb_value": tech.get("lb_value") if tech else None,
             "vwap_2h": tech.get("vwap_2h") if tech else None,
             "ema20_close": tech.get("ema20_close") if tech else None,
-            # BingX 結構高低點（OI 起漲點防守用）
             "recent_high_2h": tech.get("recent_high_2h") if tech else None,
             "recent_low_2h": tech.get("recent_low_2h") if tech else None,
             "last_kline_open_30m": tech.get("last_kline_open_30m") if tech else None,
@@ -4316,11 +4794,19 @@ def fetch_position_change():
             "energy_exhausted": bool(tech.get("energy_exhausted")) if tech else False,
             "has_5m_resonance": resonance_5m is True,
             "resonance_5m_raw": resonance_5m,
-            "is_global_consensus": False,  # 預設 False，由 cooled_top 迴圈覆寫
+            "is_global_consensus": False,
+            # ── 新增情報欄位 ──
+            "vol_spike_ratio": vol_spike_ratio,
+            "has_vol_spike": has_vol_spike,
+            "liq_nearby": liq_nearby,     # 爆倉熱力圖
+            "ob_wall": ob_wall,           # 掛單牆
+            "whale_sync": whale_sync,     # 主力同步
         })
         resonance_str = "🔥共振" if resonance_5m is True else ("⚠️已竭" if resonance_5m is False else "❓未知")
+        vol_str = f"⚡{vol_spike_ratio:.1f}×" if has_vol_spike else "-"
         logger.info(
-            f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} 布林上={ub_val} 布林下={lb_val} ATR={atr_val} 鯨魚指數={whale_idx} 5M={resonance_str} | {reason}"
+            f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} ATR={atr_val} "
+            f"5M={resonance_str} 爆量={vol_str} 鯨魚={whale_idx} | {reason}"
         )
 
     # ── BingX 支援驗證守門（CoinGlass-First 架構：最終推播前確認 BingX 有此標的）────
@@ -4922,7 +5408,30 @@ def fetch_position_change():
             # 紀錄缺 sl/tp 欄位（舊格式或寫入時無價位），本輪僅做進場理由與籌碼追蹤
             logger.info(f"比對價格: {sym_base} 無止損/止盈價位可比對（紀錄缺 sl/tp），僅做進場理由與籌碼追蹤")
 
-        # 1-3) 時間衰竭：持倉超過 24 小時仍未達標，建議保本/小虧出場
+        # 1-3a) 中期預警：持倉超過 3 小時（12 根 15m K 線）仍未達 TP2，且 TP1 也未觸及 → 動能可疑
+        _3h_elapsed = pushed_ts and (now_ts - pushed_ts) >= 3 * 3600
+        if (
+            not entry.get("closed")
+            and not entry.get("time_warned_3h")
+            and _3h_elapsed
+            and not entry.get("tp1_notified")
+        ):
+            _elapsed_bars = int((now_ts - pushed_ts) / 900)  # 15m = 900s
+            _cur_str = f"`{cur_price}`" if cur_price else "（無最新報價）"
+            warn_3h_msg = (
+                f"⏳ *【耗時預警・建議提高警惕】*\n"
+                f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}`\n"
+                f"已過 *{_elapsed_bars} 根 15m K 線*，TP1 尚未達標，現價 {_cur_str}。\n\n"
+                f"📌 *建議操作：*\n"
+                f"  • 若現價距止損 < 1%，建議直接保本平倉\n"
+                f"  • 若仍有浮盈，請將止損提升至進場價以上（保本）\n"
+                f"  • 動能延遲可能表示籌碼已換手，謹慎加倉"
+            )
+            send_telegram_message(warn_3h_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+            entry["time_warned_3h"] = True
+            logger.info(f"倉位追蹤已發送: {sym_base} 3小時耗時預警 ({_elapsed_bars} 根 K 線未達 TP1)")
+
+        # 1-3b) 時間衰竭：持倉超過 24 小時仍未達標，建議保本/小虧出場
         if (not entry.get("closed")) and pushed_ts and (now_ts - pushed_ts) >= 24 * 3600:
             timeout_msg = (
                 f"⏳ *【動能衰竭・建議保本平倉】*\n"
@@ -6759,12 +7268,15 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
         amt = ev.get("dominantAmount1h", 0) / 10_000
         side = ev.get("dominantSide", "")
         sym = ev.get("symbol", "")
+        rsi_lbl = ev.get("rsi_label", "")
         if "多" in side:
             icon, title, advice = "🟢", "多軍陣亡 (可嘗試摸底)", "👉 價格若止跌，分批接多 (Buy the Dip)"
         else:
             icon, title, advice = "🔴", "空軍陣亡 (可嘗試摸頭)", "👉 價格若漲不動，嘗試做空 (Short the Top)"
         lines.append(f"{icon} *{sym}* 💥 爆倉 *${amt:.1f}萬*")
         lines.append(f"💀 慘況：{title}")
+        if rsi_lbl:
+            lines.append(f"📊 {rsi_lbl}")
         lines.append(f"💡 策略：{advice}")
         lines.append("")
 
@@ -6773,8 +7285,52 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
     return "\n".join(lines)
 
 
+def _fetch_liq_radar_rsi_1m(symbol: str) -> Optional[float]:
+    """為撿屍雷達抓取 1m RSI，判斷是否真正超賣/超買。
+    使用 BingX 公開 K 線，計算 14 期 RSI。
+    """
+    try:
+        # 轉換格式：BTC → BTC-USDT
+        bingx_sym = f"{symbol}-USDT"
+        url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
+        params = {"symbol": bingx_sym, "interval": "1m", "limit": 50}
+        resp = requests.get(url, params=params, timeout=8)
+        if resp.status_code != 200:
+            return None
+        raw = resp.json()
+        candles = raw.get("data") or raw.get("result") or (raw if isinstance(raw, list) else None)
+        if not candles or len(candles) < 16:
+            return None
+        closes = []
+        for c in candles:
+            if isinstance(c, dict):
+                closes.append(float(c.get("close") or c.get("c") or 0))
+            elif isinstance(c, (list, tuple)) and len(c) >= 5:
+                closes.append(float(c[4]))
+        if len(closes) < 15:
+            return None
+        # 計算 14 期 RSI
+        deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+        gains = [max(d, 0.0) for d in deltas]
+        losses = [max(-d, 0.0) for d in deltas]
+        avg_gain = sum(gains[-14:]) / 14.0
+        avg_loss = sum(losses[-14:]) / 14.0
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        return round(rsi, 1)
+    except Exception as e:
+        logger.warning(f"[撿屍RSI] {symbol} 1m RSI 計算失敗: {e}")
+        return None
+
+
 def run_liquidity_radar_once():
-    """主流程：流動性獵取雷達（執行一次，適合排程或 HTTP 觸發）"""
+    """主流程：流動性獵取雷達（執行一次，適合排程或 HTTP 觸發）
+    加入 RSI 超賣/超買濾網：只有真正處於局部底部的幣種才推播，避免使用者接刀。
+    多軍爆倉（多單被強平）→ 需 RSI 1m < 35（超賣背離）
+    空軍爆倉（空單被強平）→ 需 RSI 1m > 65（超買背離）
+    """
     logger.info(f"開始執行流動性獵取雷達，共 {len(LIQ_SYMBOLS)} 個幣種...")
 
     events: List[Dict] = []
@@ -6785,8 +7341,41 @@ def run_liquidity_radar_once():
             if data_array is None:
                 continue
             event = process_liquidation_data(symbol, data_array)
-            if event:
+            if not event:
+                if idx < len(LIQ_SYMBOLS) - 1:
+                    time.sleep(LIQ_REQUEST_DELAY)
+                continue
+
+            # RSI 超賣/超買確認：確保是「局部底部/頂部」而非自由落體
+            rsi_1m = _fetch_liq_radar_rsi_1m(symbol)
+            dominant_side = event.get("dominantSide", "")
+            is_long_liq = "多" in dominant_side  # 多單爆倉 → 價格下跌
+            rsi_ok = False
+            rsi_label = ""
+            if rsi_1m is None:
+                # 無法取得 RSI，放行但標記為「未確認」
+                rsi_ok = True
+                rsi_label = "RSI 未確認"
+                logger.warning(f"[撿屍雷達] {symbol} 無法取得 1m RSI，放行但標記未確認")
+            elif is_long_liq and rsi_1m < 35:
+                rsi_ok = True
+                rsi_label = f"✅ RSI 1m={rsi_1m:.0f} (超賣背離，摸底時機)"
+                logger.info(f"[撿屍雷達] {symbol} 多單爆倉 + RSI={rsi_1m:.0f}<35，確認超賣，推播")
+            elif (not is_long_liq) and rsi_1m > 65:
+                rsi_ok = True
+                rsi_label = f"✅ RSI 1m={rsi_1m:.0f} (超買背離，摸頂時機)"
+                logger.info(f"[撿屍雷達] {symbol} 空單爆倉 + RSI={rsi_1m:.0f}>65，確認超買，推播")
+            else:
+                logger.info(
+                    f"[撿屍雷達] {symbol} 爆倉但 RSI={rsi_1m} 未達超賣/超買門檻"
+                    f"（{'多單爆倉需<35' if is_long_liq else '空單爆倉需>65'}），跳過"
+                )
+
+            if rsi_ok:
+                event["rsi_1m"] = rsi_1m
+                event["rsi_label"] = rsi_label
                 events.append(event)
+
             # 控制請求節奏，避免觸發頻率限制
             if idx < len(LIQ_SYMBOLS) - 1:
                 time.sleep(LIQ_REQUEST_DELAY)
@@ -6794,7 +7383,7 @@ def run_liquidity_radar_once():
             logger.error(f"處理 {symbol} 流動性數據時發生錯誤: {str(e)}")
 
     if not events:
-        logger.info("本次監控無幣種達到極端爆倉門檻")
+        logger.info("本次監控無幣種達到極端爆倉門檻（或均未通過 RSI 超賣/超買確認）")
         return
 
     msg = format_liquidity_consolidated_message(events)
@@ -6803,7 +7392,7 @@ def run_liquidity_radar_once():
         "inline_keyboard": [[{"text": "💀 查看詳細爆倉數據", "url": "https://www.coinglass.com/zh-TW/LiquidationData"}]]
     }
     send_telegram_message(msg, thread_id, parse_mode="Markdown", reply_markup=keyboard)
-    logger.info(f"流動性獵取雷達完成，推送 {len(events)} 個幣種的極端爆倉事件")
+    logger.info(f"流動性獵取雷達完成，推送 {len(events)} 個幣種的極端爆倉事件（均已通過 RSI 確認）")
 
 
 # ==================== 9. 山寨爆發雷達（Altcoin Season + RSI + Buy Ratio） ====================
