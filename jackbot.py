@@ -105,10 +105,10 @@ logging.getLogger().addHandler(_fh)
 # CoinGlass OI 呼叫限速（初創版 80 次/分鐘，global 必須在函數內「最先」宣告再賦值）
 _coinglass_oi_rate_limiter = None
 
-# CoinGlass API 全域呼叫計數（保守抓 70/min），避免觸發嚴格限流
+# CoinGlass API 全域呼叫計數（標準版 300/min，保留 50 緩衝，設 250）
 _coinglass_api_counter: Dict[str, Any] = {"window_start": 0.0, "count": 0}
 _coinglass_api_counter_lock = threading.Lock()
-_COINGLASS_MAX_CALLS_PER_MINUTE = 70
+_COINGLASS_MAX_CALLS_PER_MINUTE = 250
 
 # BingX 技術指標失敗次數（每輪用於判斷是否啟用 CoinGlass Plan B）
 _bingx_tech_fail_count: int = 0
@@ -176,8 +176,8 @@ def _cb_is_tripped() -> bool:
         return True
 
 
-def _cb_get_max_workers(default: int = 4) -> int:
-    """根據熔斷器狀態返回建議最大執行緒數。"""
+def _cb_get_max_workers(default: int = 12) -> int:
+    """根據熔斷器狀態返回建議最大執行緒數（標準版預設 12）。"""
     return 1 if _cb_is_tripped() else default
 
 
@@ -1225,7 +1225,7 @@ def fetch_bingx_contracts() -> Tuple[Set[str], Dict[str, str], List[str]]:
     回傳 (allowed_base_set, base_to_symbol, bases_for_price)。
     - allowed_base_set: 用於過濾的 base 集合。
     - base_to_symbol: base_upper -> 正確的 BingX symbol（如 1000PEPE-USDT），供 K 線/費率 API 使用。
-    - bases_for_price: 每個合約一個 asset（用於向 BingX 取 30m 價格），不重複。
+    - bases_for_price: 每個合約一個 asset（用於向 BingX 取 15m 價格），不重複。
     """
     allowed: Set[str] = set()
     base_to_symbol: Dict[str, str] = {}
@@ -1553,13 +1553,12 @@ def fetch_price_change_24h_bingx(symbol: str, preferred_symbol: Optional[str] = 
 
 def fetch_price_change_30m_bingx(symbol: str) -> Optional[float]:
     """
-    【BingX 官方數據源】30 分鐘 K 線漲跌幅。
-    與 CoinGlass 初創版 OI 顆粒度 >= 30m 一致，推播統一為 30m 版本。
+    【BingX 官方數據源】15 分鐘 K 線漲跌幅（已升級標準版 15m 高頻模式）。
     """
     clean_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     sym_formatted = f"{clean_symbol}-USDT"
     url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
-    params = {"symbol": sym_formatted, "interval": "30m", "limit": 3}
+    params = {"symbol": sym_formatted, "interval": "15m", "limit": 3}
     try:
         response = requests.get(url, params=params, timeout=5)
         if response.status_code != 200:
@@ -1570,9 +1569,8 @@ def fetch_price_change_30m_bingx(symbol: str) -> Optional[float]:
         data = res_json.get("data", [])
         if not isinstance(data, list) or len(data) < 2:
             return None
-        # 假設 data 時間正序：data[-1] 為最新 K，data[-2] 為上一根
         latest_k = data[-1]
-        # 本根 30m K 線：open=30 分鐘前價格，close=當前價格 → 漲跌幅 = (close - open) / open
+        # 本根 15m K 線：open=15 分鐘前價格，close=當前價格 → 漲跌幅
         current_price = float(latest_k.get("close") or 0)
         open_price_15m_ago = float(latest_k.get("open") or 0)
         if open_price_15m_ago == 0:
@@ -1584,10 +1582,10 @@ def fetch_price_change_30m_bingx(symbol: str) -> Optional[float]:
 
 
 def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: int = 99999) -> List[Dict]:
-    """初創版 Fallback：使用 BingX 官方 API 獲取 30m 漲跌幅（降速版，避免 429）。"""
+    """Fallback：使用 BingX 官方 API 獲取 15m 漲跌幅（高頻版）。"""
     symbols = list(supported_coins)[:max_symbols]
     out = []
-    logger.info(f"正在使用 BingX 官方 API 獲取 {len(symbols)} 個幣種的 30m 價格數據 (降速模式)...")
+    logger.info(f"正在使用 BingX 官方 API 獲取 {len(symbols)} 個幣種的 15m 價格數據 (高頻模式)...")
 
     def one(sym):
         time.sleep(0.03)
@@ -1649,8 +1647,7 @@ def _parse_oi_change_from_data_list(data_list: list) -> Optional[float]:
 
 def fetch_oi_change_30m(symbol: str) -> Optional[float]:
     """
-    計算單一 symbol 30 分鐘 OI 變化%
-    【降速版】大幅增加延遲以適應 CoinGlass 嚴格限流
+    計算單一 symbol 15 分鐘 OI 變化%（已升級標準版高頻模式）
     """
     global _coinglass_oi_rate_limiter, _coinglass_oi_first_failure_logged
 
@@ -1660,14 +1657,15 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
         now = time.time()
         elapsed = now - _coinglass_oi_rate_limiter.get("last_call", 0.0)
         # 雲端環境 Anti-429：熔斷器啟動時 wait_time 自動加倍
-        wait_time = random.uniform(0.3, 0.7) * _cb_get_wait_multiplier()
+        # 標準版高頻模式：隨機延遲縮短為 0.1~0.2s（熔斷時加倍）
+        wait_time = random.uniform(0.1, 0.2) * _cb_get_wait_multiplier()
         if elapsed < wait_time:
             time.sleep(wait_time - elapsed)
         _coinglass_oi_rate_limiter["last_call"] = time.time()
 
     base_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     url = f"{CG_API_BASE}/api/futures/open-interest/aggregated-history"
-    params = {"symbol": base_symbol, "interval": "30m", "limit": 5}
+    params = {"symbol": base_symbol, "interval": "15m", "limit": 5}
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
     backoff = 2.0
@@ -1705,13 +1703,105 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
     return None
 
 
+# ── 標準版特有：多所共識檢查 ─────────────────────────────────────────────────
+_CONSENSUS_MAJOR_EXCHANGES = ["Binance", "OKX", "Bybit", "BingX", "Bitget"]
+_consensus_cache: Dict[str, Tuple[bool, float]] = {}  # {symbol: (is_consensus, ts)}
+_CONSENSUS_CACHE_TTL = 60.0  # 60 秒快取，避免高頻重複呼叫
+
+
+def fetch_exchange_oi_consensus(symbol: str) -> bool:
+    """【標準版專屬】多所共識：檢查前五大交易所的 OI 在 15m 內是否同向變動。
+    若 3 家以上同向（同增或同減），回傳 True（代表有全網資金共識）。
+    結果快取 60 秒以避免頻繁 API 呼叫。
+    """
+    base_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = base_symbol
+    now = time.time()
+
+    # 快取命中
+    if cache_key in _consensus_cache:
+        cached_val, cached_ts = _consensus_cache[cache_key]
+        if now - cached_ts < _CONSENSUS_CACHE_TTL:
+            return cached_val
+
+    url = f"{CG_API_BASE}/api/futures/open-interest/exchange-list"
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    params = {"symbol": base_symbol}
+
+    try:
+        _respect_coinglass_rate_limit()
+        response = requests.get(url, params=params, headers=headers, timeout=8)
+        if response.status_code != 200:
+            _consensus_cache[cache_key] = (False, now)
+            return False
+        result = response.json()
+        if result.get("code") not in ("0", 0, 200, "200"):
+            _consensus_cache[cache_key] = (False, now)
+            return False
+
+        data_list = result.get("data", [])
+        if not isinstance(data_list, list) or not data_list:
+            _consensus_cache[cache_key] = (False, now)
+            return False
+
+        # 統計各大所的 OI 15m 變化方向
+        positive_count = 0  # OI 增加
+        negative_count = 0  # OI 減少
+        found_exchanges = 0
+
+        for entry in data_list:
+            exch = (entry.get("exchange") or entry.get("exchangeName") or "").strip()
+            if exch not in _CONSENSUS_MAJOR_EXCHANGES:
+                continue
+            found_exchanges += 1
+            # 嘗試各種可能的 OI 變化欄位
+            oi_chg = (
+                entry.get("openInterestChangePercent15m")
+                or entry.get("oiChange15m")
+                or entry.get("openInterestChange")
+                or entry.get("openInterestChangePercent")
+                or entry.get("changePercent")
+            )
+            if oi_chg is None:
+                # fallback: 計算 h 和 o 的差值方向
+                oi_now = entry.get("openInterest") or entry.get("oi") or 0
+                oi_prev = entry.get("openInterestPrev") or entry.get("oiPrev") or 0
+                try:
+                    oi_chg = float(oi_now) - float(oi_prev)
+                except (TypeError, ValueError):
+                    continue
+            try:
+                chg_val = float(oi_chg)
+                if chg_val > 0:
+                    positive_count += 1
+                elif chg_val < 0:
+                    negative_count += 1
+            except (TypeError, ValueError):
+                pass
+
+        # 3 家以上同向 → 共識確立
+        consensus = (positive_count >= 3) or (negative_count >= 3)
+        logger.info(
+            f"[多所共識] {base_symbol}: 查到 {found_exchanges} 家大所 | "
+            f"OI增加 {positive_count} 家 | OI減少 {negative_count} 家 | "
+            f"{'✅ 共識確立' if consensus else '❌ 無共識'}"
+        )
+        _consensus_cache[cache_key] = (consensus, now)
+        return consensus
+
+    except Exception as e:
+        logger.debug(f"[多所共識] {base_symbol} 查詢異常: {e}")
+        _consensus_cache[cache_key] = (False, now)
+        return False
+
+
 def normalize_symbol(coin: Dict) -> Optional[str]:
     """從幣種數據中提取 symbol"""
     return coin.get('symbol') or coin.get('pair') or coin.get('name') or coin.get('coin') or coin.get('symbolName')
 
 
 def extract_price_change_15m(coin: Dict) -> float:
-    """提取 15 分鐘價格變化%（其他模組用，持倉篩選已改 30m）"""
+    """提取 15 分鐘價格變化%（其他模組用）"""
     change = coin.get('price_change_percent_15m')
     if isinstance(change, (int, float)):
         return float(change)
@@ -1732,7 +1822,7 @@ def extract_price_change_15m(coin: Dict) -> float:
 
 
 def extract_price_change_30m(coin: Dict) -> float:
-    """提取 30 分鐘價格變化%（持倉篩選 30m 版：價格與 OI 皆 30m）"""
+    """提取 15 分鐘價格變化%（持倉篩選 15m 高頻版：價格與 OI 皆 15m）"""
     change = coin.get('price_change_percent_30m')
     if isinstance(change, (int, float)):
         return float(change)
@@ -1844,7 +1934,7 @@ def _fetch_coinglass_rsi(symbol: str) -> Optional[Dict]:
     tries = [("Binance", symbol_pair)]
 
     for exchange, sym_param in tries:
-        params = {"exchange": exchange, "interval": "30m", "symbol": sym_param}
+        params = {"exchange": exchange, "interval": "15m", "symbol": sym_param}
         try:
             time.sleep(1.0)
             r = requests.get(url, params=params, headers=headers, timeout=8)
@@ -1865,8 +1955,8 @@ def _fetch_coinglass_rsi(symbol: str) -> Optional[Dict]:
 
 
 def _fetch_coinglass_boll(symbol: str) -> Optional[Dict]:
-    """CoinGlass V4 布林帶：委由 fetch_coinglass_indicator(symbol, 'boll', '30m')。"""
-    out = fetch_coinglass_indicator(symbol, "boll", "30m")
+    """CoinGlass V4 布林帶：委由 fetch_coinglass_indicator(symbol, 'boll', '15m')。"""
+    out = fetch_coinglass_indicator(symbol, "boll", "15m")
     return out if isinstance(out, dict) else None
 
 
@@ -1881,7 +1971,7 @@ def _fetch_coinglass_atr(symbol: str, interval: str = "1d") -> Optional[float]:
     return None
 
 
-def _fetch_coinglass_ema(symbol: str, interval: str = "30m") -> Optional[float]:
+def _fetch_coinglass_ema(symbol: str, interval: str = "15m") -> Optional[float]:
     """CoinGlass V4 EMA：/api/futures/indicators/ema，取 EMA20。"""
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     symbol_param = base + "USDT"
@@ -1917,7 +2007,7 @@ def _fetch_coinglass_ema(symbol: str, interval: str = "30m") -> Optional[float]:
     return None
 
 
-def _fetch_coinglass_macd(symbol: str, interval: str = "30m") -> Optional[Dict]:
+def _fetch_coinglass_macd(symbol: str, interval: str = "15m") -> Optional[Dict]:
     """CoinGlass V4 MACD：/api/futures/indicators/macd。回傳最後一筆 MACD 相關數值或 None。"""
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     symbol_param = base + "USDT"
@@ -2263,8 +2353,8 @@ def _bbands(close: pd.Series, length: int = 20, std_dev: float = 2.0) -> Tuple[p
 
 def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    以 BingX 30m K 線為主：用本地 pandas 計算 RSI(14)、布林帶(20,2)、ATR、EMA20、VWAP_2h 等，
-    並回傳「最後一根 30m K 線」的 open/high/low/close 供 SL/TP 結構防守使用。
+    以 BingX 15m K 線為主：用本地 pandas 計算 RSI(14)、布林帶(20,2)、ATR、EMA20、VWAP_2h 等，
+    並回傳「最後一根 15m K 線」的 open/high/low/close 供 SL/TP 結構防守使用。
     包含重試機制，解決 Rate Limit (429) 問題。
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
@@ -2280,7 +2370,7 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     found_symbol = None
     for sym_param in try_symbols:
         for attempt in range(2):
-            params = {"symbol": sym_param, "interval": "30m", "limit": 60}
+            params = {"symbol": sym_param, "interval": "15m", "limit": 60}
             try:
                 r = requests.get(url, params=params, timeout=8)
                 if r.status_code == 429:
@@ -2303,7 +2393,7 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     if not raw:
         logger.warning(f"[本地換算] {clean}: BingX K線取得失敗，嘗試交易對 {try_symbols} 皆無數據")
         return None
-    logger.info(f"[本地換算] {clean}: BingX K線取得 {len(raw)} 根，使用交易對 {found_symbol}，開始本地計算 RSI(14)/布林(20,2)/EMA20/VWAP_2h/ATR(14) 與最後一根 K 線結構")
+    logger.info(f"[本地換算] {clean}: BingX 15m K線取得 {len(raw)} 根，使用交易對 {found_symbol}，開始本地計算 RSI(14)/布林(20,2)/EMA20/VWAP_2h/ATR(14) 與最後一根 K 線結構")
     opens, highs, lows, closes, volumes = [], [], [], [], []
     for row in raw:
         o = h = l = c = vol = None
@@ -2332,7 +2422,7 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     if len(closes) < 20:
         logger.warning(f"[本地換算] {clean}: K線有效根數 {len(closes)} < 20，無法計算")
         return None
-    # 30分K 最常用「關鍵均線」：EMA20（指數移動平均），對近期價格權重高、反應快，實戰多當動態支撐/阻力
+    # 15分K 最常用「關鍵均線」：EMA20（指數移動平均），對近期價格權重高、反應快，實戰多當動態支撐/阻力
     # 做空時停損至少設在 EMA20 上方、做多時在 EMA20 下方，避免被回測均線洗掉
     ema20_close = None
     if len(closes) >= 20:
@@ -2342,17 +2432,17 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         for i in range(period, len(closes)):
             ema = alpha * float(closes[i]) + (1.0 - alpha) * ema
         ema20_close = ema
-    # VWAP：小幣深度不足時 24h VWAP 易失真。Plan B 用「最近 2 小時（4 根 30m K 線）」成交量加權，更貼近短線狙擊成本位
+    # VWAP：小幣深度不足時 24h VWAP 易失真。Plan B 用「最近 2 小時（8 根 15m K 線）」成交量加權，更貼近短線狙擊成本位
     vwap_2h = None
-    if len(closes) >= 4 and len(volumes) >= 4:
-        use_c = closes[-4:]
-        use_h = highs[-4:]
-        use_l = lows[-4:]
-        use_v = volumes[-4:]
+    if len(closes) >= 8 and len(volumes) >= 8:
+        use_c = closes[-8:]
+        use_h = highs[-8:]
+        use_l = lows[-8:]
+        use_v = volumes[-8:]
         if sum(use_v) > 0:
             typical = [(use_h[i] + use_l[i] + use_c[i]) / 3.0 for i in range(len(use_c))]
             vwap_2h = sum(typical[i] * use_v[i] for i in range(len(typical))) / sum(use_v)
-            logger.info(f"[本地換算] {clean}: VWAP_2h 使用最近 4 根 30m K 線成交量加權 (典型價 H+L+C/3)，避免小幣 24h VWAP 失真")
+            logger.info(f"[本地換算] {clean}: VWAP_2h 使用最近 8 根 15m K 線成交量加權 (典型價 H+L+C/3)，避免小幣 24h VWAP 失真")
     series = pd.Series(closes)
     rsi_series = _rsi(series, period=14)
     if rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
@@ -2416,7 +2506,7 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         "real_symbol": found_symbol,
         "energy_exhausted": energy_exhausted,
     }
-    # 最後一根 30m K 線的 open/high/low/close（觸發訊號當下 K 線結構）
+    # 最後一根 15m K 線的 open/high/low/close（觸發訊號當下 K 線結構）
     if opens and highs and lows and closes:
         out["last_kline_open_30m"] = float(opens[-1])
         out["last_kline_high_30m"] = float(highs[-1])
@@ -2426,10 +2516,10 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         out["vwap_2h"] = vwap_2h
     if ema20_close is not None:
         out["ema20_close"] = ema20_close
-    # 近期結構（2h 內高低）：真實價格支撐/壓力，供 SL/TP「OI 起漲點防守」使用
-    if len(highs) >= 4 and len(lows) >= 4:
-        out["recent_high_2h"] = max(highs[-4:])
-        out["recent_low_2h"] = min(lows[-4:])
+    # 近期結構（2h 內高低）：15m × 8 根 = 2h，供 SL/TP「OI 起漲點防守」使用
+    if len(highs) >= 8 and len(lows) >= 8:
+        out["recent_high_2h"] = max(highs[-8:])
+        out["recent_low_2h"] = min(lows[-8:])
     logger.info(
         f"[本地換算] {clean}: 完成 RSI={rsi_val:.2f} 布林上={ub_value} 布林下={lb_value} "
         f"現價={current_price} ATR={atr_val} VWAP_2h={vwap_2h} EMA20={ema20_close} "
@@ -2443,14 +2533,14 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
 def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     技術指標：
-    - Plan A = BingX 30m K 線本地計算（RSI/布林/EMA20/VWAP_2h/ATR/MACD/結構高低點）
+    - Plan A = BingX 15m K 線本地計算（RSI/布林/EMA20/VWAP_2h/ATR/MACD/結構高低點）
     - Plan B = CoinGlass API（RSI/BOLL/ATR/EMA），僅在 BingX K 線不可用時作為後備。
     下游 SL/TP 與推播邏輯一律以 BingX 結構為主，確保與實際交易所一致。
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
 
     # Plan A：優先使用 BingX K 線本地計算（適用所有幣種，只要 BingX 有合約）
-    logger.info(f"[技術指標] {base}: 優先使用 BingX 30m K 線本地計算技術指標與結構")
+    logger.info(f"[技術指標] {base}: 優先使用 BingX 15m K 線本地計算技術指標與結構")
     tech = _fetch_bingx_klines_and_calc(symbol, preferred_symbol=bingx_symbol_override)
     if tech:
         # 明確標記為 BingX Plan A（plan_b_used=False 已在 _fetch_bingx_klines_and_calc 設定）
@@ -2549,13 +2639,13 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
     # Plan B 加分項：EMA、MACD（API 失敗不影響 plan_b_used）
     _respect_coinglass_rate_limit()
     _respect_coinglass_rate_limit()
-    ema20_api = _fetch_coinglass_ema(symbol, "30m")
+    ema20_api = _fetch_coinglass_ema(symbol, "15m")
     if ema20_api is not None:
         ema20_close = ema20_api
     _respect_coinglass_rate_limit()
-    macd_data = _fetch_coinglass_macd(symbol, "30m")
+    macd_data = _fetch_coinglass_macd(symbol, "15m")
     logger.info(
-        f"[技術指標] {base}: 使用 CoinGlass API 數據 RSI={rsi_val} BOLL上={ub_value} "
+        f"[技術指標-15m] {base}: 使用 CoinGlass API 數據 RSI={rsi_val} BOLL上={ub_value} "
         f"BOLL下={lb_value} 現價={current_price} ATR={atr_val} EMA20={ema20_close} plan_b_used={plan_b_used}"
     )
 
@@ -2591,22 +2681,22 @@ FUNDING_POSITIVE = 0.0005   # 0.05%，高於此視為多頭擁擠
 FUNDING_NEGATIVE = -0.0005  # -0.05%，低於此視為空頭擁擠（易嘎空）
 FUNDING_EXTREME = 0.0003    # v3.0 極端費率 0.03%，用於嘎空/殺多加權標註
 
-# 【持倉異常 = 99% 山寨幣】BTC/ETH 量體大，30m 內 OI 波動 3~4% 幾乎不可能（除非崩盤）
+# 【持倉異常 = 99% 山寨幣】15m 高頻模式，門檻已針對 15m 週期重新校準
 MAIN_COINS = {"BTC", "ETH"}   # 主流幣
-OI_MAIN_COIN_MIN = 5.5       # 主流幣須 |OI 30m| >= 5.5% 才進榜（門檻極高，實務上排除）
-OI_ALTCOIN_MIN = 1.5         # 山寨幣初選門檻（後續再用 OI_FOR_4_STAR 篩）
+OI_MAIN_COIN_MIN = 3.0       # 主流幣須 |OI 15m| >= 3.0% 才進榜（15m 版本降低門檻）
+OI_ALTCOIN_MIN = 1.0         # 山寨幣初選門檻（15m 高頻版，後續再用 OI_FOR_4_STAR 篩）
 
 # 星等門檻（基礎值；實際 4/5 星門檻會在 runtime 依 OI 分佈動態調整，以適應不同波動環境）
-OI_FOR_5_STAR = 3.5    # 5星：主力量明確才給（基礎值，動態門檻下限）
-OI_FOR_4_STAR = 3.3    # 4星（基礎值，動態門檻下限）
-OI_FOR_ELITE = 3.5     # 鑽石 💎：與 5 星對齊
+OI_FOR_5_STAR = 2.2    # 5星：15m 高頻版門檻（基礎值，動態下限）
+OI_FOR_4_STAR = 2.0    # 4星（15m 高頻版基礎值，動態下限）
+OI_FOR_ELITE = 2.2     # 鑽石 💎：與 5 星對齊（15m 版）
 
 # 狙擊鏡止盈風報門檻：止盈若低於此 R 不推播（避免賠率差、維持勝率品質）
 MIN_TP1_R_FOR_PUSH = 0.65
 
-# 抄底/摸頭 30m 門檻（保守山寨）：略放寬仍算低位/高位，減少誤殺
-PRICE_DIP_MAX = 3.0    # 抄底：30m 漲幅 ≤ 3% 才算低位，超過改標追漲
-PRICE_TOP_MIN = -3.0   # 摸頭：30m 跌幅 ≥ -3% 才算高位，跌破改標追跌
+# 抄底/摸頭 15m 門檻（山寨）：略放寬仍算低位/高位，減少誤殺
+PRICE_DIP_MAX = 3.0    # 抄底：15m 漲幅 ≤ 3% 才算低位，超過改標追漲
+PRICE_TOP_MIN = -3.0   # 摸頭：15m 跌幅 ≥ -3% 才算高位，跌破改標追跌
 
 # 24H 趨勢門檻（保守山寨）：12% 以上才當假抄底/假摸頭，適應日波動
 TREND_24H_THRESHOLD = 12.0
@@ -2619,7 +2709,7 @@ TREND_24H_THRESHOLD = 12.0
 # │ ⭐5星  │ OI≥3.5%+CVD同向              │ 標準倉 5% │ 穩健列車                                 │
 # │ ⭐4星  │ OI≥3.3%+方向                │ 減半倉 2.5%│ 賭鬼樂透                                 │
 # └────────┴────────────────────────────┴─────────────┴────────────────────────────────────────┘
-# 價格位階：抄底 30m≤3%；摸頭 30m≥-3%。24h 假訊號門檻 12%。主流幣 OI≥5.5% 才進榜。
+# 價格位階：抄底 15m≤3%；摸頭 15m≥-3%。24h 假訊號門檻 12%。主流幣 OI≥3.0% 才進榜。
 
 # 鑽石 RSI 輔助：摸頭≥60 / 抄底≤40，無 RSI 不擋
 RSI_FILTER_TOP_MIN = 60
@@ -2859,7 +2949,7 @@ def build_report_message_tiered(
     oi_success_count: int = 0,
 ) -> str:
     """
-    【傑克 30分狙擊鏡 - 暴力喊單版】
+    【傑克 15分狙擊鏡 - 暴力喊單版】
     文案極度簡化，只給重點：方向、點位、理由。SL 與 TP 同源（主力成本 或 ATR）。
     """
     def star_str(n: int) -> str:
@@ -2888,9 +2978,9 @@ def build_report_message_tiered(
         last_kline_low_30m: Optional[float] = None,
     ):
         """
-        【OI 起漲點防守法】BingX 30m 結構為主，不再使用「純 ATR 停損」：
-        - 做多 SL：recent_low_2h 或「當前 30m K 線 low」往下 0.5% buffer。
-        - 做空 SL：recent_high_2h 或「當前 30m K 線 high」往上 0.5% buffer。
+        【OI 起漲點防守法】BingX 15m 結構為主，不再使用「純 ATR 停損」：
+        - 做多 SL：recent_low_2h 或「當前 15m K 線 low」往下 0.5% buffer。
+        - 做空 SL：recent_high_2h 或「當前 15m K 線 high」往上 0.5% buffer。
         - 列車(S/S+)：SL 與現價距離 >8% 則強制壓縮至 8%。
         - 賭鬼(A)：SL 與現價距離 >6% 則強制壓縮至 6%。
         - 列車 TP：優先主力成本對稱 (VWAP_2h)，無則 1.5R。
@@ -3258,9 +3348,13 @@ def build_report_message_tiered(
         stats_parts.append(f"👻{count_a}")
     stats_str = " ".join(stats_parts) or "😴 無訊號"
 
+    # 全網共識統計
+    consensus_count = sum(1 for x in eligible_unique if x.get("is_global_consensus"))
+    consensus_badge = f" 🌍【全網資金共識 {consensus_count}訊號】" if consensus_count > 0 else ""
+
     lines = []
-    lines.append(f"🎯 *{stats_str}｜傑克持倉狙擊鏡*")
-    lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
+    lines.append(f"🎯 *{stats_str}｜傑克持倉狙擊鏡*{consensus_badge}")
+    lines.append(f"⚡ *15M 閃電監控* | 🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
     lines.append("━━━━━━━━━━━━━━")
 
     has_any = False
@@ -3290,17 +3384,19 @@ def build_report_message_tiered(
                 coin_url = f"https://www.coinglass.com/zh-TW/currencies/{sym}"
                 # S+/S/A 分級顯示邏輯：頭等機艙 5 星、穩健列車 3 星、賭鬼不給星
                 is_elite_sig = _is_elite(x)
+                is_consensus = bool(x.get("is_global_consensus"))
+                consensus_tag = " 🌍" if is_consensus else ""
                 if is_elite_sig:
                     tier_emoji = "✈️"
-                    star_display = "✈️【頭等機艙】(高信心) ⭐⭐⭐⭐⭐"
+                    star_display = f"✈️【頭等機艙】(高信心) ⭐⭐⭐⭐⭐{consensus_tag}"
                     x["tier"] = "elite"
                 elif stars >= 5:
                     tier_emoji = "🚅"
-                    star_display = "🚅【穩健列車】(標準倉) ⭐⭐⭐"
+                    star_display = f"🚅【穩健列車】(標準倉) ⭐⭐⭐{consensus_tag}"
                     x["tier"] = "train"
                 else:
                     tier_emoji = "👻"
-                    star_display = "👻【賭鬼樂透】(高風險)💣"
+                    star_display = f"👻【賭鬼樂透】(高風險)💣{consensus_tag}"
                     x["tier"] = "gambler"
 
                 # 策略與風控建議（策略前加分級 emoji）
@@ -3494,9 +3590,9 @@ def build_report_message_tiered(
 
 
 def build_report_message(top_long_open: List, top_long_close: List, top_short_open: List, top_short_close: List, processed_count: int = 0, oi_success_count: int = 0) -> str:
-    """組合推播文字（30m 版：價格與持倉皆為 30 分鐘）"""
+    """組合推播文字（15m 高頻版：價格與持倉皆為 15 分鐘）"""
     lines = []
-    lines.append("💰 *【傑克短線持倉異動排行榜】(30分)*")
+    lines.append("💰 *【傑克短線持倉異動排行榜】(15分)*")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
@@ -3548,7 +3644,7 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append("💡 *【換位思考主力動機】*")
     lines.append("")
-    lines.append("請先判斷 *30分K價格走勢趨勢* 去換位思考主力動機")
+    lines.append("請先判斷 *15分K價格走勢趨勢* 去換位思考主力動機")
     lines.append("")
     lines.append("📈 *開倉*：多方開倉＝看漲做多；空方開倉＝看跌做空。")
     lines.append("📉 *平倉*：多方平倉＝做多減碼；空方平倉＝做空減碼。（停利或停損）")
@@ -3624,7 +3720,7 @@ def fetch_position_change():
     # 步驟2：依「BingX 交易對」取得 30m 價格（有 contracts 則直接用 BingX 取價，不再依賴 CoinGlass 漲跌幅）
     if bases_for_price:
         all_symbols_data = _fetch_coins_price_change_fallback(bases_for_price)
-        logger.info(f"依 BingX 交易對取得 {len(all_symbols_data)} 個幣種的 30m 價格數據")
+        logger.info(f"依 BingX 交易對取得 {len(all_symbols_data)} 個幣種的 15m 價格數據")
     else:
         all_symbols_data = fetch_coins_price_change()
         logger.info(f"從 Coinglass API 取得 {len(all_symbols_data)} 個幣種的價格數據")
@@ -3653,8 +3749,8 @@ def fetch_position_change():
     if not coinglass_24h_map:
         coinglass_24h_map = _fetch_coinglass_24h_map()
     
-    # 【智慧過濾 Smart Filter - 30m 版】山寨為主，主流幣用 OI_MAIN_COIN_MIN 排除
-    PRICE_GATEKEEPER = 1.0  # 30m 價格波動門檻 %（>=1% 即進入 OI 檢查）
+    # 【智慧過濾 Smart Filter - 15m 高頻版】山寨為主，主流幣用 OI_MAIN_COIN_MIN 排除
+    PRICE_GATEKEEPER = 0.6  # 15m 價格波動門檻 %（>=0.6% 即進入 OI 檢查，適應更短週期）
     active_symbols = []
     for coin in target_symbols_data:
         p_change = extract_price_change_30m(coin)
@@ -3662,7 +3758,7 @@ def fetch_position_change():
             active_symbols.append(coin)
     logger.info(
         f"🔍 智慧過濾: 從 {len(target_symbols_data)} 個幣種中篩選出 {len(active_symbols)} 個活躍標的 "
-        f"(價格 30m >= {PRICE_GATEKEEPER}%) 進行 30m OI 檢查..."
+        f"(價格 15m >= {PRICE_GATEKEEPER}%) 進行 15m OI 檢查..."
     )
     # 成交量預篩：3M 以下不跑 OI（略放寬多一點候選）
     VOLUME_PREFILTER_MIN_USD = 3_000_000
@@ -3729,8 +3825,8 @@ def fetch_position_change():
     oi_success_count = 0
     oi_fail_count = 0
     
-    # 並行處理配置：CoinGlass 專用慢速模式；熔斷器啟動時自動降為 1 執行緒
-    MAX_WORKERS = _cb_get_max_workers(default=4)
+    # 並行處理配置：標準版高頻模式，預設 12 執行緒；熔斷器啟動時自動降為 1
+    MAX_WORKERS = _cb_get_max_workers(default=12)
     if MAX_WORKERS == 1:
         logger.warning("[熔斷器作用中] MAX_WORKERS 已降為 1，本輪採單執行緒保護模式")
     start_time = time.time()
@@ -4657,6 +4753,13 @@ def fetch_position_change():
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
     # 寫入冷卻檔時也用正規化 symbol，確保下次讀取比對一致
     pairs_this_run = [(_cooldown_symbol(x.get("symbol")), _item_direction(x)) for x in cooled_top if x.get("symbol")]
+
+    # ── 標準版：多所共識檢查（只對最終入選訊號查詢，節省 API 用量）────────────
+    if cooled_top:
+        for _item in cooled_top:
+            _sym = _item.get("symbol", "")
+            if _sym:
+                _item["is_global_consensus"] = fetch_exchange_oi_consensus(_sym)
 
     # 僅在「實際有至少一則訊號」時才推主報表；無訊號或全被風報比篩掉 → 不推，安靜
     has_any = False
