@@ -5527,7 +5527,7 @@ OI_FOR_4_STAR = 2.2   # 4星門檻（≥2.2% 有明確資金進場）
 OI_FOR_ELITE = 3.0    # 鑽石 💎 門檻（同 5 星）
 
 # 狙擊鏡止盈風報門檻：止盈若低於此 R 不推播（避免賠率差、維持勝率品質）
-MIN_TP1_R_FOR_PUSH = 0.65
+MIN_TP1_R_FOR_PUSH = 0.8
 
 # 抄底/摸頭 15m 門檻（山寨）：略放寬仍算低位/高位，減少誤殺
 PRICE_DIP_MAX = 3.0    # 抄底：15m 漲幅 ≤ 3% 才算低位，超過改標追漲
@@ -5916,17 +5916,21 @@ def build_report_message_tiered(
         sl_source = "ATR"  # 紀錄 SL 來源，用於訊息說明
 
         # ── ATR 波動等級分類（決定 ATR 倍率與上限）────────────────────────────
-        # < 2% : 低波動 → ATR 保底 1.2× / 2~3%: 中波動 1.35× / >3%: 高波動 1.5×
+        # 15m 高頻模式：SL 須貼近結構，過寬意味信號已失效
+        # 列車(5星) / 賭鬼(4星)
+        # 高波動(ATR>3%)：最大 8% / 6%
+        # 中波動(ATR 2-3%)：最大 6% / 5%
+        # 低波動(ATR<2%)：最大 5% / 4%
         vol_pct = (atr_val / price) * 100.0 if (atr_val is not None and price > 0) else 0.0
         if vol_pct > 3.0:
             atr_mult = 1.5    # 高波動：PEPE/SOL 系，避免 15M 正常波動洗出場
-            max_pct = 0.12 if is_train else 0.10
+            max_pct = 0.08 if is_train else 0.06
         elif vol_pct > 2.0:
             atr_mult = 1.35   # 中波動：適度放寬
-            max_pct = 0.10 if is_train else 0.08
+            max_pct = 0.06 if is_train else 0.05
         else:
             atr_mult = 1.2    # 低波動：保守
-            max_pct = 0.08 if is_train else 0.06
+            max_pct = 0.05 if is_train else 0.04
 
         # ── 腳步圖支撐/阻力有效性校驗 ─────────────────────────────────────────
         # fp_support 必須在現價下方（做多），且距現價不超過 max_pct×1.1
@@ -7005,45 +7009,13 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
         return out_page
 
     def _try_coins_markets() -> List[Dict]:
-        """多排序策略抓取全市場合約幣種。
-        由於 CoinGlass coins-markets 的 pageNum 參數被忽略（永遠回傳同一批），
-        改採「多個 sortField」輪流抓取，合併去重以擴大掃描範圍至 300~500 個幣種。
-        排序維度：預設(OI) → priceChangePercent(24h漲幅) → openInterestChange(OI變化量)
-                  → volChangePercent(成交量變化) → fundingRate(費率極端)
+        """抓取 CoinGlass coins-markets Top-100（按 OI 排序）。
+        CoinGlass 的 pageNum / sortField 均被 API 忽略，多次呼叫回傳相同 100 筆，
+        故僅打一次預設排序，節省時間與 API 配額。
         """
-        out: List[Dict] = []
         seen_syms: set = set()
-
-        # 排序欄位列表：(sortField, sortType, 說明)
-        # 每個維度最多補充 100 個新幣，預期最終 300~500 個
-        sort_variants = [
-            ("", "0",                  "預設排序(OI大到小)"),
-            ("priceChangePercent", "0", "24h漲幅↓"),
-            ("priceChangePercent", "1", "24h漲幅↑(跌最多)"),
-            ("openInterestChange", "0", "OI變化↓"),
-            ("openInterestChange", "1", "OI變化↑"),
-            ("volChangePercent",   "0", "成交量變化↓"),
-        ]
-
-        # 連續 3 組排序都沒有新幣才停（API 可能忽略 sortField，但仍全部嘗試）
-        consecutive_zero = 0
-        for sort_field, sort_type, label in sort_variants:
-            before = len(out)
-            batch = _fetch_one_coins_markets_page(sort_field, sort_type, seen_syms)
-            out.extend(batch)
-            added = len(out) - before
-            logger.info(f"[CoinGlass掃描] {label}: +{added} 個 / 累計 {len(out)} 個")
-            if added == 0:
-                consecutive_zero += 1
-                if consecutive_zero >= 3:
-                    logger.info(f"[CoinGlass掃描] 連續 {consecutive_zero} 組無新幣，停止補充（API 可能忽略 sortField）")
-                    break
-            else:
-                consecutive_zero = 0
-            # 禮貌性間隔，避免觸發 429
-            time.sleep(0.3)
-
-        logger.info(f"[CoinGlass-First] coins-markets 多排序掃描完成，共 {len(out)} 個唯一幣種")
+        out = _fetch_one_coins_markets_page("", "0", seen_syms)
+        logger.info(f"[CoinGlass-First] coins-markets 取得 {len(out)} 個幣種（OI 排序 Top-100）")
         return out
 
     # ── 嘗試 coins-price-change（備援端點）──────────────────────────────────
