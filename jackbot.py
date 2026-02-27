@@ -6631,6 +6631,16 @@ def build_report_message_tiered(
                 _tp1_display = f"`{tp1_val}`" if tp1_val and tp1_val not in ("-", "—", "") else "暫無數據"
 
                 _cap_tag = " 觸發10%上限" if sl_capped else ""
+                # TP2 共用邏輯（列車/賭鬼均顯示）
+                _tp2_str = x.get("tp2_price_str") or "-"
+                _r2 = x.get("r_tp2")
+                _r2_val = None
+                if _tp2_str != "-" and _r2 is not None:
+                    try:
+                        _r2_val = float(_r2)
+                    except (TypeError, ValueError):
+                        _r2_val = None
+
                 if stars >= 5:
                     # 列車：若 SL 距現價 >5%，標注「深空防護」
                     _sl_deep_note = ""
@@ -6638,22 +6648,21 @@ def build_report_message_tiered(
                         _sl_deep_note = " 🔐(深空防護)"
                     lines.append(f"🛑 止損：{_sl_display}{_sl_dist_str}{_sl_deep_note}{_cap_tag}")
                     r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
-                    lines.append(f"✅ 止盈：{_tp1_display} ({t1_note}){r1}")
+                    # 避免 (t1_note) 與 r1 重複（如 t1_note="1.2R" 且 r1="(1.2R)"）
+                    _note_is_r = (r_tp1 is not None and t1_note in (f"{r_tp1}R", f"{r_tp1:.1f}R", f"{r_tp1:.2f}R"))
+                    if t1_note and not _note_is_r:
+                        lines.append(f"✅ TP1(60%)：{_tp1_display} ({t1_note}){r1}")
+                    else:
+                        lines.append(f"✅ TP1(60%)：{_tp1_display}{r1}")
+                    if _r2_val is not None:
+                        lines.append(f"🎯 TP2 理論目標：`{_tp2_str}` (~{_r2_val:.1f}R)")
                 else:
-                    # 賭鬼：TP1（腳步圖阻力優先）+ 放飛剩餘 40% + TP2 理論目標
+                    # 賭鬼：TP1（落袋60%）+ TP2 理論目標
                     lines.append(f"🛑 止損：{_sl_display}{_sl_dist_str}{_cap_tag}")
                     r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
                     lines.append(f"✅ TP1(落袋60%)：{_tp1_display}{r1}")
-                    # 若有計算出 TP2，顯示理論目標價與對應 R
-                    tp2_str = x.get("tp2_price_str") or "-"
-                    r2 = x.get("r_tp2")
-                    if tp2_str != "-" and r2 is not None:
-                        try:
-                            r2_val = float(r2)
-                        except (TypeError, ValueError):
-                            r2_val = None
-                        if r2_val is not None:
-                            lines.append(f"🎯 TP2 理論目標：`{tp2_str}` (~{r2_val:.1f}R)")
+                    if _r2_val is not None:
+                        lines.append(f"🎯 TP2 理論目標：`{_tp2_str}` (~{_r2_val:.1f}R)")
 
                 # ── 📊 訂單流分析（主動買賣比 + 淨倉位 + 腳步圖關鍵位）─────────
                 _flow_score = x.get("flow_score") or 0
@@ -7600,15 +7609,25 @@ def fetch_position_change():
             _oi15_f = float(_oi15) if _oi15 is not None else None
             if _p15_f is not None and _oi15_f is not None:
                 if _oi15_f > 3.0 and _p15_f < 0:
-                    # OI 大增 > 3% 但價格下跌 → 主力逆勢底部吸籌
                     chip_divergence = "absorption"
-                    reason = f"{reason} 🕵️主力底部吸籌(OI+{_oi15_f:.1f}%↑價{_p15_f:.1f}%↓)"
-                    logger.info(f"[籌碼背離] {sym} 底部吸籌: OI+{_oi15_f:.1f}% 但價格{_p15_f:.1f}%")
+                    if _is_long_signal:
+                        # 多單方向：OI大增+價格下跌 → 主力逆勢在低點逢低買入（吸籌）
+                        reason = f"{reason} 🕵️主力底部吸籌(OI+{_oi15_f:.1f}%↑價{_p15_f:.1f}%↓)"
+                        logger.info(f"[籌碼背離] {sym} 底部吸籌(多向): OI+{_oi15_f:.1f}% 但價格{_p15_f:.1f}%")
+                    else:
+                        # 空單方向：OI大增+價格下跌 → 主力積極建空（空頭加倉確認下跌）
+                        reason = f"{reason} 🐻主力積極建空(OI+{_oi15_f:.1f}%↑價{_p15_f:.1f}%↓)"
+                        logger.info(f"[籌碼背離] {sym} 主力建空(空向): OI+{_oi15_f:.1f}% 價格{_p15_f:.1f}%")
                 elif _oi15_f < -3.0 and _p15_f > 0:
-                    # OI 大縮 > 3% 但價格上漲 → 主力高位出貨
                     chip_divergence = "distribution"
-                    reason = f"{reason} ⚠️主力高位出貨(OI{_oi15_f:.1f}%↓價+{_p15_f:.1f}%↑)"
-                    logger.info(f"[籌碼背離] {sym} 高位出貨: OI{_oi15_f:.1f}% 但價格+{_p15_f:.1f}%")
+                    if _is_long_signal:
+                        # 多單方向：OI大縮+價格上漲 → 主力高位出貨（多頭獲利了結）
+                        reason = f"{reason} ⚠️主力高位出貨(OI{_oi15_f:.1f}%↓價+{_p15_f:.1f}%↑)"
+                        logger.info(f"[籌碼背離] {sym} 高位出貨(多向): OI{_oi15_f:.1f}% 但價格+{_p15_f:.1f}%")
+                    else:
+                        # 空單方向：OI大縮+價格上漲 → 空頭撤退（空方認輸回補）
+                        reason = f"{reason} ⚠️空頭撤退(OI{_oi15_f:.1f}%↓價+{_p15_f:.1f}%↑)"
+                        logger.info(f"[籌碼背離] {sym} 空頭撤退(空向): OI{_oi15_f:.1f}% 但價格+{_p15_f:.1f}%")
         except (TypeError, ValueError):
             pass
 
@@ -7743,6 +7762,13 @@ def fetch_position_change():
             stars = 4
             reason = reason + f" ⬇️訂單流警告降星(taker={_taker_ratio:.0f}%反向,大戶={_top_ls_ratio:.2f}反向)" if _taker_ratio and _top_ls_ratio else reason + " ⬇️訂單流警告降星"
             logger.info(f"[降星] {sym} 5→4星：taker={_taker_ratio} top_ls={_top_ls_ratio} flow={_flow_score_val}")
+
+        # 降 5→4：市場微結構資料完全缺失（taker/大戶/OI趨勢全為 None）→ 無法確認，降為賭鬼
+        # 5星(列車)代表「高度確認的趨勢」，資料全無則缺乏確認，只能算賭鬼級
+        elif stars == 5 and _taker_ratio is None and _top_ls_ratio is None and _flow_score_val == 0:
+            stars = 4
+            reason = reason + " ⬇️微結構資料不足降4★"
+            logger.info(f"[降星] {sym} 5→4星：taker/大戶/訂單流全部無法取得，資料不足無法確認為列車級")
 
         # 丟棄4星：taker強烈反向且訂單流完全背離（保護勝率）
         elif stars == 4 and _taker_strongly_opposed and _flow_score_val <= 0 and _top_ls_opposed:
