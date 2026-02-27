@@ -4505,30 +4505,39 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
         }
 
     def _try_coins_markets() -> List[Dict]:
-        """帶分頁的全市場抓取：pageSize=1000，while 迴圈直到抓完所有幣種（通常 300~500 個）。"""
+        """帶自動翻頁的全市場抓取：持續翻頁直到空頁為止，抓取全市場 300~500 個合約幣種。
+        CoinGlass API 每頁硬限制約 100 筆，停止條件：
+        1. 頁面回傳空資料（最後一頁）
+        2. 本頁新增幣種 = 0（已全部讀完，無新幣）
+        3. 安全上限 15 頁（防無限迴圈，最多抓 ~1500 個）
+        """
         out: List[Dict] = []
         page_num = 1
-        page_size = 1000
         seen_syms: set = set()
+        natural_page_size: int = 0  # 自動偵測 API 每頁自然大小
         try:
             while True:
                 _respect_coinglass_rate_limit()
                 r = requests.get(
                     f"{CG_API_BASE}/api/futures/coins-markets",
                     headers=headers,
-                    params={"pageSize": page_size, "pageNum": page_num},
+                    params={"pageSize": 100, "pageNum": page_num},
                     timeout=15,
                 )
                 if r.status_code != 200:
-                    logger.info(f"coins-markets page={page_num} HTTP {r.status_code}，停止翻頁")
+                    logger.info(f"[CoinGlass 分頁] page={page_num} HTTP {r.status_code}，停止翻頁")
                     break
                 j = r.json()
                 if j.get("code") not in (0, "0", 200, "200", None):
-                    logger.info(f"coins-markets page={page_num} code={j.get('code')}，停止翻頁")
+                    logger.info(f"[CoinGlass 分頁] page={page_num} code={j.get('code')}，停止翻頁")
                     break
                 raw = j.get("data", j.get("list", j if isinstance(j, list) else []))
-                if not isinstance(raw, list) or not raw:
-                    break  # 空頁 → 翻頁結束
+                if not isinstance(raw, list) or len(raw) == 0:
+                    logger.info(f"[CoinGlass 分頁] page={page_num} 回傳空頁，翻頁完成")
+                    break
+                # 第一頁：記錄自然每頁大小
+                if page_num == 1:
+                    natural_page_size = len(raw)
                 page_added = 0
                 for item in raw:
                     parsed = _parse_cg_item(item)
@@ -4537,18 +4546,27 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
                         out.append(parsed)
                         page_added += 1
                 logger.info(
-                    f"[CoinGlass 分頁] page={page_num} 本頁 {len(raw)} 筆 / 新增 {page_added} 個 / 累計 {len(out)} 個"
+                    f"[CoinGlass 分頁] page={page_num} 本頁 {len(raw)} 筆 / 新增 {page_added} 個"
+                    f" / 累計 {len(out)} 個"
                 )
-                # 若本頁結果少於 pageSize，代表已是最後一頁
-                if len(raw) < page_size:
+                # 停止條件 A：本頁無任何新幣（已全部讀完）
+                if page_added == 0:
+                    logger.info(f"[CoinGlass 分頁] page={page_num} 無新幣種，已全部抓完")
+                    break
+                # 停止條件 B：本頁筆數 < 自然每頁大小（最後一頁，筆數不滿）
+                if natural_page_size > 0 and len(raw) < natural_page_size:
+                    logger.info(
+                        f"[CoinGlass 分頁] page={page_num} 本頁 {len(raw)} < 每頁上限 {natural_page_size}，已到最後一頁"
+                    )
                     break
                 page_num += 1
-                # 安全上限：防止無限迴圈（正常市場最多 5 頁）
-                if page_num > 10:
-                    logger.warning("[CoinGlass 分頁] 已翻 10 頁，強制停止避免無限迴圈")
+                # 安全上限：最多 15 頁（防無限迴圈）
+                if page_num > 15:
+                    logger.warning(f"[CoinGlass 分頁] 已翻 15 頁、累計 {len(out)} 個，強制停止")
                     break
         except Exception as e:
-            logger.warning(f"coins-markets 分頁抓取異常: {e}")
+            logger.warning(f"[CoinGlass 分頁] 抓取異常: {e}")
+        logger.info(f"[CoinGlass-First] coins-markets 分頁完成，共 {len(out)} 個幣種（翻了 {page_num} 頁）")
         return out
 
     # ── 嘗試 coins-price-change（備援端點）──────────────────────────────────
@@ -4621,7 +4639,6 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
 
     result = _try_coins_markets()
     if result:
-        logger.info(f"[CoinGlass-First] coins-markets 成功取得 {len(result)} 個幣種")
         return result
     result = _try_coins_price_change()
     if result:
