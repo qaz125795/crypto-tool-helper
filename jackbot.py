@@ -1808,6 +1808,7 @@ def fetch_cg_bingx_supported_bases() -> Set[str]:
     if not CG_API_KEY:
         return set()
 
+    global _cg_full_exchange_map  # global 必須在函數最頂部，任何賦值之前
     bingx_bases: Set[str] = set()
     try:
         _respect_coinglass_rate_limit()
@@ -1826,7 +1827,6 @@ def fetch_cg_bingx_supported_bases() -> Set[str]:
         # {"BingX": [{"instrument_id": "BTCUSDT", "base_asset": "BTC"}, ...], ...}
         if isinstance(data, dict):
             # 同時建立全局 coin→exchanges 反向對照表（只建立一次，供 ABC fallback 快速跳過）
-            global _cg_full_exchange_map
             _tmp_map: Dict[str, Set[str]] = {}
             for ex_name, ex_pairs in data.items():
                 if not isinstance(ex_pairs, list):
@@ -1870,7 +1870,6 @@ def fetch_cg_bingx_supported_bases() -> Set[str]:
 
         # 回應格式 B：list of {"symbol": "BTC", "exchanges": [...]}
         elif isinstance(data, list):
-            global _cg_full_exchange_map
             _tmp_map_b: Dict[str, Set[str]] = {}
             for item in data:
                 exch_list = item.get("exchanges") or item.get("exchangeList") or []
