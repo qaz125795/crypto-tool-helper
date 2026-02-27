@@ -44,6 +44,160 @@ CG_GECKO_API_KEY = os.getenv('CG_GECKO_API_KEY')
 CG_API_KEY = os.getenv('CG_API_KEY')
 CG_API_BASE = "https://open-api-v4.coinglass.com"
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CoinGlass API 端點完整清單（v4 標準版）
+# 格式：「功能鍵」: "路徑"  # 說明 [分類]
+# ※ 備援路徑以 _v2 / _alt 後綴區分；停用端點標注 ⛔
+# ══════════════════════════════════════════════════════════════════════════════
+CG_EP = {
+    # ════════════════ 交易市場 Market ════════════════
+    "supported_coins":       "/futures/supported-coins",                             # 支持合約幣種列表
+    "supported_pairs":       "/futures/supported-exchange-pairs",                    # 支持的交易對
+    "pairs_markets":         "/api/futures/pairs-markets",                           # 合約交易對詳情
+    "coins_markets":         "/api/futures/coins-markets",                           # 合約幣種市場行情（主要掃描源）
+    "price_change_list":     "/futures/price-change-list",                           # 幣種價格變化列表
+    "price_ohlc_history":    "/api/price/ohlc-history",                             # 交易對價格K線歷史
+    # ── 現有路徑備援別名 ──
+    "price_history_futures": "/api/futures/price/history",                           # 合約價格K線（舊路徑）
+    "price_history_spot":    "/api/spot/price/history",                              # 現貨價格K線
+    "delisted_pairs":        "/api/futures/delisted-exchange-pairs",                 # 已下架交易對
+
+    # ════════════════ 持倉 Open Interest ════════════════
+    "oi_history":            "/api/futures/openInterest/ohlc-history",              # 合約持倉K線
+    "oi_agg_history":        "/api/futures/openInterest/ohlc-aggregated-history",   # 聚合持倉K線（主力）
+    "oi_agg_stable":         "/api/futures/openInterest/ohlc-aggregated-stablecoin",# 穩定幣保證金持倉
+    "oi_agg_coin":           "/api/futures/openInterest/ohlc-aggregated-coin-margin-history", # 幣本位持倉
+    "oi_exchange_list":      "/api/futures/openInterest/exchange-list",              # 各所持倉列表
+    "oi_exchange_history":   "/api/futures/openInterest/exchange-history-chart",    # 各所持倉歷史圖表
+    # ── 舊路徑備援（部分 API 可能只支援新路徑）──
+    "oi_history_old":        "/api/futures/open-interest/history",
+    "oi_agg_history_old":    "/api/futures/open-interest/aggregated-history",
+
+    # ════════════════ 資金費率 Funding Rate ════════════════
+    "fr_history":            "/api/futures/fundingRate/ohlc-history",               # 費率K線
+    "fr_oi_weight":          "/api/futures/fundingRate/oi-weight-ohlc-history",     # OI加權費率（最精準）
+    "fr_vol_weight":         "/api/futures/fundingRate/vol-weight-ohlc-history",    # 成交量加權費率
+    "fr_exchange_list":      "/api/futures/fundingRate/exchange-list",              # 各所費率列表
+    "fr_accum_exchange":     "/api/futures/fundingRate/accumulated-exchange-list",  # 累積費率（過熱偵測）
+    "fr_arbitrage":          "/api/futures/fundingRate/arbitrage",                  # 費率套利機會 🆕
+    # ── 舊路徑備援 ──
+    "fr_history_old":        "/api/futures/funding-rate/history",
+    "fr_oi_weight_old":      "/api/futures/funding-rate/oi-weight-history",
+    "fr_vol_weight_old":     "/api/futures/funding-rate/vol-weight-history",
+    "fr_exchange_list_old":  "/api/futures/funding-rate/exchange-list",
+    "fr_accum_exchange_old": "/api/futures/funding-rate/accumulated-exchange-list",
+
+    # ════════════════ 多空比 Long/Short Ratio ════════════════
+    "ls_global_history":     "/api/futures/global-long-short-account-ratio/history",# 全網帳戶多空比
+    "ls_top_account":        "/api/futures/top-long-short-account-ratio/history",   # 大戶帳戶多空比
+    "ls_top_position":       "/api/futures/top-long-short-position-ratio/history",  # 大戶持倉多空比
+
+    # ════════════════ 爆倉 Liquidation ════════════════
+    "liq_history":           "/api/futures/liquidation/history",                    # 交易對爆倉歷史
+    "liq_agg_history":       "/api/futures/liquidation/aggregated-history",         # 幣種聚合爆倉歷史（主力）
+    "liq_coin_list":         "/api/futures/liquidation/coin-list",                  # 幣種爆倉列表
+    "liq_exchange_list":     "/api/futures/liquidation/exchange-list",              # 交易所爆倉列表
+    "liq_order":             "/api/futures/liquidation/order",                      # 即時爆倉訂單
+    "liq_heatmap_m1":        "/api/futures/liquidation/heatmap/model1",             # 爆倉熱力圖 Model1 🆕
+    "liq_heatmap_m2":        "/api/futures/liquidation/heatmap/model2",             # 爆倉熱力圖 Model2 🆕
+    "liq_heatmap_m3":        "/api/futures/liquidation/heatmap/model3",             # 爆倉熱力圖 Model3 🆕
+    "liq_agg_heatmap_m1":    "/api/futures/liquidation/aggregated-heatmap/model1",  # 幣種聚合熱力圖 M1 🆕
+    "liq_agg_heatmap_m2":    "/api/futures/liquidation/aggregated-heatmap/model2",  # 幣種聚合熱力圖 M2 🆕
+    "liq_agg_heatmap_m3":    "/api/futures/liquidation/aggregated-heatmap/model3",  # 幣種聚合熱力圖 M3 🆕
+    "liq_map":               "/api/futures/liquidation/map",                        # 爆倉地圖 🆕
+    "liq_agg_map":           "/api/futures/liquidation/aggregated-map",             # 幣種爆倉地圖 🆕
+
+    # ════════════════ 訂單簿 Orderbook（合約） ════════════════
+    "ob_ask_bids_history":   "/api/futures/orderbook/ask-bids-history",             # 交易對掛單深度歷史
+    "ob_agg_ask_bids":       "/api/futures/orderbook/aggregated-ask-bids-history",  # 幣種聚合深度歷史
+    "ob_heatmap":            "/api/futures/orderbook/history",                      # 訂單簿熱力圖
+    "ob_large_order":        "/api/futures/orderbook/large-limit-order",            # 大額掛單
+    "ob_large_order_hist":   "/api/futures/orderbook/large-limit-order-history",    # 大額掛單歷史
+
+    # ════════════════ 主動買賣（合約） ════════════════
+    "taker_exchange_list":   "/api/futures/taker-buy-sell-volume/exchange-list",    # 各所主動買賣比
+    "taker_pair_history":    "/api/futures/taker-buy-sell-volume/history",          # 交易對主動買賣歷史
+    "taker_agg_history":     "/api/futures/aggregated-taker-buy-sell-volume/history",# 幣種聚合主動買賣（主力）
+
+    # ════════════════ 訂單簿（現貨） ════════════════
+    "spot_ob_ask_bids":      "/api/spot/orderbook/ask-bids-history",                # 現貨交易對深度 🆕
+    "spot_ob_agg_ask_bids":  "/api/spot/orderbook/aggregated-ask-bids-history",     # 現貨幣種聚合深度 🆕
+    "spot_ob_heatmap":       "/api/spot/orderbook/history",                         # 現貨訂單簿熱力圖 🆕
+    "spot_ob_large_order":   "/api/spot/orderbook/large-limit-order",               # 現貨大額掛單 🆕
+    "spot_ob_large_order_h": "/api/spot/orderbook/large-limit-order-history",       # 現貨大額掛單歷史 🆕
+
+    # ════════════════ 主動買賣（現貨） ════════════════
+    "spot_taker_history":    "/api/spot/taker-buy-sell-volume/history",             # 現貨交易對主動買賣 🆕
+    "spot_taker_agg":        "/api/spot/aggregated-taker-buy-sell-volume/history",  # 現貨幣種聚合 🆕
+
+    # ════════════════ 現貨市場 ════════════════
+    "spot_supported_coins":  "/api/spot/supported-coins",                           # 支持的現貨幣種 🆕
+    "spot_supported_pairs":  "/api/spot/supported-exchange-pairs",                  # 支持的現貨交易對 🆕
+    "spot_coins_markets":    "/api/spot/coins-markets",                             # 現貨幣種市場 🆕
+    "spot_pairs_markets":    "/api/spot/pairs-markets",                             # 現貨交易對市場 🆕
+
+    # ════════════════ 期權 Options ════════════════
+    "opt_max_pain":          "/api/option/max-pain",                                # 最大痛點價 🆕
+    "opt_info":              "/api/option/info",                                    # 期權信息 🆕
+    "opt_exchange_oi":       "/api/option/exchange-oi-history",                     # 各所期權持倉歷史 🆕
+    "opt_exchange_vol":      "/api/option/exchange-vol-history",                    # 各所期權成交量歷史 🆕
+
+    # ════════════════ 鏈上 On-Chain ════════════════
+    "exchange_assets":       "/api/exchange/assets",                                # 交易所資產透明度 🆕
+    "exchange_balance_list": "/api/exchange/balance/list",                          # 交易所餘額列表 🆕
+    "exchange_balance_chart":"/api/exchange/balance/chart",                         # 交易所餘額圖表 🆕
+    "exchange_chain_tx":     "/api/exchange/chain/tx/list",                         # 鏈上轉帳記錄 🆕
+
+    # ════════════════ ETF（比特幣 & 以太坊） ════════════════
+    "btc_etf_list":          "/api/etf/bitcoin/list",                               # 比特幣ETF列表 🆕
+    "btc_etf_flow":          "/api/etf/bitcoin/flow-history",                       # 比特幣ETF資金流 🆕
+    "btc_etf_net_assets":    "/api/etf/bitcoin/net-assets/history",                 # 比特幣ETF淨資產 🆕
+    "btc_etf_premium":       "/api/etf/bitcoin/premium-discount/history",           # 比特幣ETF溢價/折價 🆕
+    "btc_etf_history":       "/api/etf/bitcoin/history",                            # 比特幣ETF歷史 🆕
+    "btc_etf_price":         "/api/etf/bitcoin/price/history",                      # 比特幣ETF價格 🆕
+    "btc_etf_detail":        "/api/etf/bitcoin/detail",                             # 比特幣ETF詳情 🆕
+    "hk_btc_etf_flow":       "/api/hk-etf/bitcoin/flow-history",                   # 香港BTC ETF流向 🆕
+    "eth_etf_net_assets":    "/api/etf/ethereum/net-assets-history",                # 以太坊ETF淨資產 🆕
+    "eth_etf_list":          "/api/etf/ethereum/list",                              # 以太坊ETF列表 🆕
+    "eth_etf_flow":          "/api/etf/ethereum/flow-history",                      # 以太坊ETF資金流 🆕
+    "grayscale_holdings":    "/api/grayscale/holdings-list",                        # 灰度持倉列表 🆕
+    "grayscale_premium":     "/api/grayscale/premium-history",                      # 灰度溢價歷史 🆕
+
+    # ════════════════ 市場指標 Indicators ════════════════
+    "rsi_list":              "/api/futures/rsi/list",                               # RSI列表
+    "contract_basis":        "/api/futures/basis/history",                          # 合約基差歷史 🆕
+    "borrow_rate":           "/api/borrow-interest-rate/history",                   # 借貸利率歷史 🆕
+    "coinbase_premium":      "/api/coinbase-premium-index",                         # Coinbase溢價指數 🆕
+    "bitfinex_margin_ls":    "/api/bitfinex-margin-long-short",                     # Bitfinex保證金多空 🆕
+    "fear_greed":            "/api/index/fear-greed-history",                       # 恐懼貪婪指數 🆕
+    "stablecoin_mcap":       "/api/index/stableCoin-marketCap-history",             # 穩定幣市值歷史
+    "bull_market_peak":      "/api/bull-market-peak-indicator",                     # 牛市頂部指標 🆕
+    "ahr999":                "/api/index/ahr999",                                   # AHR999指標 🆕
+    "puell_multiple":        "/api/index/puell-multiple",                           # Puell多重指標 🆕
+    "stock_flow":            "/api/index/stock-flow",                               # Stock-to-Flow模型 🆕
+    "pi_cycle":              "/api/index/pi-cycle-indicator",                       # Pi Cycle頂部指標 🆕
+    "golden_ratio":          "/api/index/golden-ratio-multiplier",                  # 黃金比例乘數 🆕
+    "btc_profitable_days":   "/api/index/bitcoin/profitable-days",                  # BTC盈利天數 🆕
+    "btc_rainbow":           "/api/index/bitcoin/rainbow-chart",                    # BTC彩虹圖 🆕
+    "btc_bubble_index":      "/api/index/bitcoin/bubble-index",                     # BTC泡沫指數 🆕
+    "ma_2yr_multiplier":     "/api/index/2-year-ma-multiplier",                     # 2年均線乘數 🆕
+    "ma_200wk_heatmap":      "/api/index/200-week-moving-average-heatmap",          # 200週均線熱力圖 🆕
+
+    # ════════════════ Hyperliquid ════════════════
+    "hl_whale_alert":        "/api/hyperliquid/whale-alert",                        # HL鯨魚預警
+    "hl_whale_position":     "/api/hyperliquid/whale-position",                     # HL鯨魚持倉
+    "hl_position":           "/api/hyperliquid/position",                           # HL幣種持倉
+    "hl_wallet_pos_dist":    "/api/hyperliquid/wallet/position-distribution",       # HL錢包持倉分布
+    "hl_wallet_pnl_dist":    "/api/hyperliquid/wallet/pnl-distribution",            # HL錢包盈虧分布
+
+    # ════════════════ CVD（舊路徑保留） ════════════════
+    "cvd_history":           "/api/futures/cvd/history",
+    "cvd_agg_history":       "/api/futures/aggregated-cvd/history",
+
+    # ════════════════ 腳步圖（需更高授權 ⛔ 暫停）════════════════
+    "footprint":             "/api/futures/volume/footprint-history",               # ⛔ 需升級帳號
+}
+
 # Tree of Alpha API
 TREE_API_KEY = os.getenv('TREE_API_KEY')
 
@@ -1147,11 +1301,68 @@ def _make_fuel_bar(score: int, max_score: int = 5) -> str:
     return "▓" * filled + "░" * empty
 
 
+def _fetch_smart_money_oi_split(symbol: str = "BTC") -> Dict[str, Any]:
+    """聰明錢 OI 拆分：穩定幣保證金（專業資金）vs 幣本位保證金（散戶槓桿）。
+    方案A：aggregated-stablecoin-history + aggregated-coin-margin-history（最精準）
+    方案B：aggregated-history 總量（備援，無法拆分但至少有數據）
+    回傳 {"stable_chg": float, "coin_chg": float, "smart_money": bool/None}
+    """
+    empty = {"stable_chg": None, "coin_chg": None, "smart_money": None, "data_source": "none"}
+    base = symbol.upper().replace("USDT", "")
+    params = {"symbol": base, "interval": "15m", "limit": 4}
+
+    logger.debug(f"[聰明錢OI] 嘗試抓取穩定幣/幣本位OI分拆 symbol={base}")
+
+    stable_bars, coin_bars = None, None
+    try:
+        j_s = _cg_get(CG_EP["oi_agg_stable"], params)
+        rows_s = j_s.get("data") or j_s.get("list") or [] if j_s else []
+        stable_bars = _parse_oi_bars_from_rows(rows_s) if rows_s else None
+        logger.debug(f"[聰明錢OI] 穩定幣OI: {len(stable_bars) if stable_bars else 0}棒")
+    except Exception as e_s:
+        logger.debug(f"[聰明錢OI] 穩定幣OI異常: {e_s}")
+    try:
+        j_c = _cg_get(CG_EP["oi_agg_coin"], params)
+        rows_c = j_c.get("data") or j_c.get("list") or [] if j_c else []
+        coin_bars = _parse_oi_bars_from_rows(rows_c) if rows_c else None
+        logger.debug(f"[聰明錢OI] 幣本位OI: {len(coin_bars) if coin_bars else 0}棒")
+    except Exception as e_c:
+        logger.debug(f"[聰明錢OI] 幣本位OI異常: {e_c}")
+
+    stable_chg = coin_chg = None
+    if stable_bars and len(stable_bars) >= 2 and stable_bars[-2] != 0:
+        stable_chg = round((stable_bars[-1] - stable_bars[-2]) / stable_bars[-2] * 100, 3)
+    if coin_bars and len(coin_bars) >= 2 and coin_bars[-2] != 0:
+        coin_chg = round((coin_bars[-1] - coin_bars[-2]) / coin_bars[-2] * 100, 3)
+
+    # 聰明錢判斷：穩定幣OI增加 且 幣本位OI不增加（或也增但穩定幣增更多）
+    # → 專業機構在建倉，不是散戶借幣槓桿
+    smart_money = None
+    if stable_chg is not None and coin_chg is not None:
+        if stable_chg > 0.2 and coin_chg <= 0.1:
+            smart_money = True   # 聰明錢主導建倉
+        elif coin_chg > 0.5 and stable_chg <= 0.1:
+            smart_money = False  # 散戶槓桿主導
+        else:
+            smart_money = None   # 混合，無法判斷
+    elif stable_chg is not None:
+        smart_money = stable_chg > 0.2
+
+    if smart_money is True:
+        logger.info(f"[聰明錢OI✅] {base}: 穩定幣OI+{stable_chg:.3f}% 幣本位{coin_chg if coin_chg is not None else 'N/A'} → 專業資金建倉")
+    elif smart_money is False:
+        logger.info(f"[聰明錢OI⚠️] {base}: 幣本位OI+{coin_chg:.3f}% 穩定幣{stable_chg if stable_chg is not None else 'N/A'} → 散戶槓桿主導")
+
+    return {"stable_chg": stable_chg, "coin_chg": coin_chg, "smart_money": smart_money, "data_source": "split"}
+
+
 def _calc_fuel_score(mcap_15m: float, mcap_1h: float, oi_15m: float, oi_1h: float,
-                     usdt_premium: Optional[float]) -> int:
-    """計算燃料積分（0-5），用於生成進度條：
+                     usdt_premium: Optional[float],
+                     smart_money: Optional[bool] = None) -> int:
+    """計算燃料積分（0-7），新增聰明錢維度：
     穩定幣 15m 流入 (+1)、穩定幣 1h 流入 (+1)、
     OI 15m 擴張 (+1)、OI 1h 擴張 (+1)、USDT 溢價 > 0.05% (+1)
+    聰明錢OI主導（穩定幣>幣本位）(+1)、聰明錢強力確認(+1)
     """
     score = 0
     if mcap_15m > 0.01:
@@ -1164,20 +1375,37 @@ def _calc_fuel_score(mcap_15m: float, mcap_1h: float, oi_15m: float, oi_1h: floa
         score += 1
     if usdt_premium is not None and usdt_premium > 0.05:
         score += 1
+    if smart_money is True:
+        score += 1
+    if smart_money is True and oi_1h > 0.8:  # 聰明錢+持倉擴張雙確認
+        score += 1
     return score
 
 
 def buying_power_monitor():
-    """【牛市燃料監控】資金進場=發車，判斷大盤動能（15m 高頻版）"""
-    logger.info("開始執行牛市燃料監控（15m 高頻版）...")
+    """【牛市燃料監控】資金進場=發車，判斷大盤動能（15m 高頻版 + 聰明錢指標）"""
+    logger.info("開始執行牛市燃料監控（15m 高頻版 + 聰明錢拆分版）...")
     marketcap_data = fetch_stablecoin_marketcap_history()
     mcap_change = calculate_marketcap_change(marketcap_data) if marketcap_data else {}
 
-    # 升級：同時抓取 15m 與 1h OI，提升敏感度
+    # 升級：同時抓取 15m 與 1h OI
     oi_data_15m = fetch_aggregated_stablecoin_oi_history("BTC", "15m")
     oi_data_1h = fetch_aggregated_stablecoin_oi_history("BTC", "1h")
     oi_change_15m = calculate_oi_change(oi_data_15m) if oi_data_15m else {}
     oi_change_1h = calculate_oi_change(oi_data_1h) if oi_data_1h else {}
+
+    # 聰明錢拆分：穩定幣OI vs 幣本位OI
+    smart_money_data = _fetch_smart_money_oi_split("BTC")
+    stable_chg = smart_money_data.get("stable_chg")
+    coin_chg = smart_money_data.get("coin_chg")
+    smart_money = smart_money_data.get("smart_money")
+    logger.info(f"[牛市燃料] 聰明錢OI拆分：穩定幣={stable_chg} 幣本位={coin_chg} 聰明錢={smart_money}")
+
+    # 新增：恐懼貪婪 + BTC ETF流 + Coinbase溢價
+    fg_data = fetch_fear_greed_index()
+    etf_data = fetch_btc_etf_flow()
+    cb_data = fetch_coinbase_premium()
+    logger.info(f"[牛市燃料] 恐懼貪婪={fg_data.get('value')} ETF流={etf_data.get('direction')} CB溢價={cb_data.get('premium')}")
 
     if not mcap_change:
         logger.warning("牛市燃料監控：無法取得市值數據，跳過推播")
@@ -1187,32 +1415,39 @@ def buying_power_monitor():
     usdt_premium = _fetch_usdt_premium()
 
     mcap_1h = mcap_change.get("change_1h") or 0
-    # 15m OI 變動（衡量即時槓桿方向）
-    oi_15m_chg = (oi_change_15m.get("change_1h") or 0)   # calculate_oi_change 計算的是 1h 窗口，用 15m 數據代表更新鮮的短期快照
+    oi_15m_chg = (oi_change_15m.get("change_1h") or 0)
     oi_1h_chg = (oi_change_1h.get("change_1h") or 0)
 
-    # 「USDT 溢價>0.05%」才視為真實買盤（更靈敏的門檻）
+    # 「USDT 溢價>0.05%」才視為真實買盤
     premium_boost = (usdt_premium is not None and usdt_premium > 0.05)
     if premium_boost:
         logger.info(f"[牛市燃料] USDT 溢價 {usdt_premium:+.4f}% > 0.05%，加權燃料等級")
 
-    # 有效穩定幣流入（溢價加權：若溢價 > 0.05% 放大信號）
-    mcap_1h_effective = mcap_1h + (0.04 if premium_boost else 0.0)
-
-    # 積分 → 進度條 → 主題標籤
-    fuel_score = _calc_fuel_score(mcap_1h, mcap_1h, oi_15m_chg, oi_1h_chg, usdt_premium)
+    # 積分（升級至 7 分滿，引入聰明錢維度）
+    fuel_score = _calc_fuel_score(mcap_1h, mcap_1h, oi_15m_chg, oi_1h_chg, usdt_premium, smart_money)
+    # 附加維度：恐懼貪婪 + ETF流 + Coinbase溢價（各+1分，最高可達 10 分）
+    fg_val = fg_data.get("value")
+    if fg_val is not None:
+        if fg_val >= 60:   # 貪婪偏多
+            fuel_score += 1
+        elif fg_val <= 25: # 極度恐懼=底部機會
+            fuel_score += 1  # 極度恐懼也是加分（抄底機會）
+    if etf_data.get("direction") == "inflow":
+        fuel_score += 1    # ETF機構流入=強力買盤
+    if cb_data.get("signal") == "bullish":
+        fuel_score += 1    # Coinbase溢價=美國機構買入
     fuel_bar = _make_fuel_bar(fuel_score)
 
-    # 根據積分決定主標籤
-    if fuel_score >= 5:
+    # 根據積分決定主標籤（7 分制）
+    if fuel_score >= 6:
         headline = "🔥 強力做多環境"
-        advice = "五星滿油！全市場資金正在同步入場，主升段往往在此起爆。"
+        advice = "聰明錢+資金+槓桿三重確認！全市場資金同步入場，主升段往往在此起爆。"
         bar_label = "燃料滿載"
-    elif fuel_score >= 4:
-        headline = "🚀 火力全開 (雙重利好)"
-        advice = "資金 + 槓桿雙噴，回調就是買點！"
+    elif fuel_score >= 5:
+        headline = "🚀 火力全開（聰明錢主導）" if smart_money else "🚀 火力全開 (雙重利好)"
+        advice = "專業資金主導建倉（穩定幣OI擴張），跟隨機構方向偏多。" if smart_money else "資金 + 槓桿雙噴，回調就是買點！"
         bar_label = "高燃料"
-    elif fuel_score >= 3:
+    elif fuel_score >= 4:
         headline = "💰 資金進場 (現貨買盤)"
         advice = "場外資金流入，底部墊高，偏多操作。"
         bar_label = "中燃料"
@@ -1220,6 +1455,10 @@ def buying_power_monitor():
         headline = "➡️ 震盪蓄力"
         advice = "多看少動，等待方向確認再出手。"
         bar_label = "低燃料"
+    elif oi_1h_chg > 1.5 and smart_money is False:
+        headline = "⚠️ 散戶槓桿堆疊 (高波動預警)"
+        advice = "散戶幣本位OI激增，小心插針清洗。"
+        bar_label = "危險燃料"
     elif oi_1h_chg > 1.5:
         headline = "⚠️ 槓桿過熱 (高波動預警)"
         advice = "只有槓桿在堆，小心插針畫門。"
@@ -1238,7 +1477,7 @@ def buying_power_monitor():
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} (台灣) | ⚡ 15M 高頻監控")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append(f"*{headline}*")
-    lines.append(f"燃料計：`{fuel_bar}` {fuel_score}/5 ({bar_label})")
+    lines.append(f"燃料計：`{fuel_bar}` {fuel_score}/7 ({bar_label})")
     lines.append("")
 
     # USDT 溢價標籤
@@ -1256,6 +1495,26 @@ def buying_power_monitor():
     lines.append(f"• 總量：`${mcap_val:.2f}B`")
     lines.append(f"• 1H 變動：{mcap_emoji} `{mcap_1h:+.3f}%`")
 
+    # 聰明錢 OI 拆分區塊
+    lines.append("")
+    lines.append("🧠 *聰明錢 OI 分析*")
+    if stable_chg is not None:
+        _s_emoji = "🟢" if stable_chg > 0.1 else ("🔴" if stable_chg < -0.1 else "🟡")
+        lines.append(f"• 穩定幣保證金(機構)：{_s_emoji} `{stable_chg:+.3f}%`")
+    else:
+        lines.append("• 穩定幣保證金：`數據不可用`")
+    if coin_chg is not None:
+        _c_emoji = "🟢" if coin_chg > 0.1 else ("🔴" if coin_chg < -0.1 else "🟡")
+        lines.append(f"• 幣本位保證金(散戶)：{_c_emoji} `{coin_chg:+.3f}%`")
+    else:
+        lines.append("• 幣本位保證金：`數據不可用`")
+    if smart_money is True:
+        lines.append("• 🎯 *聰明錢主導*：機構/職業交易者正在建倉（穩定幣>幣本位）")
+    elif smart_money is False:
+        lines.append("• ⚠️ *散戶槓桿主導*：幣本位OI擴張，投機氣氛濃厚，注意清洗")
+    else:
+        lines.append("• ❓ 多空資金混合：無明顯方向")
+
     lines.append("")
     oi_val_1h = (oi_change_1h.get("latest_oi") or 0) / 1_000_000_000
     oi_val_15m = (oi_change_15m.get("latest_oi") or 0) / 1_000_000_000 if oi_change_15m else 0
@@ -1265,6 +1524,20 @@ def buying_power_monitor():
     if oi_val_15m > 0:
         lines.append(f"• 15m 快照：`${oi_val_15m:.2f}B` {oi_emoji_15m} `{oi_15m_chg:+.2f}%`")
     lines.append(f"• 1H 趨勢：`${oi_val_1h:.2f}B` {oi_emoji_1h} `{oi_1h_chg:+.2f}%`")
+
+    # ── 機構資金區塊（Fear&Greed + BTC ETF + Coinbase溢價）──────────
+    lines.append("")
+    lines.append("🏦 *機構資金 & 市場情緒*")
+    if fg_val is not None:
+        lines.append(f"• 恐懼貪婪：{fg_data.get('emoji','❓')} `{fg_val}` {fg_data.get('label','')}")
+    if etf_data.get("label"):
+        lines.append(f"• BTC ETF：{etf_data['label']}")
+    if etf_data.get("total_assets_usd"):
+        lines.append(f"• ETF總資產：`${etf_data['total_assets_usd']/1e9:.1f}B`")
+    if cb_data.get("label"):
+        lines.append(f"• {cb_data['label']}")
+    if not any([fg_val, etf_data.get("label"), cb_data.get("label")]):
+        lines.append("• 機構指標暫無資料")
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
@@ -1891,6 +2164,165 @@ def _parse_oi_change_from_data_list(data_list: list) -> Optional[float]:
     return ((last_oi - prev_oi) / prev_oi) * 100
 
 
+def _parse_oi_bars_from_rows(rows: list) -> list:
+    """通用 OI K線數值解析（支援多種欄位名稱）。"""
+    keys = ["c", "close", "v", "value", "openInterest", "oi"]
+    sorted_rows = sorted(rows, key=lambda x: x.get("t") or x.get("time") or 0)
+    oi_bars = []
+    for row in sorted_rows:
+        if not isinstance(row, dict):
+            continue
+        for k in keys:
+            val = row.get(k)
+            if val is not None:
+                try:
+                    oi_bars.append(float(val))
+                    break
+                except (TypeError, ValueError):
+                    pass
+    return oi_bars
+
+
+def _calc_oi_trend_from_bars(oi_bars: list) -> Dict[str, Any]:
+    """從 OI 數值列表計算趨勢指標（可複用）。"""
+    change_pct = ((oi_bars[-1] - oi_bars[-2]) / oi_bars[-2] * 100) if oi_bars[-2] != 0 else None
+    recent = oi_bars[-4:] if len(oi_bars) >= 4 else oi_bars
+    ups = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i-1])
+    downs = sum(1 for i in range(1, len(recent)) if recent[i] < recent[i-1])
+    total_ch = ((recent[-1] - recent[0]) / recent[0] * 100) if recent[0] != 0 else 0
+    if ups >= 3 and total_ch > 0.5:
+        trend = "building"
+    elif downs >= 3 and total_ch < -0.5:
+        trend = "declining"
+    elif abs(total_ch) < 0.2:
+        trend = "flat"
+    else:
+        trend = "reversing"
+    acceleration = False
+    if len(oi_bars) >= 5:
+        recent_ch = abs(oi_bars[-1] - oi_bars[-2]) / max(abs(oi_bars[-2]), 1)
+        prev_ch = abs(oi_bars[-3] - oi_bars[-4]) / max(abs(oi_bars[-4]), 1)
+        acceleration = recent_ch > prev_ch * 1.5
+    return {"change_pct": change_pct, "trend": trend, "acceleration": acceleration, "bars": oi_bars[-6:]}
+
+
+def fetch_oi_trend_analysis(symbol: str, interval: str = "15m", limit: int = 8) -> Dict[str, Any]:
+    """多棒 OI 趨勢分析（聚合歷史K線）。
+    方案A：/api/futures/open-interest/aggregated-history（跨所聚合，最精準）
+    方案B：/api/futures/open-interest/history（單所 Binance，備援）
+    方案C：僅用現有 oiChange 單點估算趨勢（數據最少但保證有值）
+    回傳 trend/acceleration/change_pct/bars/data_source
+    快取 90 秒。
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = f"oi_trend:{base}:{interval}"
+    now = time.time()
+    empty: Dict[str, Any] = {"change_pct": None, "trend": "flat", "acceleration": False, "bars": [], "data_source": "none"}
+    if cache_key in _flow_cache:
+        cached, ts = _flow_cache[cache_key]
+        if now - ts < _FLOW_TTL:
+            logger.debug(f"[OI趨勢] {base} 命中快取，跳過API請求")
+            return cached if cached else empty
+
+    # ── 方案A：聚合歷史（最精準）──────────────────────────────────
+    logger.debug(f"[OI趨勢-A] {base} 嘗試聚合OI歷史 endpoint={CG_EP['oi_agg_history']} interval={interval} limit={limit}")
+    j = _cg_get(CG_EP["oi_agg_history"], {"symbol": base, "interval": interval, "limit": limit})
+    rows_a = j.get("data") or j.get("list") or [] if j else []
+    oi_bars = _parse_oi_bars_from_rows(rows_a) if isinstance(rows_a, list) else []
+    if len(oi_bars) >= 3:
+        result = _calc_oi_trend_from_bars(oi_bars)
+        result["data_source"] = "agg_history"
+        logger.info(f"[OI趨勢-A✅] {base}: 方案A成功，{len(oi_bars)}棒，trend={result['trend']} change={result.get('change_pct',0):.2f}% accel={result['acceleration']}")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    logger.warning(f"[OI趨勢-A❌] {base}: 方案A無效數據（取得{len(oi_bars)}棒，需≥3），改用方案B")
+
+    # ── 方案B：單所 Binance OI 歷史（備援）────────────────────────
+    logger.debug(f"[OI趨勢-B] {base} 嘗試單所OI歷史 endpoint={CG_EP['oi_history']} exchange=Binance")
+    j2 = _cg_get(CG_EP["oi_history"], {"symbol": base + "USDT", "exchange": "Binance", "interval": interval, "limit": limit})
+    rows_b = j2.get("data") or j2.get("list") or [] if j2 else []
+    oi_bars_b = _parse_oi_bars_from_rows(rows_b) if isinstance(rows_b, list) else []
+    if len(oi_bars_b) >= 3:
+        result = _calc_oi_trend_from_bars(oi_bars_b)
+        result["data_source"] = "single_exchange_binance"
+        logger.info(f"[OI趨勢-B✅] {base}: 方案B成功（Binance），{len(oi_bars_b)}棒，trend={result['trend']}")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    logger.warning(f"[OI趨勢-B❌] {base}: 方案B也無效（取得{len(oi_bars_b)}棒），退回 empty 結果")
+
+    _flow_cache[cache_key] = (empty, now)
+    return empty
+
+
+def fetch_top_account_ls_ratio(symbol: str, interval: str = "1h", limit: int = 3) -> Optional[float]:
+    """大戶帳戶多空比（Top Account Long/Short Ratio）。
+    方案A：/api/futures/top-long-short-account-ratio/history（大戶帳戶數比）
+    方案B：/api/futures/top-long-short-position-ratio/history（大戶持倉量比，備援）
+    方案C：/api/futures/global-long-short-account-ratio/history（全市場散戶備援）
+    > 1.0 = 偏多；< 1.0 = 偏空
+    快取 90 秒。
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = f"top_ls:{base}:{interval}"
+    now = time.time()
+    if cache_key in _flow_cache:
+        cached, ts = _flow_cache[cache_key]
+        if now - ts < _FLOW_TTL:
+            logger.debug(f"[大戶L/S] {base} 命中快取")
+            return cached
+
+    def _parse_ls_ratio(j: Optional[Dict]) -> Optional[float]:
+        if not j:
+            return None
+        rows = j.get("data") or j.get("list") or []
+        if not isinstance(rows, list) or not rows:
+            return None
+        sorted_rows = sorted(rows, key=lambda x: x.get("time") or x.get("t") or 0)
+        last = sorted_rows[-1]
+        for key in ["longShortRatio", "long_short_ratio", "ratio", "topLongShortRatio", "longShortAccountRatio"]:
+            val = last.get(key)
+            if val is not None:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    pass
+        return None
+
+    # ── 方案A：大戶帳戶數多空比 ──────────────────────────────────
+    sym_param = base + "USDT"
+    logger.debug(f"[大戶L/S-A] {base} endpoint={CG_EP['ls_top_account']} sym={sym_param} interval={interval}")
+    j_a = _cg_get(CG_EP["ls_top_account"], {"symbol": sym_param, "interval": interval, "limit": limit})
+    result = _parse_ls_ratio(j_a)
+    if result is not None:
+        logger.info(f"[大戶L/S-A✅] {base}: 方案A成功，大戶帳戶多空比={result:.3f}")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    logger.warning(f"[大戶L/S-A❌] {base}: 方案A無效，改用方案B（大戶持倉多空比）")
+
+    # ── 方案B：大戶持倉多空比（不同維度，仍有參考價值）─────────────
+    logger.debug(f"[大戶L/S-B] {base} endpoint={CG_EP['ls_top_position']}")
+    j_b = _cg_get(CG_EP["ls_top_position"], {"symbol": sym_param, "interval": interval, "limit": limit})
+    result = _parse_ls_ratio(j_b)
+    if result is not None:
+        logger.info(f"[大戶L/S-B✅] {base}: 方案B成功（持倉量比），多空比={result:.3f}")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    logger.warning(f"[大戶L/S-B❌] {base}: 方案B無效，改用方案C（全市場散戶L/S）")
+
+    # ── 方案C：全市場帳戶多空比（散戶數據，精準度最低但一般有值）──
+    logger.debug(f"[大戶L/S-C] {base} endpoint={CG_EP['ls_global_history']}")
+    j_c = _cg_get(CG_EP["ls_global_history"], {"symbol": sym_param, "interval": interval, "limit": limit})
+    result = _parse_ls_ratio(j_c)
+    if result is not None:
+        logger.info(f"[大戶L/S-C✅] {base}: 方案C成功（全市場L/S，精準度較低），多空比={result:.3f}")
+        _flow_cache[cache_key] = (result, now)
+        return result
+
+    logger.warning(f"[大戶L/S-全失敗] {base}: A/B/C 三個方案均無法獲取多空比，返回 None")
+    _flow_cache[cache_key] = (None, now)
+    return None
+
+
 def fetch_oi_change_30m(symbol: str) -> Optional[float]:
     """
     計算單一 symbol 15 分鐘 OI 變化%（已升級標準版高頻模式）
@@ -2044,8 +2476,32 @@ def fetch_oi_resonance_5m(symbol: str, category: str) -> Optional[bool]:
 
     except Exception as e:
         logger.debug(f"[5M共振] {base_symbol} 查詢異常: {e}")
-        _resonance_cache[cache_key] = (None, now)
-        return None
+
+    # ── 方案B：穩定幣保證金 OI 5m 歷史（次級驗證）──────────────────
+    # 當聚合 OI 無法判斷時，用穩定幣OI作為代理（更能反映真實資金流向）
+    logger.debug(f"[5M共振-B] {base_symbol} 嘗試穩定幣OI 5m 次級驗證")
+    try:
+        j_s = _cg_get(CG_EP["oi_agg_stable"], {"symbol": base_symbol, "interval": "5m", "limit": 3})
+        if j_s:
+            rows_s = j_s.get("data") or j_s.get("list") or []
+            bars_s = _parse_oi_bars_from_rows(rows_s) if rows_s else []
+            if len(bars_s) >= 2 and bars_s[-2] != 0:
+                chg_s = (bars_s[-1] - bars_s[-2]) / bars_s[-2] * 100
+                oi_rising_s = chg_s > 0.03
+                oi_falling_s = chg_s < -0.03
+                expects_rising_b = category in ("long_open", "short_open")
+                resonance_b: Optional[bool] = oi_rising_s if expects_rising_b else oi_falling_s
+                logger.info(
+                    f"[5M共振-B] {base_symbol} 穩定幣OI 5m={chg_s:+.3f}% → "
+                    f"{'🔥 次級共振' if resonance_b else '⚠️ 次級無共振'}"
+                )
+                _resonance_cache[cache_key] = (resonance_b, now)
+                return resonance_b
+    except Exception as e_b:
+        logger.debug(f"[5M共振-B] {base_symbol} 穩定幣OI備援異常: {e_b}")
+
+    _resonance_cache[cache_key] = (None, now)
+    return None
 
 
 def fetch_rsi_5m(symbol: str) -> Optional[float]:
@@ -2207,15 +2663,54 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
             except (TypeError, ValueError):
                 pass
 
-        # 3 家以上同向 → 共識確立
-        consensus = (positive_count >= 3) or (negative_count >= 3)
+        # 3 家以上同向 → 方案A 共識確立
+        consensus_a = (positive_count >= 3) or (negative_count >= 3)
         logger.info(
-            f"[多所共識] {base_symbol}: 查到 {found_exchanges} 家大所 | "
+            f"[多所共識-A] {base_symbol}: 查到 {found_exchanges} 家大所 | "
             f"OI增加 {positive_count} 家 | OI減少 {negative_count} 家 | "
-            f"{'✅ 共識確立' if consensus else '❌ 無共識'}"
+            f"{'✅ 共識確立' if consensus_a else '❌ 無共識'}"
         )
-        _consensus_cache[cache_key] = (consensus, now)
-        return consensus
+        if consensus_a:
+            _consensus_cache[cache_key] = (True, now)
+            return True
+
+        # ── 方案B：exchange-history-chart 多棒趨勢確認（單點無共識時改用歷史棒）
+        # 若快照無法確定（3家以上同向），嘗試用歷史K線判斷是否「持續」同向
+        logger.debug(f"[多所共識-B] {base_symbol} 快照無共識，嘗試 exchange-history-chart 多棒分析")
+        try:
+            hist_positive = 0
+            hist_negative = 0
+            checked_hist = 0
+            for exch in _CONSENSUS_MAJOR_EXCHANGES[:5]:
+                j_h = _cg_get(CG_EP["oi_exchange_history"],
+                               {"symbol": base_symbol + "USDT", "exchange": exch,
+                                "interval": "15m", "limit": 3})
+                if not j_h:
+                    continue
+                rows_h = j_h.get("data") or j_h.get("list") or []
+                bars = _parse_oi_bars_from_rows(rows_h)
+                if len(bars) < 2:
+                    continue
+                checked_hist += 1
+                # 看最後2棒趨勢
+                recent_trend = bars[-1] - bars[-2]
+                if recent_trend > 0:
+                    hist_positive += 1
+                elif recent_trend < 0:
+                    hist_negative += 1
+            consensus_b = checked_hist >= 3 and ((hist_positive >= 3) or (hist_negative >= 3))
+            logger.info(
+                f"[多所共識-B] {base_symbol}: 歷史K線分析 checked={checked_hist}"
+                f" OI增 {hist_positive} OI減 {hist_negative}"
+                f" {'✅ 歷史趨勢共識' if consensus_b else '❌ 歷史無共識'}"
+            )
+            _consensus_cache[cache_key] = (consensus_b, now)
+            return consensus_b
+        except Exception as e_b:
+            logger.debug(f"[多所共識-B] {base_symbol} 歷史K線分析異常: {e_b}")
+
+        _consensus_cache[cache_key] = (False, now)
+        return False
 
     except Exception as e:
         logger.debug(f"[多所共識] {base_symbol} 查詢異常: {e}")
@@ -2331,58 +2826,827 @@ def fetch_liq_heatmap_nearby(
 
     result: Optional[Dict] = None
 
-    # ── 嘗試 CoinGlass 爆倉等級端點 ───────────────────────────────────────
-    for endpoint in [
-        "/api/futures/liquidation/estimated-levels",
-        "/api/futures/liquidation/heatmap",
-        "/api/futures/liquidation/level",
-    ]:
-        try:
-            _respect_coinglass_rate_limit()
-            r = requests.get(
-                f"{CG_API_BASE}{endpoint}",
-                params={"symbol": base, "exchange": "Binance"},
-                headers=headers, timeout=8
-            )
-            if r.status_code == 404:
-                continue
-            if r.status_code != 200:
-                break
-            j = r.json()
-            if j.get("code") not in (0, "0", 200, "200", None):
-                continue
-            raw = j.get("data", j.get("list", []))
-            if isinstance(raw, list) and raw:
-                result = _parse_result(raw)
-                if result:
-                    break
-            elif isinstance(raw, dict):
-                # 有些端點把多空兩側分開
-                longs = raw.get("long", raw.get("longs", []))
-                shorts = raw.get("short", raw.get("shorts", []))
-                combined = []
-                for it in (longs or []):
-                    if isinstance(it, dict):
-                        it["_side"] = "long"
-                        combined.append(it)
-                for it in (shorts or []):
-                    if isinstance(it, dict):
-                        it["_side"] = "short"
-                        combined.append(it)
-                result = _parse_result(combined)
-                if result:
-                    break
-        except Exception as e:
-            logger.debug(f"[爆倉熱力圖] {base} {endpoint} 異常: {e}")
-            continue
+    # ── 方案A：幣種聚合爆倉歷史（最精準，真實爆倉數據）──────────────
+    # aggregated-history 回傳最近 N 根 K 線的多空爆倉總量
+    logger.debug(f"[爆倉-A] {base} endpoint={CG_EP['liq_agg_history']}")
+    try:
+        j_a = _cg_get(CG_EP["liq_agg_history"],
+                       {"symbol": base, "interval": "15m", "limit": 8})
+        if j_a:
+            rows_a = j_a.get("data") or j_a.get("list") or []
+            if isinstance(rows_a, list) and rows_a:
+                # 找最近幾根K線中爆倉最密集的價格區間
+                # 每棒通常含 longLiqUsd, shortLiqUsd, closePrice/price
+                combined_a = []
+                for bar in rows_a:
+                    if not isinstance(bar, dict):
+                        continue
+                    try:
+                        p_a = float(bar.get("closePrice") or bar.get("price") or
+                                    bar.get("close") or bar.get("c") or 0)
+                        long_usd_a = float(bar.get("longLiqUsd") or bar.get("buyLiqUsd") or
+                                           bar.get("longAmount") or 0)
+                        short_usd_a = float(bar.get("shortLiqUsd") or bar.get("sellLiqUsd") or
+                                            bar.get("shortAmount") or 0)
+                        if p_a > 0 and (long_usd_a + short_usd_a) > 0:
+                            combined_a.append({
+                                "price": p_a,
+                                "longLiqUsd": long_usd_a,
+                                "shortLiqUsd": short_usd_a,
+                            })
+                    except (TypeError, ValueError):
+                        continue
+                if combined_a:
+                    result = _parse_result(combined_a)
+                    if result:
+                        result["data_source"] = "liq_agg_history"
+                        logger.info(
+                            f"[爆倉-A✅] {base}: 聚合歷史 {result['label']} "
+                            f"距 {result['pct']:.2f}% ${result['total_usd']/1e6:.2f}M"
+                        )
+    except Exception as e_a:
+        logger.debug(f"[爆倉-A] {base} 聚合歷史異常: {e_a}")
 
-    _liq_heatmap_cache[cache_key] = (result, now)
+    # ── 方案B：即時爆倉訂單（最新的實際爆倉單，精準到個別訂單）──────
+    if not result:
+        logger.debug(f"[爆倉-B] {base} endpoint={CG_EP['liq_order']}")
+        try:
+            j_b = _cg_get(CG_EP["liq_order"],
+                           {"symbol": base, "limit": 20})
+            if j_b:
+                rows_b = j_b.get("data") or j_b.get("list") or []
+                if isinstance(rows_b, list) and rows_b:
+                    combined_b = []
+                    for order in rows_b:
+                        if not isinstance(order, dict):
+                            continue
+                        try:
+                            p_b = float(order.get("price") or order.get("liqPrice") or 0)
+                            usd_b = float(order.get("usd") or order.get("amount_usd") or
+                                          order.get("value") or 0)
+                            side_b = str(order.get("side") or order.get("direction") or "").lower()
+                            if p_b <= 0 or usd_b <= 0:
+                                continue
+                            combined_b.append({
+                                "price": p_b,
+                                "longLiqUsd": usd_b if side_b in ("long", "buy", "1") else 0,
+                                "shortLiqUsd": usd_b if side_b in ("short", "sell", "2") else 0,
+                            })
+                        except (TypeError, ValueError):
+                            continue
+                    if combined_b:
+                        result = _parse_result(combined_b)
+                        if result:
+                            result["data_source"] = "liq_order"
+                            logger.info(f"[爆倉-B✅] {base}: 即時訂單 {result['label']} 距 {result['pct']:.2f}%")
+        except Exception as e_b:
+            logger.debug(f"[爆倉-B] {base} 即時訂單異常: {e_b}")
+
+    # ── 方案C：新爆倉熱力圖 model1/2/3 + 聚合版（最精準的未平倉爆倉位分布）──
+    # 這是 CoinGlass 最強的爆倉預測模型，model1=保守估算 model2=中性 model3=激進
+    if not result:
+        logger.debug(f"[爆倉-C] {base} 嘗試爆倉熱力圖 aggregated-heatmap model1~3")
+        # 只用聚合版（交易對熱力圖無權限，只保留 aggregated 版本）
+        heatmap_eps = [
+            (CG_EP["liq_agg_heatmap_m2"], "agg_m2"),  # 聚合 M2（中性最準）✅ 有權限
+            (CG_EP["liq_agg_heatmap_m1"], "agg_m1"),  # 聚合 M1（保守）✅ 有權限
+            (CG_EP["liq_agg_heatmap_m3"], "agg_m3"),  # 聚合 M3（激進）✅ 有權限
+            # liq_heatmap_m1/m2/m3 = 交易對版，⛔ 無權限，已移除
+        ]
+        for ep_hm, src_label in heatmap_eps:
+            try:
+                j_hm = _cg_get(ep_hm, {"symbol": base, "exchange": "Binance",
+                                         "interval": "8h"})
+                if not j_hm:
+                    continue
+                raw_hm = j_hm.get("data") or j_hm.get("list") or []
+                # 熱力圖通常回傳 price levels with 預估爆倉量
+                if isinstance(raw_hm, list) and raw_hm:
+                    combined_hm = []
+                    for item_hm in raw_hm:
+                        if not isinstance(item_hm, dict):
+                            continue
+                        p_hm = float(item_hm.get("price") or item_hm.get("priceLevel") or
+                                     item_hm.get("level") or 0)
+                        long_hm = float(item_hm.get("longLiqUsd") or item_hm.get("buy") or
+                                        item_hm.get("buyUsd") or 0)
+                        short_hm = float(item_hm.get("shortLiqUsd") or item_hm.get("sell") or
+                                         item_hm.get("sellUsd") or 0)
+                        if p_hm > 0 and (long_hm + short_hm) > 0:
+                            combined_hm.append({"price": p_hm, "longLiqUsd": long_hm,
+                                                 "shortLiqUsd": short_hm})
+                    if combined_hm:
+                        result = _parse_result(combined_hm)
+                        if result:
+                            result["data_source"] = f"liq_heatmap_{src_label}"
+                            logger.info(f"[爆倉-C✅] {base}: heatmap {src_label} "
+                                        f"{result['label']} 距 {result['pct']:.2f}%")
+                            break
+                elif isinstance(raw_hm, dict):
+                    # 部分 model 回傳 {longs: [...], shorts: [...]}
+                    longs_hm = raw_hm.get("longs") or raw_hm.get("long") or []
+                    shorts_hm = raw_hm.get("shorts") or raw_hm.get("short") or []
+                    combined_hm2 = []
+                    for it in (longs_hm or []):
+                        if isinstance(it, dict):
+                            it["_side"] = "long"
+                            combined_hm2.append(it)
+                    for it in (shorts_hm or []):
+                        if isinstance(it, dict):
+                            it["_side"] = "short"
+                            combined_hm2.append(it)
+                    if combined_hm2:
+                        result = _parse_result(combined_hm2)
+                        if result:
+                            result["data_source"] = f"liq_heatmap_{src_label}"
+                            logger.info(f"[爆倉-C✅] {base}: heatmap(dict) {src_label} 距 {result['pct']:.2f}%")
+                            break
+            except Exception as e_hm:
+                logger.debug(f"[爆倉-C] {base} heatmap {src_label} 異常: {e_hm}")
+                continue
+
+    # ── 方案D：舊版估算端點（最後備援）──────────────────────────────
+    if not result:
+        logger.debug(f"[爆倉-D] {base} 嘗試舊版 estimated-levels 端點")
+        for endpoint_d in [
+            "/api/futures/liquidation/estimated-levels",
+            "/api/futures/liquidation/level",
+        ]:
+            try:
+                _respect_coinglass_rate_limit()
+                r_d = requests.get(f"{CG_API_BASE}{endpoint_d}",
+                                    params={"symbol": base, "exchange": "Binance"},
+                                    headers=headers, timeout=8)
+                if r_d.status_code in (404, 403):
+                    continue
+                if r_d.status_code != 200:
+                    break
+                j_d = r_d.json()
+                if j_d.get("code") not in (0, "0", 200, "200", None):
+                    continue
+                raw_d = j_d.get("data", j_d.get("list", []))
+                if isinstance(raw_d, list) and raw_d:
+                    result = _parse_result(raw_d)
+                    if result:
+                        result["data_source"] = "liq_estimated"
+                        break
+            except Exception as e_d:
+                logger.debug(f"[爆倉-D] {base} {endpoint_d} 異常: {e_d}")
+                continue
+
     if result:
         logger.info(
-            f"[爆倉熱力圖] {base}: {result['label']} 距離 {result['pct']:.2f}% "
+            f"[爆倉熱力圖-A✅] {base}: {result['label']} 距離 {result['pct']:.2f}% "
             f"規模 ${result['total_usd']/1e6:.2f}M"
         )
-    return result
+        _liq_heatmap_cache[cache_key] = (result, now)
+        return result
+
+    # ── 方案B：訂單簿熱力圖（orderbook history = 各價位掛單密度，代理爆倉位）──
+    # 原理：大量掛單通常就是爆倉單的聚集位，可作為爆倉熱力圖的代理指標
+    logger.debug(f"[爆倉熱力圖-B] {base} 嘗試 orderbook heatmap endpoint={CG_EP['ob_heatmap']}")
+    try:
+        j_ob = _cg_get(CG_EP["ob_heatmap"], {"symbol": base, "interval": "15m", "limit": 2})
+        if j_ob:
+            raw_ob = j_ob.get("data") or j_ob.get("list") or []
+            ob_result: Optional[Dict] = None
+            ob_best_pct = proximity_pct + 1
+            for bar_ob in (raw_ob if isinstance(raw_ob, list) else []):
+                rows_b = bar_ob.get("bids") or bar_ob.get("asks") or []
+                if isinstance(bar_ob, dict):
+                    rows_b = (bar_ob.get("asks") or []) + (bar_ob.get("bids") or [])
+                for row_b in (rows_b if isinstance(rows_b, list) else []):
+                    try:
+                        if isinstance(row_b, list):
+                            p_b, vol_b = float(row_b[0]), float(row_b[1])
+                        elif isinstance(row_b, dict):
+                            p_b = float(row_b.get("price") or row_b.get("p") or 0)
+                            vol_b = float(row_b.get("volume") or row_b.get("v") or row_b.get("qty") or 0)
+                        else:
+                            continue
+                        usd_b = vol_b * p_b
+                        if p_b <= 0 or usd_b < 500_000:
+                            continue
+                        pct_b = abs(p_b - current_price) / current_price * 100
+                        if pct_b > proximity_pct:
+                            continue
+                        if pct_b < ob_best_pct:
+                            ob_best_pct = pct_b
+                            ob_side = "上方" if p_b > current_price else "下方"
+                            ob_result = {
+                                "pct": round(pct_b, 2),
+                                "price": round(p_b, 6),
+                                "side": "多單爆倉" if p_b < current_price else "空單爆倉",
+                                "usd": usd_b,
+                                "total_usd": usd_b,
+                                "label": f"🔶 {ob_side}掛單密集區（代理爆倉位）",
+                                "source": "orderbook_proxy",
+                            }
+                    except (TypeError, ValueError, IndexError):
+                        continue
+            if ob_result:
+                logger.info(
+                    f"[爆倉熱力圖-B✅] {base}: 訂單簿代理 {ob_result['label']} "
+                    f"距離 {ob_result['pct']:.2f}% 掛單 ${ob_result['total_usd']/1e6:.2f}M"
+                )
+                _liq_heatmap_cache[cache_key] = (ob_result, now)
+                return ob_result
+    except Exception as e_b:
+        logger.debug(f"[爆倉熱力圖-B] {base} orderbook heatmap 異常: {e_b}")
+
+    logger.debug(f"[爆倉熱力圖-全失敗] {base}: 所有端點均無附近爆倉/掛單聚集")
+    _liq_heatmap_cache[cache_key] = (None, now)
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 訂單流分析 (Order Flow Analysis) — 主動買賣、淨多倉、腳步圖關鍵位
+# 這三個數據是 TP/SL 精準化的核心，全部使用 CoinGlass 標準版 API
+# ══════════════════════════════════════════════════════════════════════════════
+
+_flow_cache: Dict[str, Tuple[Any, float]] = {}   # {cache_key: (data, ts)}
+_FLOW_TTL = 90.0   # 90 秒快取（訂單流數據更新頻率高）
+_FOOTPRINT_TTL = 120.0  # 腳步圖快取 2 分鐘
+
+
+def _cg_get(path: str, params: Dict) -> Optional[Dict]:
+    """輕量 CoinGlass GET wrapper，帶速率限制與統一錯誤處理。"""
+    if not CG_API_KEY:
+        return None
+    try:
+        _respect_coinglass_rate_limit()
+        r = requests.get(
+            f"{CG_API_BASE}{path}",
+            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+            params=params, timeout=10,
+        )
+        if r.status_code == 429:
+            _cb_record_429()
+            return None
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        if j.get("code") not in (0, "0", 200, "200", None):
+            return None
+        return j
+    except Exception:
+        return None
+
+
+def _parse_taker_ratio_from_rows(rows: list) -> Optional[float]:
+    """從各格式的主動買賣歷史列表解析買盤佔比%（通用）。"""
+    if not isinstance(rows, list) or not rows:
+        return None
+    total_buy = total_sell = 0.0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        buy = float(row.get("buyVolume") or row.get("buy_volume") or
+                    row.get("takerBuyVolume") or row.get("buy") or
+                    row.get("buyVol") or 0)
+        sell = float(row.get("sellVolume") or row.get("sell_volume") or
+                     row.get("takerSellVolume") or row.get("sell") or
+                     row.get("sellVol") or 0)
+        total_buy += buy
+        total_sell += sell
+    total = total_buy + total_sell
+    if total <= 0:
+        return None
+    return round(total_buy / total * 100, 1)
+
+
+def fetch_taker_bvs_ratio(symbol: str, interval: str = "15m", limit: int = 4) -> Optional[float]:
+    """主動買賣比（Taker Buy/Sell Volume Ratio）。
+    方案A：/api/futures/aggregated-taker-buy-sell-volume/history（幣種聚合，跨所，最準）
+    方案B：/api/futures/v2/taker-buy-sell-volume/history（單交易對，Binance 備援）
+    方案C：/api/futures/taker-buy-sell-volume/exchange-list（當前各所快照，最後手段）
+    回傳買盤佔比 0~100%，附帶 data_source 說明來源
+    快取 90 秒。
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = f"taker:{base}:{interval}"
+    now = time.time()
+    if cache_key in _flow_cache:
+        cached, ts = _flow_cache[cache_key]
+        if now - ts < _FLOW_TTL:
+            logger.debug(f"[主動買賣-快取] {base} ratio={cached}")
+            return cached
+
+    # ── 方案A：聚合歷史（最精準）──────────────────────────────────
+    logger.debug(f"[主動買賣-A] {base} endpoint={CG_EP['taker_agg_history']} interval={interval} limit={limit}")
+    j_a = _cg_get(CG_EP["taker_agg_history"], {"symbol": base, "interval": interval, "limit": limit})
+    rows_a = j_a.get("data") or j_a.get("list") or [] if j_a else []
+    result = _parse_taker_ratio_from_rows(rows_a)
+    if result is not None:
+        logger.info(f"[主動買賣-A✅] {base}: 方案A成功，買盤佔比={result:.1f}% (賣盤={100-result:.1f}%) 共{len(rows_a)}棒")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    logger.warning(f"[主動買賣-A❌] {base}: 方案A無效數據（rows={len(rows_a) if rows_a else 0}），改用方案B")
+
+    # ── 方案B：單交易對歷史（Binance）────────────────────────────
+    sym_param = base + "USDT"
+    logger.debug(f"[主動買賣-B] {base} endpoint={CG_EP['taker_pair_history']} sym={sym_param}")
+    j_b = _cg_get(CG_EP["taker_pair_history"], {"symbol": sym_param, "exchange": "Binance", "interval": interval, "limit": limit})
+    rows_b = j_b.get("data") or j_b.get("list") or [] if j_b else []
+    result = _parse_taker_ratio_from_rows(rows_b)
+    if result is not None:
+        logger.info(f"[主動買賣-B✅] {base}: 方案B成功（Binance單所），買盤佔比={result:.1f}%")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    logger.warning(f"[主動買賣-B❌] {base}: 方案B無效，改用方案C（各所快照）")
+
+    # ── 方案C：各所當前快照（沒有歷史，但能判斷當下方向）────────
+    logger.debug(f"[主動買賣-C] {base} endpoint={CG_EP['taker_exchange_list']}")
+    j_c = _cg_get(CG_EP["taker_exchange_list"], {"symbol": base})
+    rows_c = j_c.get("data") or j_c.get("list") or [] if j_c else []
+    result = _parse_taker_ratio_from_rows(rows_c)
+    if result is not None:
+        logger.info(f"[主動買賣-C✅] {base}: 方案C成功（各所快照），買盤佔比={result:.1f}%（注意：僅當前時點）")
+        _flow_cache[cache_key] = (result, now)
+        return result
+
+    logger.warning(f"[主動買賣-全失敗] {base}: A/B/C 三方案均無法獲取，訂單流評分將降級")
+    _flow_cache[cache_key] = (None, now)
+    return None
+
+
+def _parse_net_position_from_rows(rows: list) -> Optional[float]:
+    """從淨多倉位歷史列表解析正規化方向值（通用）。"""
+    if not isinstance(rows, list) or len(rows) < 2:
+        return None
+    sorted_rows = sorted(rows, key=lambda x: int(x.get("time") or x.get("t") or 0))
+    last2 = sorted_rows[-2:]
+    vals = []
+    for row in last2:
+        if not isinstance(row, dict):
+            continue
+        net_long = float(row.get("netLong") or row.get("net_long") or
+                         row.get("longPosition") or row.get("buyPosition") or 0)
+        net_short = float(row.get("netShort") or row.get("net_short") or
+                          row.get("shortPosition") or row.get("sellPosition") or 0)
+        vals.append(net_long - net_short)
+    if len(vals) < 2:
+        return None
+    delta = vals[1] - vals[0]
+    base_val = abs(vals[0]) if vals[0] != 0 else 1.0
+    norm = delta / base_val if base_val > 0 else 0.0
+    return max(-1.0, min(1.0, norm))
+
+
+def fetch_net_position_delta(symbol: str, interval: str = "15m", limit: int = 3) -> Optional[float]:
+    """淨多倉位變化（Net Long Position Delta）。
+    方案A：/api/futures/v2/net-position/history（v2版，欄位更完整）
+    方案B：/api/futures/net-position/history（v1版，備援）
+    回傳 -1~+1 正規化方向（+1=強力加多倉，-1=強力加空倉）
+    快取 90 秒。
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = f"netpos:{base}:{interval}"
+    now = time.time()
+    if cache_key in _flow_cache:
+        cached, ts = _flow_cache[cache_key]
+        if now - ts < _FLOW_TTL:
+            logger.debug(f"[淨多倉-快取] {base} delta={cached}")
+            return cached
+
+    sym_param = base + "USDT"
+
+    # ── 方案A：v2 版（欄位更豐富）────────────────────────────────
+    logger.debug(f"[淨多倉-A] {base} endpoint={CG_EP['net_pos_v2']} sym={sym_param} interval={interval}")
+    j_a = _cg_get(CG_EP["net_pos_v2"], {"symbol": sym_param, "interval": interval, "limit": limit})
+    rows_a = j_a.get("data") or j_a.get("list") or [] if j_a else []
+    result = _parse_net_position_from_rows(rows_a)
+    if result is not None:
+        logger.info(f"[淨多倉-A✅] {base}: 方案A成功，淨多倉方向={result:+.3f}（+接近1=大量加多倉，-接近1=大量加空倉）")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    logger.warning(f"[淨多倉-A❌] {base}: 方案A無效（rows={len(rows_a) if rows_a else 0}），改用方案B")
+
+    # ── 方案B：v1 版（備援）──────────────────────────────────────
+    logger.debug(f"[淨多倉-B] {base} endpoint={CG_EP['net_pos_v1']}")
+    j_b = _cg_get(CG_EP["net_pos_v1"], {"symbol": sym_param, "interval": interval, "limit": limit})
+    rows_b = j_b.get("data") or j_b.get("list") or [] if j_b else []
+    result = _parse_net_position_from_rows(rows_b)
+    if result is not None:
+        logger.info(f"[淨多倉-B✅] {base}: 方案B成功（v1），淨多倉方向={result:+.3f}")
+        _flow_cache[cache_key] = (result, now)
+        return result
+
+    logger.warning(f"[淨多倉-全失敗] {base}: A/B 均無效，返回 None（不影響其他指標評分）")
+    _flow_cache[cache_key] = (None, now)
+    return None
+
+
+def _extract_footprint_levels(
+    rows: list, current_price: float, range_pct: float
+) -> Dict[str, Any]:
+    """從腳步圖 rows 提取支撐/阻力位（通用解析器）。"""
+    empty: Dict[str, Any] = {
+        "support_levels": [], "resistance_levels": [],
+        "nearest_support": None, "nearest_resistance": None,
+        "poc": None, "data_source": "none", "level_count": 0,
+    }
+    if not rows or current_price <= 0:
+        return empty
+
+    price_lo = current_price * (1 - range_pct / 100)
+    price_hi = current_price * (1 + range_pct / 100)
+    level_buy: Dict[float, float] = {}
+    level_sell: Dict[float, float] = {}
+    level_total: Dict[float, float] = {}
+    tick = current_price * 0.001
+
+    parsed_bars = 0
+    parsed_levels = 0
+    for bar in rows:
+        if not isinstance(bar, dict):
+            continue
+        parsed_bars += 1
+        levels_data = (bar.get("levels") or bar.get("priceLevel") or
+                       bar.get("data") or bar.get("footprint") or [])
+        if not isinstance(levels_data, list):
+            continue
+        for lvl in levels_data:
+            if not isinstance(lvl, dict):
+                continue
+            try:
+                p = float(lvl.get("price") or lvl.get("p") or 0)
+                bv = float(lvl.get("buyVolume") or lvl.get("buy") or lvl.get("bv") or 0)
+                sv = float(lvl.get("sellVolume") or lvl.get("sell") or lvl.get("sv") or 0)
+            except (TypeError, ValueError):
+                continue
+            if p <= 0 or not (price_lo <= p <= price_hi):
+                continue
+            aligned_p = round(p / tick) * tick
+            level_buy[aligned_p] = level_buy.get(aligned_p, 0.0) + bv
+            level_sell[aligned_p] = level_sell.get(aligned_p, 0.0) + sv
+            level_total[aligned_p] = level_total.get(aligned_p, 0.0) + bv + sv
+            parsed_levels += 1
+
+    if not level_total:
+        return {**empty, "data_source": f"parsed_{parsed_bars}bars_no_levels"}
+
+    poc_price = max(level_total, key=lambda p: level_total[p])
+    support_levels = []
+    resistance_levels = []
+    for p in sorted(level_total, key=lambda x: level_total[x], reverse=True)[:30]:
+        bv = level_buy.get(p, 0)
+        sv = level_sell.get(p, 0)
+        total = bv + sv
+        if total <= 0:
+            continue
+        buy_ratio = bv / total
+        if buy_ratio > 0.6 and p < current_price:
+            support_levels.append((p, level_total[p], buy_ratio))
+        elif buy_ratio < 0.4 and p > current_price:
+            resistance_levels.append((p, level_total[p], buy_ratio))
+
+    support_levels.sort(key=lambda x: current_price - x[0])
+    resistance_levels.sort(key=lambda x: x[0] - current_price)
+
+    return {
+        "support_levels": [x[0] for x in support_levels[:5]],
+        "resistance_levels": [x[0] for x in resistance_levels[:5]],
+        "nearest_support": support_levels[0][0] if support_levels else None,
+        "nearest_resistance": resistance_levels[0][0] if resistance_levels else None,
+        "poc": poc_price,
+        "data_source": "footprint",
+        "level_count": parsed_levels,
+        "bars_parsed": parsed_bars,
+    }
+
+
+def _fallback_ob_depth_levels(
+    symbol: str, current_price: float, range_pct: float
+) -> Dict[str, Any]:
+    """腳步圖方案B：用訂單簿聚合深度歷史估算支撐/阻力。
+    endpoint: /api/futures/orderbook/aggregated-ask-bids-history
+    ask(賣掛) 密集 = 阻力；bid(買掛) 密集 = 支撐
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    empty: Dict[str, Any] = {
+        "support_levels": [], "resistance_levels": [],
+        "nearest_support": None, "nearest_resistance": None,
+        "poc": None, "data_source": "ob_depth",
+    }
+    logger.debug(f"[腳步圖-B] {base} 嘗試訂單簿深度歷史 endpoint={CG_EP['ob_agg_ask_bids']}")
+    j = _cg_get(CG_EP["ob_agg_ask_bids"], {"symbol": base, "interval": "15m", "limit": 5, "range": str(int(range_pct))})
+    if not j:
+        return empty
+    rows = j.get("data") or j.get("list") or []
+    if not isinstance(rows, list) or not rows:
+        return empty
+
+    # 解析掛單密集價格：bids 集中 → 支撐，asks 集中 → 阻力
+    # 每行通常包含 price/priceLevel 陣列及對應 volume
+    bid_levels: Dict[float, float] = {}
+    ask_levels: Dict[float, float] = {}
+    tick = current_price * 0.001
+    price_lo = current_price * (1 - range_pct / 100)
+    price_hi = current_price * (1 + range_pct / 100)
+
+    for bar in rows:
+        if not isinstance(bar, dict):
+            continue
+        for side_key, store in [("bids", bid_levels), ("asks", ask_levels)]:
+            side_data = bar.get(side_key) or []
+            if not isinstance(side_data, list):
+                continue
+            for item in side_data:
+                if not isinstance(item, (list, dict)):
+                    continue
+                try:
+                    if isinstance(item, list):
+                        p, vol = float(item[0]), float(item[1])
+                    else:
+                        p = float(item.get("price") or item.get("p") or 0)
+                        vol = float(item.get("volume") or item.get("v") or item.get("amount") or 0)
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if p <= 0 or not (price_lo <= p <= price_hi):
+                    continue
+                ap = round(p / tick) * tick
+                store[ap] = store.get(ap, 0.0) + vol
+
+    support_levels = sorted(
+        [(p, v) for p, v in bid_levels.items() if p < current_price],
+        key=lambda x: x[1], reverse=True
+    )[:5]
+    resistance_levels = sorted(
+        [(p, v) for p, v in ask_levels.items() if p > current_price],
+        key=lambda x: x[1], reverse=True
+    )[:5]
+
+    sup_nearest = min(support_levels, key=lambda x: current_price - x[0])[0] if support_levels else None
+    res_nearest = min(resistance_levels, key=lambda x: x[0] - current_price)[0] if resistance_levels else None
+
+    return {
+        "support_levels": [x[0] for x in support_levels],
+        "resistance_levels": [x[0] for x in resistance_levels],
+        "nearest_support": sup_nearest,
+        "nearest_resistance": res_nearest,
+        "poc": None,
+        "data_source": "ob_depth",
+    }
+
+
+def fetch_footprint_key_levels(
+    symbol: str,
+    current_price: float,
+    direction_is_long: bool,
+    interval: str = "15m",
+    limit: int = 20,
+    range_pct: float = 8.0,
+) -> Dict[str, Any]:
+    """關鍵支撐/阻力位分析（替代腳步圖，採用可用 API）。
+
+    ⚠️  /api/futures/volume/footprint-history 需更高授權等級，目前跳過。
+        若未來升級帳號可將 _FOOTPRINT_API_ENABLED 改為 True。
+
+    方案A：/api/futures/orderbook/aggregated-ask-bids-history
+           掛單密集位 —— bid 聚集 = 支撐，ask 聚集 = 阻力
+    方案B：/api/futures/orderbook/ask-bids-history
+           單交易所訂單簿歷史（Binance，備援）
+    方案C：taker 主動買賣集中價位（aggregated-taker-buy-sell-volume/history）
+           主動買入最多 ≈ 強力支撐；主動賣出最多 ≈ 強力阻力
+    方案D：空結構（data_source='unavailable'），TP/SL 回退 ATR/結構
+
+    快取 2 分鐘。
+    """
+    _FOOTPRINT_API_ENABLED = False  # 升級帳號後設為 True 即可啟用
+
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = f"footprint:{base}:{interval}"
+    now = time.time()
+    empty_result: Dict[str, Any] = {
+        "support_levels": [], "resistance_levels": [],
+        "nearest_support": None, "nearest_resistance": None,
+        "poc": None, "data_source": "unavailable",
+    }
+    if cache_key in _flow_cache:
+        cached, ts = _flow_cache[cache_key]
+        if now - ts < _FOOTPRINT_TTL:
+            logger.debug(f"[關鍵位-快取] {base} sup={cached.get('nearest_support')} res={cached.get('nearest_resistance')}")
+            return cached if cached else empty_result
+
+    if not current_price or current_price <= 0:
+        return empty_result
+
+    # ── 若未來升級可解鎖：腳步圖歷史 API ──────────────────────────
+    if _FOOTPRINT_API_ENABLED:
+        logger.debug(f"[關鍵位-FP] {base} 嘗試腳步圖API endpoint={CG_EP['footprint']}")
+        j_fp = _cg_get(CG_EP["footprint"], {"symbol": base, "interval": interval, "limit": limit})
+        rows_fp = j_fp.get("data") or j_fp.get("list") or [] if j_fp else []
+        if isinstance(rows_fp, list) and rows_fp:
+            fp_result = _extract_footprint_levels(rows_fp, current_price, range_pct)
+            if fp_result.get("nearest_support") is not None or fp_result.get("nearest_resistance") is not None:
+                fp_result["data_source"] = "footprint_history"
+                logger.info(f"[關鍵位-FP✅] {base}: 腳步圖成功 POC={fp_result.get('poc','N/A')}")
+                _flow_cache[cache_key] = (fp_result, now)
+                return fp_result
+
+    # ── 方案A：聚合訂單簿深度歷史（掛單密集位）─────────────────────
+    logger.debug(f"[關鍵位-A] {base} 聚合訂單簿深度 endpoint={CG_EP['ob_agg_ask_bids']}")
+    ob_result = _fallback_ob_depth_levels(symbol, current_price, range_pct)
+    if ob_result.get("nearest_support") is not None or ob_result.get("nearest_resistance") is not None:
+        ob_result["data_source"] = "ob_depth_agg"
+        sup_s = f"{ob_result['nearest_support']:.6g}" if ob_result.get('nearest_support') else "N/A"
+        res_s = f"{ob_result['nearest_resistance']:.6g}" if ob_result.get('nearest_resistance') else "N/A"
+        logger.info(f"[關鍵位-A✅] {base}: 聚合訂單簿 支撐={sup_s} 阻力={res_s}")
+        _flow_cache[cache_key] = (ob_result, now)
+        return ob_result
+    logger.debug(f"[關鍵位-A❌] {base}: 聚合訂單簿無有效位，嘗試方案B")
+
+    # ── 方案B：單交易所訂單簿歷史（Binance）──────────────────────
+    logger.debug(f"[關鍵位-B] {base} 單所訂單簿 endpoint={CG_EP['ob_ask_bids_history']}")
+    try:
+        j_b = _cg_get(CG_EP["ob_ask_bids_history"],
+                      {"symbol": base, "exchange": "Binance", "interval": interval, "limit": 5})
+        if j_b:
+            rows_b = j_b.get("data") or j_b.get("list") or []
+            price_lo = current_price * (1 - range_pct / 100)
+            price_hi = current_price * (1 + range_pct / 100)
+            tick = current_price * 0.001
+            bid_lv_b: Dict[float, float] = {}
+            ask_lv_b: Dict[float, float] = {}
+            for bar_b in (rows_b if isinstance(rows_b, list) else []):
+                if not isinstance(bar_b, dict):
+                    continue
+                for sk, store_b in [("bids", bid_lv_b), ("asks", ask_lv_b)]:
+                    for it_b in (bar_b.get(sk) or []):
+                        try:
+                            if isinstance(it_b, list):
+                                pb, vb = float(it_b[0]), float(it_b[1])
+                            elif isinstance(it_b, dict):
+                                pb = float(it_b.get("price") or 0)
+                                vb = float(it_b.get("volume") or it_b.get("amount") or 0)
+                            else:
+                                continue
+                            if pb <= 0 or not (price_lo <= pb <= price_hi):
+                                continue
+                            ap_b = round(pb / tick) * tick
+                            store_b[ap_b] = store_b.get(ap_b, 0.0) + vb
+                        except (TypeError, ValueError, IndexError):
+                            continue
+            sup_b = sorted([(p, v) for p, v in bid_lv_b.items() if p < current_price],
+                           key=lambda x: x[1], reverse=True)[:5]
+            res_b = sorted([(p, v) for p, v in ask_lv_b.items() if p > current_price],
+                           key=lambda x: x[1], reverse=True)[:5]
+            sup_near_b = min(sup_b, key=lambda x: current_price - x[0])[0] if sup_b else None
+            res_near_b = min(res_b, key=lambda x: x[0] - current_price)[0] if res_b else None
+            if sup_near_b is not None or res_near_b is not None:
+                r_b = {"support_levels": [x[0] for x in sup_b],
+                       "resistance_levels": [x[0] for x in res_b],
+                       "nearest_support": sup_near_b,
+                       "nearest_resistance": res_near_b,
+                       "poc": None, "data_source": "ob_depth_binance"}
+                logger.info(f"[關鍵位-B✅] {base}: Binance訂單簿 支撐={sup_near_b or 'N/A'} 阻力={res_near_b or 'N/A'}")
+                _flow_cache[cache_key] = (r_b, now)
+                return r_b
+    except Exception as e_b:
+        logger.debug(f"[關鍵位-B] {base} Binance訂單簿異常: {e_b}")
+    logger.debug(f"[關鍵位-B❌] {base}: Binance訂單簿無有效位，嘗試方案C（taker濃度）")
+
+    # ── 方案C：taker 主動買賣集中價位（聚合歷史）────────────────────
+    # taker 大量主動買入的區間 ≈ 市場認可的強支撐；大量主動賣出 ≈ 強阻力
+    logger.debug(f"[關鍵位-C] {base} taker集中位 endpoint={CG_EP['taker_agg_history']}")
+    try:
+        j_t = _cg_get(CG_EP["taker_agg_history"],
+                      {"symbol": base, "interval": interval, "limit": 8})
+        if j_t:
+            rows_t = j_t.get("data") or j_t.get("list") or []
+            # 尋找 taker 主動買賣最集中的 K 線的收盤價 = 核心成交位
+            best_buy_price: Optional[float] = None
+            best_sell_price: Optional[float] = None
+            max_buy_vol = max_sell_vol = 0.0
+            for bar_t in (rows_t if isinstance(rows_t, list) else []):
+                if not isinstance(bar_t, dict):
+                    continue
+                try:
+                    buy_v = float(bar_t.get("buyVolume") or bar_t.get("buy") or
+                                  bar_t.get("takerBuy") or bar_t.get("takerBuyVolume") or 0)
+                    sell_v = float(bar_t.get("sellVolume") or bar_t.get("sell") or
+                                   bar_t.get("takerSell") or bar_t.get("takerSellVolume") or 0)
+                    p_c = float(bar_t.get("closePrice") or bar_t.get("price") or
+                                bar_t.get("close") or bar_t.get("c") or 0)
+                    ts_t = int(bar_t.get("t") or bar_t.get("timestamp") or bar_t.get("ts") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if p_c <= 0:
+                    continue
+                price_lo_t = current_price * (1 - range_pct / 100)
+                price_hi_t = current_price * (1 + range_pct / 100)
+                if not (price_lo_t <= p_c <= price_hi_t):
+                    continue
+                if buy_v > max_buy_vol:
+                    max_buy_vol, best_buy_price = buy_v, p_c
+                if sell_v > max_sell_vol:
+                    max_sell_vol, best_sell_price = sell_v, p_c
+            sup_c = best_buy_price if (best_buy_price and best_buy_price < current_price) else None
+            res_c = best_sell_price if (best_sell_price and best_sell_price > current_price) else None
+            if sup_c is not None or res_c is not None:
+                r_c = {"support_levels": [sup_c] if sup_c else [],
+                       "resistance_levels": [res_c] if res_c else [],
+                       "nearest_support": sup_c, "nearest_resistance": res_c,
+                       "poc": best_buy_price, "data_source": "taker_concentration"}
+                logger.info(f"[關鍵位-C✅] {base}: taker集中位 支撐={sup_c or 'N/A'} 阻力={res_c or 'N/A'}")
+                _flow_cache[cache_key] = (r_c, now)
+                return r_c
+    except Exception as e_c:
+        logger.debug(f"[關鍵位-C] {base} taker集中位異常: {e_c}")
+
+    logger.warning(f"[關鍵位-全失敗] {base}: A/B/C 三方案均無有效關鍵位，TP/SL 回退 ATR/結構計算")
+    _flow_cache[cache_key] = (empty_result, now)
+    return empty_result
+
+
+def compute_flow_score(
+    taker_ratio: Optional[float],
+    net_pos_delta: Optional[float],
+    is_long: bool,
+) -> int:
+    """訂單流綜合評分（0~4）。每個有效確認因素 +1 分。
+    - taker_ratio 方向對齊（做多>58% / 做空<42%）→ +1
+    - taker_ratio 強力（做多>65% / 做空<35%）→ 再+1
+    - net_pos_delta 方向對齊（做多>0 / 做空<0）→ +1
+    - net_pos_delta 強力（|delta| > 0.3）→ 再+1
+    分數 0=中性，1-2=中度確認，3-4=強力確認
+    """
+    score = 0
+    if taker_ratio is not None:
+        if is_long and taker_ratio > 58:
+            score += 1
+            if taker_ratio > 65:
+                score += 1
+        elif (not is_long) and taker_ratio < 42:
+            score += 1
+            if taker_ratio < 35:
+                score += 1
+    if net_pos_delta is not None:
+        if is_long and net_pos_delta > 0.05:
+            score += 1
+            if net_pos_delta > 0.3:
+                score += 1
+        elif (not is_long) and net_pos_delta < -0.05:
+            score += 1
+            if net_pos_delta < -0.3:
+                score += 1
+    return min(score, 4)
+
+
+def sl_plain_desc(sl_source: str, is_long: bool, fp_data_source: str = "") -> str:
+    """將止損來源轉成白話說明（簡短，一句話）。"""
+    # 依數據來源加上補充說明
+    if "footprint_history" in fp_data_source:
+        src_note = "（腳步圖實際逐筆成交驗證）"
+    elif "ob_depth_agg" in fp_data_source:
+        src_note = "（全網聚合訂單簿掛單密集位）"
+    elif "ob_depth_binance" in fp_data_source:
+        src_note = "（Binance 訂單簿掛單密集位）"
+    elif "taker_concentration" in fp_data_source:
+        src_note = "（近期主動買方成交最集中的區域）"
+    elif "ob_depth" in fp_data_source:
+        src_note = "（訂單簿掛單密集位估算）"
+    else:
+        src_note = ""
+
+    if "腳步圖" in sl_source or "訂單簿支撐" in sl_source:
+        return f"掛單最密集的買盤支撐區{src_note}，跌破代表買方全面退場"
+    if "taker支撐" in sl_source:
+        return f"近期主動買入最集中的區域{src_note}，這裡是真實成交形成的支撐"
+    if "結構低點" in sl_source or "結構高點" in sl_source:
+        return f"近2小時K線{'最低' if is_long else '最高'}點下方，破位則{'多' if is_long else '空'}方結構崩潰"
+    if "K線結構" in sl_source:
+        return f"當前15m K線{'低' if is_long else '高'}點，這根K線守住才有效"
+    return "ATR動態計算，根據近期真實波動幅度自動設定安全距離"
+
+
+def tp_plain_desc(tp_label: str, is_long: bool, fp_data_source: str = "") -> str:
+    """將止盈標籤轉成白話說明（簡短，一句話）。"""
+    if not tp_label:
+        return ""
+    if "footprint_history" in fp_data_source:
+        src_note = "（腳步圖成交密集的賣盤壓力區）"
+    elif "ob_depth_agg" in fp_data_source or "ob_depth_binance" in fp_data_source:
+        src_note = "（訂單簿掛單牆，賣壓集中區）"
+    elif "taker_concentration" in fp_data_source:
+        src_note = "（主動賣出最集中的區域）"
+    else:
+        src_note = ""
+
+    if "腳步圖阻力" in tp_label or "訂單簿阻力" in tp_label:
+        return f"掛單最密集的賣盤阻力區{src_note}，到這裡賣盤壓力大增"
+    if "taker阻力" in tp_label:
+        return f"近期主動賣出最集中的價位{src_note}，是市場公認的出貨壓力區"
+    if "主力成本" in tp_label:
+        return "2h均線VWAP的對稱位，主力成本區上方，通常是套牢盤出清點"
+    if "1.2R" in tp_label or "1.0R" in tp_label:
+        r = tp_label.replace("R", "").strip()
+        return f"風報比{r}倍目標，即賺{r}倍止損距離的利潤"
+    if "R" in tp_label:
+        r_val = tp_label.replace("R", "").strip().split("(")[-1] if "(" in tp_label else tp_label.replace("R", "").strip()
+        return f"約{r_val}倍風報比目標"
+    return ""
 
 
 # ── 大額掛單牆監控 ─────────────────────────────────────────────────────────────
@@ -2485,7 +3749,91 @@ def check_orderbook_wall(
     except Exception as e:
         logger.debug(f"[掛單牆-CG] {base} CoinGlass large-limit-order 失敗: {e}")
 
-    # CoinGlass large-limit-order 無資料時，直接返回 None（不再呼叫 BingX）
+    # ── 方案B：CoinGlass large-limit-order-history（歷史大單，更可靠）────────
+    logger.debug(f"[掛單牆-B] {base} 嘗試 large-limit-order-history endpoint={CG_EP['ob_large_order_hist']}")
+    try:
+        j_hist = _cg_get(CG_EP["ob_large_order_hist"],
+                         {"symbol": base, "interval": "15m", "limit": 3})
+        if j_hist:
+            orders_h = j_hist.get("data") or j_hist.get("list") or []
+            best_usd_h, best_price_h = 0.0, 0.0
+            for bar in (orders_h if isinstance(orders_h, list) else []):
+                bar_orders = bar.get("orders") or bar.get("data") or (bar if isinstance(bar, list) else [])
+                if not isinstance(bar_orders, list):
+                    bar_orders = [bar]
+                for order in bar_orders:
+                    if not isinstance(order, dict):
+                        continue
+                    try:
+                        p = float(order.get("price") or order.get("p") or 0)
+                        side = str(order.get("side") or order.get("type") or "").lower()
+                        if is_long and side not in ("ask", "sell", "2", ""):
+                            continue
+                        if not is_long and side not in ("bid", "buy", "1", ""):
+                            continue
+                        usd = float(order.get("amount_usd") or order.get("amountUsd") or
+                                    order.get("value") or order.get("size") or 0)
+                        qty = float(order.get("qty") or order.get("amount") or order.get("quantity") or 0)
+                        if usd == 0 and qty > 0 and p > 0:
+                            usd = qty * p
+                        if p <= 0 or usd <= 0:
+                            continue
+                        if is_long and not (current_price < p <= scan_limit_hi):
+                            continue
+                        if not is_long and not (scan_limit_lo <= p < current_price):
+                            continue
+                        if usd > best_usd_h:
+                            best_usd_h, best_price_h = usd, p
+                    except (TypeError, ValueError):
+                        continue
+            if best_usd_h >= _OB_WALL_MIN_USD:
+                result_h = _build_result(best_usd_h, best_price_h)
+                if result_h:
+                    logger.info(f"[掛單牆-B✅] {base}: 方案B(歷史大單)成功 ${best_usd_h/1e6:.2f}M @ {best_price_h:.6g}")
+                    _orderbook_wall_cache[cache_key] = (result_h, now)
+                    return result_h
+            logger.debug(f"[掛單牆-B] {base}: 解析到資料但金額未達門檻 (max={best_usd_h:.0f} USD)")
+    except Exception as e_b:
+        logger.debug(f"[掛單牆-B] {base} large-limit-order-history 異常: {e_b}")
+
+    # ── 方案C：orderbook aggregated ask-bids（訂單簿深度，最後手段）──────────
+    logger.debug(f"[掛單牆-C] {base} 嘗試 aggregated ask-bids endpoint={CG_EP['ob_agg_ask_bids']}")
+    try:
+        side_c = "asks" if is_long else "bids"
+        j_c = _cg_get(CG_EP["ob_agg_ask_bids"],
+                       {"symbol": base, "interval": "15m", "limit": 2, "range": "2"})
+        if j_c:
+            rows_c = j_c.get("data") or j_c.get("list") or []
+            best_usd_c, best_price_c = 0.0, 0.0
+            for bar_c in (rows_c if isinstance(rows_c, list) else []):
+                for order_c in (bar_c.get(side_c) or [] if isinstance(bar_c, dict) else []):
+                    try:
+                        if isinstance(order_c, list):
+                            p_c, vol_c = float(order_c[0]), float(order_c[1])
+                        elif isinstance(order_c, dict):
+                            p_c = float(order_c.get("price") or 0)
+                            vol_c = float(order_c.get("volume") or order_c.get("amount") or 0)
+                        else:
+                            continue
+                        usd_c = vol_c * p_c if p_c > 0 else 0
+                        if is_long and not (current_price < p_c <= scan_limit_hi):
+                            continue
+                        if not is_long and not (scan_limit_lo <= p_c < current_price):
+                            continue
+                        if usd_c > best_usd_c:
+                            best_usd_c, best_price_c = usd_c, p_c
+                    except (TypeError, ValueError, IndexError):
+                        continue
+            if best_usd_c >= _OB_WALL_MIN_USD:
+                result_c = _build_result(best_usd_c, best_price_c)
+                if result_c:
+                    logger.info(f"[掛單牆-C✅] {base}: 方案C(訂單簿深度)成功 ${best_usd_c/1e6:.2f}M @ {best_price_c:.6g}")
+                    _orderbook_wall_cache[cache_key] = (result_c, now)
+                    return result_c
+    except Exception as e_c:
+        logger.debug(f"[掛單牆-C] {base} 訂單簿深度異常: {e_c}")
+
+    logger.debug(f"[掛單牆-全失敗] {base}: A/B/C 三方案均無明顯大牆（門檻 ${_OB_WALL_MIN_USD/1e6:.1f}M）")
     _orderbook_wall_cache[cache_key] = (None, now)
     return None
 
@@ -2953,45 +4301,63 @@ def _fetch_bingx_ticker_snapshot(symbol: str, preferred_symbol: Optional[str] = 
 
 def _fetch_funding_rate_map() -> Dict[str, float]:
     """
-    一次取得 CoinGlass 全量資金費率（與排行榜同 API、同結構），回傳 symbol(base) -> 費率。
-    優先 Binance，無則 BingX。與 fetch_funding_fortune_list 同 URL、同解析邏輯。
+    一次取得 CoinGlass 全量資金費率，回傳 symbol(base) -> 費率。
+    方案A：OI加權費率歷史（最精準市場情緒，反映主力成本）
+    方案B：exchange-list（各所費率，取 Binance 優先）
     """
     out: Dict[str, float] = {}
-    url = f"{CG_API_BASE}/api/futures/funding-rate/exchange-list"
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+
+    # ── 方案A：OI 加權費率（主力建倉成本最接近的指標）─────────────
+    # 用最新一根 K 線的 OI 加權費率作為「真實市場費率」
+    logger.debug(f"[資金費率-A] 嘗試 OI加權費率 endpoint={CG_EP['fr_oi_weight']}")
+    try:
+        _respect_coinglass_rate_limit()
+        r_oi = requests.get(
+            f"{CG_API_BASE}{CG_EP['fr_oi_weight']}",
+            headers=headers,
+            params={"symbol": "BTC", "interval": "8h", "limit": 1},  # 單一查詢測試結構
+            timeout=10
+        )
+        if r_oi.status_code == 200:
+            j_oi = r_oi.json()
+            if j_oi.get("code") in (0, "0", 200, "200", None):
+                logger.debug(f"[資金費率-A] OI加權費率 API 可用，但此端點為單幣種查詢，後續按需調用")
+    except Exception:
+        pass
+
+    # ── 方案B：exchange-list（全量，可一次取得所有幣種）─────────────
+    logger.debug(f"[資金費率-B] 全量費率列表 endpoint={CG_EP['fr_exchange_list']}")
+    url = f"{CG_API_BASE}{CG_EP['fr_exchange_list']}"
+    lst = []
     for attempt in range(2):
         try:
+            _respect_coinglass_rate_limit()
             r = requests.get(url, headers=headers, timeout=12)
             if r.status_code == 429:
                 logger.warning("資金費率 API 429 Too Many Requests，2 秒後重試一次")
                 time.sleep(2)
                 continue
             if r.status_code != 200:
-                if len(out) == 0:
-                    logger.warning(f"資金費率 API status={r.status_code} body={r.text[:200]}")
-                return out
+                logger.warning(f"資金費率-B status={r.status_code} body={r.text[:200]}")
+                break
             data = r.json()
-            # 與排行榜一致：接受 code 為 0 或 '0'
             if data.get("code") not in (0, "0", 200, "200", None):
-                if len(out) == 0:
-                    logger.warning(f"資金費率 API code={data.get('code')} msg={data.get('msg')} body={r.text[:200]}")
-                return out
+                logger.warning(f"資金費率-B code={data.get('code')} msg={data.get('msg')}")
+                break
             lst = data.get("data", [])
-            if not isinstance(lst, list):
-                if len(out) == 0:
-                    logger.warning(f"資金費率 API data 非列表 type={type(lst)}")
-                return out
-            break
+            if isinstance(lst, list):
+                break
         except Exception as e:
             if attempt == 0:
-                logger.warning(f"資金費率 API 請求異常: {e}，重試一次")
+                logger.warning(f"資金費率-B 請求異常: {e}，重試一次")
                 time.sleep(1)
             else:
+                logger.warning(f"資金費率-B 全部失敗: {e}")
                 return out
-    else:
-        return out
+
     try:
-        for item in lst:
+        for item in (lst if isinstance(lst, list) else []):
             if not isinstance(item, dict):
                 continue
             base = item.get("symbol") or item.get("coin") or item.get("base")
@@ -2999,31 +4365,467 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
                 continue
             base = str(base).strip().upper()
             margin_list = item.get("stablecoin_margin_list") or item.get("margin_list") or []
-            rate_binance = None
-            rate_bingx = None
-            for m in margin_list:
+            rate_binance = rate_bingx = None
+            for m in (margin_list if isinstance(margin_list, list) else []):
                 if not isinstance(m, dict):
                     continue
                 ex = m.get("exchange")
-                if ex not in ("Binance", "BingX"):
-                    continue
                 try:
-                    v = float(m.get("funding_rate"))
+                    v = float(m.get("funding_rate") or m.get("fundingRate") or 0)
                 except (TypeError, ValueError):
                     continue
                 if ex == "Binance":
                     rate_binance = v
-                else:
+                elif ex == "BingX":
                     rate_bingx = v
             rate = rate_binance if rate_binance is not None else rate_bingx
             if rate is not None:
                 out[base] = rate
-        if len(out) == 0 and lst:
-            logger.warning(f"資金費率解析後為 0 筆，請檢查 API 回傳格式。首筆 keys={list(lst[0].keys()) if lst and isinstance(lst[0], dict) else 'n/a'}")
-        return out
+        if out:
+            logger.debug(f"[資金費率-B✅] 成功解析 {len(out)} 幣種費率")
+        elif lst:
+            logger.warning(f"[資金費率-B⚠️] 解析 0 筆，首筆 keys={list(lst[0].keys()) if lst and isinstance(lst[0], dict) else 'n/a'}")
     except Exception as e:
         logger.warning(f"資金費率解析異常: {e}")
-        return out
+    return out
+
+
+def fetch_oi_weighted_funding_rate(symbol: str, interval: str = "8h", limit: int = 3) -> Optional[float]:
+    """取得單一幣種的 OI 加權資金費率（最能反映主力槓桿成本的指標）。
+    方案A：fr_oi_weight（OI加權）
+    方案B：fr_vol_weight（成交量加權）
+    方案C：fr_history（原始費率，Binance 優先）
+    快取 15 分鐘（費率 8 小時結算一次，短期變化不大）。
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = f"fr_oi_w:{base}:{interval}"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 900:  # 15 分鐘快取
+            return val
+
+    logger.debug(f"[OI加權費率] {base} endpoint={CG_EP['fr_oi_weight']} interval={interval}")
+    for ep_key in ["fr_oi_weight", "fr_vol_weight", "fr_history"]:
+        try:
+            j = _cg_get(CG_EP[ep_key], {"symbol": base, "interval": interval, "limit": limit,
+                                          "exchange": "Binance"})
+            if not j:
+                continue
+            rows = j.get("data") or j.get("list") or []
+            if not isinstance(rows, list) or not rows:
+                logger.debug(f"[OI加權費率-{ep_key}] {base}: 空數據")
+                continue
+            last = rows[-1]
+            if isinstance(last, dict):
+                rate_val = (last.get("fundingRate") or last.get("funding_rate") or
+                            last.get("rate") or last.get("c") or last.get("close"))
+            elif isinstance(last, (list, tuple)) and len(last) >= 2:
+                rate_val = last[-1]
+            else:
+                continue
+            if rate_val is None:
+                continue
+            rate_f = float(rate_val)
+            logger.info(f"[OI加權費率✅] {base} {ep_key}: {rate_f*100:.4f}%")
+            _flow_cache[cache_key] = (rate_f, now)
+            return rate_f
+        except Exception as e:
+            logger.debug(f"[OI加權費率-{ep_key}] {base} 異常: {e}")
+            continue
+
+    _flow_cache[cache_key] = (None, now)
+    return None
+
+
+def fetch_accumulated_funding_score(symbol: str) -> Dict[str, Any]:
+    """累積資金費率極端值偵測。
+    用途：判斷市場是否已「費率過熱」或「費率極度負值（嘎空潛力）」。
+    方案A：accumulated-exchange-list（累積費率，7 日/30 日）
+    回傳：{
+      "accumulated_7d": float,      # 7日累積費率
+      "accumulated_30d": float,     # 30日累積費率
+      "squeeze_risk": str,          # "long_squeeze" / "short_squeeze" / "neutral"
+      "squeeze_label": str,         # 推播文案
+    }
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = f"accum_fr:{base}"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 1800:  # 30 分鐘快取（累積費率緩慢變動）
+            return val if val else {"accumulated_7d": None, "accumulated_30d": None,
+                                    "squeeze_risk": "unknown", "squeeze_label": ""}
+
+    empty = {"accumulated_7d": None, "accumulated_30d": None, "squeeze_risk": "unknown", "squeeze_label": ""}
+    logger.debug(f"[累積費率] {base} endpoint={CG_EP['fr_accum_exchange']}")
+    try:
+        j = _cg_get(CG_EP["fr_accum_exchange"], {"symbol": base})
+        if not j:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+        data = j.get("data") or j.get("list") or []
+
+        accum_7d = accum_30d = None
+        # 嘗試從各所中取 Binance 或聚合值
+        if isinstance(data, list):
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                ex = entry.get("exchange") or entry.get("exchangeName") or ""
+                if ex not in ("Binance", "", "All", "Aggregated"):
+                    continue
+                try:
+                    a7 = entry.get("accumulated7d") or entry.get("accum7d") or entry.get("fundingRate7d")
+                    a30 = entry.get("accumulated30d") or entry.get("accum30d") or entry.get("fundingRate30d")
+                    if a7 is not None:
+                        accum_7d = float(a7)
+                    if a30 is not None:
+                        accum_30d = float(a30)
+                    if accum_7d is not None:
+                        break
+                except (TypeError, ValueError):
+                    continue
+        elif isinstance(data, dict):
+            try:
+                accum_7d = float(data.get("accumulated7d") or data.get("accum7d") or 0)
+                accum_30d = float(data.get("accumulated30d") or data.get("accum30d") or 0)
+            except (TypeError, ValueError):
+                pass
+
+        # 判斷擠壓風險
+        # 累積費率 > 2% (7d) 代表多頭持續付費 = 軋空燃料（多頭過熱，空頭嘎空機率大）
+        # 累積費率 < -1% (7d) 代表空頭持續付費 = 嘎空燃料（空頭過熱，多頭嘎空機率大）
+        squeeze_risk = "neutral"
+        squeeze_label = ""
+        val_for_check = accum_7d
+        if val_for_check is not None:
+            if val_for_check > 0.02:   # > 2% 7d 累積 = 多頭極度過熱
+                squeeze_risk = "long_squeeze"
+                squeeze_label = f"⚠️ 7日累積費率 `{val_for_check*100:.2f}%`（多頭費用過高，嘎空風險↑）"
+                logger.info(f"[累積費率⚠️] {base}: 多頭極度過熱 7d累積={val_for_check*100:.2f}%")
+            elif val_for_check < -0.01:  # < -1% 7d 累積 = 空頭極度過熱
+                squeeze_risk = "short_squeeze"
+                squeeze_label = f"🔥 7日累積費率 `{val_for_check*100:.2f}%`（空頭費用過高，嘎空潛力巨大）"
+                logger.info(f"[累積費率🔥] {base}: 空頭極度過熱 7d累積={val_for_check*100:.2f}%")
+            else:
+                squeeze_label = f"💱 7日累積費率 `{val_for_check*100:.3f}%`（正常）"
+        else:
+            logger.debug(f"[累積費率] {base}: 無法解析累積費率數據 data={str(data)[:100]}")
+
+        result = {"accumulated_7d": accum_7d, "accumulated_30d": accum_30d,
+                  "squeeze_risk": squeeze_risk, "squeeze_label": squeeze_label}
+        _flow_cache[cache_key] = (result, now)
+        return result
+    except Exception as e:
+        logger.debug(f"[累積費率] {base} 異常: {e}")
+        _flow_cache[cache_key] = (empty, now)
+        return empty
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 市場宏觀指標（Fear&Greed、BTC ETF、Coinbase溢價、合約基差、期權最大痛點）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fetch_fear_greed_index() -> Dict[str, Any]:
+    """恐懼貪婪指數（整合市場情緒的最佳單一指標）。
+    endpoint: /api/index/fear-greed-history
+    快取 30 分鐘（每日更新一次，短期快取防重複請求）。
+    回傳: {"value": int, "label": str, "emoji": str, "signal": str}
+    """
+    cache_key = "fear_greed_index"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 1800:
+            return val if val else {}
+
+    logger.debug(f"[恐懼貪婪] endpoint={CG_EP['fear_greed']}")
+    empty = {"value": None, "label": "N/A", "emoji": "❓", "signal": "neutral"}
+    try:
+        j = _cg_get(CG_EP["fear_greed"], {"limit": 1})
+        if not j:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+        data = j.get("data") or j.get("list") or j
+        if isinstance(data, list) and data:
+            data = data[-1]  # 最新一筆
+        if not isinstance(data, dict):
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+
+        val_raw = data.get("value") or data.get("score") or data.get("index")
+        label_raw = data.get("value_classification") or data.get("label") or data.get("classification") or ""
+        if val_raw is None:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+
+        fg_val = int(float(val_raw))
+        # 標準化標籤
+        if fg_val >= 80:
+            emoji, label, signal = "🔥", "極度貪婪", "overbought"
+        elif fg_val >= 60:
+            emoji, label, signal = "🟢", "貪婪", "bullish"
+        elif fg_val >= 40:
+            emoji, label, signal = "🟡", "中性", "neutral"
+        elif fg_val >= 20:
+            emoji, label, signal = "🔴", "恐懼", "bearish"
+        else:
+            emoji, label, signal = "💀", "極度恐懼", "oversold"
+
+        result = {"value": fg_val, "label": label_raw or label, "emoji": emoji,
+                  "signal": signal, "score": fg_val}
+        logger.info(f"[恐懼貪婪✅] 當前指數={fg_val} {emoji} {label}")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    except Exception as e:
+        logger.debug(f"[恐懼貪婪] 異常: {e}")
+        _flow_cache[cache_key] = (empty, now)
+        return empty
+
+
+def fetch_btc_etf_flow(limit: int = 3) -> Dict[str, Any]:
+    """比特幣ETF資金流向（機構資金進出場最直接信號）。
+    endpoint: /api/etf/bitcoin/flow-history
+    方案B: /api/etf/bitcoin/net-assets/history
+    快取 1 小時。
+    回傳: {"net_flow_usd": float, "direction": "inflow"/"outflow"/"neutral",
+           "label": str, "total_assets_usd": float}
+    """
+    cache_key = "btc_etf_flow"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 3600:
+            return val if val else {}
+
+    logger.debug(f"[BTC ETF] endpoint={CG_EP['btc_etf_flow']}")
+    empty = {"net_flow_usd": None, "direction": "unknown", "label": "", "total_assets_usd": None}
+    try:
+        j = _cg_get(CG_EP["btc_etf_flow"], {"limit": limit})
+        if not j:
+            j = _cg_get(CG_EP["btc_etf_net_assets"], {"limit": limit})
+        if not j:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+
+        data = j.get("data") or j.get("list") or []
+        if isinstance(data, list) and data:
+            latest = data[-1]
+        elif isinstance(data, dict):
+            latest = data
+        else:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+
+        net_flow = (latest.get("netFlow") or latest.get("net_flow") or
+                    latest.get("netInflow") or latest.get("netOutflow") or
+                    latest.get("flow") or 0)
+        total_assets = (latest.get("totalAssets") or latest.get("total_assets") or
+                        latest.get("netAssets") or 0)
+        try:
+            net_f = float(net_flow)
+            total_a = float(total_assets)
+        except (TypeError, ValueError):
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+
+        if net_f > 50_000_000:       # > 5千萬 USD 淨流入
+            direction = "inflow"
+            label = f"🟢 BTC ETF淨流入 `${net_f/1e6:.0f}M`（機構積極買入）"
+        elif net_f < -50_000_000:    # 5千萬以上淨流出
+            direction = "outflow"
+            label = f"🔴 BTC ETF淨流出 `${abs(net_f)/1e6:.0f}M`（機構減倉警告）"
+        else:
+            direction = "neutral"
+            label = f"🟡 BTC ETF資金流 `${net_f/1e6:+.0f}M`（中性）" if net_f != 0 else ""
+
+        result = {"net_flow_usd": net_f, "direction": direction, "label": label,
+                  "total_assets_usd": total_a if total_a > 0 else None}
+        logger.info(f"[BTC ETF✅] 淨流 ${net_f/1e6:+.0f}M 總資產 ${total_a/1e9:.1f}B")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    except Exception as e:
+        logger.debug(f"[BTC ETF] 異常: {e}")
+        _flow_cache[cache_key] = (empty, now)
+        return empty
+
+
+def fetch_coinbase_premium() -> Dict[str, Any]:
+    """Coinbase 溢價指數（美國機構買盤強度最直接指標）。
+    Coinbase 溢價 > 0 = 美國資金正在買入（機構牛訊號）
+    Coinbase 溢價 < 0 = 美國資金正在賣出（機構熊訊號）
+    endpoint: /api/coinbase-premium-index
+    快取 15 分鐘。
+    """
+    cache_key = "coinbase_premium"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 900:
+            return val if val else {}
+
+    logger.debug(f"[Coinbase溢價] endpoint={CG_EP['coinbase_premium']}")
+    empty = {"premium": None, "label": "", "signal": "neutral"}
+    try:
+        j = _cg_get(CG_EP["coinbase_premium"], {"limit": 1})
+        if not j:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+        data = j.get("data") or j.get("list") or j
+        if isinstance(data, list) and data:
+            data = data[-1]
+        if not isinstance(data, dict):
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+
+        prem = data.get("premium") or data.get("premiumIndex") or data.get("value")
+        if prem is None:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+        prem_f = float(prem)
+
+        if prem_f > 0.1:
+            signal, label = "bullish", f"🟢 Coinbase溢價 `+{prem_f:.3f}%`（美國機構主動買入）"
+        elif prem_f < -0.1:
+            signal, label = "bearish", f"🔴 Coinbase折價 `{prem_f:.3f}%`（美國機構主動賣出）"
+        else:
+            signal, label = "neutral", f"🟡 Coinbase溢價 `{prem_f:+.3f}%`（中性）"
+
+        result = {"premium": prem_f, "label": label, "signal": signal}
+        logger.info(f"[Coinbase溢價✅] {prem_f:+.3f}% {signal}")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    except Exception as e:
+        logger.debug(f"[Coinbase溢價] 異常: {e}")
+        _flow_cache[cache_key] = (empty, now)
+        return empty
+
+
+def fetch_options_max_pain(symbol: str = "BTC") -> Dict[str, Any]:
+    """期權最大痛點價格（市場價格的引力中心，到期日前常回歸此價）。
+    方案A: /api/option/max-pain
+    方案B: /api/option/info（從期權信息中提取）
+    快取 1 小時（每日更新一次）。
+    回傳: {"max_pain_price": float, "expiry": str, "label": str, "distance_pct": float}
+    """
+    base = symbol.replace("USDT", "").upper()
+    cache_key = f"opt_max_pain:{base}"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 3600:
+            return val if val else {}
+
+    logger.debug(f"[最大痛點] {base} endpoint={CG_EP['opt_max_pain']}")
+    empty = {"max_pain_price": None, "expiry": None, "label": "", "distance_pct": None}
+    try:
+        for ep_key in ["opt_max_pain", "opt_info"]:
+            j = _cg_get(CG_EP[ep_key], {"symbol": base})
+            if not j:
+                continue
+            data = j.get("data") or j.get("list") or j
+            if isinstance(data, list) and data:
+                data = data[0]
+            if not isinstance(data, dict):
+                continue
+            mp = data.get("maxPain") or data.get("max_pain") or data.get("maxPainPrice")
+            expiry = data.get("expiry") or data.get("expiryDate") or data.get("deliveryDate") or ""
+            if mp is None:
+                continue
+            mp_f = float(mp)
+            result = {"max_pain_price": mp_f, "expiry": str(expiry), "label": "", "distance_pct": None}
+            result["label"] = f"🎯 期權最大痛點：`{mp_f:,.0f}` USD（到期日 {expiry}）"
+            logger.info(f"[最大痛點✅] {base}: {mp_f:,.0f} 到期={expiry}")
+            _flow_cache[cache_key] = (result, now)
+            return result
+    except Exception as e:
+        logger.debug(f"[最大痛點] {base} 異常: {e}")
+    _flow_cache[cache_key] = (empty, now)
+    return empty
+
+
+def fetch_contract_basis(symbol: str = "BTC", interval: str = "1h", limit: int = 4) -> Dict[str, Any]:
+    """合約基差（期貨價格 - 現貨價格）。
+    正基差（期貨溢價）= 市場看多預期
+    負基差（期貨折價）= 市場看空預期或現貨更強
+    endpoint: /api/futures/basis/history
+    快取 15 分鐘。
+    回傳: {"basis_pct": float, "trend": "widening"/"narrowing"/"stable",
+           "label": str, "signal": str}
+    """
+    base = symbol.replace("USDT", "").upper()
+    cache_key = f"basis:{base}:{interval}"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 900:
+            return val if val else {}
+
+    logger.debug(f"[合約基差] {base} endpoint={CG_EP['contract_basis']}")
+    empty = {"basis_pct": None, "trend": "unknown", "label": "", "signal": "neutral"}
+    try:
+        j = _cg_get(CG_EP["contract_basis"], {"symbol": base, "exchange": "Binance",
+                                                "interval": interval, "limit": limit})
+        if not j:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+        rows = j.get("data") or j.get("list") or []
+        if not isinstance(rows, list) or len(rows) < 2:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+
+        # 解析最近幾根 K 線的基差值
+        basis_vals = []
+        for bar in rows:
+            if not isinstance(bar, dict):
+                continue
+            b = bar.get("basis") or bar.get("basisRate") or bar.get("c") or bar.get("close")
+            if b is not None:
+                try:
+                    basis_vals.append(float(b))
+                except (TypeError, ValueError):
+                    pass
+
+        if len(basis_vals) < 2:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+
+        latest_basis = basis_vals[-1]
+        prev_basis = basis_vals[-2]
+        # 判斷趨勢
+        if abs(latest_basis) > abs(prev_basis) * 1.1:
+            trend = "widening"
+        elif abs(latest_basis) < abs(prev_basis) * 0.9:
+            trend = "narrowing"
+        else:
+            trend = "stable"
+
+        # 生成信號
+        if latest_basis > 0.005:     # > 0.5%
+            signal = "bullish"
+            label = f"📈 期貨溢價 `+{latest_basis*100:.3f}%`（市場看多，期貨>現貨）"
+        elif latest_basis < -0.003:  # < -0.3%
+            signal = "bearish"
+            label = f"📉 期貨折價 `-{abs(latest_basis)*100:.3f}%`（現貨更強，資金回流現貨）"
+        else:
+            signal = "neutral"
+            label = f"〰️ 基差中性 `{latest_basis*100:+.3f}%`"
+
+        if trend == "widening" and signal == "bullish":
+            label += "（基差擴大，看多情緒升溫）"
+        elif trend == "narrowing" and signal == "bullish":
+            label += "（基差收窄，多頭熱情降溫）"
+
+        result = {"basis_pct": latest_basis * 100, "trend": trend, "label": label, "signal": signal}
+        logger.info(f"[合約基差✅] {base}: {latest_basis*100:+.4f}% trend={trend}")
+        _flow_cache[cache_key] = (result, now)
+        return result
+    except Exception as e:
+        logger.debug(f"[合約基差] {base} 異常: {e}")
+        _flow_cache[cache_key] = (empty, now)
+        return empty
 
 
 def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -3781,15 +5583,17 @@ def build_report_message_tiered(
         recent_low_2h: Optional[float] = None,
         last_kline_high_30m: Optional[float] = None,
         last_kline_low_30m: Optional[float] = None,
+        fp_support: Optional[float] = None,    # 腳步圖最近支撐位
+        fp_resistance: Optional[float] = None,  # 腳步圖最近阻力位
+        fp_poc: Optional[float] = None,         # 腳步圖 Point of Control
     ):
         """
-        【OI 起漲點防守法】BingX 15m 結構為主，不再使用「純 ATR 停損」：
-        - 做多 SL：recent_low_2h 或「當前 15m K 線 low」往下 0.5% buffer。
-        - 做空 SL：recent_high_2h 或「當前 15m K 線 high」往上 0.5% buffer。
-        - 列車(S/S+)：SL 與現價距離 >8% 則強制壓縮至 8%。
-        - 賭鬼(A)：SL 與現價距離 >6% 則強制壓縮至 6%。
-        - 列車 TP：優先主力成本對稱 (VWAP_2h)，無則 1.5R。
-        - 賭鬼 TP：TP1 = 1.0R，TP2 = 2.5R~4.0R（此處預設 3R，僅計算不顯示）。
+        【OI 起漲點防守法 v2 — 腳步圖增強版】
+        SL 優先順序（做多）：腳步圖支撐 → 結構低點(recent_low_2h) → ATR floor
+        TP 優先順序（做多）：腳步圖阻力 → VWAP對稱 → R倍數
+        - 列車(S/S+)：SL 上限 8~12%（依波動動態）
+        - 賭鬼(A)：SL 上限 6~10%（依波動動態）
+        - 腳步圖阻力在 1.0R~3.5R 範圍內才採用，超出則回退 R 倍數
         """
         _na = "-"
         def fmt_p(p):
@@ -3864,15 +5668,13 @@ def build_report_message_tiered(
         buffer_pct = 0.005  # 0.5% buffer（結構位微調）
         sl_price = None
         sl_capped = False
+        sl_source = "ATR"  # 紀錄 SL 來源，用於訊息說明
 
         # ── ATR 波動等級分類（決定 ATR 倍率與上限）────────────────────────────
-        # vol_pct = ATR/Price (%)
-        # < 2%   : 低波動（常規）→ ATR 保底 1.2×
-        # 2~3%   : 中波動           → ATR 保底 1.35×
-        # > 3%   : 高波動（PEPE/SOL 系等）→ ATR 保底 1.5×，避免 15M 正常波動洗出場
+        # < 2% : 低波動 → ATR 保底 1.2× / 2~3%: 中波動 1.35× / >3%: 高波動 1.5×
         vol_pct = (atr_val / price) * 100.0 if (atr_val is not None and price > 0) else 0.0
         if vol_pct > 3.0:
-            atr_mult = 1.5    # 高波動：放寬止損，減少被正常波動掃出場
+            atr_mult = 1.5    # 高波動：PEPE/SOL 系，避免 15M 正常波動洗出場
             max_pct = 0.12 if is_train else 0.10
         elif vol_pct > 2.0:
             atr_mult = 1.35   # 中波動：適度放寬
@@ -3881,55 +5683,90 @@ def build_report_message_tiered(
             atr_mult = 1.2    # 低波動：保守
             max_pct = 0.08 if is_train else 0.06
 
+        # ── 腳步圖支撐/阻力有效性校驗 ─────────────────────────────────────────
+        # fp_support 必須在現價下方（做多），且距現價不超過 max_pct×1.1
+        _fp_sup_valid = (
+            fp_support is not None
+            and isinstance(fp_support, (int, float))
+            and fp_support > 0
+            and is_long
+            and fp_support < price
+            and abs(price - fp_support) / price <= max_pct * 1.1
+        )
+        _fp_res_valid = (
+            fp_resistance is not None
+            and isinstance(fp_resistance, (int, float))
+            and fp_resistance > 0
+            and fp_resistance > price
+            and abs(fp_resistance - price) / price <= 0.15  # 阻力不超過 15%
+        )
+        # 對應做空的鏡像
+        if not is_long:
+            _fp_sup_valid = (
+                fp_support is not None
+                and isinstance(fp_support, (int, float))
+                and fp_support > price
+                and abs(fp_support - price) / price <= max_pct * 1.1
+            )
+            _fp_res_valid = (
+                fp_resistance is not None
+                and isinstance(fp_resistance, (int, float))
+                and fp_resistance > 0
+                and fp_resistance < price
+                and abs(price - fp_resistance) / price <= 0.15
+            )
+
         if is_train:
-            # 列車：結構 + ATR 雙保底（ATR 倍率動態）
-            basis_price = basis_low if is_long else basis_high
-            struct_dist = None
-            if basis_price is not None:
-                if is_long:
-                    basis_price_adj = basis_price * (1.0 - buffer_pct)
-                else:
-                    basis_price_adj = basis_price * (1.0 + buffer_pct)
-                struct_dist = abs(price - basis_price_adj)
-            # ATR 保底距離（動態倍率）：高波動用 1.5×，中波動 1.35×，低波動 1.2×
-            if atr_val is not None:
-                atr_floor = atr_mult * atr_val
+            # ── 列車：SL 優先順序：腳步圖支撐 > 結構低點 > ATR floor ──
+            if _fp_sup_valid:
+                fp_sl = (float(fp_support) * (1.0 - buffer_pct) if is_long
+                         else float(fp_support) * (1.0 + buffer_pct))
+                # ATR 保底（不能比 ATR floor 更窄）
+                atr_floor = (atr_mult * atr_val) if atr_val is not None else price * 0.02
+                proposed_dist = abs(price - fp_sl)
+                sl_dist = max(proposed_dist, atr_floor)
+                sl_price = price - sl_dist if is_long else price + sl_dist
+                sl_source = "腳步圖支撐"
             else:
-                atr_floor = price * 0.02
-            if struct_dist is not None:
-                sl_dist = max(struct_dist, atr_floor)
-            else:
-                sl_dist = atr_floor
-            sl_price = price - sl_dist if is_long else price + sl_dist
+                basis_price = basis_low if is_long else basis_high
+                struct_dist = None
+                if basis_price is not None:
+                    adj = basis_price * (1 - buffer_pct) if is_long else basis_price * (1 + buffer_pct)
+                    struct_dist = abs(price - adj)
+                atr_floor = (atr_mult * atr_val) if atr_val is not None else price * 0.02
+                sl_dist = max(struct_dist, atr_floor) if struct_dist is not None else atr_floor
+                sl_price = price - sl_dist if is_long else price + sl_dist
+                sl_source = "結構低點" if struct_dist is not None else "ATR"
             dist_pct = abs(price - sl_price) / price if price > 0 else 0
             if dist_pct > max_pct:
                 sl_capped = True
-                if is_long:
-                    sl_price = price * (1.0 - max_pct)
-                else:
-                    sl_price = price * (1.0 + max_pct)
+                sl_price = price * (1.0 - max_pct) if is_long else price * (1.0 + max_pct)
         else:
-            # 賭鬼：結構優先，否則 ATR（動態倍率）/ 百分比
-            if is_long and basis_low is not None:
+            # ── 賭鬼：SL 優先順序：腳步圖支撐 > 結構優先 > ATR ──
+            if _fp_sup_valid:
+                fp_sl = (float(fp_support) * (1.0 - buffer_pct) if is_long
+                         else float(fp_support) * (1.0 + buffer_pct))
+                atr_floor = (atr_mult * atr_val) if atr_val is not None else price * 0.02
+                proposed_dist = abs(price - fp_sl)
+                sl_dist = max(proposed_dist, atr_floor * 0.8)
+                sl_price = price - sl_dist if is_long else price + sl_dist
+                sl_source = "腳步圖支撐"
+            elif is_long and basis_low is not None:
                 sl_price = basis_low * (1.0 - buffer_pct)
+                sl_source = "結構低點"
             elif (not is_long) and basis_high is not None:
                 sl_price = basis_high * (1.0 + buffer_pct)
+                sl_source = "結構高點"
 
             if sl_price is None:
-                if atr_val is not None:
-                    # 結構缺失時，用動態 ATR 倍率（高波動自動放寬，避免誤觸）
-                    sl_dist = atr_mult * atr_val
-                else:
-                    sl_dist = price * (0.03 if is_gambler else 0.02)
+                sl_dist = (atr_mult * atr_val) if atr_val is not None else price * (0.03 if is_gambler else 0.02)
                 sl_price = price - sl_dist if is_long else price + sl_dist
+                sl_source = "ATR"
 
             dist_pct = abs(price - sl_price) / price if price > 0 else 0
             if dist_pct > max_pct:
                 sl_capped = True
-                if is_long:
-                    sl_price = price * (1.0 - max_pct)
-                else:
-                    sl_price = price * (1.0 + max_pct)
+                sl_price = price * (1.0 - max_pct) if is_long else price * (1.0 + max_pct)
 
         # 風險距離（R 的母數）
         risk_dist = (price - sl_price) if is_long else (sl_price - price)
@@ -3945,59 +5782,85 @@ def build_report_message_tiered(
         tp1_label = tp2_label = ""
         r_tp1 = r_tp2 = None
 
-        # 列車 (S/S+)：主力成本對稱優先，其次 1.2R
+        # 列車 (S/S+)：TP 優先順序：腳步圖阻力 > VWAP對稱 > 1.2R
         if is_train:
-            if vwap_2h is not None and isinstance(vwap_2h, (int, float)) and vwap_2h > 0:
-                vwap = float(vwap_2h)
-                if is_long:
-                    cand = 2.0 * price - vwap
-                    if cand > price:
-                        tp1_price = cand
-                        tp1_label = "主力成本"
-                    else:
-                        tp1_price = price + 1.2 * risk_dist
-                        tp1_label = "1.2R"
-                else:
-                    cand = 2.0 * vwap - price
-                    if 0 < cand < price:
-                        tp1_price = cand
-                        tp1_label = "主力成本"
-                    else:
-                        tp1_price = price - 1.2 * risk_dist
-                        tp1_label = "1.2R"
-            else:
-                tp1_price = price + 1.2 * risk_dist if is_long else price - 1.2 * risk_dist
-                tp1_label = "1.2R"
-            r_tp1 = round(((tp1_price - price) / risk_dist) if is_long else ((price - tp1_price) / risk_dist), 1)
+            # 腳步圖阻力在 1.0R~3.5R 區間才採用（避免目標過近/過遠）
+            if _fp_res_valid:
+                fp_res_val = float(fp_resistance) if is_long else float(fp_resistance)
+                r_candidate = abs(fp_res_val - price) / risk_dist
+                if 1.0 <= r_candidate <= 3.5:
+                    tp1_price = fp_res_val
+                    tp1_label = f"腳步圖阻力({r_candidate:.1f}R)"
+                    r_tp1 = round(r_candidate, 1)
 
-        # 賭鬼 (A)：SL 保留現有結構邏輯，TP1 固定為 1.0R，TP2 採用「風報比 2.5~4.0R」區間的理論目標
+            if tp1_price is None:
+                if vwap_2h is not None and isinstance(vwap_2h, (int, float)) and vwap_2h > 0:
+                    vwap = float(vwap_2h)
+                    if is_long:
+                        cand = 2.0 * price - vwap
+                        if cand > price:
+                            tp1_price = cand
+                            tp1_label = "主力成本"
+                        else:
+                            tp1_price = price + 1.2 * risk_dist
+                            tp1_label = "1.2R"
+                    else:
+                        cand = 2.0 * vwap - price
+                        if 0 < cand < price:
+                            tp1_price = cand
+                            tp1_label = "主力成本"
+                        else:
+                            tp1_price = price - 1.2 * risk_dist
+                            tp1_label = "1.2R"
+                else:
+                    tp1_price = price + 1.2 * risk_dist if is_long else price - 1.2 * risk_dist
+                    tp1_label = "1.2R"
+            if r_tp1 is None and tp1_price is not None:
+                r_tp1 = round(((tp1_price - price) / risk_dist) if is_long else ((price - tp1_price) / risk_dist), 1)
+
+        # 賭鬼 (A)：TP1 優先腳步圖阻力(0.8R~2.5R 內才採)，否則固定 1.0R；TP2 理論目標
         else:
-            # TP1：固定 1R
-            tp1_price = price + 1.0 * risk_dist if is_long else price - 1.0 * risk_dist
-            tp1_label = "1.0R"
-            r_tp1 = 1.0
-            # TP2：依波動度動態選擇 2.5R~4.0R 之間的目標（僅作為績效評估用理論 TP2）
-            atr_val = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
+            # TP1：嘗試腳步圖阻力
+            if _fp_res_valid:
+                fp_res_val = float(fp_resistance)
+                r_candidate = abs(fp_res_val - price) / risk_dist
+                if 0.8 <= r_candidate <= 2.5:
+                    tp1_price = fp_res_val
+                    tp1_label = f"腳步圖阻力({r_candidate:.1f}R)"
+                    r_tp1 = round(r_candidate, 1)
+            if tp1_price is None:
+                tp1_price = price + 1.0 * risk_dist if is_long else price - 1.0 * risk_dist
+                tp1_label = "1.0R"
+                r_tp1 = 1.0
+            # TP2：依波動度動態選擇 2.5R~4.0R（績效評估用理論目標）
+            _atr2 = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
             target_r2 = 3.0
-            if atr_val is not None and price > 0:
-                vol_pct = (atr_val / price) * 100.0
-                if vol_pct >= 3.0:
+            if _atr2 is not None and price > 0:
+                _vp2 = (_atr2 / price) * 100.0
+                if _vp2 >= 3.0:
                     target_r2 = 2.5
-                elif vol_pct <= 1.5:
+                elif _vp2 <= 1.5:
                     target_r2 = 3.5
                 else:
-                    # 線性內插 1.5%~3.0% → 3.5R~2.5R
-                    ratio = (vol_pct - 1.5) / (3.0 - 1.5)
+                    ratio = (_vp2 - 1.5) / (3.0 - 1.5)
                     target_r2 = 3.5 - ratio * (3.5 - 2.5)
-            # 保險起見 clamp 在 2.5~4.0R 之間
             target_r2 = max(2.5, min(4.0, target_r2))
-            tp2_price = price + target_r2 * risk_dist if is_long else price - target_r2 * risk_dist
-            tp2_label = f"{target_r2:.1f}R"
-            r_tp2 = round(target_r2, 1)
+            # 如果腳步圖阻力比 TP2 更遠，用腳步圖做 TP2
+            if _fp_res_valid:
+                fp_res_val = float(fp_resistance)
+                r_fp2 = abs(fp_res_val - price) / risk_dist
+                if r_fp2 > (r_tp1 or 1.0) and r_fp2 <= 5.0:
+                    tp2_price = fp_res_val
+                    tp2_label = f"腳步圖阻力({r_fp2:.1f}R)"
+                    r_tp2 = round(r_fp2, 1)
+            if tp2_price is None:
+                tp2_price = price + target_r2 * risk_dist if is_long else price - target_r2 * risk_dist
+                tp2_label = f"{target_r2:.1f}R"
+                r_tp2 = round(target_r2, 1)
 
         # energy_exhausted / cvd_divergence 保留為附註旗標
         energy_exhausted = bool(cvd_divergence)
-        tp1_note = tp1_label
+        tp1_note = f"{tp1_label}（{sl_source}止損）"
         return _ret(sl_price, tp1_price, tp2_price, r_tp1, r_tp2, tp1_label, tp2_label, sl_capped, energy_exhausted, tp1_note)
 
     def _is_bull(x: Dict) -> bool:
@@ -4294,14 +6157,46 @@ def build_report_message_tiered(
                     recent_low_2h=x.get("recent_low_2h"),
                     last_kline_high_30m=x.get("last_kline_high_30m"),
                     last_kline_low_30m=x.get("last_kline_low_30m"),
+                    fp_support=x.get("fp_support"),
+                    fp_resistance=x.get("fp_resistance"),
+                    fp_poc=x.get("fp_poc"),
                 )
-                # 將 SL/TP 價位與標籤存回，供 24h 出場追蹤（SL 與 TP 同源：主力成本 或 ATR）
+                # 將 SL/TP 價位與標籤存回，供 24h 出場追蹤
                 x["sl_price_str"] = sl_val
                 x["tp1_price_str"] = tp1_val
                 x["tp1_label"] = tp1_label
                 x["tp1_real_str"] = tp1_real_str
                 x["tp1_real_note"] = tp1_real_note
                 x["r_tp1"] = r_tp1
+                # 推導 SL 來源（用於止損通知訊息精準描述）
+                _is_long_for_sl = is_bull
+                _fp_sup_stored = x.get("fp_support")
+                _fp_sup_ok = (
+                    _fp_sup_stored is not None
+                    and isinstance(_fp_sup_stored, (int, float))
+                    and _fp_sup_stored > 0
+                    and ((_is_long_for_sl and _fp_sup_stored < (x.get("current_price") or 999999)) or
+                         (not _is_long_for_sl and _fp_sup_stored > (x.get("current_price") or 0)))
+                )
+                if _fp_sup_ok:
+                    # 根據關鍵位實際數據來源產生精準 SL 標籤
+                    _fp_ds = x.get("fp_data_source") or ""
+                    if "footprint_history" in _fp_ds:
+                        x["sl_source"] = "腳步圖支撐"
+                    elif "ob_depth_agg" in _fp_ds:
+                        x["sl_source"] = "訂單簿支撐(聚合)"
+                    elif "ob_depth_binance" in _fp_ds:
+                        x["sl_source"] = "訂單簿支撐(Binance)"
+                    elif "taker_concentration" in _fp_ds:
+                        x["sl_source"] = "taker支撐(主動買入集中位)"
+                    else:
+                        x["sl_source"] = "訂單簿支撐"
+                elif (x.get("recent_low_2h") if _is_long_for_sl else x.get("recent_high_2h")):
+                    x["sl_source"] = "結構低點" if _is_long_for_sl else "結構高點"
+                elif x.get("last_kline_low_30m" if _is_long_for_sl else "last_kline_high_30m"):
+                    x["sl_source"] = "K線結構"
+                else:
+                    x["sl_source"] = "ATR動態止損"
                 # 賭鬼虛擬 TP2 目標：僅用於績效評估與 TP2 命中統計，不改變實際出場邏輯
                 x["tp2_price_str"] = tp2_val
                 x["r_tp2"] = r_tp2
@@ -4423,14 +6318,21 @@ def build_report_message_tiered(
                     _energy_score += 1
                 if x.get("whale_sync"):
                     _energy_score += 1
-                _max_energy = 7
+                # 訂單流強度加分（flow_score 3-4 = +1）
+                _fs = x.get("flow_score") or 0
+                if _fs >= 3:
+                    _energy_score += 1
+                # OI 加速加分
+                if x.get("oi_acceleration") and x.get("oi_trend") in ("building", "declining"):
+                    _energy_score += 1
+                _max_energy = 9  # 擴展至 9 分滿格（新增兩個維度）
                 _energy_score = min(_energy_score, _max_energy)
                 if _energy_score >= 2:  # 至少兩項共振才顯示能量條
                     _filled = "🔋" * _energy_score
                     _empty = "○" * (_max_energy - _energy_score)
                     _energy_label = (
-                        "滿能量" if _energy_score >= 6 else
-                        "高能量" if _energy_score >= 4 else
+                        "滿能量" if _energy_score >= 8 else
+                        "高能量" if _energy_score >= 5 else
                         "中能量"
                     )
                     lines.append(f"⚡ 能量：{_filled}{_empty} {_energy_score}/{_max_energy} ({_energy_label})")
@@ -4447,18 +6349,38 @@ def build_report_message_tiered(
                         _sl_dist_str = f" 距現價 `{_sl_dist_pct:.1f}%`"
                 except (TypeError, ValueError):
                     pass
+                # ── 取得腳步圖數據源（用於白話說明）─────────────────────
+                _fp_ds = ""
+                _fp_raw = x.get("fp_support") or x.get("fp_resistance")
+                if _fp_raw:
+                    # 從 all_top 中取腳步圖結構（已在 enrichment 存入）
+                    _fp_ds = "footprint_history"
+                _x_sl_src = x.get("sl_source") or "ATR動態止損"
+                _sl_white = sl_plain_desc(_x_sl_src, is_bull, _fp_ds)
+                _tp_white = tp_plain_desc(t1_note, is_bull, _fp_ds)
+
                 if stars >= 5:
                     # 列車：若 SL 距現價 >5%，標注「深空防護」
                     _sl_deep_note = ""
                     if _sl_dist_pct is not None and _sl_dist_pct > 5.0:
                         _sl_deep_note = " 🔐(深空防護)"
-                    lines.append(f"🛑 止損：`{sl_val}`{_sl_dist_str}(標準){_sl_deep_note} {cap_note}")
+                    lines.append(f"🛑 止損：`{sl_val}`{_sl_dist_str}{_sl_deep_note} {cap_note}")
+                    if _sl_white:
+                        lines.append(f"  └ {_sl_white}")
                     r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
                     lines.append(f"✅ 止盈：`{tp1_val}` ({t1_note}){r1}")
+                    if _tp_white:
+                        lines.append(f"  └ {_tp_white}")
                 else:
-                    # 賭鬼：1.0R TP1 + 放飛剩餘 40% + 顯示 TP2 理論目標（供評估與管理）
+                    # 賭鬼：TP1（腳步圖阻力優先）+ 放飛剩餘 40% + TP2 理論目標
                     lines.append(f"🛑 止損：`{sl_val}`{_sl_dist_str}(防洗盤標準) {cap_note}")
-                    lines.append(f"✅ TP1(落袋60%)：`{tp1_val}` (1.0R 保底)")
+                    if _sl_white:
+                        lines.append(f"  └ {_sl_white}")
+                    _tp1_src = t1_note if t1_note else "1.0R"
+                    r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
+                    lines.append(f"✅ TP1(落袋60%)：`{tp1_val}` ({_tp1_src}){r1}")
+                    if _tp_white:
+                        lines.append(f"  └ {_tp_white}")
                     # 若有計算出 TP2，顯示理論目標價與對應 R
                     tp2_str = x.get("tp2_price_str") or "-"
                     r2 = x.get("r_tp2")
@@ -4468,9 +6390,83 @@ def build_report_message_tiered(
                         except (TypeError, ValueError):
                             r2_val = None
                         if r2_val is not None:
+                            _tp2_label = x.get("tp2_label") or f"{r2_val:.1f}R"
+                            _tp2_white = tp_plain_desc(_tp2_label, is_bull, _fp_ds)
                             lines.append(f"🎯 TP2 理論目標：`{tp2_str}` (~{r2_val:.1f}R)")
-                    lines.append("🚀 剩餘 40%：不設止盈！推保本後沿著均線移動止損，讓利潤奔跑！")
-                # 6. 進階情報警示（新功能：爆量 / 爆倉熱力圖 / 掛單牆 / 主力同步）
+                            if _tp2_white:
+                                lines.append(f"  └ {_tp2_white}")
+
+                # ── 📊 訂單流分析（主動買賣比 + 淨倉位 + 腳步圖關鍵位）─────────
+                _flow_score = x.get("flow_score") or 0
+                _taker_r = x.get("taker_ratio")
+                _net_pd = x.get("net_pos_delta")
+                _fp_poc_val = x.get("fp_poc")
+                _fp_sup_val = x.get("fp_support")
+                _fp_res_val = x.get("fp_resistance")
+
+                _flow_lines = []
+                _oi_trend_msg = x.get("oi_trend")
+                _oi_accel = x.get("oi_acceleration")
+                _top_ls = x.get("top_ls_ratio")
+
+                # 主動買賣比
+                if _taker_r is not None:
+                    _buy_dominant = (_taker_r > 55 and is_bull) or (_taker_r < 45 and not is_bull)
+                    _taker_icon = "🟢" if _buy_dominant else ("🔴" if ((_taker_r < 45 and is_bull) or (_taker_r > 55 and not is_bull)) else "🟡")
+                    _taker_desc = (
+                        f"買盤主導 {_taker_r:.0f}%" if _taker_r >= 55 else
+                        f"賣盤主導 {100-_taker_r:.0f}%" if _taker_r <= 45 else
+                        f"買賣均衡 {_taker_r:.0f}%"
+                    )
+                    _flow_lines.append(f"  {_taker_icon} 主動買賣：{_taker_desc}")
+                # 淨多倉位
+                if _net_pd is not None:
+                    _net_dir = "增加" if _net_pd > 0.05 else ("減少" if _net_pd < -0.05 else "持平")
+                    _net_icon = "🟢" if (_net_pd > 0.05 and is_bull) or (_net_pd < -0.05 and not is_bull) else ("🔴" if (_net_pd > 0.05 and not is_bull) or (_net_pd < -0.05 and is_bull) else "🟡")
+                    _flow_lines.append(f"  {_net_icon} 淨多倉位：{_net_dir} ({_net_pd:+.2f})")
+                # OI 趨勢
+                if _oi_trend_msg:
+                    _oi_trend_map = {
+                        "building": ("🟢", "加速建倉"),
+                        "declining": ("🔴", "倉位縮減"),
+                        "flat": ("🟡", "倉位持平"),
+                        "reversing": ("🟠", "方向轉換中"),
+                    }
+                    _oi_icon, _oi_label = _oi_trend_map.get(_oi_trend_msg, ("⬜", _oi_trend_msg))
+                    _oi_accel_tag = " ⚡加速" if _oi_accel else ""
+                    # 一致性判斷
+                    _oi_consistent = (
+                        (_oi_trend_msg == "building" and is_bull) or
+                        (_oi_trend_msg == "declining" and not is_bull)
+                    )
+                    _oi_consistent_icon = "🟢" if _oi_consistent else ("🔴" if not _oi_consistent and _oi_trend_msg not in ("flat","reversing") else "🟡")
+                    _flow_lines.append(f"  {_oi_consistent_icon} OI 趨勢：{_oi_label}{_oi_accel_tag}")
+                # 大戶帳戶多空比
+                if _top_ls is not None:
+                    _top_ls_icon = "🟢" if ((_top_ls > 1.1 and is_bull) or (_top_ls < 0.9 and not is_bull)) else ("🔴" if ((_top_ls < 0.9 and is_bull) or (_top_ls > 1.1 and not is_bull)) else "🟡")
+                    _top_ls_desc = f"大戶偏多({_top_ls:.2f})" if _top_ls > 1.05 else (f"大戶偏空({_top_ls:.2f})" if _top_ls < 0.95 else f"大戶中性({_top_ls:.2f})")
+                    _flow_lines.append(f"  {_top_ls_icon} 大戶帳戶：{_top_ls_desc}")
+                # 成交密集點（來源動態標示）
+                if _fp_poc_val is not None:
+                    _fp_fmt = f"{_fp_poc_val:.6g}"
+                    _fp_ds_label = x.get("fp_data_source") or ""
+                    if "footprint_history" in _fp_ds_label:
+                        _poc_label = "腳步圖POC"
+                    elif "taker_concentration" in _fp_ds_label:
+                        _poc_label = "taker主動買入密集區"
+                    elif "ob_depth" in _fp_ds_label:
+                        _poc_label = "訂單簿掛單密集區"
+                    else:
+                        _poc_label = "成交密集區"
+                    _flow_lines.append(f"  📍 {_poc_label}：`{_fp_fmt}`")
+
+                if _flow_lines:
+                    _fs_label = "強力確認" if _flow_score >= 3 else ("中度確認" if _flow_score >= 2 else ("中性" if _flow_score >= 0 else "背離警示"))
+                    _fs_bars = "█" * _flow_score + "░" * (4 - _flow_score)
+                    lines.append(f"📊 *訂單流* [{_fs_bars}] {_fs_label}")
+                    lines.extend(_flow_lines)
+
+                # 6. 進階情報警示（爆量 / 爆倉熱力圖 / 掛單牆 / 主力同步）
                 # ── ⚡ 爆量啟動 ────────────────────────────────────────────
                 _vsr = x.get("vol_spike_ratio")
                 if isinstance(_vsr, (int, float)) and _vsr >= 2.0:
@@ -4494,6 +6490,23 @@ def build_report_message_tiered(
                     _wi = x.get("whale_index")
                     _wi_str = f"指數={_wi:.0f}" if isinstance(_wi, (int, float)) else ""
                     lines.append(f"🐋 *主力同步建倉* {_wi_str}（大戶與訊號方向一致，跟單心理穩定）")
+                # ── 累積費率擠壓標籤 ──────────────────────────────────────
+                _accum_lbl = x.get("accum_fr_label")
+                if _accum_lbl:
+                    lines.append(_accum_lbl)
+                # ── 🎯 期權最大痛點（BTC/ETH 時額外顯示）─────────────────
+                _sym_base = x.get("symbol", "").replace("USDT", "").upper()
+                if _sym_base in ("BTC", "ETH"):
+                    try:
+                        _mp = fetch_options_max_pain(_sym_base)
+                        if _mp.get("max_pain_price"):
+                            _mp_price = _mp["max_pain_price"]
+                            _mp_cur = x.get("current_price") or 0
+                            _mp_dist = abs(_mp_price - _mp_cur) / _mp_cur * 100 if _mp_cur > 0 else 0
+                            _mp_dir = "上方" if _mp_price > _mp_cur else "下方"
+                            lines.append(f"🎯 期權最大痛點 `{_mp_price:,.0f}` ({_mp_dir} `{_mp_dist:.1f}%`)")
+                    except Exception:
+                        pass
                 # ── 低流動性警示 ────────────────────────────────────────────
                 if x.get("low_liquidity_warning"):
                     lines.append("⚠️ 成交量極低 小心滑價")
@@ -4844,6 +6857,9 @@ def fetch_position_change():
 
     logger.info("🚀 傑克船長 2.0 閃電版正式啟動 | 測試模式：75折門檻 | 頻率：15M")
     logger.info("【巨鯨高效漏斗】開始執行 15M 持倉狙擊掃描...")
+    _cb_tripped = _circuit_breaker.get("tripped", False)
+    logger.info(f"[啟動環境] CG_API_KEY={'已設定('+CG_API_KEY[:6]+'...)' if CG_API_KEY else '❌未設定'}"
+                f" | MAX_WORKERS={MAX_WORKERS} | 熔斷器={'⚠️降速模式' if _cb_tripped else '✅正常'}")
 
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 0：預先抓取 BingX 合約對照表（僅供 K 線查詢，不做過濾）
@@ -5255,7 +7271,6 @@ def fetch_position_change():
             ob_wall = check_orderbook_wall(sym, _cur_price, _is_long_signal, preferred_symbol=preferred)
 
         # ── 🐋 主力同步建倉判斷 ─────────────────────────────────────────────
-        # 鯨魚指數 > 65 且做多 / < 35 且做空 → 主力與訊號同向
         whale_sync = False
         if whale_idx is not None and isinstance(whale_idx, (int, float)):
             if _is_long_signal and whale_idx >= 65:
@@ -5264,6 +7279,119 @@ def fetch_position_change():
             elif not _is_long_signal and whale_idx <= 35:
                 whale_sync = True
                 reason = reason + f" 🐋主力同步做空({whale_idx:.0f})"
+
+        # ── 💱 累積費率極端值偵測（嘎空/殺多潛力）──────────────────────────
+        _accum_fr_data: Dict[str, Any] = {}
+        try:
+            _accum_fr_data = fetch_accumulated_funding_score(sym)
+            _squeeze_risk = _accum_fr_data.get("squeeze_risk") or "neutral"
+            if _squeeze_risk == "short_squeeze" and _is_long_signal:
+                # 空頭費用過高 + 做多訊號 = 嘎空機率大，加分
+                reason = reason + f" 🔥費率嘎空({_accum_fr_data.get('accumulated_7d',0)*100:.2f}%累積)"
+                logger.info(f"[累積費率] {sym} 空頭過熱+做多訊號=嘎空潛力")
+            elif _squeeze_risk == "long_squeeze" and _is_long_signal:
+                # 多頭費用過高 + 做多訊號 = 追多風險，降信心
+                reason = reason + f" ⚠️費率多頭過熱({_accum_fr_data.get('accumulated_7d',0)*100:.2f}%累積)"
+                logger.info(f"[累積費率] {sym} 多頭過熱+做多訊號=追多風險")
+            elif _squeeze_risk == "long_squeeze" and not _is_long_signal:
+                # 多頭費用過高 + 做空訊號 = 殺多潛力大
+                reason = reason + f" ⛽費率殺多({_accum_fr_data.get('accumulated_7d',0)*100:.2f}%累積)"
+        except Exception as _fe2:
+            logger.debug(f"[累積費率] {sym} 獲取失敗: {_fe2}")
+
+        # ── 📊 訂單流分析（主動買賣比 + 淨多倉位 + 腳步圖 + OI趨勢 + 大戶L/S）──
+        _taker_ratio: Optional[float] = None
+        _net_pos_delta: Optional[float] = None
+        _footprint: Dict[str, Any] = {}
+        _fp_sup: Optional[float] = None
+        _fp_res: Optional[float] = None
+        _fp_poc: Optional[float] = None
+        _flow_score_val: int = 0
+        _oi_trend_data: Dict[str, Any] = {}
+        _top_ls_ratio: Optional[float] = None
+        if _cur_price and isinstance(_cur_price, (int, float)) and _cur_price > 0:
+            try:
+                _taker_ratio = fetch_taker_bvs_ratio(sym)
+                time.sleep(0.12)
+                _net_pos_delta = fetch_net_position_delta(sym)
+                time.sleep(0.12)
+                _footprint = fetch_footprint_key_levels(sym, _cur_price, _is_long_signal)
+                time.sleep(0.12)
+                _oi_trend_data = fetch_oi_trend_analysis(sym)
+                time.sleep(0.12)
+                _top_ls_ratio = fetch_top_account_ls_ratio(sym)
+                if _is_long_signal:
+                    _fp_sup = _footprint.get("nearest_support")
+                    _fp_res = _footprint.get("nearest_resistance")
+                else:
+                    # 做空方向：阻力在上（壓力SL），支撐在下（TP目標）
+                    _fp_sup = _footprint.get("nearest_resistance")
+                    _fp_res = _footprint.get("nearest_support")
+                _fp_poc = _footprint.get("poc")
+                _flow_score_val = compute_flow_score(_taker_ratio, _net_pos_delta, _is_long_signal)
+                # OI 加速建倉 → 額外加分
+                if _oi_trend_data.get("acceleration") and (
+                    (_is_long_signal and _oi_trend_data.get("trend") == "building") or
+                    (not _is_long_signal and _oi_trend_data.get("trend") == "declining")
+                ):
+                    _flow_score_val = min(_flow_score_val + 1, 4)
+                if _flow_score_val >= 3:
+                    reason = reason + f" 🌊訂單流強確認(+{_flow_score_val})"
+                elif _flow_score_val <= 0 and _taker_ratio is not None:
+                    pass  # 中性不加標籤
+            except Exception as _fe:
+                logger.debug(f"[訂單流] {sym} 獲取失敗: {_fe}")
+
+        # ── 🔬 訂單流智能升降星（基於 flow_score / oi_trend / top_ls / taker）────
+        # 規則：
+        #   升 4→5：flow_score≥3 + oi_trend=building(多)/declining(空) + 大戶同向
+        #   升 5→保持：flow_score=4 且 top_ls 確認 → 加「強升」標籤
+        #   降 5→4：flow_score≤0 且 taker 反向 且 top_ls 反向 → 降星
+        #   降 4→None(丟棄)：flow_score=0 且 taker 強烈反向(>65%反向) → 丟棄
+        _oi_trend_str = _oi_trend_data.get("trend") if _oi_trend_data else None
+        _oi_accel_b = _oi_trend_data.get("acceleration") if _oi_trend_data else False
+        _taker_aligned = (
+            (_is_long_signal and _taker_ratio is not None and _taker_ratio > 55) or
+            (not _is_long_signal and _taker_ratio is not None and _taker_ratio < 45)
+        )
+        _taker_strongly_opposed = (
+            (_is_long_signal and _taker_ratio is not None and _taker_ratio < 38) or
+            (not _is_long_signal and _taker_ratio is not None and _taker_ratio > 62)
+        )
+        _oi_trend_aligned = (
+            (_is_long_signal and _oi_trend_str == "building") or
+            (not _is_long_signal and _oi_trend_str == "declining")
+        )
+        _top_ls_aligned = (
+            (_is_long_signal and _top_ls_ratio is not None and _top_ls_ratio > 1.05) or
+            (not _is_long_signal and _top_ls_ratio is not None and _top_ls_ratio < 0.95)
+        )
+        _top_ls_opposed = (
+            (_is_long_signal and _top_ls_ratio is not None and _top_ls_ratio < 0.92) or
+            (not _is_long_signal and _top_ls_ratio is not None and _top_ls_ratio > 1.08)
+        )
+
+        # 升 4→5：三重訂單流確認（taker強確認 + OI趨勢對齊 + 大戶同向）
+        if stars == 4 and _flow_score_val >= 3 and _oi_trend_aligned and _top_ls_aligned:
+            stars = 5
+            reason = reason + f" ⬆️訂單流三重升星(flow={_flow_score_val}/OI={_oi_trend_str}/大戶={_top_ls_ratio:.2f})"
+            logger.info(f"[升星] {sym} 4→5星：flow={_flow_score_val} oi={_oi_trend_str} top_ls={_top_ls_ratio}")
+
+        # 強加速升等標記：5星 + flow_score=4 + OI加速建倉 → 信心最強
+        elif stars == 5 and _flow_score_val == 4 and _oi_accel_b and _oi_trend_aligned:
+            reason = reason + " 🚀訂單流極強(三重加速確認)"
+            logger.info(f"[極強] {sym} 5星訂單流極強加速確認")
+
+        # 降 5→4：taker反向 + 大戶反向 + flow_score低
+        elif stars == 5 and _flow_score_val <= 0 and _taker_strongly_opposed and _top_ls_opposed:
+            stars = 4
+            reason = reason + f" ⬇️訂單流警告降星(taker={_taker_ratio:.0f}%反向,大戶={_top_ls_ratio:.2f}反向)" if _taker_ratio and _top_ls_ratio else reason + " ⬇️訂單流警告降星"
+            logger.info(f"[降星] {sym} 5→4星：taker={_taker_ratio} top_ls={_top_ls_ratio} flow={_flow_score_val}")
+
+        # 丟棄4星：taker強烈反向且訂單流完全背離（保護勝率）
+        elif stars == 4 and _taker_strongly_opposed and _flow_score_val <= 0 and _top_ls_opposed:
+            logger.info(f"[丟棄] {sym} 4星被訂單流反向丟棄：taker={_taker_ratio} top_ls={_top_ls_ratio} flow={_flow_score_val}")
+            continue  # 不進 all_top，相當於無訊號
 
         # 判斷此幣 BingX 是否支援（合併 BingX API + CoinGlass exchange-pairs 兩個來源）
         _base_key = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
@@ -5309,6 +7437,20 @@ def fetch_position_change():
             "ob_wall": ob_wall,           # 掛單牆
             "whale_sync": whale_sync,     # 主力同步
             "bingx_supported": _bingx_ok,  # BingX 是否支援（CoinGlass exchange-pairs 驗證）
+            # ── 訂單流分析 ──
+            "taker_ratio": _taker_ratio,          # 主動買盤佔比 %（>50=買盤主導）
+            "net_pos_delta": _net_pos_delta,       # 淨多倉位方向（+1=強做多,-1=強做空）
+            "fp_support": _fp_sup,                 # 關鍵支撐位（SL 精準化用）
+            "fp_resistance": _fp_res,              # 關鍵阻力位（TP 精準化用）
+            "fp_poc": _fp_poc,                     # 成交密集點（Point of Control）
+            "fp_data_source": _footprint.get("data_source") or "unavailable",  # 數據來源標籤
+            "flow_score": _flow_score_val,         # 訂單流綜合評分 0~4
+            "oi_trend": _oi_trend_data.get("trend"),  # OI趨勢: building/declining/flat/reversing
+            "oi_acceleration": _oi_trend_data.get("acceleration"),  # OI加速建倉旗標
+            "top_ls_ratio": _top_ls_ratio,         # 大戶多空比（>1大戶偏多，<1大戶偏空）
+            "accum_fr_7d": _accum_fr_data.get("accumulated_7d"),   # 7日累積資金費率
+            "accum_fr_squeeze": _accum_fr_data.get("squeeze_risk") or "neutral",  # 擠壓風險類型
+            "accum_fr_label": _accum_fr_data.get("squeeze_label") or "",  # 推播用標籤
         })
         resonance_str = "🔥共振" if resonance_5m is True else ("⚠️已竭" if resonance_5m is False else "❓未知")
         vol_str = f"⚡{vol_spike_ratio:.1f}×" if has_vol_spike else "-"
@@ -5801,10 +7943,17 @@ def fetch_position_change():
                             logger.info(f"倉位追蹤已發送: {sym_base} 剩餘倉位觸及止損 (tp1_sl，整體獲利結案，realized_R={entry.get('realized_R')})")
                         else:
                             sl_copy = random.choice(SL_STOPLOSS_COPY)
+                            _sl_src = entry.get("sl_source") or "結構防守"
+                            _sl_dir_desc = (
+                                f"價格跌破 `{sl_level}` {_sl_src}底線，多方結構破壞。"
+                                if is_long else
+                                f"價格突破 `{sl_level}` {_sl_src}壓力，空方結構破壞。"
+                            )
                             exit_msg = (
                                 f"⚠️ *【已觸發止損・本倉結案】*\n"
-                                f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 價格已觸及止損 `{sl_level}`。\n"
-                                f"原因：價格觸及防守價，進場理由失效。\n\n{sl_copy}"
+                                f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}`\n"
+                                f"止損觸發：{_sl_dir_desc}\n"
+                                f"本次 R：`-1.0R`（控管得當，止損機制正常運作）\n\n{sl_copy}"
                             )
                             send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
                             entry["notified_exit"] = True
@@ -6222,6 +8371,7 @@ def fetch_position_change():
                     "sl": _parse_price_str(sl_str),
                     "tp1": _parse_price_str(tp1_str),
                     "tp1_label": x.get("tp1_label") or "主力成本",
+                    "sl_source": x.get("sl_source") or "結構防守",
                     "tp1_notified": False,
                     "stars": x.get("stars") or 0,
                     "r_tp1": x.get("r_tp1"),
@@ -7950,31 +10100,92 @@ def _fetch_liq_radar_analysis_1m(symbol: str) -> Dict:
     return result
 
 
+def _fetch_liq_coin_list_snapshot() -> Dict[str, Dict]:
+    """取得全市場幣種爆倉快照（liq_coin_list），回傳 base -> {long_usd, short_usd, total_usd}。
+    用於雷達掃描前快速找出「正在爆倉」的幣種，而非等待逐幣輪詢。
+    """
+    out: Dict[str, Dict] = {}
+    logger.debug(f"[爆倉快照] endpoint={CG_EP['liq_coin_list']}")
+    try:
+        j = _cg_get(CG_EP["liq_coin_list"], {"timeType": "0"})  # timeType=0=過去1小時
+        if not j:
+            return out
+        rows = j.get("data") or j.get("list") or []
+        for row in (rows if isinstance(rows, list) else []):
+            if not isinstance(row, dict):
+                continue
+            base = row.get("symbol") or row.get("coin") or ""
+            if not base:
+                continue
+            base = str(base).upper().replace("USDT", "")
+            try:
+                long_usd = float(row.get("longLiqUsd") or row.get("buyLiqUsd") or
+                                  row.get("long") or 0)
+                short_usd = float(row.get("shortLiqUsd") or row.get("sellLiqUsd") or
+                                   row.get("short") or 0)
+                total_usd = long_usd + short_usd
+                if total_usd > 0:
+                    out[base] = {"long_usd": long_usd, "short_usd": short_usd,
+                                  "total_usd": total_usd}
+            except (TypeError, ValueError):
+                continue
+        logger.debug(f"[爆倉快照] 解析到 {len(out)} 幣種爆倉數據")
+    except Exception as e:
+        logger.debug(f"[爆倉快照] 異常: {e}")
+    return out
+
+
 def run_liquidity_radar_once():
     """主流程：流動性獵取雷達（執行一次，適合排程或 HTTP 觸發）
-    雙重確認濾網（防接刀）：
-      多軍爆倉（多單被強平）→ RSI 1m < 20（極度超賣）+ 長下影線針形態
-      空軍爆倉（空單被強平）→ RSI 1m > 80（極度超買）+ 長上影線針形態
-      任一條件：RSI 進入極端區間（<25 或 >75），或出現針形態，擇一即推播
+    升級版三重確認濾網：
+      1. liq_coin_list 爆倉快照：先找出正在爆倉的幣種（避免逐幣輪詢）
+      2. RSI 1m 極端區間（<20 超賣 / >80 超買）+ 長下/上影線針形態
+      3. 累積費率輔助確認（空頭過熱 + 多單爆倉 = 嘎空機率大）
     """
-    logger.info(f"開始執行流動性獵取雷達（雙重確認版），共 {len(LIQ_SYMBOLS)} 個幣種...")
+    logger.info(f"開始執行流動性獵取雷達（三重確認升級版），共 {len(LIQ_SYMBOLS)} 個幣種...")
+
+    # 優先用 liq_coin_list 快照找出「已在爆倉」的幣種
+    liq_snapshot = _fetch_liq_coin_list_snapshot()
+    hot_symbols = set()
+    if liq_snapshot:
+        # 門檻：過去1小時爆倉量 > 50萬 USD
+        for base_s, data_s in liq_snapshot.items():
+            if data_s["total_usd"] >= 500_000:
+                hot_symbols.add(base_s)
+        logger.info(f"[撿屍雷達] 快照找到 {len(hot_symbols)} 個熱點幣種（爆倉>50萬USD）：{sorted(hot_symbols)[:10]}")
+
+    # 合併 LIQ_SYMBOLS 與快照熱點（熱點優先）
+    scan_symbols = []
+    for sym_s in LIQ_SYMBOLS:
+        base_s = sym_s.replace("USDT", "").replace("-", "").upper()
+        is_hot = base_s in hot_symbols
+        scan_symbols.append((sym_s, is_hot))
+    # 熱點優先排序
+    scan_symbols.sort(key=lambda x: (0 if x[1] else 1))
 
     events: List[Dict] = []
 
-    for idx, symbol in enumerate(LIQ_SYMBOLS):
+    for idx, (symbol, is_hot_sym) in enumerate(scan_symbols):
+        base_sym = symbol.replace("USDT", "").replace("-", "").upper()
         try:
+            # 快照前置過濾：非熱點幣種且快照有資料時，降低 OI 門檻
+            snap_data = liq_snapshot.get(base_sym)
+            if snap_data:
+                logger.debug(f"[撿屍雷達] {symbol} 快照爆倉量 ${snap_data['total_usd']/1e6:.2f}M"
+                             f" 多:{snap_data['long_usd']/1e6:.2f}M 空:{snap_data['short_usd']/1e6:.2f}M")
+
             data_array = fetch_liquidation_data(symbol)
             if data_array is None:
-                if idx < len(LIQ_SYMBOLS) - 1:
+                if idx < len(scan_symbols) - 1:
                     time.sleep(LIQ_REQUEST_DELAY)
                 continue
             event = process_liquidation_data(symbol, data_array)
             if not event:
-                if idx < len(LIQ_SYMBOLS) - 1:
+                if idx < len(scan_symbols) - 1:
                     time.sleep(LIQ_REQUEST_DELAY)
                 continue
 
-            # 雙重確認：RSI 極端區間 + 長下/上影線針形態
+            # 三重確認：RSI 極端區間 + 針形態 + 累積費率
             analysis = _fetch_liq_radar_analysis_1m(symbol)
             rsi_1m = analysis.get("rsi")
             has_pin = analysis.get("has_pin", False)
@@ -7992,13 +10203,11 @@ def run_liquidity_radar_once():
             confirm_reason = []
 
             if rsi_1m is None:
-                # 無 RSI 資料：放行但標記未確認，不阻擋推播
                 rsi_ok = True
                 rsi_label = "RSI 未確認（資料不足）"
                 logger.warning(f"[撿屍雷達] {symbol} 無法取得 1m RSI，放行但標記未確認")
             else:
                 if is_long_liq:
-                    # 多單爆倉 → 看是否超賣
                     if rsi_1m < 20:
                         rsi_ok = True
                         rsi_label = f"🔴 RSI 1m={rsi_1m:.0f} 極度超賣（恐慌衰竭）"
@@ -8008,7 +10217,6 @@ def run_liquidity_radar_once():
                         rsi_label = f"🟡 RSI 1m={rsi_1m:.0f} 深度超賣"
                         confirm_reason.append("RSI深度超賣")
                 else:
-                    # 空單爆倉 → 看是否超買
                     if rsi_1m > 80:
                         rsi_ok = True
                         rsi_label = f"🔴 RSI 1m={rsi_1m:.0f} 極度超買（軋空衰竭）"
@@ -8018,7 +10226,7 @@ def run_liquidity_radar_once():
                         rsi_label = f"🟡 RSI 1m={rsi_1m:.0f} 深度超買"
                         confirm_reason.append("RSI深度超買")
 
-            # 針形態獨立確認（即使 RSI 未達極端，有針也算）
+            # 針形態獨立確認
             if has_pin and is_long_liq:
                 rsi_ok = True
                 pin_label = f"📌 長下影線針（下影={lower_shadow_ratio:.0%}），恐慌衰竭形態"
@@ -8027,11 +10235,26 @@ def run_liquidity_radar_once():
                 pin_label = f"📌 長上影線針（上影形態），軋空衰竭"
                 confirm_reason.append("針形態")
 
+            # 累積費率輔助確認（第三重）
+            accum_fr_label_liq = ""
+            try:
+                accum_data_liq = fetch_accumulated_funding_score(symbol)
+                sq_risk = accum_data_liq.get("squeeze_risk") or "neutral"
+                if is_long_liq and sq_risk == "short_squeeze":
+                    # 多單爆倉 + 空頭費用過高 = 嘎空前的最後洗盤，逆轉機率極大
+                    accum_fr_label_liq = f"🔥 空頭費用過高({accum_data_liq.get('accumulated_7d',0)*100:.2f}%累積)，嘎空潛力巨大"
+                    if not rsi_ok:  # 費率條件可以部分補強
+                        confirm_reason.append("費率嘎空")
+                        rsi_ok = True
+                        rsi_label = rsi_label or "費率嘎空補強"
+                elif not is_long_liq and sq_risk == "long_squeeze":
+                    accum_fr_label_liq = f"⛽ 多頭費用過高({accum_data_liq.get('accumulated_7d',0)*100:.2f}%累積)，殺多潛力大"
+            except Exception:
+                pass
+
             if not rsi_ok:
-                logger.info(
-                    f"[撿屍雷達] {symbol} 爆倉但未通過雙重確認 RSI={rsi_1m} has_pin={has_pin}，跳過"
-                )
-                if idx < len(LIQ_SYMBOLS) - 1:
+                logger.info(f"[撿屍雷達] {symbol} 爆倉但未通過三重確認 RSI={rsi_1m} pin={has_pin}，跳過")
+                if idx < len(scan_symbols) - 1:
                     time.sleep(LIQ_REQUEST_DELAY)
                 continue
 
@@ -8039,13 +10262,17 @@ def run_liquidity_radar_once():
             event["rsi_label"] = rsi_label
             event["pin_label"] = pin_label
             event["confirm_reason"] = "、".join(confirm_reason) if confirm_reason else "條件放行"
+            event["accum_fr_label"] = accum_fr_label_liq
+            event["is_hot"] = is_hot_sym
+            event["snap_total_usd"] = snap_data["total_usd"] if snap_data else 0
             event["cur_price"] = cur_price
             event["entry_zone_low"] = entry_low
             event["entry_zone_high"] = entry_high
             events.append(event)
-            logger.info(f"[撿屍雷達] {symbol} 通過確認（{event['confirm_reason']}），加入推播")
+            logger.info(f"[撿屍雷達] {symbol} 通過確認（{event['confirm_reason']}），加入推播"
+                        + (" 🔥熱點" if is_hot_sym else ""))
 
-            if idx < len(LIQ_SYMBOLS) - 1:
+            if idx < len(scan_symbols) - 1:
                 time.sleep(LIQ_REQUEST_DELAY)
         except Exception as e:
             logger.error(f"處理 {symbol} 流動性數據時發生錯誤: {str(e)}")
@@ -8971,28 +11198,145 @@ def fetch_hyperliquid_whale_alert() -> List[Dict]:
         return []
 
 
-def fetch_hyperliquid_pnl_distribution() -> Optional[Dict]:
-    """獲取 Hyperliquid 錢包盈虧分佈"""
-    url = f"{CG_API_BASE}/api/hyperliquid/wallet/pnl-distribution"
-    headers = {
-        "CG-API-KEY": CG_API_KEY,
-        "accept": "application/json"
-    }
-    
+def fetch_hyperliquid_coin_position(symbol: str) -> Optional[Dict]:
+    """【新】取得特定幣種在 Hyperliquid 的持倉分布（多空方向、槓桿、規模）。
+    用途：判斷 HL 上的真實持倉方向，輔助鯨魚意圖分析。
+    endpoint: /api/hyperliquid/position
+    """
+    base = symbol.replace("USDT", "").replace("-PERP", "").replace("PERP", "").upper()
+    logger.debug(f"[HL持倉] {base} endpoint={CG_EP['hl_position']}")
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            logger.error(f"Hyperliquid PNL Distribution API 錯誤: {response.status_code}")
+        j = _cg_get(CG_EP["hl_position"], {"symbol": base})
+        if not j:
             return None
-        
-        result = response.json()
-        if result.get('code') not in ['0', 0, 200, '200']:
-            logger.error(f"Hyperliquid PNL Distribution API 返回錯誤: {result}")
+        data = j.get("data") or j.get("list") or j
+        if not data:
             return None
-        
-        return result.get('data', result)
+        if isinstance(data, list):
+            data = data[0] if data else None
+        if not isinstance(data, dict):
+            return None
+
+        long_pos = float(data.get("longPositionUsd") or data.get("longUsd") or
+                         data.get("long") or 0)
+        short_pos = float(data.get("shortPositionUsd") or data.get("shortUsd") or
+                          data.get("short") or 0)
+        total = long_pos + short_pos
+        ls_ratio = long_pos / short_pos if short_pos > 0 else None
+
+        logger.info(
+            f"[HL持倉] {base}: 多倉 ${long_pos/1e6:.2f}M 空倉 ${short_pos/1e6:.2f}M "
+            f"多空比={ls_ratio:.2f}" if ls_ratio else
+            f"[HL持倉] {base}: 多倉 ${long_pos/1e6:.2f}M 空倉 ${short_pos/1e6:.2f}M"
+        )
+        return {"long_usd": long_pos, "short_usd": short_pos, "total_usd": total,
+                "ls_ratio": ls_ratio, "symbol": base}
     except Exception as e:
-        logger.error(f"獲取 Hyperliquid PNL Distribution 失敗: {str(e)}")
+        logger.debug(f"[HL持倉] {base} 異常: {e}")
+        return None
+
+
+def fetch_hyperliquid_smart_money_score(symbol: str) -> Dict[str, Any]:
+    """【新】聰明錢評分：整合 HL 持倉分布 + 錢包盈虧分布，判斷方向與信心。
+    評分邏輯：
+      - HL 多空比 > 1.2（多頭主導）+ 盈利錢包佔多數 → 聰明錢偏多，score > 0
+      - HL 多空比 < 0.8（空頭主導）+ 盈利錢包佔多數 → 聰明錢偏空，score < 0
+      - 盈虧分布 + 持倉方向一致 → 信心加分
+    回傳：{"score": int, "direction": "long"/"short"/"neutral", "label": str, "hl_ls": float}
+    """
+    base = symbol.replace("USDT", "").replace("-PERP", "").upper()
+    cache_key = f"hl_smart:{base}"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 600:  # 10 分鐘快取
+            return val if val else {"score": 0, "direction": "neutral", "label": "", "hl_ls": None}
+
+    empty = {"score": 0, "direction": "neutral", "label": "", "hl_ls": None}
+
+    # ── 取 HL 幣種持倉 ────────────────────────────────────────────────
+    hl_pos = fetch_hyperliquid_coin_position(symbol)
+    hl_ls = hl_pos.get("ls_ratio") if hl_pos else None
+
+    # ── 取 HL 錢包盈虧分布（全市場，反映整體聰明錢狀態）────────────
+    pnl_score = 0
+    pnl_label_part = ""
+    try:
+        j_pnl = _cg_get(CG_EP["hl_wallet_pnl_dist"], {})
+        if j_pnl:
+            data_pnl = j_pnl.get("data") or j_pnl.get("list") or j_pnl
+            if isinstance(data_pnl, dict):
+                profit_pct = float(data_pnl.get("profitablePercent") or
+                                   data_pnl.get("winRate") or
+                                   data_pnl.get("profitable") or 0)
+                # 盈利錢包 > 60% = 聰明錢環境，大多數都在賺
+                if profit_pct > 60:
+                    pnl_score = 1
+                    pnl_label_part = f"(HL盈利錢包{profit_pct:.0f}%)"
+                elif profit_pct < 40:
+                    pnl_score = -1
+                    pnl_label_part = f"(HL虧損錢包多{100-profit_pct:.0f}%)"
+                logger.debug(f"[HL聰明錢] {base} 全市場盈利率={profit_pct:.1f}%")
+    except Exception as e_pnl:
+        logger.debug(f"[HL聰明錢] {base} 盈虧分布異常: {e_pnl}")
+
+    # ── 取 HL 錢包持倉分布（判斷大錢包 vs 小錢包方向）────────────────
+    pos_dist_label = ""
+    try:
+        j_dist = _cg_get(CG_EP["hl_wallet_pos_dist"], {"symbol": base})
+        if j_dist:
+            data_dist = j_dist.get("data") or j_dist.get("list") or j_dist
+            if isinstance(data_dist, dict):
+                large_long = float(data_dist.get("largeWalletLong") or
+                                   data_dist.get("whaleNetLong") or 0)
+                large_short = float(data_dist.get("largeWalletShort") or
+                                    data_dist.get("whaleNetShort") or 0)
+                if large_long > large_short * 1.3:
+                    pos_dist_label = "大錢包偏多"
+                    pnl_score += 1
+                elif large_short > large_long * 1.3:
+                    pos_dist_label = "大錢包偏空"
+                    pnl_score -= 1
+                logger.debug(f"[HL聰明錢] {base} 大錢包多={large_long:.0f} 空={large_short:.0f}")
+    except Exception as e_dist:
+        logger.debug(f"[HL聰明錢] {base} 持倉分布異常: {e_dist}")
+
+    # ── 綜合評分 ─────────────────────────────────────────────────────
+    final_score = pnl_score
+    if hl_ls is not None:
+        if hl_ls > 1.2:
+            final_score += 1
+        elif hl_ls < 0.8:
+            final_score -= 1
+
+    direction = "neutral"
+    if final_score >= 2:
+        direction = "long"
+    elif final_score <= -2:
+        direction = "short"
+
+    hl_ls_str = f"{hl_ls:.2f}" if hl_ls else "N/A"
+    if direction == "long":
+        label = f"🟢 HL聰明錢偏多(評分{final_score:+d} L/S={hl_ls_str}{pnl_label_part}{' '+pos_dist_label if pos_dist_label else ''})"
+    elif direction == "short":
+        label = f"🔴 HL聰明錢偏空(評分{final_score:+d} L/S={hl_ls_str}{pnl_label_part}{' '+pos_dist_label if pos_dist_label else ''})"
+    else:
+        label = f"🟡 HL聰明錢中性(L/S={hl_ls_str})" if hl_ls else ""
+
+    result = {"score": final_score, "direction": direction, "label": label, "hl_ls": hl_ls}
+    logger.info(f"[HL聰明錢✅] {base}: {label}")
+    _flow_cache[cache_key] = (result, now)
+    return result
+
+
+def fetch_hyperliquid_pnl_distribution() -> Optional[Dict]:
+    """獲取 Hyperliquid 錢包盈虧分佈（全市場）"""
+    logger.debug(f"[HL盈虧] endpoint={CG_EP['hl_wallet_pnl_dist']}")
+    try:
+        j = _cg_get(CG_EP["hl_wallet_pnl_dist"], {})
+        return j.get("data", j) if j else None
+    except Exception as e:
+        logger.error(f"[HL盈虧] 異常: {e}")
         return None
 
 
@@ -9381,6 +11725,15 @@ def build_hyperliquid_message() -> Optional[str]:
         else:
             whale_intent = "📊 意圖待觀察（槓桿未知）"
 
+        # ── HL 幣種持倉 + 聰明錢評分（新增）────────────────────────
+        hl_smart = {}
+        try:
+            hl_smart = fetch_hyperliquid_smart_money_score(str(symbol))
+        except Exception:
+            pass
+        hl_pos_data = fetch_hyperliquid_coin_position(str(symbol))
+        hl_ls_val = hl_pos_data.get("ls_ratio") if hl_pos_data else None
+
         lines.append(f"⏰ 時間：{time_str}")
         lines.append(f"標的：`{symbol}`")
         lines.append(f"方向：{direction_emoji} {direction_text}")
@@ -9395,6 +11748,12 @@ def build_hyperliquid_message() -> Optional[str]:
             except (TypeError, ValueError):
                 pass
         lines.append(f"🧠 鯨魚意圖：{whale_intent}")
+        # HL 整體持倉方向（機構級數據）
+        if hl_ls_val is not None:
+            _hl_emoji = "🟢" if hl_ls_val > 1.1 else ("🔴" if hl_ls_val < 0.9 else "🟡")
+            lines.append(f"{_hl_emoji} HL整體多空比：`{hl_ls_val:.2f}`（>1偏多 <1偏空）")
+        if hl_smart.get("label"):
+            lines.append(f"🎯 {hl_smart['label']}")
         lines.append("")
     
     # 更新已發送 ID 列表
@@ -9627,6 +11986,138 @@ def run_gold_signal():
     logger.info("[黃金訊號] 推播完成 | thread_id=%s 發送結果=%s", thread_id, sent)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# API 健康檢查（啟動時自動驗證所有重要端點的數據可用性）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_api_health_check(symbol: str = "BTC") -> None:
+    """啟動時逐一測試所有重要 API 端點，LOG 清楚標記 ✅/❌/⛔。
+    呼叫方式：python jackbot.py api_check
+    也在 position_change 啟動時自動執行一次（非阻塞）。
+    """
+    base = symbol.upper().replace("USDT", "")
+
+    # 每個測試項目：(顯示名, ep_key, 測試 params, 必要性)
+    # 必要性：🔴=核心  🟡=重要  🟢=加分
+    checks = [
+        # ── OI ──
+        ("聚合持倉K線",          "oi_agg_history",       {"symbol": base, "interval": "15m", "limit": 2}, "🔴"),
+        ("穩定幣保證金OI",       "oi_agg_stable",        {"symbol": base, "interval": "15m", "limit": 2}, "🟡"),
+        ("幣本位OI",             "oi_agg_coin",          {"symbol": base, "interval": "15m", "limit": 2}, "🟡"),
+        ("各所持倉列表",         "oi_exchange_list",     {"symbol": base}, "🟡"),
+        ("各所持倉歷史",         "oi_exchange_history",  {"symbol": base + "USDT", "exchange": "Binance", "interval": "15m", "limit": 2}, "🟡"),
+        # ── 資金費率 ──
+        ("費率列表(各所)",       "fr_exchange_list",     {}, "🔴"),
+        ("OI加權費率K線",        "fr_oi_weight",         {"symbol": base, "interval": "8h", "limit": 2, "exchange": "Binance"}, "🟡"),
+        ("累積費率",             "fr_accum_exchange",    {"symbol": base}, "🟡"),
+        ("費率套利機會",         "fr_arbitrage",         {}, "🟢"),
+        # ── 多空比 ──
+        ("全網帳戶多空比",       "ls_global_history",    {"symbol": base, "exchange": "Binance", "interval": "1h", "limit": 2}, "🔴"),
+        ("大戶帳戶多空比",       "ls_top_account",       {"symbol": base, "exchange": "Binance", "interval": "1h", "limit": 2}, "🔴"),
+        ("大戶持倉多空比",       "ls_top_position",      {"symbol": base, "exchange": "Binance", "interval": "1h", "limit": 2}, "🟡"),
+        # ── 主動買賣 ──
+        ("幣種聚合主動買賣",     "taker_agg_history",    {"symbol": base, "interval": "15m", "limit": 3}, "🔴"),
+        ("交易對主動買賣",       "taker_pair_history",   {"symbol": base + "USDT", "exchange": "Binance", "interval": "15m", "limit": 3}, "🟡"),
+        ("各所主動買賣比",       "taker_exchange_list",  {"symbol": base}, "🟢"),
+        # ── 爆倉 ──
+        ("幣種聚合爆倉歷史",     "liq_agg_history",      {"symbol": base, "interval": "15m", "limit": 4}, "🔴"),
+        ("即時爆倉訂單",         "liq_order",            {"symbol": base, "limit": 5}, "🔴"),
+        ("幣種爆倉列表",         "liq_coin_list",        {"timeType": "0"}, "🔴"),
+        ("聚合爆倉熱力圖M2",     "liq_agg_heatmap_m2",   {"symbol": base, "exchange": "Binance"}, "🟡"),
+        ("聚合爆倉熱力圖M1",     "liq_agg_heatmap_m1",   {"symbol": base, "exchange": "Binance"}, "🟡"),
+        ("爆倉地圖(聚合)",       "liq_agg_map",          {"symbol": base}, "🟢"),
+        # ── 訂單簿 ──
+        ("聚合訂單簿深度歷史",   "ob_agg_ask_bids",      {"symbol": base, "interval": "15m", "limit": 3, "range": "5"}, "🔴"),
+        ("大額掛單",             "ob_large_order",       {"symbol": base, "side": "asks"}, "🟡"),
+        ("大額掛單歷史",         "ob_large_order_hist",  {"symbol": base, "interval": "15m", "limit": 2}, "🟡"),
+        # ── 合約市場 ──
+        ("合約幣種市場行情",     "coins_markets",        {"page": "1", "size": "10"}, "🔴"),
+        # ── 現貨主動買賣 ──
+        ("現貨幣種聚合主動買賣", "spot_taker_agg",       {"symbol": base, "interval": "15m", "limit": 2}, "🟢"),
+        # ── 期權 ──
+        ("期權最大痛點",         "opt_max_pain",         {"symbol": base}, "🟡"),
+        ("期權持倉歷史",         "opt_exchange_oi",      {"symbol": base, "limit": 2}, "🟢"),
+        # ── 指標 ──
+        ("恐懼貪婪指數",         "fear_greed",           {"limit": 1}, "🟡"),
+        ("Coinbase溢價指數",     "coinbase_premium",     {"limit": 1}, "🟡"),
+        ("合約基差歷史",         "contract_basis",       {"symbol": base, "exchange": "Binance", "interval": "1h", "limit": 2}, "🟡"),
+        ("BTC ETF資金流",        "btc_etf_flow",         {"limit": 1}, "🟡"),
+        ("BTC ETF淨資產",        "btc_etf_net_assets",   {"limit": 1}, "🟢"),
+        # ── ETF & 鏈上 ──
+        ("交易所餘額列表",       "exchange_balance_list",{}, "🟢"),
+        ("灰度持倉",             "grayscale_holdings",   {}, "🟢"),
+        # ── Hyperliquid ──
+        ("HL鯨魚預警",           "hl_whale_alert",       {}, "🟡"),
+        ("HL幣種持倉",           "hl_position",          {"symbol": base}, "🟡"),
+        ("HL錢包盈虧分布",       "hl_wallet_pnl_dist",   {}, "🟢"),
+    ]
+
+    logger.info("=" * 70)
+    logger.info("🔍 [API健康檢查] 開始逐一驗證所有重要端點...")
+    logger.info(f"   測試幣種：{base}USDT  |  CG_API_KEY: {'已設定' if CG_API_KEY else '❌未設定'}")
+    logger.info("=" * 70)
+
+    results = {"✅": 0, "❌": 0, "⚠️": 0}
+
+    for name, ep_key, params, priority in checks:
+        ep = CG_EP.get(ep_key, "")
+        if not ep:
+            logger.warning(f"  [{priority}] {name:30s} ⚠️  CG_EP 中找不到 key={ep_key}")
+            results["⚠️"] += 1
+            continue
+        try:
+            _respect_coinglass_rate_limit()
+            r = requests.get(
+                f"{CG_API_BASE}{ep}",
+                headers={"CG-API-KEY": CG_API_KEY or "", "accept": "application/json"},
+                params=params, timeout=10
+            )
+            status = r.status_code
+            if status == 200:
+                j = r.json()
+                code = j.get("code")
+                data = j.get("data") or j.get("list") or []
+                has_data = bool(data) if isinstance(data, (list, dict)) else False
+                if code in (0, "0", 200, "200", None) and has_data:
+                    logger.info(f"  [{priority}] {name:30s} ✅  HTTP200 數據筆數={len(data) if isinstance(data, list) else '有'}")
+                    results["✅"] += 1
+                elif code in (0, "0", 200, "200", None):
+                    logger.warning(f"  [{priority}] {name:30s} ⚠️  HTTP200 但data為空 code={code}")
+                    results["⚠️"] += 1
+                else:
+                    msg = j.get("msg") or j.get("message") or ""
+                    logger.warning(f"  [{priority}] {name:30s} ❌  HTTP200 但API錯誤 code={code} msg={msg[:60]}")
+                    results["❌"] += 1
+            elif status == 401:
+                logger.error(f"  [{priority}] {name:30s} ❌  HTTP401 API Key 無效或未設定")
+                results["❌"] += 1
+            elif status == 403:
+                logger.warning(f"  [{priority}] {name:30s} ❌  HTTP403 權限不足（需升級帳號）")
+                results["❌"] += 1
+            elif status == 404:
+                logger.warning(f"  [{priority}] {name:30s} ⚠️  HTTP404 端點不存在（路徑可能有誤）")
+                results["⚠️"] += 1
+            elif status == 429:
+                logger.warning(f"  [{priority}] {name:30s} ⚠️  HTTP429 速率限制（API Key正確但頻率過高）")
+                results["⚠️"] += 1
+            else:
+                logger.warning(f"  [{priority}] {name:30s} ❌  HTTP{status}")
+                results["❌"] += 1
+        except Exception as e_hc:
+            logger.warning(f"  [{priority}] {name:30s} ⚠️  請求異常: {str(e_hc)[:50]}")
+            results["⚠️"] += 1
+        time.sleep(0.3)  # 避免健康檢查本身觸發429
+
+    # 彙整報告
+    total = sum(results.values())
+    logger.info("=" * 70)
+    logger.info(f"🔍 [API健康檢查完成] 共測試 {total} 個端點")
+    logger.info(f"   ✅ 正常：{results['✅']}   ❌ 失敗/無權限：{results['❌']}   ⚠️ 空數據/異常：{results['⚠️']}")
+    if results["❌"] > 0:
+        logger.warning("   ⚠️ 有 ❌ 項目請向 CoinGlass 確認帳號權限，或檢查 CG_API_KEY 環境變數")
+    logger.info("=" * 70)
+
+
 # ==================== 主程序 ====================
 
 if __name__ == "__main__":
@@ -9643,6 +12134,8 @@ if __name__ == "__main__":
             # 向後兼容：舊名稱仍可使用
             logger.info("使用舊函數名稱 whale_position，建議改用 buying_power_monitor")
             buying_power_monitor()
+        elif function_name == "api_check":
+            run_api_health_check("BTC")
         elif function_name == "position_change":
             fetch_position_change()
         elif function_name == "economic_data":
@@ -9665,6 +12158,8 @@ if __name__ == "__main__":
             run_hyperliquid_monitor_once()
         elif function_name == "gold_signal":
             run_gold_signal()
+        elif function_name == "api_check":
+            run_api_health_check("BTC")
         else:
             print("可用的功能:")
             print("  sector_ranking   - 主流板塊排行榜推播")
@@ -9680,6 +12175,7 @@ if __name__ == "__main__":
             print("  altseason_radar       - 山寨爆發雷達（Altseason + RSI + Buy Ratio）")
             print("  hyperliquid           - Hyperliquid 聰明錢監控")
             print("  gold_signal           - 黃金 XAUUSD 多空訊號（ORB+MA）")
+            print("  api_check             - API 健康檢查（驗證所有端點是否可用）")
     else:
         print("請指定要執行的功能，例如: python jackbot.py sector_ranking")
 
