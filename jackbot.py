@@ -1898,25 +1898,32 @@ def fetch_cg_bingx_supported_bases() -> Set[str]:
 def get_major_exchanges_for_coin(base: str, pool: Optional[List[str]] = None) -> List[str]:
     """
     從 _cg_full_exchange_map 快取查詢 pool 內哪些大所支援該幣種。
-    若快取尚未建立（首輪前），回傳完整 pool（保守不縮減）。
-    BingX 無論如何保留：即使 map 中沒有，也要保留 BingX 作為 K 線備援。
+
+    判斷邏輯：
+    1. 快取未建立 → 回傳完整 pool（保守，不誤封鎖）
+    2. 幣不在 map 裡 → 回傳完整 pool（保守，可能是新幣或 map 有缺口）
+    3. 幣在 map 裡但不在 pool 的任何交易所 → 回傳 []（已確認不支援，跳過）
+    4. 幣在 map 裡且部分匹配 → 只回傳有支援的交易所
 
     範例：
-        BTC  → ["Binance", "OKX", "Bybit"]   (三所都支援)
-        ULTIMA → ["BingX"]                     (只有 BingX 支援，跳過 Binance/OKX/Bybit)
+        BTC    → ["Binance", "OKX", "Bybit"]  (三所都支援，全回)
+        KABUTO → []                             (只在 BingX，Binance/OKX/Bybit 皆無，跳過)
     """
     if pool is None:
         pool = ["Binance", "OKX", "Bybit"]
-    if not _cg_full_exchange_map:          # 快取未建立，不縮減（保守策略）
+    if not _cg_full_exchange_map:                     # 快取未建立，保守不縮減
         return pool
-    supported = _cg_full_exchange_map.get(base.upper(), set())
+    base_upper = base.upper()
+    if base_upper not in _cg_full_exchange_map:       # 幣不在 map，可能是新幣，保守回傳
+        return pool
+    supported = _cg_full_exchange_map[base_upper]
     filtered = [ex for ex in pool if ex in supported]
     # 若 pool 含 BingX 且 BingX 支援該幣，確保保留
     if "BingX" in pool and any("bingx" in s.lower() for s in supported):
         if "BingX" not in filtered:
             filtered.append("BingX")
-    # 若 filtered 為空（幣種完全不在任何 pool 所），回傳完整 pool 防止誤封鎖
-    return filtered if filtered else pool
+    # filtered 可能為空（幣種確認不在這些交易所），直接回傳空 → for loop 0 次，立即跳過
+    return filtered
 
 
 # Fallback 時僅記錄第一次 Binance 失敗原因，避免刷屏
@@ -6266,6 +6273,7 @@ def build_report_message_tiered(
     lines.append("━━━━━━━━━━━━━━")
 
     has_any = False
+    push_count = 0      # 實際通過所有篩選、進入訊息的訊號數
     seen_syms = set()  # 同幣只顯示一次，避免 1000PEPE 等重複出現
     for section_title, subs in blocks:
         section_printed = False
@@ -6420,6 +6428,7 @@ def build_report_message_tiered(
                     continue
 
                 has_any = True
+                push_count = push_count + 1  # noqa: (defined below at init)
                 price = x.get("current_price")
                 if price is not None and isinstance(price, (int, float)):
                     price_str = f"{price:.4f}" if price < 10 else f"{price:.2f}"
@@ -6758,7 +6767,7 @@ def build_report_message_tiered(
                     lines.append("📍 *數據源：CoinGlass* | ⚠️ BingX 查無此標的，請至各交易所自行查詢")
                 lines.append("")
 
-    return "\n".join(lines), has_any
+    return "\n".join(lines), has_any, push_count
 
 
 def build_report_message(top_long_open: List, top_long_close: List, top_short_open: List, top_short_close: List, processed_count: int = 0, oi_success_count: int = 0) -> str:
@@ -8659,14 +8668,16 @@ def fetch_position_change():
     # 僅在「實際有至少一則訊號」時才推主報表；無訊號或全被風報比篩掉 → 不推，安靜
     has_any = False
     if cooled_top:
-        msg, has_any = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
+        msg, has_any, push_count = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
         if has_any:
             logger.info(
-                f"【推播總結】本輪最終推播 {len(cooled_top)} 檔，處理幣種 {processed_count} 個，OI 成功 {oi_success_count} 個"
+                f"【推播總結】本輪最終推播 {push_count} 檔"
+                f"（冷卻後候選 {len(cooled_top)} 個，RSI+風報比篩選後實推 {push_count} 個）"
+                f"，處理幣種 {processed_count} 個，OI 成功 {oi_success_count} 個"
             )
             send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
         else:
-            logger.info(f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，但風報比篩選後 0 筆可推播（止盈風報比 < {MIN_TP1_R_FOR_PUSH}R），不發送主報表")
+            logger.info(f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，但 RSI/風報比篩選後 0 筆可推播，不發送主報表")
     else:
         if len(all_top) == 0:
             logger.info(f"【未推播原因】本輪無達 OI 門檻之標的（四類皆 0 筆），不發送主報表")
