@@ -711,12 +711,16 @@ def fetch_global_account_ratio(symbol: str, time_type: str) -> Optional[Dict]:
     try:
         response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
-            logger.error(f"全局帳戶比 API 請求失敗 - {symbol}: {response.status_code}")
+            logger.debug(f"全局帳戶比 API 請求失敗 - {symbol}: HTTP {response.status_code}（可能不在指定交易所）")
             return None
         
         data = response.json()
         if data.get('code') not in ['0', 0, 200, '200']:
-            logger.error(f"全局帳戶比 API 返回錯誤 - {symbol}: {data.get('code')}")
+            _code = data.get('code')
+            if str(_code) == '400':
+                logger.debug(f"全局帳戶比 API 返回 400 - {symbol}: 此幣種可能不在 Binance 上（預期行為）")
+            else:
+                logger.warning(f"全局帳戶比 API 返回錯誤 - {symbol}: code={_code}")
             return None
         
         return data
@@ -2315,19 +2319,22 @@ def fetch_oi_trend_analysis(symbol: str, interval: str = "15m", limit: int = 8) 
     # ── 方案B：單所輪詢 OI 歷史（備援）────────────────────────
     # 只嘗試實際支援該幣的大所，跳過 BingX-only 小幣的無效呼叫
     _oi_b_exchanges = get_major_exchanges_for_coin(base, ["Binance", "OKX", "Bybit"])
-    for _oi_ex in _oi_b_exchanges:
-        for _oi_iv in _oi_try_ivs:
-            logger.debug(f"[OI趨勢-B] {base} 單所OI歷史 exchange={_oi_ex} interval={_oi_iv}")
-            j2 = _cg_get(CG_EP["oi_history"], {"symbol": base + "USDT", "exchange": _oi_ex, "interval": _oi_iv, "limit": limit})
-            rows_b = j2.get("data") or j2.get("list") or [] if j2 else []
-            oi_bars_b = _parse_oi_bars_from_rows(rows_b) if isinstance(rows_b, list) else []
-            if len(oi_bars_b) >= 3:
-                result = _calc_oi_trend_from_bars(oi_bars_b)
-                result["data_source"] = f"{_oi_ex}_{_oi_iv}"
-                logger.info(f"[OI趨勢-B✅] {base}: 方案B成功（{_oi_ex}/{_oi_iv}），{len(oi_bars_b)}棒")
-                _flow_cache[cache_key] = (result, now)
-                return result
-    logger.warning(f"[OI趨勢-B❌] {base}: 方案B也無效，退回 empty 結果")
+    if not _oi_b_exchanges:
+        logger.debug(f"[OI趨勢-B] {base}: 無大所支援，跳過方案B")
+    else:
+        for _oi_ex in _oi_b_exchanges:
+            for _oi_iv in _oi_try_ivs:
+                logger.debug(f"[OI趨勢-B] {base} 單所OI歷史 exchange={_oi_ex} interval={_oi_iv}")
+                j2 = _cg_get(CG_EP["oi_history"], {"symbol": base + "USDT", "exchange": _oi_ex, "interval": _oi_iv, "limit": limit})
+                rows_b = j2.get("data") or j2.get("list") or [] if j2 else []
+                oi_bars_b = _parse_oi_bars_from_rows(rows_b) if isinstance(rows_b, list) else []
+                if len(oi_bars_b) >= 3:
+                    result = _calc_oi_trend_from_bars(oi_bars_b)
+                    result["data_source"] = f"{_oi_ex}_{_oi_iv}"
+                    logger.info(f"[OI趨勢-B✅] {base}: 方案B成功（{_oi_ex}/{_oi_iv}），{len(oi_bars_b)}棒")
+                    _flow_cache[cache_key] = (result, now)
+                    return result
+        logger.warning(f"[OI趨勢-B❌] {base}: 方案B也無效，退回 empty 結果")
 
     _flow_cache[cache_key] = (empty, now)
     return empty
@@ -2372,6 +2379,12 @@ def fetch_top_account_ls_ratio(symbol: str, interval: str = "1h", limit: int = 3
     _ls_iv = "h1"
     # 只嘗試實際支援該幣的大所，BingX-only 小幣直接跳過（無資料）
     _ls_exchanges = get_major_exchanges_for_coin(base, ["Binance", "OKX", "Bybit"])
+
+    # 若無大所支援，直接跳過 A/B/C 三方案（BingX-only 小幣無此數據）
+    if not _ls_exchanges:
+        logger.debug(f"[大戶L/S] {base}: 無大所支援，跳過 A/B/C 三方案")
+        _flow_cache[cache_key] = (None, now)
+        return None
 
     # ── 方案A：大戶帳戶數多空比──────────────────────────────────────
     for _ls_ex in _ls_exchanges:
@@ -3301,19 +3314,22 @@ def fetch_taker_bvs_ratio(symbol: str, interval: str = "15m", limit: int = 4) ->
     sym_param = base + "USDT"
     # 只嘗試實際支援該幣的交易所，跳過 BingX-only 小幣對 Binance/OKX/Bybit 的無效呼叫
     _b_exchanges = get_major_exchanges_for_coin(base, ["Binance", "OKX", "Bybit", "BingX", "Bitget"])
-    for _b_ex in _b_exchanges:
-        for _iv_b in _try_intervals:
-            logger.debug(f"[主動買賣-B] {base} exchange={_b_ex} sym={sym_param} interval={_iv_b}")
-            j_b = _cg_get(CG_EP["taker_pair_history"], {"symbol": sym_param, "exchange": _b_ex,
-                                                         "interval": _iv_b, "limit": limit})
-            rows_b = j_b.get("data") or j_b.get("list") or [] if j_b else []
-            result = _parse_taker_ratio_from_rows(rows_b)
-            if result is not None:
-                logger.info(f"[主動買賣-B✅] {base}: {_b_ex}({_iv_b}) 成功，買盤佔比={result:.1f}%")
-                _flow_cache[cache_key] = (result, now)
-                return result
-        logger.debug(f"[主動買賣-B] {base} {_b_ex} 無有效數據")
-    logger.warning(f"[主動買賣-B❌] {base}: 所有交易所均無有效數據，改用方案C（各所快照）")
+    if not _b_exchanges:
+        logger.debug(f"[主動買賣-B] {base}: 無支援大所，跳過方案B，直接方案C")
+    else:
+        for _b_ex in _b_exchanges:
+            for _iv_b in _try_intervals:
+                logger.debug(f"[主動買賣-B] {base} exchange={_b_ex} sym={sym_param} interval={_iv_b}")
+                j_b = _cg_get(CG_EP["taker_pair_history"], {"symbol": sym_param, "exchange": _b_ex,
+                                                             "interval": _iv_b, "limit": limit})
+                rows_b = j_b.get("data") or j_b.get("list") or [] if j_b else []
+                result = _parse_taker_ratio_from_rows(rows_b)
+                if result is not None:
+                    logger.info(f"[主動買賣-B✅] {base}: {_b_ex}({_iv_b}) 成功，買盤佔比={result:.1f}%")
+                    _flow_cache[cache_key] = (result, now)
+                    return result
+            logger.debug(f"[主動買賣-B] {base} {_b_ex} 無有效數據")
+        logger.warning(f"[主動買賣-B❌] {base}: 所有交易所均無有效數據，改用方案C（各所快照）")
 
     # ── 方案C：各所當前快照（固定用 h1，覆蓋最廣）────────
     j_c = _cg_get(CG_EP["taker_exchange_list"], {"symbol": base, "range": "h1"})
@@ -3374,6 +3390,12 @@ def fetch_net_position_delta(symbol: str, interval: str = "15m", limit: int = 3)
     _np_try_ivs = list(dict.fromkeys(_np_try_ivs))
     # 只嘗試實際支援該幣的大所，BingX-only 小幣不浪費 API 呼叫
     _np_exchanges = get_major_exchanges_for_coin(base, ["Binance", "OKX", "Bybit"])
+
+    # 無大所支援直接跳過（BingX-only 小幣無此數據）
+    if not _np_exchanges:
+        logger.debug(f"[淨多倉] {base}: 無大所支援，跳過 A/B 兩方案")
+        _flow_cache[cache_key] = (None, now)
+        return None
 
     # ── 方案A：v2 版（欄位更豐富，文檔確認必填 exchange=）─────────────────
     rows_a: list = []
@@ -5397,7 +5419,9 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     # CoinGlass symbol 格式：通常為 {base}USDT（如 BTCUSDT）或 1000PEPEUSDT
     try_pairs = [f"{clean}USDT", f"1000{clean}USDT"]
-    exchanges_to_try = ["Binance", "OKX", "Bybit"]
+    # 優先用大所（流動性佳），BingX 和 Bitget 作為後補覆蓋 BingX-only 小幣
+    # → 讓 CoinGlass 統一拉 K 線，不再需要 Plan B 直接打 BingX
+    exchanges_to_try = ["Binance", "OKX", "Bybit", "BingX", "Bitget"]
     headers_cg = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
     for exchange in exchanges_to_try:
@@ -5460,8 +5484,8 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
         tech["source"] = "CoinGlass"
         return tech
 
-    # ── Plan B：BingX K 線備援（CoinGlass 不可用時）─────────────────────────
-    logger.warning(f"[技術指標] {base}: CoinGlass K 線失敗，切換 Plan B BingX 備援")
+    # ── Plan B：BingX K 線備援（CoinGlass 五所均無資料時）─────────────────────────
+    logger.warning(f"[技術指標] {base}: CoinGlass K 線失敗（已試 Binance/OKX/Bybit/BingX/Bitget），切換 Plan B 直接打 BingX")
     tech_bx = _fetch_bingx_klines_and_calc(symbol, preferred_symbol=bingx_symbol_override)
     if tech_bx:
         tech_bx["source"] = "BingX"
@@ -6280,12 +6304,14 @@ def build_report_message_tiered(
         for sub_label, items in subs:
             if not items:
                 continue
+            items_sorted = sorted(items, key=lambda x: (-(x.get("stars") or 0), -(abs(x.get("oiChange30m") or 0))))
+            # 暫存基準點：若本子區塊沒有任何項目通過 RSI/風報比篩選，則回滾標題
+            sub_start_idx = len(lines)
             if not section_printed:
                 lines.append("")
                 lines.append(section_title)
-                section_printed = True
-            items_sorted = sorted(items, key=lambda x: (-(x.get("stars") or 0), -(abs(x.get("oiChange30m") or 0))))
             lines.append(sub_label)
+            had_any_in_sub = False
             for x in items_sorted:
                 sym = x.get("symbol", "")
                 if sym and sym in seen_syms:
@@ -6427,6 +6453,7 @@ def build_report_message_tiered(
                     logger.info(f"狙擊鏡跳過 {sym}: 止盈 風報比 {r_tp1}R < {MIN_TP1_R_FOR_PUSH}R，不推播")
                     continue
 
+                had_any_in_sub = True
                 has_any = True
                 push_count = push_count + 1  # noqa: (defined below at init)
                 price = x.get("current_price")
@@ -6766,6 +6793,11 @@ def build_report_message_tiered(
                 else:
                     lines.append("📍 *數據源：CoinGlass* | ⚠️ BingX 查無此標的，請至各交易所自行查詢")
                 lines.append("")
+            # 若本子區塊無任何項目通過 RSI/風報比篩選，回滾掉暫存的標題與子標題
+            if had_any_in_sub:
+                section_printed = True
+            else:
+                del lines[sub_start_idx:]
 
     return "\n".join(lines), has_any, push_count
 
@@ -7544,9 +7576,14 @@ def fetch_position_change():
         whale_idx = _whale_index_latest(clean_base, "1d")
         time.sleep(0.2)
         # v3.0 散戶多空比（僅對 4/5 星候選額外調用）
+        # BingX-only 幣種不在 Binance，跳過以避免預期外 400 呼叫
         symbol_param = clean_base + "USDT"
-        global_data = fetch_global_account_ratio(symbol_param, "1h")
-        time.sleep(0.5)
+        if get_major_exchanges_for_coin(clean_base, ["Binance"]):
+            global_data = fetch_global_account_ratio(symbol_param, "1h")
+            time.sleep(0.5)
+        else:
+            global_data = None
+            logger.debug(f"全局帳戶比 {clean_base}: BingX-only 幣種，跳過 Binance 查詢")
         latest_point = get_latest_data_point(global_data) if global_data else None
         retail_ratio = latest_point.get("global_account_long_short_ratio") if isinstance(latest_point, dict) else None
         if retail_ratio is not None and isinstance(retail_ratio, (int, float)):
