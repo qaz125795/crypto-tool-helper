@@ -1790,6 +1790,10 @@ def fetch_supported_futures_coins() -> List[str]:
 _cg_bingx_bases_cache: Dict[str, Any] = {"ts": 0.0, "bases": set()}
 _CG_BINGX_BASES_TTL = 3600  # 1 小時快取，交易所上幣不頻繁
 
+# ── 幣種→交易所反向對照表（由 fetch_cg_bingx_supported_bases 順帶建立）──────
+# 格式：{"BTC": {"Binance", "OKX", "Bybit", "BingX", ...}, "ULTIMA": {"BingX"}, ...}
+_cg_full_exchange_map: Dict[str, Set[str]] = {}
+
 
 def fetch_cg_bingx_supported_bases() -> Set[str]:
     """從 CoinGlass /api/futures/supported-exchange-pairs 取得 BingX 支援的幣種 base set。
@@ -1821,6 +1825,27 @@ def fetch_cg_bingx_supported_bases() -> Set[str]:
         # 回應格式 A：dict keyed by exchange name
         # {"BingX": [{"instrument_id": "BTCUSDT", "base_asset": "BTC"}, ...], ...}
         if isinstance(data, dict):
+            # 同時建立全局 coin→exchanges 反向對照表（只建立一次，供 ABC fallback 快速跳過）
+            global _cg_full_exchange_map
+            _tmp_map: Dict[str, Set[str]] = {}
+            for ex_name, ex_pairs in data.items():
+                if not isinstance(ex_pairs, list):
+                    continue
+                for item in ex_pairs:
+                    _b = (item.get("base_asset") or item.get("baseAsset") or item.get("base") or "")
+                    if not _b:
+                        _inst = (item.get("instrument_id") or item.get("instrumentId")
+                                 or item.get("symbol") or item.get("pair") or "")
+                        _b = (_inst.replace("USDT", "").replace("USDT-PERP", "")
+                              .replace("-PERP", "").replace("_USDT", "")
+                              .replace("-USDT", "").replace("-", "").replace("_", "").upper())
+                    _b = _b.strip().upper()
+                    if _b and len(_b) <= 12:
+                        _tmp_map.setdefault(_b, set()).add(ex_name)
+            if _tmp_map:
+                _cg_full_exchange_map = _tmp_map
+                logger.info(f"[CG支援查詢] 反向對照表建立完成：{len(_tmp_map)} 個幣種跨 {len(data)} 個交易所")
+
             bingx_key = next((k for k in data if "bingx" in k.lower() or "bing" in k.lower()), None)
             if bingx_key:
                 for item in (data[bingx_key] or []):
@@ -1845,12 +1870,18 @@ def fetch_cg_bingx_supported_bases() -> Set[str]:
 
         # 回應格式 B：list of {"symbol": "BTC", "exchanges": [...]}
         elif isinstance(data, list):
+            global _cg_full_exchange_map
+            _tmp_map_b: Dict[str, Set[str]] = {}
             for item in data:
                 exch_list = item.get("exchanges") or item.get("exchangeList") or []
-                if any("bingx" in str(e).lower() for e in exch_list):
-                    sym = (item.get("symbol") or item.get("coin") or "").strip().upper()
-                    if sym and len(sym) <= 12:
+                sym = (item.get("symbol") or item.get("coin") or "").strip().upper()
+                if sym and len(sym) <= 12:
+                    for _e in exch_list:
+                        _tmp_map_b.setdefault(sym, set()).add(str(_e))
+                    if any("bingx" in str(e).lower() for e in exch_list):
                         bingx_bases.add(sym)
+            if _tmp_map_b:
+                _cg_full_exchange_map = _tmp_map_b
             logger.info(f"[CG支援查詢] BingX 支援 {len(bingx_bases)} 個幣種（格式B）")
 
     except Exception as e:
@@ -1859,6 +1890,30 @@ def fetch_cg_bingx_supported_bases() -> Set[str]:
     if bingx_bases:
         _cg_bingx_bases_cache = {"ts": now, "bases": bingx_bases}
     return bingx_bases
+
+
+def get_major_exchanges_for_coin(base: str, pool: Optional[List[str]] = None) -> List[str]:
+    """
+    從 _cg_full_exchange_map 快取查詢 pool 內哪些大所支援該幣種。
+    若快取尚未建立（首輪前），回傳完整 pool（保守不縮減）。
+    BingX 無論如何保留：即使 map 中沒有，也要保留 BingX 作為 K 線備援。
+
+    範例：
+        BTC  → ["Binance", "OKX", "Bybit"]   (三所都支援)
+        ULTIMA → ["BingX"]                     (只有 BingX 支援，跳過 Binance/OKX/Bybit)
+    """
+    if pool is None:
+        pool = ["Binance", "OKX", "Bybit"]
+    if not _cg_full_exchange_map:          # 快取未建立，不縮減（保守策略）
+        return pool
+    supported = _cg_full_exchange_map.get(base.upper(), set())
+    filtered = [ex for ex in pool if ex in supported]
+    # 若 pool 含 BingX 且 BingX 支援該幣，確保保留
+    if "BingX" in pool and any("bingx" in s.lower() for s in supported):
+        if "BingX" not in filtered:
+            filtered.append("BingX")
+    # 若 filtered 為空（幣種完全不在任何 pool 所），回傳完整 pool 防止誤封鎖
+    return filtered if filtered else pool
 
 
 # Fallback 時僅記錄第一次 Binance 失敗原因，避免刷屏
@@ -2248,7 +2303,8 @@ def fetch_oi_trend_analysis(symbol: str, interval: str = "15m", limit: int = 8) 
     logger.warning(f"[OI趨勢-A❌] {base}: 方案A無效數據（取得{len(oi_bars)}棒，需≥3，已試 {_oi_try_ivs}），改用方案B")
 
     # ── 方案B：單所輪詢 OI 歷史（備援）────────────────────────
-    _oi_b_exchanges = ["Binance", "OKX", "Bybit"]
+    # 只嘗試實際支援該幣的大所，跳過 BingX-only 小幣的無效呼叫
+    _oi_b_exchanges = get_major_exchanges_for_coin(base, ["Binance", "OKX", "Bybit"])
     for _oi_ex in _oi_b_exchanges:
         for _oi_iv in _oi_try_ivs:
             logger.debug(f"[OI趨勢-B] {base} 單所OI歷史 exchange={_oi_ex} interval={_oi_iv}")
@@ -2304,7 +2360,8 @@ def fetch_top_account_ls_ratio(symbol: str, interval: str = "1h", limit: int = 3
     sym_param = base + "USDT"
     # L/S 比只支援較粗粒度，固定用 h1（m15 山寨幣幾乎全部空陣列）
     _ls_iv = "h1"
-    _ls_exchanges = ["Binance", "OKX", "Bybit"]
+    # 只嘗試實際支援該幣的大所，BingX-only 小幣直接跳過（無資料）
+    _ls_exchanges = get_major_exchanges_for_coin(base, ["Binance", "OKX", "Bybit"])
 
     # ── 方案A：大戶帳戶數多空比──────────────────────────────────────
     for _ls_ex in _ls_exchanges:
@@ -3232,7 +3289,8 @@ def fetch_taker_bvs_ratio(symbol: str, interval: str = "15m", limit: int = 4) ->
 
     # ── 方案B：單交易對歷史 v2（多交易所 × h1 輪詢）─────────────────
     sym_param = base + "USDT"
-    _b_exchanges = ["Binance", "OKX", "Bybit", "BingX", "Bitget"]
+    # 只嘗試實際支援該幣的交易所，跳過 BingX-only 小幣對 Binance/OKX/Bybit 的無效呼叫
+    _b_exchanges = get_major_exchanges_for_coin(base, ["Binance", "OKX", "Bybit", "BingX", "Bitget"])
     for _b_ex in _b_exchanges:
         for _iv_b in _try_intervals:
             logger.debug(f"[主動買賣-B] {base} exchange={_b_ex} sym={sym_param} interval={_iv_b}")
@@ -3304,7 +3362,8 @@ def fetch_net_position_delta(symbol: str, interval: str = "15m", limit: int = 3)
     # 同 Taker 端點：m15 山寨幣幾乎全部空陣列，優先試 h1
     _np_try_ivs = ["h1", _cg_interval(interval)] if interval not in ("1h", "h1") else ["h1"]
     _np_try_ivs = list(dict.fromkeys(_np_try_ivs))
-    _np_exchanges = ["Binance", "OKX", "Bybit"]
+    # 只嘗試實際支援該幣的大所，BingX-only 小幣不浪費 API 呼叫
+    _np_exchanges = get_major_exchanges_for_coin(base, ["Binance", "OKX", "Bybit"])
 
     # ── 方案A：v2 版（欄位更豐富，文檔確認必填 exchange=）─────────────────
     rows_a: list = []
@@ -6167,7 +6226,9 @@ def build_report_message_tiered(
     ]
 
     # 統計 S+/S/A 數量（依「不重複標的」計，避免同標的出現在多區塊時顯示多台列車）
-    eligible_items = long_dip + long_break + short_top + short_break
+    # 先套用 RSI 過濾，確保統計與顯示一致
+    eligible_items_raw = long_dip + long_break + short_top + short_break
+    eligible_items = [x for x in eligible_items_raw if _pass_rsi_filter(x, x.get("zone") or "")]
     eligible_by_sym = {str(x.get("symbol") or "").strip(): x for x in eligible_items if x.get("symbol")}
     eligible_unique = list(eligible_by_sym.values())
     count_diamond = sum(1 for x in eligible_unique if _is_diamond(x))
@@ -6221,6 +6282,11 @@ def build_report_message_tiered(
                 if sym:
                     seen_syms.add(sym)
                 zone = x.get("zone")
+                # RSI 過濾：追漲 RSI<45 / 追跌 RSI>55 → 動能不符，跳過不推
+                if not _pass_rsi_filter(x, zone or ""):
+                    _rsi_v = x.get("rsi")
+                    logger.info(f"狙擊鏡跳過 {sym}: RSI={_rsi_v} 不符合 {zone} 動能門檻，過濾")
+                    continue
                 sym = x.get("symbol", "")
                 stars = x.get("stars", 1)
                 is_bull = _is_bull(x)
