@@ -1,0 +1,66 @@
+name: 清除所有冷卻與績效記錄（手動觸發）
+
+on:
+  workflow_dispatch:
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 用相同前綴 restore 舊 cache，讓 reset_data 覆蓋成空檔
+      # 再以新 run_id 存回 → 下次 position-change 就讀到空的 data/
+      - name: Restore data state (取得舊狀態以便覆蓋)
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: data-position-change-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            data-position-change-${{ runner.os }}-
+
+      - name: Ensure data directory exists
+        run: mkdir -p data
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 清除所有冷卻與績效記錄
+        env:
+          PYTHONUNBUFFERED: 1
+          CG_API_KEY: ${{ secrets.CG_API_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
+          TG_THREAD_POSITION_CHANGE: ${{ secrets.TG_THREAD_POSITION_CHANGE }}
+        run: |
+          echo "=============================================="
+          echo " 開始清除所有冷卻、推播紀錄、績效數據..."
+          echo "=============================================="
+          python -u jackbot.py reset_data
+          echo "=============================================="
+          echo " 清除完成，下一輪 position_change 將全新開始"
+          echo "=============================================="
+
+      - name: 確認清除結果
+        run: |
+          echo "--- data/ 目錄內容 ---"
+          ls -la data/ 2>/dev/null || echo "(目錄為空)"
+          echo "--- sniper_cooldown.json ---"
+          cat data/sniper_cooldown.json 2>/dev/null || echo "(檔案不存在)"
+          echo "--- performance_history.json ---"
+          cat data/performance_history.json 2>/dev/null || echo "(檔案不存在)"
