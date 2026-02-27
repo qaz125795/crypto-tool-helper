@@ -4590,7 +4590,9 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
                 if raw_rate is None:
                     continue
                 try:
-                    rate_found = float(raw_rate)
+                    # CoinGlass exchange-list 的 funding_rate 是百分比格式
+                    # (如 -0.1316 = -0.1316%)，需除以 100 轉為小數供後續計算
+                    rate_found = float(raw_rate) / 100.0
                     break
                 except (TypeError, ValueError):
                     continue
@@ -4607,7 +4609,7 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
                     if raw_rate is None:
                         continue
                     try:
-                        rate_found = float(raw_rate)
+                        rate_found = float(raw_rate) / 100.0
                         break
                     except (TypeError, ValueError):
                         continue
@@ -5299,11 +5301,17 @@ def _calc_indicators_from_ohlcv(
 
     # VWAP_2h（最近 8 根 15m K 線）
     vwap_2h = None
-    if len(closes) >= 8 and len(volumes) >= 8 and sum(volumes[-8:]) > 0:
+    if len(closes) >= 8 and len(volumes) >= 8:
         uc, uh, ul, uv = closes[-8:], highs[-8:], lows[-8:], volumes[-8:]
         typical = [(uh[i] + ul[i] + uc[i]) / 3.0 for i in range(len(uc))]
-        vwap_2h = sum(typical[i] * uv[i] for i in range(len(typical))) / sum(uv)
-        logger.info(f"[指標計算] {clean}: VWAP_2h 使用最近 8 根 K 線成交量加權 (典型價 H+L+C/3)")
+        total_vol = sum(uv)
+        if total_vol > 0:
+            vwap_2h = sum(typical[i] * uv[i] for i in range(len(typical))) / total_vol
+            logger.info(f"[指標計算] {clean}: VWAP_2h 使用最近 8 根 K 線成交量加權 (典型價 H+L+C/3)")
+        else:
+            # CoinGlass price/history 不含 volume → 退為等權典型價均值（TWAP 近似）
+            vwap_2h = sum(typical) / len(typical)
+            logger.info(f"[指標計算] {clean}: VWAP_2h 無 volume，改用等權典型價均值 (TWAP 近似)")
 
     series = pd.Series(closes)
     rsi_series = _rsi(series, period=14)
