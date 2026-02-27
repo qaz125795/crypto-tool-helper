@@ -7197,10 +7197,10 @@ def fetch_position_change():
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 4：成交量預篩（直接讀 CoinGlass _cg_volume_usd）
     # ════════════════════════════════════════════════════════
-    # CoinGlass coins-price-change 端點的 _cg_volume_usd 大多為 None，
-    # 真正的精品門撒由 Step 4.5 BingX 支援過濾承擔。
-    # 此步驟：有量資料且 < 5M 才淘汰；無量資料 → 放行（交給 BingX 過濾）
-    VOLUME_PREFILTER_MIN_USD = 5_000_000
+    # coins-price-change 端點絕大多數幣的 _cg_volume_usd 為 None（API 本身不帶量）
+    # 真正的精品門撒由 Step 4.5 BingX 支援過濾承擔；Step 4 只做「確定超小幣」淘汰
+    # 邏輯：有量資料且明確 < 1M USD → 淘汰；其餘（含 None）一律放行給 BingX 過濾
+    VOLUME_PREFILTER_MIN_USD = 1_000_000   # 僅淘汰確定 <1M 的超小幣
     active_above_volume: List[Dict[str, Any]] = []
     vol_no_data = 0
     vol_below = 0
@@ -7209,20 +7209,20 @@ def fetch_position_change():
         if cg_vol is None:
             vol_no_data += 1
             coin["_volume_usd"] = 0.0
-            active_above_volume.append(coin)   # 無量資料放行，BingX 過濾承擔把關
+            active_above_volume.append(coin)   # 無量資料放行，主力信號不依賴成交量
         else:
             try:
                 vol = float(cg_vol)
             except (TypeError, ValueError):
                 vol = 0.0
+            coin["_volume_usd"] = vol
             if vol > 0 and vol < VOLUME_PREFILTER_MIN_USD:
-                vol_below += 1
+                vol_below += 1   # 確定 <1M 才淘汰
             else:
-                coin["_volume_usd"] = vol
                 active_above_volume.append(coin)
     logger.info(
-        f"📊 [掃描漏斗] 4. 成交量預篩(>={VOLUME_PREFILTER_MIN_USD/1e6:.0f}M USD)："
-        f"通過 {len(active_above_volume)} 個（無量資料放行 {vol_no_data} 個，低量淘汰 {vol_below} 個）"
+        f"📊 [掃描漏斗] 4. 成交量預篩(確定<{VOLUME_PREFILTER_MIN_USD/1e6:.0f}M 才淘汰)："
+        f"通過 {len(active_above_volume)} 個（無量資料放行 {vol_no_data} 個，超小幣淘汰 {vol_below} 個）"
     )
 
     # ── Step 4.5：BingX 支援過濾（不支援的幣不運算、不推播）────────────────
