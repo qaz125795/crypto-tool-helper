@@ -113,6 +113,65 @@ _COINGLASS_MAX_CALLS_PER_MINUTE = 70
 # BingX 技術指標失敗次數（每輪用於判斷是否啟用 CoinGlass Plan B）
 _bingx_tech_fail_count: int = 0
 
+# OI API 最後一次呼叫的 HTTP 狀態碼與錯誤訊息（供 process_single_symbol 診斷回報）
+_oi_last_status: Dict[str, int] = {}
+_oi_last_error: Dict[str, str] = {}
+
+# 動態 OI 門檻統計（每輪由 fetch_position_change 根據當前樣本分佈更新）
+# 宣告於頂部，確保 _classify_signal_and_tier 與 fetch_position_change 均能正確存取
+_dynamic_oi_mean_30m: Optional[float] = None
+_dynamic_oi_std_30m: Optional[float] = None
+_dynamic_oi_4star: Optional[float] = None
+_dynamic_oi_5star: Optional[float] = None
+_dynamic_oi_sample_size: int = 0
+
+# 緊急備援：GitHub Action timeout (SIGTERM) 前確保 sniper_cooldown.json 能寫回磁碟
+# fetch_position_change 執行時會持續更新此 dict，atexit/SIGTERM handler 讀取後寫入
+_emergency_sniper_state: Dict[str, Any] = {}
+_emergency_sniper_path: Optional[str] = None
+
+
+def _emergency_save_sniper_state() -> None:
+    """緊急備援寫入：atexit 與 SIGTERM handler 共用。
+    確保 GitHub Action timeout 或意外終止前，sniper_cooldown.json 能落磁碟。
+    """
+    global _emergency_sniper_state, _emergency_sniper_path
+    if not _emergency_sniper_path or not _emergency_sniper_state:
+        return
+    try:
+        path = Path(_emergency_sniper_path)
+        tmp = path.with_suffix(path.suffix + ".emergency_tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_emergency_sniper_state, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+        logging.getLogger(__name__).info(
+            f"[緊急備援] sniper_cooldown.json 已安全寫回 ({path})"
+        )
+    except Exception as ex:
+        logging.getLogger(__name__).warning(f"[緊急備援] 緊急寫入失敗: {ex}")
+
+
+import atexit as _atexit
+import signal as _signal
+
+_atexit.register(_emergency_save_sniper_state)
+
+def _sigterm_handler(signum, frame):  # type: ignore[type-arg]
+    _emergency_save_sniper_state()
+    raise SystemExit(0)
+
+try:
+    _signal.signal(_signal.SIGTERM, _sigterm_handler)
+except (OSError, ValueError):
+    # 某些環境（Windows/非主執行緒）不支援 SIGTERM，忽略
+    pass
+
 
 def _respect_coinglass_rate_limit() -> None:
     """簡單的全域速率限制：確保 CoinGlass API 約 <70 次/分鐘。"""
@@ -2300,11 +2359,7 @@ def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = Non
     # Plan B：僅當 BingX K 線連續失敗多次時，才退回 CoinGlass API
     logger.warning(f"[技術指標] {base}: BingX K 線本地計算失敗，記錄一次 BingX 失敗計數")
     global _bingx_tech_fail_count
-    try:
-        _bingx_tech_fail_count  # type: ignore[name-defined]
-    except NameError:
-        _bingx_tech_fail_count = 0  # type: ignore[assignment]
-    _bingx_tech_fail_count += 1  # type: ignore[operator]
+    _bingx_tech_fail_count += 1
     if _bingx_tech_fail_count <= 3:  # 連續失敗前三次，寧可放棄該幣種也不直接用 CoinGlass
         logger.warning(f"[技術指標] {base}: BingX 失敗次數={_bingx_tech_fail_count} ≤ 3，本輪放棄技術指標以避免數據源偏差")
         return None
@@ -2439,13 +2494,6 @@ OI_ALTCOIN_MIN = 1.5         # 山寨幣初選門檻（後續再用 OI_FOR_4_STA
 OI_FOR_5_STAR = 3.5    # 5星：主力量明確才給（基礎值，動態門檻下限）
 OI_FOR_4_STAR = 3.3    # 4星（基礎值，動態門檻下限）
 OI_FOR_ELITE = 3.5     # 鑽石 💎：與 5 星對齊
-
-# 動態 OI 門檻統計（每輪由 fetch_position_change 根據當前樣本分佈更新）
-_dynamic_oi_mean_30m: Optional[float] = None
-_dynamic_oi_std_30m: Optional[float] = None
-_dynamic_oi_4star: Optional[float] = None
-_dynamic_oi_5star: Optional[float] = None
-_dynamic_oi_sample_size: int = 0
 
 # 狙擊鏡止盈風報門檻：止盈若低於此 R 不推播（避免賠率差、維持勝率品質）
 MIN_TP1_R_FOR_PUSH = 0.65
@@ -3830,6 +3878,9 @@ def fetch_position_change():
     _cooldown_path_abs = str(SNIPER_COOLDOWN_FILE)
     # 冷卻 + 推播紀錄改為「單一 JSON」一併讀寫，避免 CI cache 還原時兩檔不一致（冷卻有、推播紀錄 0 筆）
     logger.info(f"狙擊狀態檔路徑（冷卻+推播紀錄）: {_cooldown_path_abs}")
+    # 註冊緊急備援路徑，確保 GitHub Action timeout (SIGTERM / atexit) 前能寫回磁碟
+    global _emergency_sniper_path, _emergency_sniper_state
+    _emergency_sniper_path = _cooldown_path_abs
     now_ts = time.time()
     cooldown_sec = COOLDOWN_HOURS * 3600
     history_sec = HISTORY_HOURS * 3600
@@ -4190,23 +4241,31 @@ def fetch_position_change():
                         stars_val = entry.get("stars", 5)
                         if stars_val < 5 and not entry.get("tp1_notified"):
                             # 賭鬼單：TP1 達標僅提醒先落袋 60%，剩餘 40% 改為保本移動止損，不立即結案
-                            tp_msg = (
-                                f"✅ *【TP1 達標・建議落袋 60%】*\n"
-                                f"台灣時間 *{pushed_at_tw}* 推的賭鬼 *{dir_label}* 標的 `{sym_base}` 已達 TP1 `{tp1_level}`。\n"
-                                f"建議先獲利了結 60%，剩餘 40% 設為保本，讓利潤奔跑！"
-                            )
-                            send_telegram_message(tp_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
-                            entry["tp1_notified"] = True
-                            # 將追蹤止損上移/下移至進場價（保本），若無 entry_price 則維持原 SL
+                            # 先計算保本價，用於訊息顯示
                             be_price = entry.get("entry_price")
                             try:
                                 be_price_f = float(be_price) if be_price is not None else None
                             except (TypeError, ValueError):
                                 be_price_f = None
+                            be_str = f"`{be_price_f}`" if be_price_f else "進場價"
+                            tp_msg = (
+                                f"🛡️ *【盾牌啟動・此單已零風險】*\n"
+                                f"✅ TP1 達標 | 台灣時間 *{pushed_at_tw}* 推的賭鬼 *{dir_label}* 標的 `{sym_base}`\n"
+                                f"TP1 `{tp1_level}` 已觸及，恭喜入袋為安！\n\n"
+                                f"📌 *建議立即操作：*\n"
+                                f"  1️⃣ 先獲利了結 *60%* 倉位\n"
+                                f"  2️⃣ 剩餘 40%：將止損移動至進場價 {be_str}（保本）\n"
+                                f"  3️⃣ 不設止盈，順著主力移動止損讓利潤奔跑！\n\n"
+                                f"⚡ 此單現已零風險，剩餘倉位輸了也不虧，贏了是純利！"
+                            )
+                            send_telegram_message(tp_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
+                            entry["tp1_notified"] = True
+                            # 將追蹤止損上移/下移至進場價（保本），若無 entry_price 則維持原 SL
                             if be_price_f is not None and be_price_f > 0:
                                 entry["sl"] = be_price_f
+                                logger.info(f"賭鬼單 {sym_base} TP1 達標，止損自動移動至保本價 {be_price_f}")
                             exit_notified_set.add(sym_base)
-                            logger.info(f"倉位追蹤已發送: {sym_base} 賭鬼 TP1 達標 (僅提醒落袋，不結案)")
+                            logger.info(f"倉位追蹤已發送: {sym_base} 賭鬼 TP1 達標 (盾牌啟動，不結案，保本價={be_price_f})")
                         else:
                             # 列車單或已通知過 TP1 的賭鬼：維持原本 TP1 結案邏輯
                             _tp_reason = "主力成本對稱達標" if tp1_lbl == "主力成本" else "波動如預期(ATR)達標"
@@ -4344,6 +4403,7 @@ def fetch_position_change():
         try:
             SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
             state = {"history": history, "signals": push_log_signals}
+            _emergency_sniper_state = state  # 同步緊急備援快照
             with _sniper_file_lock():
                 save_json_file(SNIPER_COOLDOWN_FILE, state)
         except Exception as e:
@@ -4571,6 +4631,7 @@ def fetch_position_change():
                 return (now_ts - t) <= PUSH_LOG_RETENTION_HOURS * 3600
             push_log_signals = [e for e in push_log_signals if _retain_signal(e)]
             state = {"history": history, "signals": push_log_signals}
+            _emergency_sniper_state = state  # 同步緊急備援快照（最終版）
             with _sniper_file_lock():
                 save_json_file(SNIPER_COOLDOWN_FILE, state)
             logger.info(f"冷卻檔已寫入: 本輪 {len(pairs_this_run)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h) -> {_cooldown_path_abs}")
