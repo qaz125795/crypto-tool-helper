@@ -6487,9 +6487,9 @@ def build_report_message_tiered(
                 # 1. Header: 標的＋換方向＋波動提示（精簡，不顯示數據來源與分級標籤）
                 sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
                 flip_tag = " 🔄換方向" if x.get("direction_flip") else ""
-                lines.append(f"{dir_emoji} `{sym_base}`{flip_tag}{vol_desc}")
+                lines.append(f"{dir_emoji} `{sym_base}`{flip_tag}")
                 # 2. 策略（白話，含分級 emoji）
-                lines.append(f"🎲 策略：{strength}｜{pos_rec}")
+                lines.append(f"🎲 策略：{strength}")
                 flip = x.get("direction_flip")
                 if flip:
                     if "多轉空" in flip:
@@ -6626,28 +6626,20 @@ def build_report_message_tiered(
                 _sl_display = f"`{sl_val}`" if sl_val and sl_val not in ("-", "—", "") else "暫無數據"
                 _tp1_display = f"`{tp1_val}`" if tp1_val and tp1_val not in ("-", "—", "") else "暫無數據"
 
+                _cap_tag = " 觸發10%上限" if sl_capped else ""
                 if stars >= 5:
                     # 列車：若 SL 距現價 >5%，標注「深空防護」
                     _sl_deep_note = ""
                     if _sl_dist_pct is not None and _sl_dist_pct > 5.0:
                         _sl_deep_note = " 🔐(深空防護)"
-                    lines.append(f"🛑 止損：{_sl_display}{_sl_dist_str}{_sl_deep_note} {cap_note}")
-                    if _sl_white:
-                        lines.append(f"  └ {_sl_white}")
+                    lines.append(f"🛑 止損：{_sl_display}{_sl_dist_str}{_sl_deep_note}{_cap_tag}")
                     r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
                     lines.append(f"✅ 止盈：{_tp1_display} ({t1_note}){r1}")
-                    if _tp_white:
-                        lines.append(f"  └ {_tp_white}")
                 else:
                     # 賭鬼：TP1（腳步圖阻力優先）+ 放飛剩餘 40% + TP2 理論目標
-                    lines.append(f"🛑 止損：{_sl_display}{_sl_dist_str}(防洗盤標準) {cap_note}")
-                    if _sl_white:
-                        lines.append(f"  └ {_sl_white}")
-                    _tp1_src = t1_note if t1_note else "1.0R"
+                    lines.append(f"🛑 止損：{_sl_display}{_sl_dist_str}{_cap_tag}")
                     r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
-                    lines.append(f"✅ TP1(落袋60%)：{_tp1_display} ({_tp1_src}){r1}")
-                    if _tp_white:
-                        lines.append(f"  └ {_tp_white}")
+                    lines.append(f"✅ TP1(落袋60%)：{_tp1_display}{r1}")
                     # 若有計算出 TP2，顯示理論目標價與對應 R
                     tp2_str = x.get("tp2_price_str") or "-"
                     r2 = x.get("r_tp2")
@@ -6657,11 +6649,7 @@ def build_report_message_tiered(
                         except (TypeError, ValueError):
                             r2_val = None
                         if r2_val is not None:
-                            _tp2_label = x.get("tp2_label") or f"{r2_val:.1f}R"
-                            _tp2_white = tp_plain_desc(_tp2_label, is_bull, _fp_ds)
                             lines.append(f"🎯 TP2 理論目標：`{tp2_str}` (~{r2_val:.1f}R)")
-                            if _tp2_white:
-                                lines.append(f"  └ {_tp2_white}")
 
                 # ── 📊 訂單流分析（主動買賣比 + 淨倉位 + 腳步圖關鍵位）─────────
                 _flow_score = x.get("flow_score") or 0
@@ -6791,15 +6779,6 @@ def build_report_message_tiered(
                             lines.append(f"🎯 期權最大痛點 `{_mp_price:,.0f}` ({_mp_dir} `{_mp_dist:.1f}%`)")
                     except Exception:
                         pass
-                # ── 低流動性警示 ────────────────────────────────────────────
-                if x.get("low_liquidity_warning"):
-                    lines.append("⚠️ 成交量極低 小心滑價")
-                # 數據源提示：CoinGlass 為主，顯示 BingX 支援狀態
-                _bingx_ok = x.get("bingx_supported")
-                if _bingx_ok is True:
-                    lines.append("📍 *數據源：CoinGlass* | ✅ BingX 確認支援此標的")
-                else:
-                    lines.append("📍 *數據源：CoinGlass* | ⚠️ BingX 查無此標的，請至各交易所自行查詢")
                 lines.append("")
             # 若本子區塊無任何項目通過 RSI/風報比篩選，回滾掉暫存的標題與子標題
             if had_any_in_sub:
@@ -7890,7 +7869,22 @@ def fetch_position_change():
         snap = _fetch_bingx_ticker_snapshot(sym, preferred_symbol=preferred)
         if snap:
             if snap.get("price") is not None:
-                x["current_price"] = snap["price"]
+                snap_price = float(snap["price"])
+                kline_price = x.get("current_price")
+                # 交叉驗證：若 Ticker 快照與 K 線收盤價差距 > 8%，保留 K 線價（更可靠）
+                # 避免 Ticker 瞬間閃崩/快照異常導致 SL/TP 基準錯誤、推播後立即觸損
+                if kline_price and isinstance(kline_price, (int, float)) and kline_price > 0:
+                    _diff_pct = abs(snap_price - kline_price) / kline_price * 100
+                    if _diff_pct > 8.0:
+                        logger.warning(
+                            f"[現價驗證] {clean_base}: Ticker={snap_price} vs K線={kline_price:.4g} "
+                            f"差距={_diff_pct:.1f}% > 8%，保留 K 線價格，捨棄可能異常的 Ticker 快照"
+                        )
+                        x["data_source_warning"] = True
+                    else:
+                        x["current_price"] = snap_price
+                else:
+                    x["current_price"] = snap_price
             vol = snap.get("volume_usd")
             if vol is not None:
                 x["low_liquidity_warning"] = vol < VOLUME_SOFT_MIN_USD
@@ -8072,7 +8066,7 @@ def fetch_position_change():
             n_sl = sum(1 for e in closed_today if e.get("exit_reason") == "sl")
             n_tp1 = sum(1 for e in closed_today if e.get("exit_reason") in ("tp1", "tp1_sl"))
             n_timeout = sum(1 for e in closed_today if e.get("exit_reason") == "timeout")
-            n_reversal = sum(1 for e in closed_today if e.get("exit_reason") == "reversal")
+            n_reversal = 0
             n_win = n_tp1
             n_closed = len(closed_today)
             n_pushed = len(pushed_today)
@@ -8147,9 +8141,9 @@ def fetch_position_change():
                 f"📊 *【{summary_date} 每日績效總結】*",
                 f"",
                 f"📤 當日推播：{n_pushed} 單",
-                f"✅ 已結案：{n_closed} 單（止盈 {n_tp1}｜止損 {n_sl}｜超時撤退 {n_timeout}｜籌碼反轉 {n_reversal}）",
+                f"✅ 已結案：{n_closed} 單（止盈 {n_tp1}｜止損 {n_sl}｜超時撤退 {n_timeout}）",
                 f"🎯 R 統計：贏 {sum_r_win:.2f}R｜輸 {sum_r_loss:.2f}R｜淨 {sum_r:.2f}R",
-                f"※ 只要碰到 TP1 即計入贏局；止盈算贏、止損算輸（timeout / reversal 視為平局）→ {n_win} 贏 / {n_sl} 輸",
+                f"※ 止盈算贏、止損算輸（timeout 視為平局）→ {n_win} 贏 / {n_sl} 輸",
             ]
             if win_rate is not None:
                 summary_lines.append(f"📈 整體勝率：{win_rate:.1f}%")
@@ -8212,7 +8206,7 @@ def fetch_position_change():
             send_telegram_message("\n".join(summary_lines), TG_THREAD_IDS["position_change"], parse_mode="Markdown")
             # 記錄已發送，防止本輪後續迭代重複推播
             save_json_file(_last_summary_file, {"last_sent_date": str(summary_date)})
-            logger.info(f"每日績效總結已發送: {summary_date} 推播 {n_pushed} 結案 {n_closed} 止盈 {n_tp1} 止損 {n_sl} 超時 {n_timeout} 反轉 {n_reversal} 勝率 {win_rate}% | 週R={sum_r_week:.2f} 月R={sum_r_month:.2f}")
+            logger.info(f"每日績效總結已發送: {summary_date} 推播 {n_pushed} 結案 {n_closed} 止盈 {n_tp1} 止損 {n_sl} 超時 {n_timeout} 勝率 {win_rate}% | 週R={sum_r_week:.2f} 月R={sum_r_month:.2f}")
     # 倉位追蹤依賴「上一輪（及之前）寫入的推播紀錄」；若 data 目錄在排程間未持久化（如 CI 無 cache），此處會一直是 0 筆
     in_window = [
         e for e in push_log_signals
@@ -8222,7 +8216,7 @@ def fetch_position_change():
     logger.info(f"推播紀錄: 共 {len(push_log_signals)} 筆，48h 內且未結案 {len(in_window)} 筆待追蹤 (倉位追蹤需 data 目錄在排程間持久化)")
     if len(push_log_signals) == 0 and len(history) > 0:
         logger.warning("推播紀錄為 0 筆但冷卻有歷史 → 若曾推播過，請確認 workflow 的 data 目錄已正確 cache/還原，否則每輪從空檔開始、無法倉位追蹤")
-    logger.info(f"【倉位追蹤】本輪待追蹤 {len(in_window)} 筆歷史訊號 (48h 內未結案)，開始檢查 SL/TP、籌碼反轉、進場理由…")
+    logger.info(f"【倉位追蹤】本輪待追蹤 {len(in_window)} 筆歷史訊號 (48h 內未結案)，開始檢查 SL/TP…")
     exit_notified_set: Set[str] = set()
     # SL 觸發時輪播勵志文案（每次隨機選一段）
     SL_STOPLOSS_COPY = [
@@ -8310,6 +8304,25 @@ def fetch_position_change():
                         hit_sl = True
                     elif (not is_long) and cur_price >= sl_level:
                         hit_sl = True
+
+                # ── 進場價異常保護：推播後 10 分鐘內觸損 + 現價與 SL 方向差距 > 2倍 SL 距離
+                # 代表進場價是異常 Ticker 快照（閃崩/stale），而非市場真的突破 SL
+                # → 不記 -1R，直接取消這筆紀錄
+                if hit_sl and sl_level is not None and pushed_ts and (now_ts - pushed_ts) < 600:
+                    _entry_price = entry.get("entry_price")
+                    if _entry_price and isinstance(_entry_price, (int, float)) and _entry_price > 0:
+                        _sl_dist = abs(_entry_price - sl_level)
+                        _cur_dist = abs(cur_price - _entry_price)
+                        if _sl_dist > 0 and _cur_dist > _sl_dist * 2:
+                            logger.warning(
+                                f"[進場價異常保護] {sym_base}: 推播後 {int(now_ts-pushed_ts)}s 即觸損，"
+                                f"現價={cur_price} 進場={_entry_price} SL={sl_level} "
+                                f"距離={_cur_dist:.4g} > 2×SL={_sl_dist*2:.4g}，判定進場價異常，取消此筆"
+                            )
+                            entry["notified_exit"] = True
+                            entry["closed"] = True
+                            entry["exit_reason"] = "entry_price_error"
+                            hit_sl = False
                 # TP1 觸發條件：只用「收盤價/現價」達標才算，避免插針後收回仍誤發 TP1 達標
                 if tp1_level is not None:
                     if is_long and cur_price >= tp1_level:
@@ -8556,7 +8569,7 @@ def fetch_position_change():
             exit_notified_set.add(sym_base)
             logger.info(f"倉位追蹤已發送: {sym_base} 動能衰竭超過24小時，建議保本/小虧出場 (本倉結案)")
 
-        # 價格已結案（SL / TP / timeout），不再做籌碼反轉檢查
+        # 價格已結案（SL / TP / timeout），跳過
         if entry.get("closed"):
             continue
 
@@ -8574,47 +8587,6 @@ def fetch_position_change():
             reason_status = "弱化"
         logger.info(f"【進場理由】{sym_base} 當初 {entry_cat} 本輪 {cur_label} -> {reason_status}")
 
-        # 2) 籌碼變化追蹤：反轉→提早下車；同向加強→可考慮加碼
-        if not cur_cat:
-            continue
-        # 2a) 籌碼反轉 → 提早出場
-        reversal = False
-        if pushed_dir == "多" and cur_cat in ("short_open", "long_close"):
-            reversal = True
-        elif pushed_dir == "空" and cur_cat in ("long_open", "short_close"):
-            reversal = True
-        if reversal:
-            exit_msg = (
-                f"🚨 *【籌碼反轉・很可惜】*\n"
-                f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 籌碼已出現反轉，"
-                f"建議減碼或再觀察，等待下一輪機會。\n"
-                f"_（僅供參考，若未即時看到推播也可繼續持有，依自身狀況判斷。)_"
-            )
-            send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
-            entry["notified_exit"] = True
-            entry["closed"] = True
-            entry["exit_reason"] = "reversal"
-            entry["realized_R"] = 0.0
-            entry["closed_ts"] = int(now_ts)
-            exit_notified_set.add(sym_base)
-            logger.info(f"出場提示已發送: {sym_base} (當初{pushed_dir}，本輪{cur_cat} 籌碼反轉，realized_R={entry.get('realized_R')})")
-            continue
-        # 2b) 籌碼同向：主力/倉位還在，可持續持有（不建議加碼，僅提醒遵守停損停利）
-        same_side_strength = False
-        if pushed_dir == "多" and cur_cat in ("long_open", "short_close"):
-            same_side_strength = True
-        elif pushed_dir == "空" and cur_cat in ("short_open", "long_close"):
-            same_side_strength = True
-        if same_side_strength and not entry.get("add_notified"):
-            add_msg = (
-                f"📈 *【籌碼同向・倉位仍在】*\n"
-                f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 本輪主力/倉位方向仍在，"
-                f"可持續持有，一樣遵守停損停利。"
-            )
-            send_telegram_message(add_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
-            entry["add_notified"] = True
-            exit_notified_set.add(sym_base)
-            logger.info(f"加碼提示已發送: {sym_base} (當初{pushed_dir}，本輪{cur_cat} 同向加強)")
     if exit_notified_set:
         try:
             SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -8628,7 +8600,7 @@ def fetch_position_change():
     if exit_notified_set:
         logger.info(f"【倉位追蹤】本輪檢查完成，共發送 {len(exit_notified_set)} 則推播 → 標的: {', '.join(sorted(exit_notified_set))}")
     else:
-        logger.info(f"【倉位追蹤】本輪檢查完成，無觸發 (待追蹤 {len(in_window)} 筆均未達 SL/TP 或籌碼反轉/加碼)")
+        logger.info(f"【倉位追蹤】本輪檢查完成，無觸發 (待追蹤 {len(in_window)} 筆均未達 SL/TP)")
     # 冷卻：改為「綁定上一單結案狀態」的智慧冷卻：
     # - A 還在車上（未 closed）：同幣阻擋新推播，僅做同向加強/反轉提醒。
     # - B 已結案且 exit_reason in {tp1,tp2}：視為主力開下一車，無視 4h 冷卻，可重新推播。
