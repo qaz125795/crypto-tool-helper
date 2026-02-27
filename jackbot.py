@@ -92,6 +92,10 @@ CG_EP = {
     "ls_top_account":        "/api/futures/top-long-short-account-ratio/history",   # 大戶帳戶多空比
     "ls_top_position":       "/api/futures/top-long-short-position-ratio/history",  # 大戶持倉多空比
 
+    # ════════════════ 淨持倉 Net Position ════════════════
+    "net_pos_v2":            "/api/futures/v2/net-position/history",                  # 淨多/空持倉歷史 v2（欄位更完整）
+    "net_pos_v1":            "/api/futures/net-position/history",                     # 淨多/空持倉歷史 v1（備援）
+
     # ════════════════ 爆倉 Liquidation ════════════════
     "liq_history":           "/api/futures/liquidation/history",                    # 交易對爆倉歷史
     "liq_agg_history":       "/api/futures/liquidation/aggregated-history",         # 幣種聚合爆倉歷史（主力）
@@ -12158,8 +12162,6 @@ if __name__ == "__main__":
             run_hyperliquid_monitor_once()
         elif function_name == "gold_signal":
             run_gold_signal()
-        elif function_name == "api_check":
-            run_api_health_check("BTC")
         else:
             print("可用的功能:")
             print("  sector_ranking   - 主流板塊排行榜推播")
