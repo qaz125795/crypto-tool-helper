@@ -2440,8 +2440,10 @@ def _classify_signal_and_tier(
     # 輔助函數：v3.0 散戶濾網 & 極端費率
     def _apply_retail_funding(tup: Tuple[str, str, int, str, str]) -> Tuple[str, str, int, str, str]:
         label, zone, stars, rsi_desc, reason = tup
-        is_long = category in ("long_open", "short_close")
-        is_short = category in ("short_open", "long_close")
+        # 做多訊號：突破追漲(long_open) 或 多軍斷頭抄底(long_close)
+        is_long = category in ("long_open", "long_close")
+        # 做空訊號：跌破追跌(short_open) 或 空軍被軋摸頭(short_close)
+        is_short = category in ("short_open", "short_close")
 
         # 散戶過熱降級
         if retail_ratio is not None and retail_ratio > 1.45:
@@ -2523,7 +2525,7 @@ def _classify_signal_and_tier(
                     apply_24h("🔴 鑽石摸頭", ZONE_TOP, 5, rsi_desc, "⛽ 軋空爆發+CVD買極值" + reason_suffix)
                 )
 
-            if oi > 0 and category in ("long_open", "short_close"):
+            if oi > 0 and category == "long_open":
                 return _apply_retail_funding(apply_24h("🟢 順勢追多", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 量價齊揚" + reason_suffix))
 
             if oi > 0 and category == "short_open":
@@ -2536,7 +2538,7 @@ def _classify_signal_and_tier(
             # [降級 4 星]：OI 很大 但 CVD 背離 = 激戰/轉折盤
             downgrade_reason = "⚠️ 持倉大增但CVD背離 (多空激戰)"
             if oi > 0:
-                zone = ZONE_BREAKOUT_LONG if category in ("long_open", "short_close") else ZONE_BREAKOUT_SHORT
+                zone = ZONE_BREAKOUT_LONG if category == "long_open" else ZONE_BREAKOUT_SHORT
                 return _ret_4("🟡 激戰博弈", zone, rsi_desc, downgrade_reason)
             else:
                 zone = ZONE_DIP if category == "short_close" else ZONE_TOP
@@ -2559,7 +2561,7 @@ def _classify_signal_and_tier(
             )
 
     # 4 星一般邏輯（含 CVD 背離分開 open/close 文案）
-    if oi > 0 and (funding_negative or category in ("long_open", "short_close")):
+    if oi > 0 and (funding_negative or category == "long_open"):
         return _ret_4("🟢 試單做多", ZONE_BREAKOUT_LONG, rsi_desc, "持倉增加 (觀察動能)")
 
     if oi < 0 and (funding_positive or category == "short_close"):
@@ -2575,7 +2577,7 @@ def _classify_signal_and_tier(
         return _ret_4("🟢 超跌試多", ZONE_DIP, rsi_desc, "多頭斷頭 (摸底試單)")
 
     if oi > 0:
-        zone = ZONE_BREAKOUT_LONG if category in ("long_open", "short_close") else ZONE_BREAKOUT_SHORT
+        zone = ZONE_BREAKOUT_LONG if category == "long_open" else ZONE_BREAKOUT_SHORT
         return _ret_4("🟡 順勢觀察", zone, rsi_desc, "持倉異動順勢")
 
     if oi < 0:
@@ -3218,16 +3220,21 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
         if oi_change_30m is None:
             return {'status': 'oi_failed', 'symbol': symbol}
         category = None
+        # 價格 / 持倉變化 → 四象限分類（名詞依交易實務修正）
+        # 價格漲 + OI 漲 = long_open  (多頭開倉)
+        # 價格漲 + OI 跌 = short_close (空軍被軋，空頭平倉)
+        # 價格跌 + OI 漲 = short_open (空頭開倉)
+        # 價格跌 + OI 跌 = long_close  (多軍斷頭，多頭平倉)
         if price_change_30m > 0:
             if oi_change_30m > 0:
                 category = 'long_open'
             elif oi_change_30m < 0:
-                category = 'long_close'
+                category = 'short_close'  # 價漲 + OI 跌 = 空軍被軋平倉
         elif price_change_30m < 0:
             if oi_change_30m > 0:
                 category = 'short_open'
             elif oi_change_30m < 0:
-                category = 'short_close'
+                category = 'long_close'   # 價跌 + OI 跌 = 多軍斷頭平倉
         if category:
             price_change_24h = extract_price_change_24h(coin)
             return {
