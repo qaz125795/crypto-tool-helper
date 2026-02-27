@@ -6544,6 +6544,8 @@ def build_report_message_tiered(
                 had_any_in_sub = True
                 has_any = True
                 push_count = push_count + 1  # noqa: (defined below at init)
+                # 標記：此標的是「實際有推播」的訊號，供後續冷卻/倉位追蹤使用
+                x["selected_for_push"] = True
                 price = x.get("current_price")
                 if price is not None and isinstance(price, (int, float)):
                     price_str = f"{price:.4f}" if price < 10 else f"{price:.2f}"
@@ -8808,7 +8810,12 @@ def fetch_position_change():
     if _skipped > 0:
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
     # 寫入冷卻檔時也用正規化 symbol，確保下次讀取比對一致
-    pairs_this_run = [(_cooldown_symbol(x.get("symbol")), _item_direction(x)) for x in cooled_top if x.get("symbol")]
+    # 僅針對「實際有推播」的標的寫入冷卻（selected_for_push=True）
+    pairs_this_run = [
+        (_cooldown_symbol(x.get("symbol")), _item_direction(x))
+        for x in cooled_top
+        if x.get("symbol") and x.get("selected_for_push")
+    ]
 
     # ── 標準版：多所共識檢查（只對最終入選訊號查詢，節省 API 用量）────────────
     if cooled_top:
@@ -8885,6 +8892,9 @@ def fetch_position_change():
 
             new_push_entries: List[Dict[str, Any]] = []
             for x in cooled_top:
+                # 僅紀錄「真的有推播」的訊號；RSI/風報比被篩掉的標的不追蹤
+                if not x.get("selected_for_push"):
+                    continue
                 full_sym = x.get("symbol") or ""
                 base_sym = _cooldown_symbol(full_sym)
                 if not base_sym:
