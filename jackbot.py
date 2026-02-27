@@ -2276,7 +2276,49 @@ def _calc_oi_trend_from_bars(oi_bars: list) -> Dict[str, Any]:
         recent_ch = abs(oi_bars[-1] - oi_bars[-2]) / max(abs(oi_bars[-2]), 1)
         prev_ch = abs(oi_bars[-3] - oi_bars[-4]) / max(abs(oi_bars[-4]), 1)
         acceleration = recent_ch > prev_ch * 1.5
+    # bars 僅保留最近 6 根，後續依 interval 推導 1h/4h 變化
     return {"change_pct": change_pct, "trend": trend, "acceleration": acceleration, "bars": oi_bars[-6:]}
+
+
+def _augment_oi_multi_tf_changes(result: Dict[str, Any], interval: str) -> Dict[str, Any]:
+    """
+    基於 OI bars 推導多時間框架變化：
+    - change_1h_pct：近 1 小時 OI 變化百分比
+    - change_4h_pct：近 4 小時 OI 變化百分比（若資料不足則為 None）
+    interval 目前實務上多為 h1 或 15m。
+    """
+    bars = result.get("bars") or []
+    change_1h_pct: Optional[float] = None
+    change_4h_pct: Optional[float] = None
+    if not isinstance(bars, list) or len(bars) < 2:
+        result["change_1h_pct"] = None
+        result["change_4h_pct"] = None
+        return result
+
+    iv = (interval or "").lower()
+    try:
+        if iv in ("h1", "1h"):
+            # 一根 = 1h
+            if len(bars) >= 2 and bars[-2] != 0:
+                change_1h_pct = (bars[-1] - bars[-2]) / bars[-2] * 100
+            if len(bars) >= 4 and bars[-4] != 0:
+                change_4h_pct = (bars[-1] - bars[-4]) / bars[-4] * 100
+        elif iv in ("15m", "m15", "15min"):
+            # 4 根 ≈ 1h；4h 需 16 根，通常資料不足 → 僅計 1h
+            if len(bars) >= 4 and bars[-4] != 0:
+                change_1h_pct = (bars[-1] - bars[-4]) / bars[-4] * 100
+            change_4h_pct = None
+        else:
+            # 其他 interval 暫不特別推導
+            change_1h_pct = result.get("change_pct")
+            change_4h_pct = None
+    except Exception:
+        change_1h_pct = result.get("change_pct")
+        change_4h_pct = None
+
+    result["change_1h_pct"] = change_1h_pct
+    result["change_4h_pct"] = change_4h_pct
+    return result
 
 
 def fetch_oi_trend_analysis(symbol: str, interval: str = "15m", limit: int = 8) -> Dict[str, Any]:
@@ -2311,6 +2353,7 @@ def fetch_oi_trend_analysis(symbol: str, interval: str = "15m", limit: int = 8) 
         if len(oi_bars) >= 3:
             result = _calc_oi_trend_from_bars(oi_bars)
             result["data_source"] = f"agg_history_{_oi_iv}"
+            result = _augment_oi_multi_tf_changes(result, _oi_iv)
             logger.info(f"[OI趨勢-A✅] {base}: 方案A成功({_oi_iv})，{len(oi_bars)}棒，trend={result['trend']}")
             _flow_cache[cache_key] = (result, now)
             return result
@@ -2331,6 +2374,7 @@ def fetch_oi_trend_analysis(symbol: str, interval: str = "15m", limit: int = 8) 
                 if len(oi_bars_b) >= 3:
                     result = _calc_oi_trend_from_bars(oi_bars_b)
                     result["data_source"] = f"{_oi_ex}_{_oi_iv}"
+                    result = _augment_oi_multi_tf_changes(result, _oi_iv)
                     logger.info(f"[OI趨勢-B✅] {base}: 方案B成功（{_oi_ex}/{_oi_iv}），{len(oi_bars_b)}棒")
                     _flow_cache[cache_key] = (result, now)
                     return result
@@ -6554,11 +6598,7 @@ def build_report_message_tiered(
                     else:
                         fr_desc = "⚖️ 中性"
                     lines.append(f"💸 費率：`{fr_pct:.4f}%` {fr_desc}")
-                # 4. 邏輯（持倉變化白話）+ 訂單簿（白話）
-                reason = x.get("reason", "籌碼異動")
-                if flip:
-                    reason = (reason or "") + " 趨勢已改變，舊單失效。"
-                # 籌碼背離預警：OI 漲但價格跌幅收斂 → 底部吸籌；OI 跌但價格漲幅收斂 → 頂部出貨
+                # 4. 15m 觸發數值（CoinGlass 四象限座標：持倉變化 vs 價格變化）
                 p30 = x.get("priceChange30m")
                 oi30 = x.get("oiChange30m")
                 try:
@@ -6569,6 +6609,26 @@ def build_report_message_tiered(
                     oi30_val = float(oi30) if isinstance(oi30, (int, float, str)) and oi30 is not None else None
                 except (TypeError, ValueError):
                     oi30_val = None
+                if oi30_val is not None and p30_val is not None:
+                    _oi_str = f"{oi30_val:+.2f}%"
+                    _p30_str = f"{p30_val:+.2f}%"
+                    # 四象限標籤（對應 CoinGlass Visual Screener 象限名稱）
+                    _cat = x.get("category", "")
+                    _quadrant_map = {
+                        "long_open":   "🟢 多方開倉",
+                        "short_close": "🟢 空方平倉",
+                        "short_open":  "🔴 空方開倉",
+                        "long_close":  "🔴 多方平倉",
+                    }
+                    _quadrant_label = _quadrant_map.get(_cat, "")
+                    _quadrant_tag = f" ({_quadrant_label})" if _quadrant_label else ""
+                    lines.append(f"📊 15m{_quadrant_tag}：持倉 `{_oi_str}` 價格 `{_p30_str}`")
+
+                # 邏輯（持倉變化白話）+ 訂單簿（白話）
+                reason = x.get("reason", "籌碼異動")
+                if flip:
+                    reason = (reason or "") + " 趨勢已改變，舊單失效。"
+                # 籌碼背離預警：OI 漲但價格跌幅收斂 → 底部吸籌；OI 跌但價格漲幅收斂 → 頂部出貨
                 if p30_val is not None and oi30_val is not None:
                     if oi30_val > 3.0 and p30_val < 0:
                         reason = (reason or "") + " 🕵️ 主力底部吸籌"
@@ -6707,6 +6767,8 @@ def build_report_message_tiered(
                 _flow_lines = []
                 _oi_trend_msg = x.get("oi_trend")
                 _oi_accel = x.get("oi_acceleration")
+                _oi_1h = x.get("oi_change_1h_pct")
+                _oi_4h = x.get("oi_change_4h_pct")
                 _top_ls = x.get("top_ls_ratio")
 
                 # 主動買賣比
@@ -6741,6 +6803,14 @@ def build_report_message_tiered(
                     )
                     _oi_consistent_icon = "🟢" if _oi_consistent else ("🔴" if not _oi_consistent and _oi_trend_msg not in ("flat","reversing") else "🟡")
                     _flow_lines.append(f"  {_oi_consistent_icon} OI 趨勢：{_oi_label}{_oi_accel_tag}")
+                    # 多時間框架 OI 情緒雷達：判斷是剛啟動還是已經拉升多小時
+                    _oi_parts: list[str] = []
+                    if isinstance(_oi_1h, (int, float)):
+                        _oi_parts.append(f"1h `{_oi_1h:+.2f}%`")
+                    if isinstance(_oi_4h, (int, float)):
+                        _oi_parts.append(f"4h `{_oi_4h:+.2f}%`")
+                    if _oi_parts:
+                        _flow_lines.append(f"  🔎 OI 風險雷達：{' / '.join(_oi_parts)}")
                 # 大戶帳戶多空比
                 if _top_ls is not None:
                     _top_ls_icon = "🟢" if ((_top_ls > 1.1 and is_bull) or (_top_ls < 0.9 and not is_bull)) else ("🔴" if ((_top_ls < 0.9 and is_bull) or (_top_ls > 1.1 and not is_bull)) else "🟡")
@@ -7861,6 +7931,8 @@ def fetch_position_change():
             "flow_score": _flow_score_val,         # 訂單流綜合評分 0~4
             "oi_trend": _oi_trend_data.get("trend"),  # OI趨勢: building/declining/flat/reversing
             "oi_acceleration": _oi_trend_data.get("acceleration"),  # OI加速建倉旗標
+            "oi_change_1h_pct": _oi_trend_data.get("change_1h_pct"),  # 近1h OI 變化%
+            "oi_change_4h_pct": _oi_trend_data.get("change_4h_pct"),  # 近4h OI 變化%（若資料不足則為 None）
             "top_ls_ratio": _top_ls_ratio,         # 大戶多空比（>1大戶偏多，<1大戶偏空）
             "accum_fr_7d": _accum_fr_data.get("accumulated_7d"),   # 7日累積資金費率
             "accum_fr_squeeze": _accum_fr_data.get("squeeze_risk") or "neutral",  # 擠壓風險類型
