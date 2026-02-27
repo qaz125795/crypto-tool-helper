@@ -51,8 +51,8 @@ CG_API_BASE = "https://open-api-v4.coinglass.com"
 # ══════════════════════════════════════════════════════════════════════════════
 CG_EP = {
     # ════════════════ 交易市場 Market ════════════════
-    "supported_coins":       "/futures/supported-coins",                             # 支持合約幣種列表
-    "supported_pairs":       "/futures/supported-exchange-pairs",                    # 支持的交易對
+    "supported_coins":       "/api/futures/supported-coins",                         # 支持合約幣種列表
+    "supported_pairs":       "/api/futures/supported-exchange-pairs",                # 支持的交易對
     "pairs_markets":         "/api/futures/pairs-markets",                           # 合約交易對詳情
     "coins_markets":         "/api/futures/coins-markets",                           # 合約幣種市場行情（主要掃描源）
     "price_change_list":     "/futures/price-change-list",                           # 幣種價格變化列表
@@ -6988,25 +6988,84 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             logger.warning(f"coins-price-change 異常: {e}")
             return []
 
-    # ── 同時呼叫兩個端點並合併（解決 coins-markets 只回傳 100 個的問題）──────
+    # ── Step 1：coins-markets（top 100，帶完整 OI/Price 數據）──────────────
     result_markets = _try_coins_markets()
-    result_pc = _try_coins_price_change()
 
-    if result_markets and result_pc:
-        seen_syms = {item["symbol"] for item in result_markets}
-        extra = [item for item in result_pc if item["symbol"] not in seen_syms]
-        if extra:
-            logger.info(f"[CoinGlass-First] coins-price-change 額外補充 {len(extra)} 個 coins-markets 未涵蓋的幣種")
-        result = result_markets + extra
-        logger.info(f"[CoinGlass-First] 合併後總計 {len(result)} 個唯一幣種（markets={len(result_markets)} + pc補充={len(extra)}）")
-        return result
-    elif result_markets:
-        logger.info(f"[CoinGlass-First] 僅 coins-markets 有效，共 {len(result_markets)} 個幣種")
-        return result_markets
-    elif result_pc:
-        logger.info(f"[CoinGlass-First] coins-markets 無效，改用 coins-price-change，共 {len(result_pc)} 個幣種")
-        return result_pc
-    return []
+    # ── Step 2：coins-price-change（全量幣種價格資料，診斷 + 補充）──────────
+    result_pc = _try_coins_price_change()
+    if result_pc:
+        _pc_sample_keys = list(result_pc[0].keys()) if isinstance(result_pc[0], dict) else []
+        logger.info(f"[CoinGlass-First] coins-price-change 回傳 {len(result_pc)} 個幣種 | 首筆欄位={_pc_sample_keys}")
+    else:
+        logger.warning("[CoinGlass-First] coins-price-change 無回傳數據")
+
+    # ── Step 3：supported-coins（全量幣種名單，作為最終補充）───────────────
+    # 用 supported-coins 確保掃描涵蓋所有合約幣種（即使 price-change 也有上限）
+    def _try_supported_coins_stubs(seen: set) -> List[Dict]:
+        """從 supported-coins 取得完整幣種名單，為未覆蓋幣種建立最小存根（stub）。
+        stubs 沒有 price_change 數據，會被標記 _stub=True，
+        下游 price filter 會對這類幣「放行進 OI 檢查」而非直接拋棄。"""
+        try:
+            _respect_coinglass_rate_limit()
+            r = requests.get(
+                f"{CG_API_BASE}{CG_EP['supported_coins']}",
+                headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+                timeout=10
+            )
+            if r.status_code != 200:
+                logger.debug(f"[supported-coins] HTTP {r.status_code}")
+                return []
+            j = r.json()
+            coin_list = j.get("data", [])
+            if not isinstance(coin_list, list) or not coin_list:
+                return []
+            stubs = []
+            for c in coin_list:
+                name = str(c).strip().upper() if isinstance(c, str) else (
+                    str(c.get("symbol") or c.get("coin") or "").strip().upper()
+                    if isinstance(c, dict) else ""
+                )
+                if name and len(name) <= 14 and name not in seen:
+                    seen.add(name)
+                    stubs.append({
+                        "symbol": name, "coin": name,
+                        "price_change_percent_30m": None,
+                        "price_change_percent_24h": None,
+                        "_cg_volume_usd": None,
+                        "_stub": True,  # 標記為 stub：price filter 放行，直接進 OI 檢查
+                    })
+            logger.info(f"[CoinGlass-First] supported-coins 補充 {len(stubs)} 個 stub 幣種（無 price 數據，直接進 OI 掃描）")
+            return stubs
+        except Exception as e:
+            logger.debug(f"[supported-coins] 異常: {e}")
+            return []
+
+    # ── Step 4：三路合併 ──────────────────────────────────────────────────
+    seen_syms: set = set()
+    result: List[Dict] = []
+
+    for item in result_markets:
+        sym = item.get("symbol", "")
+        if sym and sym not in seen_syms:
+            seen_syms.add(sym)
+            result.append(item)
+
+    pc_added = 0
+    for item in result_pc:
+        sym = item.get("symbol", "")
+        if sym and sym not in seen_syms:
+            seen_syms.add(sym)
+            result.append(item)
+            pc_added += 1
+
+    stub_list = _try_supported_coins_stubs(seen_syms)
+    result.extend(stub_list)
+
+    logger.info(
+        f"[CoinGlass-First] 三路合併完成 → 總計 {len(result)} 個唯一幣種"
+        f"（markets={len(result_markets)} | pc補充={pc_added} | supported-coins stub={len(stub_list)}）"
+    )
+    return result
 
 
 def fetch_position_change():
@@ -7091,13 +7150,19 @@ def fetch_position_change():
     # ════════════════════════════════════════════════════════
     PRICE_GATEKEEPER = 0.45  # 測試模式：原 0.6 × 0.75
     active_symbols: List[Dict] = []
+    stub_pass_count = 0
     for coin in bingx_filtered:
+        # supported-coins stub（沒有 price 數據）→ 直接放行讓 OI 決定
+        if coin.get("_stub"):
+            active_symbols.append(coin)
+            stub_pass_count += 1
+            continue
         p_change = extract_price_change_30m(coin)
         if abs(p_change) >= PRICE_GATEKEEPER:
             active_symbols.append(coin)
     logger.info(
         f"📊 [掃描漏斗] 3. 經價格波動(>={PRICE_GATEKEEPER}%)過濾，最終 {len(active_symbols)} 幣種進入 OI 運算"
-        f"（淘汰 {len(bingx_filtered) - len(active_symbols)} 個低波動標的）"
+        f"（淘汰 {len(bingx_filtered) - len(active_symbols)} 個低波動標的 | stub 無數據直通 {stub_pass_count} 個）"
     )
 
     # ════════════════════════════════════════════════════════
