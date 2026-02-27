@@ -7995,9 +7995,11 @@ def fetch_position_change():
                     if hit_sl:
                         if entry.get("tp1_notified"):
                             # 賭鬼單已先落袋 TP1，再被 SL 出場 → 整體視為獲利結案
+                            _cur_price_str = f"`{cur_price}`" if cur_price is not None else "N/A"
                             exit_msg = (
                                 f"⚠️ *【剩餘倉位出場・整體獲利結案】*\n"
                                 f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 價格回落觸及防守價。\n"
+                                f"📍 觸發時現價：{_cur_price_str}（15分鐘K線收盤/快照）\n"
                                 f"由於已落袋 TP1 (60%)，此單整體依然獲利！完美結束！"
                             )
                             send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
@@ -8023,10 +8025,12 @@ def fetch_position_change():
                                 if is_long else
                                 f"價格突破 `{sl_level}` {_sl_src}壓力，空方結構破壞。"
                             )
+                            _cur_price_str = f"`{cur_price}`" if cur_price is not None else "N/A"
                             exit_msg = (
                                 f"⚠️ *【已觸發止損・本倉結案】*\n"
                                 f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}`\n"
                                 f"止損觸發：{_sl_dir_desc}\n"
+                                f"📍 觸發時現價：{_cur_price_str}（15分鐘K線收盤/快照）\n"
                                 f"本次 R：`-1.0R`（控管得當，止損機制正常運作）\n\n{sl_copy}"
                             )
                             send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
@@ -8054,9 +8058,11 @@ def fetch_position_change():
                                 be_price_f = None
                             be_str = f"`{be_price_f}`" if be_price_f else "進場價"
                             _locked_time = datetime.now(TAIPEI_TZ).strftime("%H:%M")
+                            _cur_price_str_shield = f"`{cur_price}`" if cur_price is not None else "N/A"
                             tp_msg = (
                                 f"🛡️ *【盾牌啟動・此單已零風險】*\n"
                                 f"✅ TP1 達標 | 台灣時間 *{pushed_at_tw}* 推的賭鬼 *{dir_label}* 標的 `{sym_base}`\n"
+                                f"📍 觸發時現價：{_cur_price_str_shield}（15分鐘K線收盤/快照）\n"
                                 f"TP1 `{tp1_level}` 已觸及，恭喜入袋為安！\n"
                                 f"✅ *已鎖定利潤* `{_locked_time}` 台灣\n\n"
                                 f"📌 *建議立即操作：*\n"
@@ -8076,9 +8082,11 @@ def fetch_position_change():
                         else:
                             # 列車單或已通知過 TP1 的賭鬼：維持原本 TP1 結案邏輯
                             _tp_reason = "主力成本對稱達標" if tp1_lbl == "主力成本" else "波動如預期(ATR)達標"
+                            _cur_price_str = f"`{cur_price}`" if cur_price is not None else "N/A"
                             exit_msg = (
                                 f"✅ *【已達止盈・本倉完結】*\n"
                                 f"台灣時間 *{pushed_at_tw}* 推的 *{dir_label}* 標的 `{sym_base}` 已達止盈({tp1_lbl}) `{tp1_level}`。\n"
+                                f"📍 觸發時現價：{_cur_price_str}（15分鐘K線收盤/快照）\n"
                                 f"原因：{_tp_reason}，本倉結案。"
                             )
                             send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
@@ -8105,9 +8113,11 @@ def fetch_position_change():
                             r_tp2_val = float(r_tp2) if r_tp2 is not None else None
                         except (TypeError, ValueError):
                             r_tp2_val = None
+                        _cur_price_str_tp2 = f"`{cur_price}`" if cur_price is not None else "N/A"
                         exit_msg = (
                             f"🎯 *【TP2 滿貫結案】*\n"
                             f"台灣時間 *{pushed_at_tw}* 推的賭鬼 *{dir_label}* 標的 `{sym_base}` 價格已觸及 TP2 `{tp2_level}`。\n"
+                            f"📍 觸發時現價：{_cur_price_str_tp2}（15分鐘K線收盤/快照）\n"
                             f"本單已完成 TP1 + TP2 滿貫，建議全數了結部位。"
                         )
                         send_telegram_message(exit_msg, TG_THREAD_IDS["position_change"], parse_mode="Markdown")
