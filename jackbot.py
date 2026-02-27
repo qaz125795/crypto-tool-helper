@@ -4622,6 +4622,7 @@ def fetch_position_change():
     else:
         logger.info(f"[熔斷器✅] 正常模式（連續429={_cb_cnt}）")
 
+    logger.info("🚀 傑克船長 2.0 閃電版正式啟動 | 測試模式：75折門檻 | 頻率：15M")
     logger.info("【CoinGlass-First】開始執行 15M 持倉狙擊掃描...")
 
     # ── Step 1：CoinGlass 全市場數據（不預先受限於 BingX 幣種）────────────────
@@ -5472,16 +5473,22 @@ def fetch_position_change():
                     f"cur_price={cur_price} last_high_30m={kline_high} last_low_30m={kline_low}"
                 )
             # 若 K 線不可用，退回到 ticker 快照（確保不會整體失效）
-            if kline_tech is None:
-                logger.warning(f"倉位追蹤 K 線取得失敗，改用 ticker 快照取價: {sym_base} full_symbol={full_sym}")
+            if kline_tech is None or cur_price is None:
+                if kline_tech is None:
+                    logger.warning(f"倉位追蹤 K 線取得失敗，改用 ticker 快照取價: {sym_base} full_symbol={full_sym}")
                 snap = _fetch_bingx_ticker_snapshot(full_sym, preferred_symbol=None)
                 if snap and snap.get("price") is not None:
                     try:
                         cur_price = float(snap.get("price"))
                     except (TypeError, ValueError):
                         cur_price = None
-                if cur_price is None and snap is None:
-                    logger.warning(f"倉位追蹤取價失敗(無快照): {sym_base} full_symbol={full_sym}")
+                if cur_price is None:
+                    # K 線與快照均失敗 → 記錄並跳過本輪比對，避免任何 UnboundLocalError
+                    logger.info(
+                        f"[倉位追蹤] {sym_base} 本輪 BingX 取價完全失敗（K 線與快照均無效），"
+                        f"跳過 SL/TP 比對，等待下一輪重試"
+                    )
+                    continue
                 else:
                     logger.info(f"【倉位追蹤快照】{sym_base} full_symbol={full_sym} cur_price={cur_price}")
 
