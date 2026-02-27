@@ -6857,9 +6857,6 @@ def fetch_position_change():
 
     logger.info("🚀 傑克船長 2.0 閃電版正式啟動 | 測試模式：75折門檻 | 頻率：15M")
     logger.info("【巨鯨高效漏斗】開始執行 15M 持倉狙擊掃描...")
-    _cb_tripped = _circuit_breaker.get("tripped", False)
-    logger.info(f"[啟動環境] CG_API_KEY={'已設定('+CG_API_KEY[:6]+'...)' if CG_API_KEY else '❌未設定'}"
-                f" | MAX_WORKERS={MAX_WORKERS} | 熔斷器={'⚠️降速模式' if _cb_tripped else '✅正常'}")
 
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 0：預先抓取 BingX 合約對照表（僅供 K 線查詢，不做過濾）
@@ -6989,6 +6986,9 @@ def fetch_position_change():
     
     # 並行處理配置：標準版高頻模式，預設 12 執行緒；熔斷器啟動時自動降為 1
     MAX_WORKERS = _cb_get_max_workers(default=15)
+    _cb_tripped = _circuit_breaker.get("tripped", False)
+    logger.info(f"[啟動環境] CG_API_KEY={'已設定('+CG_API_KEY[:6]+'...)' if CG_API_KEY else '❌未設定'}"
+                f" | MAX_WORKERS={MAX_WORKERS} | 熔斷器={'⚠️降速模式' if _cb_tripped else '✅正常'}")
     if MAX_WORKERS == 1:
         logger.warning("[熔斷器作用中] MAX_WORKERS 已降為 1，本輪採單執行緒保護模式")
     start_time = time.time()
