@@ -5386,6 +5386,12 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     if len(highs) >= 8 and len(lows) >= 8:
         out["recent_high_2h"] = max(highs[-8:])
         out["recent_low_2h"] = min(lows[-8:])
+    # 突破前回檔結構點：取最後一根 K（觸發訊號）之前 2~4 根的高低點
+    # 適用於「EMA20 突破前的回檔低」做 SL 錨點，比 2H 最低更貼近結構
+    if len(lows) >= 4:
+        out["pre_breakout_low"] = min(lows[-4:-1])   # 觸發 K 線之前 3 根最低
+    if len(highs) >= 4:
+        out["pre_breakout_high"] = max(highs[-4:-1]) # 觸發 K 線之前 3 根最高
     logger.info(
         f"[本地換算] {clean}: 完成 RSI={rsi_val:.2f} 布林上={ub_value} 布林下={lb_value} "
         f"現價={current_price} ATR={atr_val} VWAP_2h={vwap_2h} EMA20={ema20_close} "
@@ -5511,6 +5517,10 @@ def _calc_indicators_from_ohlcv(
     if len(highs) >= 8:
         out["recent_high_2h"] = max(highs[-8:])
         out["recent_low_2h"] = min(lows[-8:])
+    if len(lows) >= 4:
+        out["pre_breakout_low"] = min(lows[-4:-1])
+    if len(highs) >= 4:
+        out["pre_breakout_high"] = max(highs[-4:-1])
 
     logger.info(
         f"[{source_label}指標] {clean}: RSI={rsi_val:.2f} BB上={ub_value} BB下={lb_value} "
@@ -5766,47 +5776,75 @@ def build_report_message_tiered(
         recent_high_2h: Optional[float] = None,
         recent_low_2h: Optional[float] = None,
         signal_type: str = "trend",
+        pre_breakout_low: Optional[float] = None,
+        pre_breakout_high: Optional[float] = None,
+        ema20: Optional[float] = None,
     ):
         """
-        ATR 動態防守法（MTF 雙策略版）：
+        SL 選點邏輯（做多為例）：
+          EMA20 和突破前結構低分別算出候選 SL，取兩者中較貼近現價（較緊）的那個。
+          如果只有其中一個有效，就用那個。都沒有則退回 2H 低點。
 
-        【建倉型】signal_type="trend"  (long_open / short_open)
-          屬於長趨勢跟隨，有足夠時間走出空間。
-          SL：結構點 ± 0.5 * ATR
-          TP1：1.5R（分批止盈）
-          TP2：3.0R（趨勢目標）
+          ATR 作為緩衝 pad（建倉型 0.5x，軋空型 0.2x），貼在選定的結構點外側。
 
-        【平倉軋空型】signal_type="squeeze"  (long_close / short_close)
-          屬於短線爆發，容易快速反轉畫門，必須保守落袋。
-          SL：結構點 ± 0.2 * ATR（更貼近，快速確認失效）
-          TP1：1.0R（盡快落袋）
-          TP2：2.0R（延伸目標）
-
-        返回: (sl_price, tp1_price, tp2_price, sl_pct, warn_pct)
-        warn_pct: 若 SL 距現價 > 6%，回傳實際百分比（警示減倉）
+        回傳: (sl_price, tp1_price, tp2_price, sl_pct, warn_pct, sl_basis_label)
+          sl_basis_label: 說明 SL 依據（EMA20 / 結構低 / 2H低 / 無基準）
         """
         if not price or price <= 0:
-            return None, None, None, None, None
+            return None, None, None, None, None, "—"
 
         is_squeeze = (signal_type == "squeeze")
         atr_val = float(atr) if atr and isinstance(atr, (int, float)) and atr > 0 else None
-
-        # ATR 緩衝倍率：建倉型 0.5 倍，軋空/平倉型 0.2 倍（更貼近，確認快速失效）
         atr_mult = 0.2 if is_squeeze else 0.5
-        pad = atr_mult * atr_val if atr_val else price * (0.005 if is_squeeze else 0.015)
+        pad = atr_mult * atr_val if atr_val else price * (0.005 if is_squeeze else 0.01)
+
+        def _valid_below(v):  # 對做多：有效的支撐點 = 在現價以下
+            return v and isinstance(v, (int, float)) and 0 < float(v) < price
+        def _valid_above(v):  # 對做空：有效的壓力點 = 在現價以上
+            return v and isinstance(v, (int, float)) and float(v) > price
+
+        candidates = []  # [(sl_price, label)]
 
         if is_long:
-            basis = float(recent_low_2h) if recent_low_2h and isinstance(recent_low_2h, (int, float)) and recent_low_2h > 0 else None
-            sl_price = (basis - pad) if basis else (price - pad)
+            # 候選 1：EMA20 — 動態均線防守（回測 EMA20 不破才算有效突破）
+            if _valid_below(ema20):
+                candidates.append((float(ema20) - pad, "EMA20防守"))
+            # 候選 2：突破前 3 根回檔低 — 靜態結構失效點
+            if _valid_below(pre_breakout_low):
+                candidates.append((float(pre_breakout_low) - pad, "結構低防守"))
+            # 備援：2H 整體低點
+            if _valid_below(recent_low_2h):
+                candidates.append((float(recent_low_2h) - pad, "2H低點"))
         else:
-            basis = float(recent_high_2h) if recent_high_2h and isinstance(recent_high_2h, (int, float)) and recent_high_2h > 0 else None
-            sl_price = (basis + pad) if basis else (price + pad)
+            if _valid_above(ema20):
+                candidates.append((float(ema20) + pad, "EMA20防守"))
+            if _valid_above(pre_breakout_high):
+                candidates.append((float(pre_breakout_high) + pad, "結構高防守"))
+            if _valid_above(recent_high_2h):
+                candidates.append((float(recent_high_2h) + pad, "2H高點"))
+
+        if candidates:
+            if is_long:
+                # 做多取最高（最貼近現價 = 最緊的合理止損）
+                sl_price, sl_label = max(candidates, key=lambda c: c[0])
+            else:
+                # 做空取最低
+                sl_price, sl_label = min(candidates, key=lambda c: c[0])
+            # 確保 SL 方向正確（不能穿越現價）
+            if is_long and sl_price >= price:
+                sl_price = price * 0.97
+                sl_label = "備援3%"
+            elif not is_long and sl_price <= price:
+                sl_price = price * 1.03
+                sl_label = "備援3%"
+        else:
+            sl_price = price * 0.97 if is_long else price * 1.03
+            sl_label = "備援3%"
 
         risk = (price - sl_price) if is_long else (sl_price - price)
         if risk <= 0:
             risk = price * (0.005 if is_squeeze else 0.015)
 
-        # 風報比：建倉型 TP1=1.5R / TP2=3.0R；軋空型 TP1=1.0R / TP2=2.0R
         if is_squeeze:
             tp1_price = price + 1.0 * risk if is_long else price - 1.0 * risk
             tp2_price = price + 2.0 * risk if is_long else price - 2.0 * risk
@@ -5815,8 +5853,8 @@ def build_report_message_tiered(
             tp2_price = price + 3.0 * risk if is_long else price - 3.0 * risk
 
         sl_pct = abs(price - sl_price) / price * 100 if price > 0 else 0
-        warn_pct = sl_pct if sl_pct > 6.0 else None
-        return sl_price, tp1_price, tp2_price, sl_pct, warn_pct
+        warn_pct = sl_pct if sl_pct > 8.0 else None
+        return sl_price, tp1_price, tp2_price, sl_pct, warn_pct, sl_label
 
     def _is_bull(x: Dict) -> bool:
         cat = x.get("category", "")
@@ -5976,15 +6014,20 @@ def build_report_message_tiered(
         vol_usd = x.get("volume_usd") or x.get("_cg_volume_usd") or 0
         funding_rate = x.get("funding_rate")
         atr_val = x.get("atr")
+        rsi_val = x.get("rsi")
+        detected_ts = x.get("_detected_ts")
 
         # SL/TP 計算（ATR 動態防守）
         # 建倉型 → "trend"：TP1=1.5R / TP2=3.0R / SL=0.5*ATR
         # 平倉軋空型 → "squeeze"：TP1=1.0R / TP2=2.0R / SL=0.2*ATR
         _sig_type = "squeeze" if category in ("long_close", "short_close") else "trend"
-        sl, tp1, tp2, sl_pct, warn_pct = calc_sl_tp(
+        sl, tp1, tp2, sl_pct, warn_pct, sl_label = calc_sl_tp(
             price, is_bull_sig, atr_val,
             x.get("recent_high_2h"), x.get("recent_low_2h"),
             signal_type=_sig_type,
+            pre_breakout_low=x.get("pre_breakout_low"),
+            pre_breakout_high=x.get("pre_breakout_high"),
+            ema20=x.get("ema20"),
         )
 
         # ── 手機優化排版（簡潔 + 教學理由 + 訊號分級）────────────────
@@ -6053,7 +6096,7 @@ def build_report_message_tiered(
 
         if sl is not None:
             sl_pct_str = f"{sl_pct:.1f}%" if sl_pct is not None else "—"
-            msg_lines.append(f"🛑 停損   `{_fmt_price(sl)}`  (`-{sl_pct_str}`)")
+            msg_lines.append(f"🛑 停損   `{_fmt_price(sl)}`  (`-{sl_pct_str}`)  _{sl_label}_")
         else:
             msg_lines.append("🛑 停損   無數據")
 
@@ -6094,7 +6137,34 @@ def build_report_message_tiered(
             msg_lines.append(f"⚡ 資金費率 `{fr_val:+.4f}%`  {fr_comment}")
 
         if warn_pct is not None:
-            msg_lines.append(f"⚠️ *SL距離 `{warn_pct:.1f}%`，請將本金【減半】！*")
+            msg_lines.append(
+                f"⚠️ SL距離 `{warn_pct:.1f}%`，結構點較遠，風報比偏低，可考慮跳過或減半倉位"
+            )
+
+        # ⑥ RSI 熱度標示（影響勝率提示）
+        if rsi_val is not None and isinstance(rsi_val, (int, float)):
+            if is_bull_sig:
+                if rsi_val >= 80:
+                    msg_lines.append(f"🌡️ RSI `{rsi_val:.0f}` 嚴重超買，追高風險極高，勝率顯著下降")
+                elif rsi_val >= 70:
+                    msg_lines.append(f"🌡️ RSI `{rsi_val:.0f}` 偏熱，建議等回踩確認再進，或減半倉位")
+                elif rsi_val <= 40:
+                    msg_lines.append(f"💚 RSI `{rsi_val:.0f}` 低位多頭，超賣反彈，勝率更佳")
+            else:
+                if rsi_val <= 20:
+                    msg_lines.append(f"🌡️ RSI `{rsi_val:.0f}` 嚴重超賣，追空風險極高，勝率顯著下降")
+                elif rsi_val <= 30:
+                    msg_lines.append(f"🌡️ RSI `{rsi_val:.0f}` 偏冷，建議等反彈確認再做空，或減半倉位")
+                elif rsi_val >= 60:
+                    msg_lines.append(f"💚 RSI `{rsi_val:.0f}` 高位空頭，超買做空，勝率更佳")
+
+        # ⑦ 訊號時差（提醒用戶訊號新鮮度）
+        if detected_ts is not None:
+            age_sec = int(time.time() - detected_ts)
+            if age_sec >= 120:
+                msg_lines.append(f"⏱️ 訊號產生於 `{age_sec}` 秒前，動能可能已衰退，請先確認現價")
+            else:
+                msg_lines.append(f"⏱️ 訊號產生於 `{age_sec}` 秒前")
 
         # ── 儲存供後續倉位追蹤（冷卻 / TP/SL 觸發更新 / 績效統計）──────
         x["sl_price_str"] = _fmt_price(sl)
@@ -6125,18 +6195,36 @@ def build_report_message_tiered(
         return no_sig_msg, False, 0
 
     # 收集各訊號的 emoji，組成 header 彙總列
-    emoji_summary = " ".join(
-        x.get("_sig_emoji", "🏎️")
-        for x in enriched_items
+    pushed_items = [
+        x for x in enriched_items
         if x.get("selected_for_push") and x.get("symbol") in seen_syms
-    )
+    ]
+    emoji_summary = " ".join(x.get("_sig_emoji", "🏎️") for x in pushed_items)
+
+    # 多單相關性警示：同輪 ≥3 個同向訊號
+    bull_count = sum(1 for x in pushed_items if x.get("category") in ("long_open", "short_close"))
+    bear_count = sum(1 for x in pushed_items if x.get("category") in ("short_open", "long_close"))
+    correlation_warn = ""
+    if bull_count >= 3:
+        correlation_warn = (
+            f"\n{'─' * 20}\n"
+            f"⚠️ *相關性警示：本輪 {bull_count} 個多單同時出現*\n"
+            f"BTC 若急跌可能同步觸損，請控制總倉位，勿全倉押入"
+        )
+    elif bear_count >= 3:
+        correlation_warn = (
+            f"\n{'─' * 20}\n"
+            f"⚠️ *相關性警示：本輪 {bear_count} 個空單同時出現*\n"
+            f"BTC 若急漲可能同步觸損，請控制總倉位，勿全倉押入"
+        )
+
     header = (
         f"🎯 *山寨幣莊家狙擊鏡*  {emoji_summary}\n"
         f"🕐 {now_str} 台北\n"
         f"{'─' * 20}\n"
     )
     sep = f"\n{'─' * 20}\n"
-    body = sep.join(messages_out)
+    body = sep.join(messages_out) + correlation_warn
 
     # ── 以下為舊版渲染殘留（已棄用，直接 return 跳過）──────────────
     return header + body, has_any, push_count
@@ -6840,6 +6928,65 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"處理 {symbol} 時發生錯誤: {str(e)}")
         return {'status': 'error', 'symbol': symbol, 'error': str(e)}
+
+
+def _gist_load_cooldown() -> Optional[Dict]:
+    """從 GitHub Gist 讀取冷卻狀態（需設定 GIST_ID + GITHUB_TOKEN 環境變數）。
+    回傳解析後的 dict，或 None（未設定 / 讀取失敗）。
+    """
+    gist_id = os.getenv("GIST_ID")
+    token   = os.getenv("GITHUB_TOKEN")
+    if not gist_id or not token:
+        return None
+    try:
+        resp = requests.get(
+            f"https://api.github.com/gists/{gist_id}",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            files = resp.json().get("files", {})
+            file_obj = files.get("sniper_cooldown.json") or next(iter(files.values()), None)
+            if file_obj:
+                raw = file_obj.get("content") or "{}"
+                data = json.loads(raw)
+                logger.info(f"[Gist冷卻✅] 從 GitHub Gist 讀取成功，history={len(data.get('history',[]))} 筆")
+                return data
+        else:
+            logger.warning(f"[Gist冷卻] 讀取失敗 HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"[Gist冷卻] 讀取例外: {e}")
+    return None
+
+
+def _gist_save_cooldown(data: Dict) -> bool:
+    """將冷卻狀態寫回 GitHub Gist。回傳是否成功。"""
+    gist_id = os.getenv("GIST_ID")
+    token   = os.getenv("GITHUB_TOKEN")
+    if not gist_id or not token:
+        return False
+    try:
+        payload = {
+            "files": {
+                "sniper_cooldown.json": {
+                    "content": json.dumps(data, ensure_ascii=False, indent=2)
+                }
+            }
+        }
+        resp = requests.patch(
+            f"https://api.github.com/gists/{gist_id}",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+            json=payload,
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            logger.info(f"[Gist冷卻✅] 寫回 GitHub Gist 成功，history={len(data.get('history',[]))} 筆")
+            return True
+        else:
+            logger.warning(f"[Gist冷卻] 寫回失敗 HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"[Gist冷卻] 寫回例外: {e}")
+    return False
 
 
 def fetch_binance_24h_volume() -> Dict[str, float]:
@@ -7663,6 +7810,9 @@ def fetch_position_change():
             "atr": atr_val,
             "recent_high_2h": tech.get("recent_high_2h") if tech else None,
             "recent_low_2h": tech.get("recent_low_2h") if tech else None,
+            "pre_breakout_low": tech.get("pre_breakout_low") if tech else None,
+            "pre_breakout_high": tech.get("pre_breakout_high") if tech else None,
+            "ema20": tech.get("ema20_close") if tech else None,
             "last_kline_high_30m": tech.get("last_kline_high_30m") if tech else None,
             "last_kline_low_30m": tech.get("last_kline_low_30m") if tech else None,
             "signal_label": signal_label,
@@ -7671,6 +7821,7 @@ def fetch_position_change():
             "rsi_desc": rsi_desc,
             "reason": reason,
             "funding_rate": funding_rate,
+            "_detected_ts": time.time(),   # 訊號偵測時間，供推播計算時差
         })
         logger.info(f"[Enrichment] {sym} 已加入 all_top：RSI={rsi_val} ATR={atr_val} 現價={_cur_price} | {reason}")
 
@@ -7785,9 +7936,17 @@ def fetch_position_change():
                     break
                 time.sleep(poll_interval + random.uniform(0, poll_interval))
 
+    # ── Gist 優先讀取冷卻狀態，失敗則 fallback 到本地 JSON ──────────
+    _gist_data = _gist_load_cooldown()
+    if _gist_data is not None:
+        history = _gist_data.get("history") or []
+        push_log_signals = _gist_data.get("signals") or []
+        _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
+        logger.info(f"冷卻檔已讀取(Gist): history {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆 | 推播紀錄 {len(push_log_signals)} 筆")
+
     try:
         with _sniper_file_lock():
-            if SNIPER_COOLDOWN_FILE.exists():
+            if SNIPER_COOLDOWN_FILE.exists() and _gist_data is None:
                 raw = json.loads(SNIPER_COOLDOWN_FILE.read_text(encoding="utf-8"))
                 history = raw.get("history") or []
                 # 推播紀錄與冷卻同一檔：有 "signals" 就用，無則 []；相容舊版僅有 history
@@ -8718,6 +8877,8 @@ def fetch_position_change():
                 save_json_file(SNIPER_COOLDOWN_FILE, state)
             logger.info(f"冷卻檔已寫入: 本輪 {len(pairs_this_run)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h) -> {_cooldown_path_abs}")
             logger.info(f"推播紀錄已寫入: 本輪 {len(new_push_entries)} 筆，共 {len(push_log_signals)} 筆 (保留 {PUSH_LOG_RETENTION_HOURS}h)")
+            # ── Gist 同步寫回（持久化到 GitHub，下次 runner 重置後仍可讀取）──
+            _gist_save_cooldown(state)
         except Exception as e:
             logger.warning(f"寫入狙擊狀態檔失敗: {e}")
 
