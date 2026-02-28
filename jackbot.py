@@ -6817,12 +6817,9 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
 
 
 def fetch_binance_24h_volume() -> Dict[str, float]:
-    """獲取幣安合約全市場 24h 成交額 (USD) 作為 CoinGlass 成交量欄位的權威備援。
-
-    幣安 /fapi/v1/ticker/24hr 免費、無需 API Key，且欄位穩定，
-    用於解決 CoinGlass coins-markets 成交量欄位命名混亂導致全量為 None 的問題。
-
+    """獲取幣安永續合約全市場 24h 成交額 (USD)。
     回傳 dict: { "BTC": 1_500_000_000.0, "ETH": 800_000_000.0, ... }
+    注意：GitHub Actions 環境若地區封鎖 fapi.binance.com 會返回空 dict。
     """
     try:
         resp = requests.get(
@@ -6831,6 +6828,9 @@ def fetch_binance_24h_volume() -> Dict[str, float]:
         )
         if resp.status_code == 200:
             data = resp.json()
+            if not isinstance(data, list):
+                logger.warning(f"[成交量備援-幣安] 回傳格式異常: {type(data)}")
+                return {}
             result: Dict[str, float] = {}
             for item in data:
                 raw_sym = str(item.get("symbol") or "")
@@ -6844,10 +6844,57 @@ def fetch_binance_24h_volume() -> Dict[str, float]:
                     vol = 0.0
                 if vol > 0:
                     result[base] = vol
-            logger.info(f"[成交量備援] 幣安 24h 成交額載入完成：{len(result)} 個幣種")
+            logger.info(f"[成交量備援-幣安✅] 24h 成交額載入完成：{len(result)} 個幣種")
             return result
+        else:
+            logger.warning(f"[成交量備援-幣安] HTTP {resp.status_code}，跳至 BingX 備援")
     except Exception as e:
-        logger.warning(f"[成交量備援] 幣安 API 獲取失敗（不影響主流程，將以 CoinGlass 數據為主）: {e}")
+        logger.warning(f"[成交量備援-幣安] 請求失敗，跳至 BingX 備援: {e}")
+    return {}
+
+
+def fetch_bingx_24h_volume() -> Dict[str, float]:
+    """獲取 BingX 永續合約全市場 24h 成交額 (USD) 作為第二備援。
+
+    呼叫 /openApi/swap/v2/quote/ticker（不帶 symbol = 一次拿全市場），
+    此端點免費、無需 API Key，且 BingX 已是我們跟單的主要交易所。
+
+    回傳 dict: { "BTC": 800_000_000.0, "SOL": 50_000_000.0, ... }
+    """
+    try:
+        resp = requests.get(
+            "https://open-api.bingx.com/openApi/swap/v2/quote/ticker",
+            timeout=8
+        )
+        if resp.status_code == 200:
+            j = resp.json()
+            if j.get("code") != 0:
+                logger.warning(f"[成交量備援-BingX] API 回傳 code={j.get('code')}")
+                return {}
+            data = j.get("data")
+            if not isinstance(data, list):
+                logger.warning(f"[成交量備援-BingX] 回傳 data 不是 list: {type(data)}")
+                return {}
+            result: Dict[str, float] = {}
+            for item in data:
+                raw_sym = str(item.get("symbol") or "")
+                base = raw_sym.replace("-USDT", "").replace("USDT", "") \
+                              .replace("-BUSD", "").replace("-", "").upper()
+                if not base:
+                    continue
+                qv = item.get("quoteVolume") or item.get("volume") or item.get("turnover")
+                try:
+                    vol = float(qv) if qv is not None else 0.0
+                except (TypeError, ValueError):
+                    vol = 0.0
+                if vol > 0:
+                    result[base] = vol
+            logger.info(f"[成交量備援-BingX✅] 24h 成交額載入完成：{len(result)} 個幣種")
+            return result
+        else:
+            logger.warning(f"[成交量備援-BingX] HTTP {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"[成交量備援-BingX] 請求失敗: {e}")
     return {}
 
 
@@ -7250,20 +7297,27 @@ def fetch_position_change():
     )
 
     # ════════════════════════════════════════════════════════
-    # 漏斗 Step 4：成交量預篩（CoinGlass + 幣安備援雙源合一）
+    # 漏斗 Step 4：成交量預篩（三段備援鏈：CoinGlass → 幣安 → BingX）
     # ════════════════════════════════════════════════════════
-    # 策略：CoinGlass 成交量優先；若為 0 或 None，以幣安 24h quoteVolume 補齊。
-    # 確認 >= 7M USD 才放行；7M~30M 在推播中加輕倉警告。
+    # 優先順序：CoinGlass 有量 → 幣安備援 → BingX 備援
+    # >= 7M USD 才放行；7M~30M 在推播中加輕倉警告
     VOLUME_PREFILTER_MIN_USD = 7_000_000
 
-    # 提前一次性載入幣安備援（免費端點，耗時約 1~2 秒）
-    logger.info("[成交量備援] 開始載入幣安合約 24h 成交額...")
+    # 一次性載入兩個備援來源（並行感知：先幣安，失敗再 BingX）
+    logger.info("[成交量備援] Step 1/2：載入幣安合約 24h 成交額...")
     _binance_vol_map: Dict[str, float] = fetch_binance_24h_volume()
+    if not _binance_vol_map:
+        logger.info("[成交量備援] 幣安無資料，Step 2/2：改載 BingX 24h 成交額...")
+        _bingx_vol_map: Dict[str, float] = fetch_bingx_24h_volume()
+    else:
+        _bingx_vol_map = {}
 
     active_above_volume: List[Dict[str, Any]] = []
     vol_cg_only = 0
     vol_binance_fill = 0
+    vol_bingx_fill = 0
     vol_below = 0
+
     for coin in active_symbols:
         cg_vol = coin.get("_cg_volume_usd")
         try:
@@ -7271,29 +7325,38 @@ def fetch_position_change():
         except (TypeError, ValueError):
             cg_vol = 0.0
 
-        # 若 CoinGlass 拿不到成交量，用幣安權威數據補齊
-        if cg_vol == 0.0 and _binance_vol_map:
-            sym_base = (coin.get("symbol") or "").replace("USDT", "").replace("-", "").replace("_", "").upper()
+        sym_base = (coin.get("symbol") or "").replace("USDT", "").replace("-", "").replace("_", "").upper()
+
+        if cg_vol > 0:
+            # CoinGlass 本身有量
+            vol_cg_only += 1
+        elif _binance_vol_map:
+            # 備援 1：幣安
             binance_vol = _binance_vol_map.get(sym_base, 0.0)
             if binance_vol > 0:
                 cg_vol = binance_vol
                 vol_binance_fill += 1
-        else:
-            if cg_vol > 0:
-                vol_cg_only += 1
+        elif _bingx_vol_map:
+            # 備援 2：BingX
+            bingx_vol = _bingx_vol_map.get(sym_base, 0.0)
+            if bingx_vol > 0:
+                cg_vol = bingx_vol
+                vol_bingx_fill += 1
 
         coin["_volume_usd"] = cg_vol
-        coin["_cg_volume_usd"] = cg_vol  # 同步更新，供後續推播成交額顯示使用
+        coin["_cg_volume_usd"] = cg_vol  # 同步更新供推播成交額顯示
 
         if cg_vol >= VOLUME_PREFILTER_MIN_USD:
             active_above_volume.append(coin)
         else:
             vol_below += 1
 
+    _vol_src = (
+        f"CoinGlass {vol_cg_only} | 幣安備援 {vol_binance_fill} | BingX備援 {vol_bingx_fill} | "
+        f"<7M淘汰 {vol_below}"
+    )
     logger.info(
-        f"📊 [掃描漏斗] 4. 成交量篩選(>=7M USD)："
-        f"通過 {len(active_above_volume)} 個 "
-        f"（CoinGlass有量 {vol_cg_only} 個 | 幣安備援補齊 {vol_binance_fill} 個 | <7M淘汰 {vol_below} 個）"
+        f"📊 [掃描漏斗] 4. 成交量篩選(>=7M USD)：通過 {len(active_above_volume)} 個 （{_vol_src}）"
     )
 
     # ── Step 4.5：BingX 支援過濾（不支援的幣不運算、不推播）────────────────
@@ -7614,7 +7677,7 @@ def fetch_position_change():
 
     logger.info(f"[Enrichment 完成] {len(all_top)} 個訊號進入推播流程")
     if len(all_top) == 0:
-        logger.info("本輪無符合條件訊號（OI>=3% & Price>=1.5% & 成交額>=30M USD）")
+        logger.info("本輪無符合條件訊號（15m OI>=2% & Price>=1.0% & 1H順勢 & 成交額>=7M USD）")
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
