@@ -5763,10 +5763,13 @@ def _classify_signal_and_tier(
     mtf_note = ""
     if price_chg_1h is not None and isinstance(price_chg_1h, (int, float)):
         if is_bull_signal and price_chg_1h <= 0:
-            return None  # 多頭扳機但 1h 下跌，逆勢過濾
-        if is_bear_signal and price_chg_1h >= 0:
-            return None  # 空頭扳機但 1h 上漲，逆勢過濾
-        mtf_note = " ✅1H順勢"
+            mtf_trend_ok = False
+            mtf_note = f" ⚠️1H逆風({price_chg_1h:+.2f}%)"   # 放行，僅備註逆風
+        elif is_bear_signal and price_chg_1h >= 0:
+            mtf_trend_ok = False
+            mtf_note = f" ⚠️1H逆風({price_chg_1h:+.2f}%)"   # 放行，僅備註逆風
+        else:
+            mtf_note = " ✅1H順勢"
     else:
         # 1H 數據缺失：放行但加警示（CoinGlass API 有時不回傳該欄位）
         mtf_note = " ❓1H數據缺失"
@@ -5792,22 +5795,34 @@ def _classify_signal_and_tier(
             fr_note = " 🔥費率偏負"
 
     # 四象限分類（依 category 決定訊號標籤與 zone）
+    # mtf_trend_ok = False 時代表 1H 逆風，reason 額外加提示語
+    _counter_hint = ""
+    if not mtf_trend_ok:
+        if category in ("long_open", "short_close"):
+            _counter_hint = "（1H逆風，注意是否為摸頭回落，OI仍強才跟）"
+        elif category in ("short_open", "long_close"):
+            _counter_hint = "（1H逆風，注意是否為摸底反彈，OI仍強才跟）"
+
     if category == "long_open":
         label = "🚀 多頭入場"
         zone = ZONE_BREAKOUT_LONG
-        reason = f"15m OI↑+Price↑，多頭建倉中，1H順勢護航{fr_note}{mtf_note}"
+        _trend = "1H逆風⚠️" if not mtf_trend_ok else "1H順勢護航"
+        reason = f"15m OI↑+Price↑，多頭建倉中，{_trend}{fr_note}{mtf_note}{_counter_hint}"
     elif category == "short_open":
         label = "🐻 空頭入場"
         zone = ZONE_BREAKOUT_SHORT
-        reason = f"15m OI↑+Price↓，空頭積極建倉，1H順勢護航{fr_note}{mtf_note}"
+        _trend = "1H逆風⚠️" if not mtf_trend_ok else "1H順勢護航"
+        reason = f"15m OI↑+Price↓，空頭積極建倉，{_trend}{fr_note}{mtf_note}{_counter_hint}"
     elif category == "long_close":
         label = "💥 多頭平倉"
         zone = ZONE_DIP
-        reason = f"15m OI↓+Price↓，多頭被迫斷頭平倉，1H下行加速{fr_note}{mtf_note}"
+        _trend = "1H逆風⚠️" if not mtf_trend_ok else "1H下行加速"
+        reason = f"15m OI↓+Price↓，多頭被迫斷頭平倉，{_trend}{fr_note}{mtf_note}{_counter_hint}"
     elif category == "short_close":
         label = "🔥 空頭平倉"
         zone = ZONE_TOP
-        reason = f"15m OI↓+Price↑，空頭遭軋空強制回補，1H上行加速{fr_note}{mtf_note}"
+        _trend = "1H逆風⚠️" if not mtf_trend_ok else "1H上行加速"
+        reason = f"15m OI↓+Price↑，空頭遭軋空強制回補，{_trend}{fr_note}{mtf_note}{_counter_hint}"
     else:
         return None
 
@@ -8027,7 +8042,7 @@ def fetch_position_change():
 
     logger.info(f"[Enrichment 完成] {len(all_top)} 個訊號進入推播流程")
     if len(all_top) == 0:
-        logger.info(f"本輪無符合條件訊號（15m OI>={OI_THRESHOLD_30M}% & Price>={PRICE_THRESHOLD_30M}% & 1H順勢 & 成交額>=7M USD）")
+        logger.info(f"本輪無符合條件訊號（15m OI>={OI_THRESHOLD_30M}% & Price>={PRICE_THRESHOLD_30M}% & 成交額>=7M USD，1H方向已改為備註非過濾）")
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
