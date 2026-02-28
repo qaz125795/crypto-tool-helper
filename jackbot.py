@@ -1675,378 +1675,53 @@ def fetch_whale_position_old():
 
 # ==================== 3. 持倉變化篩選器 ====================
 
-def fetch_bingx_contracts() -> Tuple[Set[str], Dict[str, str], List[str]]:
-    """
-    開頭拉 BingX 有支援的合約交易對：GET /openApi/swap/v2/quote/contracts。
-    回傳 (allowed_base_set, base_to_symbol, bases_for_price)。
-    - allowed_base_set: 用於過濾的 base 集合。
-    - base_to_symbol: base_upper -> 正確的 BingX symbol（如 1000PEPE-USDT），供 K 線/費率 API 使用。
-    - bases_for_price: 每個合約一個 asset（用於向 BingX 取 15m 價格），不重複。
-    """
-    allowed: Set[str] = set()
-    base_to_symbol: Dict[str, str] = {}
-    bases_for_price: List[str] = []
-    url = "https://open-api.bingx.com/openApi/swap/v2/quote/contracts"
-    try:
-        r = requests.get(url, timeout=15)
-        if r.status_code != 200:
-            return allowed, base_to_symbol, bases_for_price
-        j = r.json()
-        if j.get("code") != 0:
-            return allowed, base_to_symbol, bases_for_price
-        data = j.get("data", [])
-        if not isinstance(data, list):
-            return allowed, base_to_symbol, bases_for_price
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            sym = item.get("symbol") or item.get("symbolName")
-            asset = item.get("asset") or ""
-            if not sym or not asset:
-                continue
-            status = item.get("status", 1)
-            if status != 1:
-                continue
-            asset_upper = asset.strip().upper()
-            _sym_clean = sym.strip()
-            # 主鍵：BingX 原始 asset（如 1000000BABYDOGE）
-            allowed.add(asset_upper)
-            base_to_symbol[asset_upper] = _sym_clean
-            bases_for_price.append(asset_upper)
-            # 衍生別名，讓 CoinGlass 不同命名也能對到同一份 K 線 ─────────────
-            # 1000xxx → xxx（舊邏輯，如 1000PEPE → PEPE）
-            if asset_upper.startswith("1000") and len(asset_upper) > 4:
-                _s1 = asset_upper[4:]
-                allowed.add(_s1)
-                base_to_symbol.setdefault(_s1, _sym_clean)
-            # 1000000xxx → 1Mxxx（如 1000000BABYDOGE → 1MBABYDOGE）
-            if asset_upper.startswith("1000000") and len(asset_upper) > 7:
-                _s2 = "1M" + asset_upper[7:]
-                allowed.add(_s2)
-                base_to_symbol.setdefault(_s2, _sym_clean)
-            # 1000xxx → 1Kxxx（如 1000PEPE → 1KPEPE）
-            if asset_upper.startswith("1000") and not asset_upper.startswith("1000000") and len(asset_upper) > 4:
-                _s3 = "1K" + asset_upper[4:]
-                allowed.add(_s3)
-                base_to_symbol.setdefault(_s3, _sym_clean)
-            # 10000xxx → 1Wxxx（如 10000LADYS → 1WLADYS，CoinGlass 偶見此縮寫）
-            if asset_upper.startswith("10000") and len(asset_upper) > 5:
-                _s4 = "1W" + asset_upper[5:]
-                allowed.add(_s4)
-                base_to_symbol.setdefault(_s4, _sym_clean)
-        return allowed, base_to_symbol, bases_for_price
-    except Exception as e:
-        logger.warning(f"BingX contracts API 失敗: {e}")
-        return allowed, base_to_symbol, bases_for_price
 
 
-def fetch_supported_futures_coins() -> List[str]:
-    """獲取 BingX 交易所支援的合約幣種列表（應該有 600+ 個）"""
-    url = "https://open-api-v4.coinglass.com/api/futures/supported-exchange-pairs"
-    headers = {
-        "CG-API-KEY": CG_API_KEY,
-        "accept": "application/json"
-    }
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            logger.error(f"supported-exchange-pairs API error: {response.status_code}")
-            return []
-        
-        result = response.json()
-        data = result.get('data', result)
-        
-        # API 返回的是字典結構：{"BingX": [{"instrument_id": "BTCUSDT", "base_asset": "BTC", ...}, ...]}
-        if not isinstance(data, dict):
-            logger.error(f"API 返回數據格式錯誤，預期字典但得到: {type(data)}")
-            return []
-        
-        # 調試：記錄可用的交易所
-        exchanges = list(data.keys())
-        logger.info(f"API 返回的交易所: {exchanges[:10]}... (共 {len(exchanges)} 個)")
-        
-        # 查找 BingX（嘗試多種可能的鍵名）
-        bingx_data = None
-        for key in data.keys():
-            if 'bingx' in str(key).lower() or 'bing' in str(key).lower():
-                bingx_data = data[key]
-                logger.info(f"找到 BingX 數據，鍵名: {key}")
-                break
-        
-        if not bingx_data:
-            logger.error(f"未找到 BingX 數據，可用交易所: {exchanges}")
-            return []
-        
-        if not isinstance(bingx_data, list):
-            logger.error(f"BingX 數據格式錯誤，預期列表但得到: {type(bingx_data)}")
-            return []
-        
-        # 提取幣種符號
-        symbols = []
-        for item in bingx_data:
-            if not isinstance(item, dict):
-                continue
-            
-            # 優先使用 base_asset（例如 "BTC"）
-            symbol = item.get('base_asset') or item.get('baseAsset') or item.get('base')
-            
-            # 如果沒有 base_asset，從 instrument_id 提取（例如 "BTCUSDT" 或 "BTC-USDT" -> "BTC"）
-            if not symbol:
-                instrument_id = item.get('instrument_id') or item.get('instrumentId') or item.get('symbol') or item.get('pair') or ''
-                if instrument_id:
-                    # 處理多種格式：BTCUSDT, BTC-USDT, BTC_USDT 等
-                    symbol = instrument_id.replace('USDT', '').replace('USDT-PERP', '').replace('-PERP', '').replace('_USDT', '').replace('-USDT', '').replace('_', '').upper()
-            
-            if symbol and symbol not in symbols:
-                # 過濾無效符號（如 NCCONATURALGAS2USD 等導致 OI 無數據）
-                sym_upper = symbol.upper()
-                if len(symbol) <= 12 and "2USD" not in sym_upper:
-                    symbols.append(symbol)
-        
-        logger.info(f"從 BingX API 獲取到 {len(symbols)} 個合約幣種")
-        return symbols
-    except Exception as e:
-        logger.error(f"獲取 BingX 合約幣種列表失敗: {str(e)}")
-        import traceback
-        logger.error(f"錯誤詳情: {traceback.format_exc()}")
-        return []
-
-
-# ── CoinGlass exchange-pairs BingX 支援快取 ────────────────────────────────
-_cg_bingx_bases_cache: Dict[str, Any] = {"ts": 0.0, "bases": set()}
-_CG_BINGX_BASES_TTL = 3600  # 1 小時快取，交易所上幣不頻繁
-
-# ── 幣種→交易所反向對照表（由 fetch_cg_bingx_supported_bases 順帶建立）──────
-# 格式：{"BTC": {"Binance", "OKX", "Bybit", "BingX", ...}, "ULTIMA": {"BingX"}, ...}
+# ── 幣種→交易所反向對照表（由 CoinGlass supported-exchange-pairs 填充）──────
+# 格式：{"BTC": {"Binance", "OKX", "Bybit", ...}, ...}
+# 快取未建立時 get_major_exchanges_for_coin 保守回傳完整 pool
 _cg_full_exchange_map: Dict[str, Set[str]] = {}
-
-
-def fetch_cg_bingx_supported_bases() -> Set[str]:
-    """從 CoinGlass /api/futures/supported-exchange-pairs 取得 BingX 支援的幣種 base set。
-    帶 1 小時 TTL 快取，避免每輪重複呼叫。
-    回傳格式：{"BTC", "ETH", "SOL", ...}（大寫 base，已去掉 USDT/- 等後綴）
-    """
-    global _cg_bingx_bases_cache
-    now = time.time()
-    if now - _cg_bingx_bases_cache["ts"] < _CG_BINGX_BASES_TTL and _cg_bingx_bases_cache["bases"]:
-        return _cg_bingx_bases_cache["bases"]
-
-    if not CG_API_KEY:
-        return set()
-
-    global _cg_full_exchange_map  # global 必須在函數最頂部，任何賦值之前
-    bingx_bases: Set[str] = set()
-    try:
-        _respect_coinglass_rate_limit()
-        r = requests.get(
-            f"{CG_API_BASE}/api/futures/supported-exchange-pairs",
-            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            logger.warning(f"[CG支援查詢] supported-exchange-pairs HTTP {r.status_code}")
-            return bingx_bases
-        j = r.json()
-        data = j.get("data", j)
-
-        # 回應格式 A：dict keyed by exchange name
-        # {"BingX": [{"instrument_id": "BTCUSDT", "base_asset": "BTC"}, ...], ...}
-        if isinstance(data, dict):
-            # 同時建立全局 coin→exchanges 反向對照表（只建立一次，供 ABC fallback 快速跳過）
-            _tmp_map: Dict[str, Set[str]] = {}
-            for ex_name, ex_pairs in data.items():
-                if not isinstance(ex_pairs, list):
-                    continue
-                for item in ex_pairs:
-                    _b = (item.get("base_asset") or item.get("baseAsset") or item.get("base") or "")
-                    if not _b:
-                        _inst = (item.get("instrument_id") or item.get("instrumentId")
-                                 or item.get("symbol") or item.get("pair") or "")
-                        _b = (_inst.replace("USDT", "").replace("USDT-PERP", "")
-                              .replace("-PERP", "").replace("_USDT", "")
-                              .replace("-USDT", "").replace("-", "").replace("_", "").upper())
-                    _b = _b.strip().upper()
-                    if _b and len(_b) <= 12:
-                        _tmp_map.setdefault(_b, set()).add(ex_name)
-            if _tmp_map:
-                _cg_full_exchange_map = _tmp_map
-                _ex_names = sorted(data.keys())
-                logger.info(
-                    f"[CG支援查詢] 反向對照表建立完成：{len(_tmp_map)} 個幣種跨 {len(data)} 個交易所"
-                    f" | 交易所名稱樣本: {_ex_names[:10]}"
-                )
-
-            bingx_key = next((k for k in data if "bingx" in k.lower() or "bing" in k.lower()), None)
-            if bingx_key:
-                for item in (data[bingx_key] or []):
-                    base = (
-                        item.get("base_asset") or item.get("baseAsset") or item.get("base") or ""
-                    )
-                    if not base:
-                        inst = (item.get("instrument_id") or item.get("instrumentId")
-                                or item.get("symbol") or item.get("pair") or "")
-                        base = (inst.replace("USDT", "").replace("USDT-PERP", "")
-                                .replace("-PERP", "").replace("_USDT", "")
-                                .replace("-USDT", "").replace("-", "").replace("_", "").upper())
-                    base = base.strip().upper()
-                    if base and len(base) <= 12:
-                        bingx_bases.add(base)
-                logger.info(
-                    f"[CG支援查詢] BingX ({bingx_key}) 支援 {len(bingx_bases)} 個幣種"
-                    f"（來源：CoinGlass supported-exchange-pairs）"
-                )
-            else:
-                logger.warning(f"[CG支援查詢] 回應中未找到 BingX key，可用 key: {list(data.keys())[:10]}")
-
-        # 回應格式 B：list of {"symbol": "BTC", "exchanges": [...]}
-        elif isinstance(data, list):
-            _tmp_map_b: Dict[str, Set[str]] = {}
-            for item in data:
-                exch_list = item.get("exchanges") or item.get("exchangeList") or []
-                sym = (item.get("symbol") or item.get("coin") or "").strip().upper()
-                if sym and len(sym) <= 12:
-                    for _e in exch_list:
-                        _tmp_map_b.setdefault(sym, set()).add(str(_e))
-                    if any("bingx" in str(e).lower() for e in exch_list):
-                        bingx_bases.add(sym)
-            if _tmp_map_b:
-                _cg_full_exchange_map = _tmp_map_b
-            logger.info(f"[CG支援查詢] BingX 支援 {len(bingx_bases)} 個幣種（格式B）")
-
-    except Exception as e:
-        logger.warning(f"[CG支援查詢] fetch_cg_bingx_supported_bases 異常: {e}")
-
-    if bingx_bases:
-        _cg_bingx_bases_cache = {"ts": now, "bases": bingx_bases}
-    return bingx_bases
 
 
 def get_major_exchanges_for_coin(base: str, pool: Optional[List[str]] = None) -> List[str]:
     """
     從 _cg_full_exchange_map 快取查詢 pool 內哪些大所支援該幣種。
-
-    判斷邏輯：
-    1. 快取未建立 → 回傳完整 pool（保守，不誤封鎖）
-    2. 幣不在 map 裡 → 回傳完整 pool（保守，可能是新幣或 map 有缺口）
-    3. 幣在 map 裡但不在 pool 的任何交易所 → 回傳 []（已確認不支援，跳過）
-    4. 幣在 map 裡且部分匹配 → 只回傳有支援的交易所
-
-    範例：
-        BTC    → ["Binance", "OKX", "Bybit"]  (三所都支援，全回)
-        KABUTO → []                             (只在 BingX，Binance/OKX/Bybit 皆無，跳過)
+    快取未建立 → 保守回傳完整 pool；幣不在 map → 同上。
     """
     if pool is None:
         pool = ["Binance", "OKX", "Bybit"]
-    if not _cg_full_exchange_map:                     # 快取未建立，保守不縮減
+    if not _cg_full_exchange_map:
         return pool
     base_upper = base.upper()
-    if base_upper not in _cg_full_exchange_map:       # 幣不在 map，可能是新幣，保守回傳
+    if base_upper not in _cg_full_exchange_map:
         return pool
     supported = _cg_full_exchange_map[base_upper]
-    filtered = [ex for ex in pool if ex in supported]
-    # 若 pool 含 BingX 且 BingX 支援該幣，確保保留
-    if "BingX" in pool and any("bingx" in s.lower() for s in supported):
-        if "BingX" not in filtered:
-            filtered.append("BingX")
-    # filtered 可能為空（幣種確認不在這些交易所），直接回傳空 → for loop 0 次，立即跳過
-    return filtered
-
-
-# Fallback 時僅記錄第一次 Binance 失敗原因，避免刷屏
-_binance_fallback_first_failure_logged = False
-
-
-def fetch_price_change_15m_binance(symbol: str) -> Optional[float]:
-    """用 Binance 合約 API 取得 15 分鐘漲跌幅%（含詳細錯誤代碼診斷）"""
-    global _binance_fallback_first_failure_logged
-    # 移除特殊符號並轉大寫，確保格式正確
-    clean_symbol = symbol.replace("-", "").replace("_", "").upper()
-    sym = f"{clean_symbol}USDT" if not clean_symbol.endswith("USDT") else clean_symbol
-    url = "https://fapi.binance.com/fapi/v1/klines"
-    params = {"symbol": sym, "interval": "15m", "limit": 2}
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if not isinstance(data, list) or len(data) < 2:
-                if not _binance_fallback_first_failure_logged:
-                    _binance_fallback_first_failure_logged = True
-                    logger.warning(f"Binance API 回傳格式異常 {sym}: 非列表或長度<2 resp={str(data)[:150]}")
-                return None
-            prev_close = float(data[0][4])
-            last_close = float(data[1][4])
-            if not prev_close:
-                return None
-            return ((last_close - prev_close) / prev_close) * 100
-
-        # --- 錯誤診斷：印出 Status Code 與回應內容 ---
-        if not _binance_fallback_first_failure_logged:
-            _binance_fallback_first_failure_logged = True
-            logger.error(f"Binance API Error for {sym}: Status {r.status_code} - {r.text[:300]}")
-        if r.status_code == 429:
-            logger.warning("⚠️ RATE LIMIT TRIGGERED (429) - 幣安 API 頻率限制")
-            time.sleep(1)
-        elif r.status_code == 418:
-            logger.warning(f"⚠️ IP 被幣安暫時封鎖 (418) - {sym}")
-        elif r.status_code in (403, 451):
-            logger.error("🚫 GEOBLOCK/REGION RESTRICTION (403/451) - 目前 IP 無法訪問幣安 API")
-        return None
-    except Exception as e:
-        if not _binance_fallback_first_failure_logged:
-            _binance_fallback_first_failure_logged = True
-            logger.warning(f"Binance 連線異常 {sym}: {type(e).__name__}: {e}")
-        return None
+    return [ex for ex in pool if ex in supported]
 
 
 def fetch_coins_price_change() -> List[Dict]:
-    """獲取幣種漲跌幅列表（改為只返回合約幣種）。初創版若 coins-price-change 為空則用 Binance 公開 API fallback。"""
-    supported_coins = fetch_supported_futures_coins()
-    if not supported_coins:
-        logger.warning("無法獲取合約幣種列表，使用備用方法")
-        url = f"{CG_API_BASE}/api/futures/coins-price-change"
-        headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            if response.status_code != 200:
-                return []
-            result = response.json()
-            return result.get('data', result if isinstance(result, list) else [])
-        except Exception:
-            return []
-
+    """CoinGlass coins-price-change 備援端點（coins-markets 失敗時啟用，純 CoinGlass 模式）。"""
     url = f"{CG_API_BASE}/api/futures/coins-price-change"
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
-            logger.error(f"coins-price-change HTTP {response.status_code}")
-            return _fetch_coins_price_change_fallback(supported_coins)
+            logger.error(f"[備援] coins-price-change HTTP {response.status_code}")
+            return []
         result = response.json()
-        all_data = result.get('data', result if isinstance(result, list) else [])
-        if not all_data:
-            code = result.get('code', '')
-            msg = result.get('msg', result.get('message', ''))
-            logger.warning(f"CoinGlass 幣種漲跌幅返回空數據 code={code} msg={msg}（初創版可能不包含此接口，改用 BingX 官方 API）")
-            return _fetch_coins_price_change_fallback(supported_coins)
-        filtered_data = []
-        for item in all_data:
-            symbol = item.get('symbol') or item.get('coin') or ''
-            symbol_clean = symbol.replace('USDT', '').replace('USDT-PERP', '').upper()
-            if symbol_clean in supported_coins:
-                filtered_data.append(item)
-        logger.info(f"過濾後剩餘 {len(filtered_data)} 個合約幣種（原始 {len(all_data)} 個）")
-        return filtered_data
+        data = result.get('data', result if isinstance(result, list) else [])
+        if not data:
+            logger.warning(f"[備援] coins-price-change 回傳空資料 code={result.get('code')} msg={result.get('msg','')}")
+            return []
+        logger.info(f"[備援] coins-price-change 取得 {len(data)} 個幣種")
+        return data
     except Exception as e:
-        logger.error(f"獲取幣種價格變化失敗: {str(e)}")
-        return _fetch_coins_price_change_fallback(supported_coins)
+        logger.error(f"[備援] coins-price-change 失敗: {e}")
+        return []
 
 
 def _fetch_coinglass_24h_map() -> Dict[str, float]:
-    """
-    CoinGlass 幣種漲跌幅：GET /api/futures/coins-price-change，回傳 {clean_symbol: pct}。
-    創業版可能無此接口或回傳空，會顯示 0 個幣種，主流程改以 price/history 逐筆或 BingX 計算 24h。
-    """
+    """CoinGlass coins-price-change → {clean_symbol: 24h_pct}（coins-markets 失敗時的備援 24h 漲跌幅來源）。"""
     if not CG_API_KEY:
         return {}
     try:
@@ -2056,11 +1731,11 @@ def _fetch_coinglass_24h_map() -> Dict[str, float]:
             timeout=10
         )
         if r.status_code != 200:
-            logger.info("CoinGlass 24h 漲跌幅: HTTP 非 200，將用 BingX 計算")
+            logger.warning(f"[24h映射] coins-price-change HTTP {r.status_code}")
             return {}
         j = r.json()
         if j.get("code") not in (0, "0", 200, "200", None):
-            logger.info(f"CoinGlass 24h 漲跌幅: API code={j.get('code')} msg={j.get('msg', j.get('message', ''))}，將用 BingX 計算")
+            logger.warning(f"[24h映射] coins-price-change code={j.get('code')} msg={j.get('msg','')}")
             return {}
         data = j.get("data", j if isinstance(j, list) else [])
         if not isinstance(data, list):
@@ -2084,10 +1759,9 @@ def _fetch_coinglass_24h_map() -> Dict[str, float]:
             )
             if isinstance(pct, (int, float)) and pct == pct:
                 out[clean] = float(pct)
-        logger.info(f"CoinGlass 24h 漲跌幅已取得 {len(out)} 個幣種")
         return out
     except Exception as e:
-        logger.warning(f"CoinGlass 24h 漲跌幅取得失敗，將用 BingX 計算: {e}")
+        logger.warning(f"[24h映射] coins-price-change 失敗: {e}")
         return {}
 
 
@@ -2166,57 +1840,6 @@ def fetch_price_change_24h_bingx(symbol: str, preferred_symbol: Optional[str] = 
     return None
 
 
-def fetch_price_change_30m_bingx(symbol: str) -> Optional[float]:
-    """
-    【BingX 官方數據源】15 分鐘 K 線漲跌幅（已升級標準版 15m 高頻模式）。
-    """
-    clean_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-    sym_formatted = f"{clean_symbol}-USDT"
-    url = "https://open-api.bingx.com/openApi/swap/v3/quote/klines"
-    params = {"symbol": sym_formatted, "interval": "15m", "limit": 3}
-    try:
-        response = requests.get(url, params=params, timeout=5)
-        if response.status_code != 200:
-            return None
-        res_json = response.json()
-        if res_json.get("code") != 0:
-            return None
-        data = res_json.get("data", [])
-        if not isinstance(data, list) or len(data) < 2:
-            return None
-        latest_k = data[-1]
-        # 本根 15m K 線：open=15 分鐘前價格，close=當前價格 → 漲跌幅
-        current_price = float(latest_k.get("close") or 0)
-        open_price_15m_ago = float(latest_k.get("open") or 0)
-        if open_price_15m_ago == 0:
-            return None
-        change_percent = ((current_price - open_price_15m_ago) / open_price_15m_ago) * 100
-        return change_percent
-    except Exception:
-        return None
-
-
-def _fetch_coins_price_change_fallback(supported_coins: List[str], max_symbols: int = 99999) -> List[Dict]:
-    """Fallback：使用 BingX 官方 API 獲取 15m 漲跌幅（高頻版）。"""
-    symbols = list(supported_coins)[:max_symbols]
-    out = []
-    logger.info(f"正在使用 BingX 官方 API 獲取 {len(symbols)} 個幣種的 15m 價格數據 (高頻模式)...")
-
-    def one(sym):
-        time.sleep(0.03)
-        ch = fetch_price_change_30m_bingx(sym)
-        return {"symbol": sym, "coin": sym, "price_change_percent_30m": ch} if ch is not None else None
-
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = [ex.submit(one, s) for s in symbols]
-        for i, res in enumerate(as_completed(futures)):
-            r = res.result()
-            if r is not None:
-                out.append(r)
-            if (i + 1) % 50 == 0:
-                logger.info(f"BingX 價格獲取進度: {i + 1}/{len(symbols)} (成功 {len(out)} 個)")
-    logger.info(f"成功從 BingX 獲取 {len(out)} 個幣種的價格數據")
-    return out
 
 
 # OI 首次失敗僅記錄一次，避免洗版
@@ -4697,7 +4320,7 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
                 out[base] = rate_found
 
         if out:
-            logger.info(f"[資金費率✅] 成功解析 {len(out)} 幣種幣安費率（stablecoin_margin_list 優先）")
+            logger.info(f"[資金費率✅] 成功解析 {len(out)} 幣種（CoinGlass exchange-list，Binance USDT 永續）")
         elif lst:
             _sample = list(lst[0].keys()) if lst and isinstance(lst[0], dict) else "n/a"
             logger.warning(f"[資金費率⚠️] 解析 0 筆，首筆結構 keys={_sample}")
@@ -5694,28 +5317,18 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
 
 def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    技術指標：
-    - Plan A = CoinGlass futures/price/history K 線本地計算（RSI/布林/EMA20/VWAP_2h/ATR/MACD/結構高低點）
-    - Plan B = BingX 15m K 線本地計算（CoinGlass 不可用時備援）
+    技術指標：純 CoinGlass 模式
+    - CoinGlass futures/price/history K 線本地計算（RSI/布林/EMA20/VWAP_2h/ATR/MACD/結構高低點）
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
 
-    # ── Plan A：CoinGlass futures/price/history K 線（主數據源）────────────
-    logger.info(f"[技術指標] {base}: Plan A CoinGlass K 線計算技術指標")
+    logger.info(f"[技術指標] {base}: CoinGlass K 線計算技術指標")
     tech = _fetch_cg_klines_and_calc(symbol)
     if tech:
         tech["source"] = "CoinGlass"
         return tech
 
-    # ── Plan B：BingX K 線備援（CoinGlass 五所均無資料時）─────────────────────────
-    logger.warning(f"[技術指標] {base}: CoinGlass K 線失敗（已試 Binance/OKX/Bybit/BingX/Bitget），切換 Plan B 直接打 BingX")
-    tech_bx = _fetch_bingx_klines_and_calc(symbol, preferred_symbol=bingx_symbol_override)
-    if tech_bx:
-        tech_bx["source"] = "BingX"
-        logger.info(f"[技術指標] {base}: Plan B BingX 完成 RSI={tech_bx.get('rsi')}")
-        return tech_bx
-
-    logger.warning(f"[技術指標] {base}: CoinGlass 與 BingX 均無法取得 K 線，技術指標失敗")
+    logger.warning(f"[技術指標] {base}: CoinGlass K 線失敗，技術指標無法計算")
     return None
 
 
@@ -5730,13 +5343,13 @@ FUNDING_EXTREME = 0.0003    # 極端費率 0.03%，用於標註
 
 # 15m MTF 四象限進場門檻（15m 扳機 + 1h 趨勢濾網，雙週期共振）
 MAIN_COINS = {"BTC", "ETH"}
-OI_THRESHOLD_30M = 1.4     # 15m OI 扳機門檻（下修至 1.4%）
+OI_THRESHOLD_30M = 1.5     # 15m OI 扳機門檻
 PRICE_THRESHOLD_30M = 0.85 # 15m 價格扳機門檻
-OI_MAIN_COIN_MIN = 1.4
-OI_ALTCOIN_MIN = 1.4
-OI_FOR_5_STAR = 1.4
-OI_FOR_4_STAR = 1.4
-OI_FOR_ELITE = 1.4
+OI_MAIN_COIN_MIN = 1.5
+OI_ALTCOIN_MIN = 1.5
+OI_FOR_5_STAR = 1.5
+OI_FOR_4_STAR = 1.5
+OI_FOR_ELITE = 1.5
 
 
 def _classify_signal_and_tier(
@@ -6153,6 +5766,7 @@ def build_report_message_tiered(
         vol_usd = x.get("volume_usd") or x.get("_cg_volume_usd") or 0
         funding_rate = x.get("funding_rate")
         atr_val = x.get("atr")
+        taker_ratio_15m = x.get("_taker_ratio_15m")  # 主動買盤%（coins-markets top-100 才有）
         rsi_val = x.get("rsi")
         detected_ts = x.get("_detected_ts")
 
@@ -6191,7 +5805,7 @@ def build_report_message_tiered(
         # ── 訊號分級 ──────────────────────────────────────────────────
         # 🏎️ 順勢右側：OI & 價格 & 1H 三者方向一致（追勢型）
         # 🎲 逆勢左側：OI 反向（軋空/踩踏），屬反轉型（左側博弈）
-        # 💎 精品升級：流動性充足(≥30M) + 多所共識 + 費率助攻
+        # 💎 精品升級：流動性充足(≥30M) + 多所共識 + 費率助攻 + taker 方向確認
         is_trend_follow = category in ("long_open", "short_open")
         is_counter      = category in ("short_close", "long_close")
 
@@ -6199,12 +5813,22 @@ def build_report_message_tiered(
         is_consensus = bool(x.get("is_global_consensus"))
         fr_aligned = False
         if funding_rate is not None and isinstance(funding_rate, (int, float)):
-            if is_bull_sig and funding_rate < -0.0005:   # 做多時費率負 = 嘎空加持
+            if is_bull_sig and funding_rate < -0.0005:
                 fr_aligned = True
-            elif not is_bull_sig and funding_rate > 0.0005:  # 做空時費率正 = 殺多加持
+            elif not is_bull_sig and funding_rate > 0.0005:
                 fr_aligned = True
 
-        is_premium = vol_m_val >= 30 and is_consensus and fr_aligned
+        # Taker ratio 確認：coins-markets 提供免費的主動買賣比（等同現貨 CVD）
+        taker_ratio_15m = x.get("_taker_ratio_15m")  # 0~100，None = 非 top-100 幣無資料
+        taker_aligned = False
+        if taker_ratio_15m is not None:
+            if is_bull_sig and taker_ratio_15m > 53:   # 做多：買方主導 > 53%
+                taker_aligned = True
+            elif not is_bull_sig and taker_ratio_15m < 47:  # 做空：賣方主導 < 47%
+                taker_aligned = True
+
+        # 精品：成交值≥30M + 多所共識 + (費率助攻 OR taker 確認)
+        is_premium = vol_m_val >= 30 and is_consensus and (fr_aligned or taker_aligned)
 
         if is_premium:
             sig_emoji = "💎"
@@ -6231,6 +5855,33 @@ def build_report_message_tiered(
         else:
             p1h_part = "—"
         msg_lines.append(f"📡 OI `{oi_str}`（{oi_desc}）  價 `{p15_str}`  |  1H `{p1h_part}`")
+
+        # Taker ratio（主動買賣比）：coins-markets 免費 CVD 資料，只有 top-100 才有
+        if taker_ratio_15m is not None:
+            taker_sell_pct = round(100 - taker_ratio_15m, 1)
+            if is_bull_sig:
+                if taker_ratio_15m > 55:
+                    taker_icon = "✅"
+                    taker_note = "主力主動買入，買壓持續"
+                elif taker_ratio_15m > 50:
+                    taker_icon = "🟡"
+                    taker_note = "買方略佔優，力道普通"
+                else:
+                    taker_icon = "⚠️"
+                    taker_note = "賣壓偏重，OI增倉但買盤不積極"
+            else:
+                if taker_ratio_15m < 45:
+                    taker_icon = "✅"
+                    taker_note = "主力主動賣出，賣壓持續"
+                elif taker_ratio_15m < 50:
+                    taker_icon = "🟡"
+                    taker_note = "賣方略佔優，力道普通"
+                else:
+                    taker_icon = "⚠️"
+                    taker_note = "買壓偏重，OI減倉但賣盤不積極"
+            msg_lines.append(
+                f"📊 主動買盤 `{taker_ratio_15m:.0f}%`  賣盤 `{taker_sell_pct:.0f}%`  {taker_icon} {taker_note}"
+            )
         msg_lines.append("")
 
         # ③ 點位（無 $ 符號，直接複製貼上）
@@ -7198,93 +6849,6 @@ def _gist_save_cooldown(data: Dict) -> bool:
     return False
 
 
-def fetch_binance_24h_volume() -> Dict[str, float]:
-    """獲取幣安永續合約全市場 24h 成交額 (USD)。
-    回傳 dict: { "BTC": 1_500_000_000.0, "ETH": 800_000_000.0, ... }
-    注意：GitHub Actions 環境若地區封鎖 fapi.binance.com 會返回空 dict。
-    """
-    try:
-        resp = requests.get(
-            "https://fapi.binance.com/fapi/v1/ticker/24hr",
-            timeout=8
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if not isinstance(data, list):
-                logger.warning(f"[成交量備援-幣安] 回傳格式異常: {type(data)}")
-                return {}
-            result: Dict[str, float] = {}
-            for item in data:
-                raw_sym = str(item.get("symbol") or "")
-                base = raw_sym.replace("USDT", "").replace("BUSD", "") \
-                              .replace("PERP", "").replace("-", "").upper()
-                if not base:
-                    continue
-                try:
-                    vol = float(item.get("quoteVolume") or 0)
-                except (TypeError, ValueError):
-                    vol = 0.0
-                if vol > 0:
-                    result[base] = vol
-            logger.info(f"[成交量備援-幣安✅] 24h 成交額載入完成：{len(result)} 個幣種")
-            return result
-        else:
-            logger.warning(f"[成交量備援-幣安] HTTP {resp.status_code}，跳至 BingX 備援")
-    except Exception as e:
-        logger.warning(f"[成交量備援-幣安] 請求失敗，跳至 BingX 備援: {e}")
-    return {}
-
-
-def fetch_bingx_24h_volume() -> Dict[str, float]:
-    """獲取 BingX 永續合約全市場 24h 成交額 (USD) 作為第二備援。
-
-    呼叫 /openApi/swap/v2/quote/ticker（不帶 symbol = 一次拿全市場），
-    此端點免費、無需 API Key，且 BingX 已是我們跟單的主要交易所。
-
-    回傳 dict: { "BTC": 800_000_000.0, "SOL": 50_000_000.0, ... }
-    """
-    try:
-        resp = requests.get(
-            "https://open-api.bingx.com/openApi/swap/v2/quote/ticker",
-            timeout=8
-        )
-        if resp.status_code == 200:
-            j = resp.json()
-            if j.get("code") != 0:
-                logger.warning(f"[成交量備援-BingX] API 回傳 code={j.get('code')}")
-                return {}
-            data = j.get("data")
-            if not isinstance(data, list):
-                logger.warning(f"[成交量備援-BingX] 回傳 data 不是 list: {type(data)}")
-                return {}
-            result: Dict[str, float] = {}
-            for item in data:
-                raw_sym = str(item.get("symbol") or "")
-                base = raw_sym.replace("-USDT", "").replace("USDT", "") \
-                              .replace("-BUSD", "").replace("-", "").upper()
-                if not base:
-                    continue
-                qv = item.get("quoteVolume") or item.get("volume") or item.get("turnover")
-                try:
-                    vol = float(qv) if qv is not None else 0.0
-                except (TypeError, ValueError):
-                    vol = 0.0
-                if vol > 0:
-                    result[base] = vol
-                    # 同步寫入 CoinGlass 可能用的縮寫別名，確保名稱不同也能對到成交值
-                    if base.startswith("1000000") and len(base) > 7:
-                        result.setdefault("1M" + base[7:], vol)   # 1000000BABYDOGE → 1MBABYDOGE
-                    if base.startswith("1000") and not base.startswith("1000000") and len(base) > 4:
-                        result.setdefault("1K" + base[4:], vol)   # 1000PEPE → 1KPEPE
-                    if base.startswith("10000") and len(base) > 5:
-                        result.setdefault("1W" + base[5:], vol)   # 10000LADYS → 1WLADYS
-            logger.info(f"[成交量備援-BingX✅] 24h 成交額載入完成：{len(result)} 個幣種")
-            return result
-        else:
-            logger.warning(f"[成交量備援-BingX] HTTP {resp.status_code}")
-    except Exception as e:
-        logger.warning(f"[成交量備援-BingX] 請求失敗: {e}")
-    return {}
 
 
 def fetch_coinglass_coins_markets() -> List[Dict]:
@@ -7337,25 +6901,14 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             item.get("priceChange24h") or item.get("change_24h")
         )
         # 成交量欄位：CoinGlass 命名混亂，盡量窮舉所有可能的 key
-        # ── 一次性診斷：首筆印出所有欄位 ──
-        if not getattr(_parse_cg_item, "_diag_done", False):
-            logger.info(f"[CG診斷] _parse_cg_item 首筆原始 keys: {list(item.keys())}")
-            vol_hint = {k: v for k, v in item.items() if any(x in k.lower() for x in ("vol", "turn", "amount", "usd", "trade", "quote"))}
-            logger.info(f"[CG診斷] _parse_cg_item 成交值相關欄位: {vol_hint}")
-            _parse_cg_item._diag_done = True
-        vol_raw = (
-            item.get("turnover24h") or
-            item.get("volUsd24h") or item.get("volumeUsd24h") or
-            item.get("volume24h") or item.get("vol24h") or
-            item.get("quoteVolume24h") or item.get("usdtVolume") or
-            item.get("volume") or item.get("quoteVolume") or
-            item.get("volUsd") or item.get("usdVolume") or
-            item.get("tradeVolume24h") or item.get("turnover") or
-            item.get("tradeAmount") or item.get("tradeAmount24h") or
-            item.get("volUSDT") or item.get("usdtTurnover") or
-            item.get("totalTurnover") or item.get("totalVol") or
-            item.get("vol_usd") or item.get("volume_usd")
-        )
+        # 成交值：CoinGlass coins-markets 提供 long_volume_usd_24h + short_volume_usd_24h
+        # 兩者相加 = 全市場 24h 合約成交額（USD）
+        try:
+            long_vol = float(item.get("long_volume_usd_24h") or 0)
+            short_vol = float(item.get("short_volume_usd_24h") or 0)
+            vol = long_vol + short_vol if (long_vol + short_vol) > 0 else 0.0
+        except (TypeError, ValueError):
+            vol = 0.0
         try:
             p15 = float(p15) if p15 is not None else None
         except (TypeError, ValueError):
@@ -7368,10 +6921,6 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             p24 = float(p24) if p24 is not None else None
         except (TypeError, ValueError):
             p24 = None
-        try:
-            vol = float(vol_raw) if vol_raw is not None else 0.0
-        except (TypeError, ValueError):
-            vol = 0.0
         # CoinGlass coins-markets 已含 15m OI 變化率，直接保留，供後續「OI快速通道」用
         oi_15m_raw = (
             item.get("open_interest_change_percent_15m") or
@@ -7386,14 +6935,26 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
         except (TypeError, ValueError):
             cg_oi_15m = None
 
+        # CoinGlass coins-markets 包含 15m/1h 主動買賣量（免費的 CVD 資料）
+        # long_volume_usd_15m = 主動買入（taker buy）； short_volume_usd_15m = 主動賣出（taker sell）
+        try:
+            taker_buy_15m = float(item.get("long_volume_usd_15m") or 0)
+            taker_sell_15m = float(item.get("short_volume_usd_15m") or 0)
+            taker_total_15m = taker_buy_15m + taker_sell_15m
+            # 主動買盤佔比 0~100；None 代表此幣無 15m taker 資料（非 coins-markets top-100）
+            taker_ratio_15m = round(taker_buy_15m / taker_total_15m * 100, 1) if taker_total_15m > 0 else None
+        except (TypeError, ValueError):
+            taker_ratio_15m = None
+
         return {
             "symbol": sym,
             "coin": sym,
             "price_change_percent_30m": p15,
             "price_change_percent_1h": p1h,
             "price_change_percent_24h": p24,
-            "_cg_volume_usd": vol,      # 0.0 代表 CoinGlass 拿不到，由幣安備援補齊
+            "_cg_volume_usd": vol,
             "_cg_oi_change_15m": cg_oi_15m,  # CoinGlass 已算好的 15m OI 變化率（coins-markets 限定）
+            "_taker_ratio_15m": taker_ratio_15m,  # 主動買盤%，None=無資料；>50=買壓>賣壓
             "_raw_cg": item,
         }
 
@@ -7424,12 +6985,6 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             raw = j.get("data", j.get("list", j if isinstance(j, list) else []))
             if not isinstance(raw, list):
                 return out_page
-            # ── 診斷：印出 coins-markets 第一筆所有 key 和成交值相關欄位 ──
-            if raw and isinstance(raw[0], dict) and not getattr(_fetch_one_coins_markets_page, "_diag_done", False):
-                logger.info(f"[CG診斷] coins-markets 第一筆所有欄位: {list(raw[0].keys())}")
-                vol_fields = {k: v for k, v in raw[0].items() if any(x in k.lower() for x in ("vol", "turn", "amount", "usd", "trade"))}
-                logger.info(f"[CG診斷] coins-markets 成交值相關欄位: {vol_fields}")
-                _fetch_one_coins_markets_page._diag_done = True
             added = 0
             for item in raw:
                 parsed = _parse_cg_item(item)
@@ -7467,10 +7022,6 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             raw = j.get("data", j.get("list", j if isinstance(j, list) else []))
             if not isinstance(raw, list) or not raw:
                 return []
-            # ── 診斷：印出第一筆的所有 key，確認 CoinGlass 成交值欄位名稱 ──
-            if raw and isinstance(raw[0], dict):
-                logger.info(f"[CG診斷] coins-price-change 第一筆所有欄位: {list(raw[0].keys())}")
-                logger.info(f"[CG診斷] coins-price-change 第一筆原始值: { {k: v for k, v in raw[0].items() if 'vol' in k.lower() or 'turn' in k.lower() or 'amount' in k.lower()} }")
             out = []
             for item in raw:
                 if not isinstance(item, dict):
@@ -7633,45 +7184,26 @@ def fetch_position_change():
     else:
         logger.info(f"[熔斷器✅] 正常模式（連續429={_cb_cnt}）")
 
-    logger.info("🚀 傑克船長 2.0 閃電版正式啟動 | 精品模式：15m山寨幣優化門檻 | 頻率：15M")
-    logger.info("【巨鯨高效漏斗】開始執行 15M 持倉狙擊掃描...")
+    logger.info("🚀 山寨幣莊家狙擊鏡 啟動 | 純 CoinGlass 模式 | 15m MTF 掃描")
 
     # ════════════════════════════════════════════════════════
-    # 漏斗 Step 0：預先抓取 BingX 合約對照表（僅供 K 線查詢，不做過濾）
-    # CoinGlass 已是主數據源，BingX 僅作為技術指標 K 線來源
+    # 漏斗 Step 0：資料源初始化（純 CoinGlass 模式）
     # ════════════════════════════════════════════════════════
-    logger.info("📊 [掃描漏斗] Step 0：預先抓取 BingX K線合約對照表 + CoinGlass 交易所支援名單...")
-    allowed_bases: Set[str] = set()
-    base_to_symbol: Dict[str, str] = {}
-    _ab0, base_to_symbol, _ = fetch_bingx_contracts()
-    if _ab0:
-        allowed_bases = _ab0
-        logger.info(f"📊 [掃描漏斗] Step 0a：BingX API 對照表載入 {len(allowed_bases)} 個幣種（K線查詢備用）")
-    else:
-        logger.warning("📊 [掃描漏斗] Step 0a：BingX 對照表取得失敗，K線改用 CoinGlass 價格備援")
-    # CoinGlass supported-exchange-pairs：用於訊息中標示各幣 BingX 支援狀態
-    cg_bingx_supported: Set[str] = fetch_cg_bingx_supported_bases()
-    # 合併兩個來源：BingX API + CoinGlass exchange-pairs → 最完整的支援集合
-    all_bingx_supported: Set[str] = allowed_bases | cg_bingx_supported
-    logger.info(
-        f"📊 [掃描漏斗] Step 0b：CoinGlass 交易所支援 BingX {len(cg_bingx_supported)} 個"
-        f"，合併後共 {len(all_bingx_supported)} 個 BingX 支援幣種"
-    )
+    logger.info("📊 [掃描漏斗] Step 0：純 CoinGlass 模式，所有數據（成交值/K線/OI）均來自 CoinGlass API")
 
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 1：CoinGlass 全市場數據（帶分頁，抓取 300~500 個幣種）
     # ════════════════════════════════════════════════════════
     all_symbols_data = fetch_coinglass_coins_markets()
     if not all_symbols_data:
-        # 備援：舊式流程
-        logger.warning("[巨鯨漏斗] CoinGlass 主流端點失敗，啟用備援流程")
-        if _ab0:
-            all_symbols_data = fetch_coins_price_change()
-            logger.info(f"[備援] CoinGlass coins-price-change 取得 {len(all_symbols_data)} 個幣種")
-        if not all_symbols_data:
-            send_telegram_message("⚠️ 無法取得幣種漲跌資料，請稍後再試。", TG_THREAD_IDS['position_change'])
-            return
-    logger.info(f"📊 [掃描漏斗] 1. CoinGlass 全網共 {len(all_symbols_data)} 幣種")
+        logger.warning("[漏斗] coins-markets 失敗，嘗試 coins-price-change 備援")
+        all_symbols_data = fetch_coins_price_change()
+        if all_symbols_data:
+            logger.info(f"[備援✅] coins-price-change 取得 {len(all_symbols_data)} 個幣種")
+    if not all_symbols_data:
+        send_telegram_message("⚠️ 無法取得幣種漲跌資料，請稍後再試。", TG_THREAD_IDS['position_change'])
+        return
+    logger.info(f"📊 [漏斗 1] CoinGlass 全網 {len(all_symbols_data)} 幣種")
 
     # ── 大盤環境：取得 BTC 30m + 1H 漲跌幅，供訊號推播備註大盤狀態 ──────────────
     global _btc_30m_pct, _btc_1h_pct
@@ -7705,18 +7237,13 @@ def fetch_position_change():
     # 漏斗 Step 2：CoinGlass 全市場放行（訊號以 CoinGlass 為準，不做 BingX 過濾）
     # 訊息中會加上提示，請用戶自行確認交易所是否支援此標的
     # ════════════════════════════════════════════════════════
-    bingx_filtered = all_symbols_data  # 直接放行全部 CoinGlass 幣種
-    logger.info(
-        f"📊 [掃描漏斗] 2. CoinGlass 全市場放行 {len(bingx_filtered)} 幣種（不做 BingX 過濾，訊號以 CoinGlass 為準）"
-    )
-
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 3：價格波動過濾（|15m 漲跌幅| >= PRICE_GATEKEEPER）
     # ════════════════════════════════════════════════════════
     PRICE_GATEKEEPER = 0.85  # 15m MTF：|漲跌幅| ≥0.85%（原 1.0% × 0.85）
     active_symbols: List[Dict] = []
     stub_pass_count = 0
-    for coin in bingx_filtered:
+    for coin in all_symbols_data:
         # supported-coins stub（沒有 price 數據）→ 直接放行讓 OI 決定
         if coin.get("_stub"):
             active_symbols.append(coin)
@@ -7726,32 +7253,21 @@ def fetch_position_change():
         if abs(p_change) >= PRICE_GATEKEEPER:
             active_symbols.append(coin)
     logger.info(
-        f"📊 [掃描漏斗] 3. 經價格波動(>={PRICE_GATEKEEPER}%)過濾，最終 {len(active_symbols)} 幣種進入 OI 運算"
-        f"（淘汰 {len(bingx_filtered) - len(active_symbols)} 個低波動標的 | stub 無數據直通 {stub_pass_count} 個）"
+        f"📊 [漏斗 3] 價格波動>={PRICE_GATEKEEPER}% → {len(active_symbols)} 幣種進 OI 運算"
+        f"（淘汰 {len(all_symbols_data) - len(active_symbols) + stub_pass_count} | stub直通 {stub_pass_count}）"
     )
 
     # ════════════════════════════════════════════════════════
-    # 漏斗 Step 4：成交量預篩（三段備援鏈：CoinGlass → 幣安 → BingX）
+    # 漏斗 Step 4：成交值預篩（純 CoinGlass 模式）
+    # coins-markets Top-100 提供 long_volume_usd_24h + short_volume_usd_24h
+    # 其他幣種無 CoinGlass 成交值 → OI 快速通道補救
     # ════════════════════════════════════════════════════════
-    # 優先順序：CoinGlass 有量 → 幣安備援 → BingX 備援
-    # >= 7M USD 才放行；7M~30M 在推播中加輕倉警告
     VOLUME_PREFILTER_MIN_USD = 7_000_000
-
-    # 一次性載入兩個備援來源（並行感知：先幣安，失敗再 BingX）
-    logger.info("[成交量備援] Step 1/2：載入幣安合約 24h 成交額...")
-    _binance_vol_map: Dict[str, float] = fetch_binance_24h_volume()
-    if not _binance_vol_map:
-        logger.info("[成交量備援] 幣安無資料，Step 2/2：改載 BingX 24h 成交額...")
-        _bingx_vol_map: Dict[str, float] = fetch_bingx_24h_volume()
-    else:
-        _bingx_vol_map = {}
 
     active_above_volume: List[Dict[str, Any]] = []
     vol_cg_only = 0
-    vol_binance_fill = 0
-    vol_bingx_fill = 0
     vol_below = 0
-    vol_oi_fastpass = 0  # OI 快速通道：coins-markets 已知 OI 達標，繞過成交量門檻
+    vol_oi_fastpass = 0
 
     for coin in active_symbols:
         cg_vol = coin.get("_cg_volume_usd")
@@ -7760,37 +7276,17 @@ def fetch_position_change():
         except (TypeError, ValueError):
             cg_vol = 0.0
 
-        sym_base = (coin.get("symbol") or "").replace("USDT", "").replace("-", "").replace("_", "").upper()
-
-        if cg_vol > 0:
-            # CoinGlass 本身有量
-            vol_cg_only += 1
-        elif _binance_vol_map:
-            # 備援 1：幣安
-            binance_vol = _binance_vol_map.get(sym_base, 0.0)
-            if binance_vol > 0:
-                cg_vol = binance_vol
-                vol_binance_fill += 1
-        elif _bingx_vol_map:
-            # 備援 2：BingX
-            bingx_vol = _bingx_vol_map.get(sym_base, 0.0)
-            if bingx_vol > 0:
-                cg_vol = bingx_vol
-                vol_bingx_fill += 1
-
         coin["_volume_usd"] = cg_vol
-        coin["_cg_volume_usd"] = cg_vol  # 同步更新供推播成交額顯示
+        coin["_cg_volume_usd"] = cg_vol
 
         if cg_vol >= VOLUME_PREFILTER_MIN_USD:
+            vol_cg_only += 1
             active_above_volume.append(coin)
         else:
-            # ── OI 快速通道 ────────────────────────────────────────────────────
-            # coins-markets 已提供該幣 15m OI 變化率（不需個別 API 呼叫）
-            # 條件：OI 達標 + 價格達標 + 至少有 3M 成交量（完全沒量的幣不放行）
-            # 5M 以下在推播中加「成交量偏小」警告，7M 以上才算正常
+            # ── OI 快速通道：coins-markets Top-100 OI 達標 + 價格達標 + 最低 1M 成交值 ──
             _cg_oi = coin.get("_cg_oi_change_15m")
             _p15 = coin.get("price_change_percent_30m")
-            _OI_FASTPASS_MIN_VOL = 1_000_000   # 快速通道最低量門檻（1M，面額小的幣仍需基本流動性）
+            _OI_FASTPASS_MIN_VOL = 1_000_000
             if (
                 cg_vol >= _OI_FASTPASS_MIN_VOL and
                 _cg_oi is not None and
@@ -7798,34 +7294,16 @@ def fetch_position_change():
                 _p15 is not None and
                 abs(float(_p15)) >= PRICE_GATEKEEPER
             ):
-                coin["_vol_fastpass"] = True   # 標記：推播時加成交量不明警示
+                coin["_vol_fastpass"] = True
                 active_above_volume.append(coin)
                 vol_oi_fastpass += 1
             else:
                 vol_below += 1
 
-    _vol_src = (
-        f"CoinGlass {vol_cg_only} | 幣安備援 {vol_binance_fill} | BingX備援 {vol_bingx_fill} | "
-        f"OI快速通道 {vol_oi_fastpass} | <7M淘汰 {vol_below}"
-    )
     logger.info(
-        f"📊 [掃描漏斗] 4. 成交量篩選(>=7M USD)：通過 {len(active_above_volume)} 個 （{_vol_src}）"
+        f"📊 [漏斗 4] 成交值篩選 ≥7M: 通過 {len(active_above_volume)} 個"
+        f"（直接 {vol_cg_only} | OI快速通道[1M~7M] {vol_oi_fastpass} | 淘汰[<1M] {vol_below}）"
     )
-
-    # ── Step 4.5：BingX 支援過濾（不支援的幣不運算、不推播）────────────────
-    bingx_filtered_in: List[Dict[str, Any]] = []
-    bingx_filtered_out = 0
-    for _coin in active_above_volume:
-        _base = (_coin.get("symbol") or "").replace("USDT", "").replace("-", "").replace("_", "").upper()
-        if _base in all_bingx_supported:
-            bingx_filtered_in.append(_coin)
-        else:
-            bingx_filtered_out += 1
-    logger.info(
-        f"📊 [掃描漏斗] 4.5. BingX 支援過濾：通過 {len(bingx_filtered_in)} 個，"
-        f"淘汰 {bingx_filtered_out} 個（BingX 不支援，跳過運算）"
-    )
-    active_above_volume = bingx_filtered_in
 
     # ── Step 5：排序 + 限制數量（前 50 固定，其餘隨機保多樣性）─────────────────
     MAX_OI_SYMBOLS = 320
@@ -7920,8 +7398,11 @@ def fetch_position_change():
     total_time = time.time() - start_time
     in_four = len(long_open) + len(long_close) + len(short_open) + len(short_close)
     below_oi_threshold = oi_success_count - in_four
-    logger.info(f"處理統計: 總共 {processed_count} 個幣種, OI 成功 {oi_success_count} 個, OI 失敗 {oi_fail_count} 個 | 總用時: {total_time/60:.1f} 分鐘")
-    logger.info(f"分類結果: 多方開倉 {len(long_open)}, 多方平倉 {len(long_close)}, 空方開倉 {len(short_open)}, 空方平倉 {len(short_close)}（共 {in_four} 個達 OI 初選門檻｜其餘 {below_oi_threshold} 個 OI 成功但 |OI 變化| 未達門檻未入四類）")
+    logger.info(
+        f"📊 [OI掃描] 共 {processed_count} 幣 | 成功 {oi_success_count} 失敗 {oi_fail_count} | 用時 {total_time/60:.1f}min | "
+        f"入選: 多開 {len(long_open)} 多平 {len(long_close)} 空開 {len(short_open)} 空平 {len(short_close)} "
+        f"（達門檻 {in_four} / OI成功 {oi_success_count}）"
+    )
 
     # 動態 OI 門檻計算：以本輪四類樣本的 |OI 30m| 分佈計算平均與標準差，
     # 4 星實際門檻 = max(固定 4 星門檻, mean + 1σ)
@@ -7944,14 +7425,11 @@ def fetch_position_change():
         _dynamic_oi_4star = max(OI_FOR_4_STAR, _dynamic_oi_mean_30m + 1.0 * _dynamic_oi_std_30m)
         _dynamic_oi_5star = max(OI_FOR_5_STAR, _dynamic_oi_mean_30m + 2.0 * _dynamic_oi_std_30m)
         logger.info(
-            f"【動態 OI 門檻】樣本 {_dynamic_oi_sample_size} 個 | 平均 {_dynamic_oi_mean_30m:.2f}% σ {_dynamic_oi_std_30m:.2f}% → "
-            f"4星門檻 {_dynamic_oi_4star:.2f}% 5星門檻 {_dynamic_oi_5star:.2f}%"
+            f"【動態OI門檻】樣本 {_dynamic_oi_sample_size} 個 | μ={_dynamic_oi_mean_30m:.2f}% σ={_dynamic_oi_std_30m:.2f}% "
+            f"→ 4★≥{_dynamic_oi_4star:.2f}% 5★≥{_dynamic_oi_5star:.2f}%"
         )
     else:
-        # 樣本數不足：嘗試從 CoinGlass 抓取 24h 成交量前 20 名幣種的 OI 15m 變化作補充
-        logger.info(
-            f"【動態 OI 門檻】樣本數 {_dynamic_oi_sample_size} < 10，嘗試從 CoinGlass Top-20 補充初始化樣本..."
-        )
+        # 樣本數不足：補充 CoinGlass Top-20 OI 數據
         _extra_samples: List[float] = []
         try:
             _respect_coinglass_rate_limit()
@@ -7978,9 +7456,8 @@ def fetch_position_change():
                             break
                 if _extra_samples:
                     oi_samples.extend(_extra_samples)
-                    logger.info(f"【動態 OI 門檻】Top-20 補充 {len(_extra_samples)} 個樣本，總計 {len(oi_samples)} 個")
         except Exception as _e:
-            logger.warning(f"【動態 OI 門檻】Top-20 補充失敗（不影響主流程）: {_e}")
+            logger.warning(f"【動態OI門檻】Top-20 補充失敗: {_e}")
 
         if len(oi_samples) >= 10:
             arr = np.array(oi_samples, dtype=float)
@@ -7990,8 +7467,8 @@ def fetch_position_change():
             _dynamic_oi_5star = max(OI_FOR_5_STAR, _dynamic_oi_mean_30m + 2.0 * _dynamic_oi_std_30m)
             _dynamic_oi_sample_size = len(oi_samples)
             logger.info(
-                f"【動態 OI 門檻 (補充後)】樣本 {_dynamic_oi_sample_size} 個 | 平均 {_dynamic_oi_mean_30m:.2f}% σ {_dynamic_oi_std_30m:.2f}% → "
-                f"4星門檻 {_dynamic_oi_4star:.2f}% 5星門檻 {_dynamic_oi_5star:.2f}%"
+                f"【動態OI門檻(補充後)】樣本 {_dynamic_oi_sample_size} 個 | μ={_dynamic_oi_mean_30m:.2f}% σ={_dynamic_oi_std_30m:.2f}% "
+                f"→ 4★≥{_dynamic_oi_4star:.2f}% 5★≥{_dynamic_oi_5star:.2f}%"
             )
         else:
             _dynamic_oi_mean_30m = None
@@ -7999,8 +7476,7 @@ def fetch_position_change():
             _dynamic_oi_4star = None
             _dynamic_oi_5star = None
             logger.info(
-                f"【動態 OI 門檻】補充後樣本數仍不足 10（共 {len(oi_samples)} 個），沿用固定門檻 "
-                f"4星 {OI_FOR_4_STAR}% / 5星 {OI_FOR_5_STAR}%"
+                f"【動態OI門檻】樣本不足(共 {len(oi_samples)} 個)，沿用固定門檻 4★≥{OI_FOR_4_STAR}% 5★≥{OI_FOR_5_STAR}%"
             )
 
     # 只統計與計算 4 星以上：|OI| < 實際 4 星門檻 的不進 top、不跑後續運算
@@ -8017,19 +7493,13 @@ def fetch_position_change():
     top_long_close = long_close[:3]
     top_short_open = short_open[:3]
     top_short_close = short_close[:3]
-    logger.info(f"四類 TOP 候選數: 多方開倉 {len(top_long_open)}, 多方平倉 {len(top_long_close)}, 空方開倉 {len(top_short_open)}, 空方平倉 {len(top_short_close)}（各類取前 3，供後續分類/成交量/冷卻/風報篩選）")
-
-    # BingX 支援名單已在漏斗 Step 0 預先載入，此處直接使用 allowed_bases / base_to_symbol
     logger.info(
-        f"[漏斗確認] enrichment 開始，BingX 名單 {len(allowed_bases)} 個 base，"
-        f"base_to_symbol {len(base_to_symbol)} 個映射"
+        f"📊 [TOP候選] 多開 {len(top_long_open)} 多平 {len(top_long_close)} 空開 {len(top_short_open)} 空平 {len(top_short_close)}（各取前3）→ 開始 enrichment"
     )
 
     # ════════════════════════════════════════════════════════
-    # Enrichment：僅保留核心資料（技術指標 + 資金費率）
-    # 已刪除：CVD、掛單牆、大戶多空比、主動買賣比、5m共振
+    # Enrichment：核心資料（CoinGlass 技術指標 + 資金費率）
     # ════════════════════════════════════════════════════════
-    # 批次預載全市場 Funding Rate（CoinGlass exchange-list，一次取全部）
     _cg_fr_map: Dict[str, float] = _fetch_funding_rate_map()
     logger.info(f"[FR批次] CoinGlass Funding Rate 預載完成，共 {len(_cg_fr_map)} 個幣種")
 
@@ -8037,22 +7507,17 @@ def fetch_position_change():
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
         sym = item.get("symbol", "")
-        clean_base = sym.replace("USDT", "").replace("-", "").upper()
-        preferred = base_to_symbol.get(clean_base) if base_to_symbol else None
-        if not preferred:
-            preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
 
-        # 技術指標：K 線計算 RSI / ATR / 結構高低點（主力來源）
+        # 技術指標：CoinGlass K 線計算 RSI / ATR / 結構高低點
         time.sleep(0.2)
-        tech = calculate_technicals(sym, bingx_symbol_override=preferred)
+        tech = calculate_technicals(sym)
 
-        # 資金費率：優先 CoinGlass 批次表，找不到再逐幣呼叫 BingX 備援
+        # 資金費率：CoinGlass 批次表（純 CoinGlass 模式，不再呼叫 BingX）
         _base_fr = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
         funding_rate = _cg_fr_map.get(_base_fr)
-        if funding_rate is None:
-            funding_rate = _fetch_bingx_funding_rate(sym, preferred_symbol=preferred)
 
         # 24h 漲跌幅
+        clean_base = sym.replace("USDT", "").replace("-", "").upper()
         price_24h = item.get("priceChange24h") if isinstance(item.get("priceChange24h"), (int, float)) else None
         if price_24h is None:
             price_24h = coinglass_24h_map.get(clean_base)
@@ -8071,7 +7536,7 @@ def fetch_position_change():
             price_chg_1h=price_1h,
         )
         if classified is None:
-            logger.info(f"[MTF] 跳過 {sym}: OI>={OI_THRESHOLD_30M}% & Price 15m>={PRICE_THRESHOLD_30M}% 未達標，或 1H 趨勢逆風")
+            logger.debug(f"[MTF] 跳過 {sym}: OI<{OI_THRESHOLD_30M}% 或 Price<{PRICE_THRESHOLD_30M}%")
             continue
         signal_label, zone, stars, rsi_desc, reason = classified
         rsi_val = tech.get("rsi") if tech else None
@@ -8116,29 +7581,13 @@ def fetch_position_change():
     if skipped_no_kline > 0:
         logger.info(f"[品質門撒] 淘汰 {skipped_no_kline} 個 ATR=None（K線無數據小幣），剩餘 {len(all_top)} 個精品訊號")
 
-    # 用 BingX ticker 更新現價（交叉驗證，差距 > 8% 保留 K 線價）
+    # 成交額同步（從 _cg_volume_usd 寫入供推播使用）
     for x in all_top:
-        sym = x.get("symbol", "")
-        clean_base = sym.replace("USDT", "").replace("-", "").upper()
-        preferred = base_to_symbol.get(clean_base) if base_to_symbol else None
-        if not preferred:
-            preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
-        snap = _fetch_bingx_ticker_snapshot(sym, preferred_symbol=preferred)
-        if snap and snap.get("price") is not None:
-            snap_price = float(snap["price"])
-            kline_price = x.get("current_price")
-            if kline_price and isinstance(kline_price, (int, float)) and kline_price > 0:
-                _diff_pct = abs(snap_price - kline_price) / kline_price * 100
-                if _diff_pct <= 8.0:
-                    x["current_price"] = snap_price
-            else:
-                x["current_price"] = snap_price
-        # 成交額（從 _cg_volume_usd 或 item 原有數據）
         x["volume_usd"] = x.get("_volume_usd") or x.get("_cg_volume_usd") or 0
 
     logger.info(f"[Enrichment 完成] {len(all_top)} 個訊號進入推播流程")
     if len(all_top) == 0:
-        logger.info(f"本輪無符合條件訊號（15m OI>={OI_THRESHOLD_30M}% & Price>={PRICE_THRESHOLD_30M}% & 成交額>=7M USD，1H方向已改為備註非過濾）")
+        logger.info(f"本輪無符合條件訊號（OI≥{OI_THRESHOLD_30M}% & 價格≥{PRICE_THRESHOLD_30M}% & 成交值≥1M USD）")
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
@@ -8146,9 +7595,21 @@ def fetch_position_change():
     HISTORY_HOURS = 24   # 冷卻歷史保留 24 小時（供 cooldown 與 direction_flip 使用）
 
     def _item_direction(x: Dict) -> str:
-        """只回傳 多/空，冷卻不區分區塊（摸頭/追跌/頭等艙/列車等）。"""
+        """只回傳 多/空。優先用 build_report 已設定的 dir 欄位，其次用 category，最後才解析 signal_label。"""
+        # 1. 最可靠：build_report_message_tiered 在每個推播項目上直接設定的 dir
+        d = (x.get("dir") or "").strip()
+        if d in ("多", "空"):
+            return d
+        # 2. 從 category 判斷（long_open / short_close = 看多訊號）
+        cat = (x.get("category") or x.get("entry_category") or "").strip()
+        if cat in ("long_open", "short_close"):
+            return "多"
+        if cat in ("short_open", "long_close"):
+            return "空"
+        # 3. fallback：嘗試解析 signal_label（關鍵字擴充）
         sig = x.get("signal_label") or ""
-        return "多" if ("做多" in sig or "追多" in sig or "嘎空" in sig or "抄底" in sig) else "空"
+        bull_kws = ("做多", "追多", "嘎空", "抄底", "多頭入場", "空頭平倉", "強勢做多", "Long")
+        return "多" if any(kw in sig for kw in bull_kws) else "空"
 
     def _cooldown_symbol(s: str) -> str:
         """冷卻 key 統一用「幣種基底」比對，避免 BNLIFE / BNLIFEUSDT / BNLIFE-USDT 被當不同幣重複推。"""
@@ -8482,7 +7943,7 @@ def fetch_position_change():
         pushed_at_tw = entry.get("pushed_at_tw") or datetime.fromtimestamp(pushed_ts, tz=TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
         dir_label = "多單" if pushed_dir == "多" else "空單"
 
-        # 1) 價格追蹤：觸及 SL 或 TP 即結案（以 BingX 30m K 線 high/low 判斷是否曾經打到價位）
+        # 1) 價格追蹤：觸及 SL 或 TP 即結案（以 15m K 線 high/low 判斷是否曾經打到價位）
         sl_level = entry.get("sl")
         tp1_level = entry.get("tp1")
         tp2_level = entry.get("tp2")
@@ -8492,7 +7953,7 @@ def fetch_position_change():
 
         if sl_level is not None or tp1_level is not None:
             full_sym = entry.get("full_symbol") or f"{sym_base}USDT"
-            # 優先使用 BingX 30m K 線本地計算（可取得當前 K 線的 high/low，避免瞬間插針被漏判）
+            # 使用 K 線 high/low 判斷是否曾觸及 SL/TP（避免只看收盤價漏判插針）
             kline_tech = _fetch_bingx_klines_and_calc(full_sym, preferred_symbol=None)
             cur_price = None
             kline_high = None
@@ -8542,31 +8003,20 @@ def fetch_position_change():
                 if _outside_range:
                     logger.warning(
                         f"[進場價範圍保護] {sym_base}: 進場={_ep} 但近2h高低=({recent_high_2h},{recent_low_2h})，"
-                        f"進場價在BingX從未成交，判定為 CoinGlass 假數據，靜默取消"
+                        f"進場價超出近2h價格範圍，可能是資料異常，靜默取消"
                     )
                     entry["notified_exit"] = True
                     entry["closed"] = True
                     entry["exit_reason"] = "entry_price_error"
                     continue
-            # 若 K 線不可用，退回到 ticker 快照（確保不會整體失效）
+            # 若 CoinGlass K 線不可用，跳過本輪比對等待下輪重試
             if kline_tech is None or cur_price is None:
-                if kline_tech is None:
-                    logger.warning(f"倉位追蹤 K 線取得失敗，改用 ticker 快照取價: {sym_base} full_symbol={full_sym}")
-                snap = _fetch_bingx_ticker_snapshot(full_sym, preferred_symbol=None)
-                if snap and snap.get("price") is not None:
-                    try:
-                        cur_price = float(snap.get("price"))
-                    except (TypeError, ValueError):
-                        cur_price = None
-                if cur_price is None:
-                    # K 線與快照均失敗 → 記錄並跳過本輪比對，避免任何 UnboundLocalError
-                    logger.info(
-                        f"[倉位追蹤] {sym_base} 本輪 BingX 取價完全失敗（K 線與快照均無效），"
-                        f"跳過 SL/TP 比對，等待下一輪重試"
-                    )
-                    continue
-                else:
-                    logger.info(f"【倉位追蹤快照】{sym_base} full_symbol={full_sym} cur_price={cur_price}")
+                logger.info(
+                    f"[倉位追蹤] {sym_base} CoinGlass K 線取價失敗，"
+                    f"跳過本輪 SL/TP 比對，等待下一輪重試"
+                )
+                continue
+            logger.info(f"【倉位追蹤K線】{sym_base} full_symbol={full_sym} cur_price={cur_price}")
 
             # 取價一致性檢查：cur_price 必須落在該標的 K 線區間內，否則可能取錯標的（如 POL 誤用他幣價格）
             if cur_price is not None and kline_high is not None and kline_low is not None and kline_high > 0 and kline_low > 0:
@@ -8827,14 +8277,8 @@ def fetch_position_change():
             if not _sl_fallback_added:
                 logger.info(f"比對價格: {sym_base} 無止損/止盈價位可比對（紀錄缺 sl/tp 且無進場價），本輪僅做籌碼追蹤")
 
-            # 嘗試取得現價供 3h 預警使用
-            _full_sym_fb = entry.get("full_symbol") or f"{sym_base}USDT"
-            _snap_fb = _fetch_bingx_ticker_snapshot(_full_sym_fb, preferred_symbol=None)
-            if _snap_fb and _snap_fb.get("price") is not None:
-                try:
-                    cur_price = float(_snap_fb["price"])
-                except (TypeError, ValueError):
-                    cur_price = None
+            # 3h 預警現價（若 K 線已有 cur_price 則無需重新取）
+            pass
 
         # 1-3a) 中期預警：持倉超過 3 小時（12 根 15m K 線）仍未達 TP2，且 TP1 也未觸及 → 已關閉（使用者覺得太吵）
         _3h_elapsed = pushed_ts and (now_ts - pushed_ts) >= 3 * 3600
