@@ -5653,13 +5653,13 @@ FUNDING_EXTREME = 0.0003    # 極端費率 0.03%，用於標註
 
 # 15m MTF 四象限進場門檻（15m 扳機 + 1h 趨勢濾網，雙週期共振）
 MAIN_COINS = {"BTC", "ETH"}
-OI_THRESHOLD_30M = 2.0     # 15m OI 扳機門檻 >=2%（MTF 升級版）
-PRICE_THRESHOLD_30M = 1.0  # 15m 價格扳機門檻 >=1.0%（MTF 升級版）
-OI_MAIN_COIN_MIN = 2.0
-OI_ALTCOIN_MIN = 2.0
-OI_FOR_5_STAR = 2.0
-OI_FOR_4_STAR = 2.0
-OI_FOR_ELITE = 2.0
+OI_THRESHOLD_30M = 1.7     # 15m OI 扳機門檻（原 2.0% × 0.85 = 1.7%）
+PRICE_THRESHOLD_30M = 0.85 # 15m 價格扳機門檻（原 1.0% × 0.85 = 0.85%）
+OI_MAIN_COIN_MIN = 1.7
+OI_ALTCOIN_MIN = 1.7
+OI_FOR_5_STAR = 1.7
+OI_FOR_4_STAR = 1.7
+OI_FOR_ELITE = 1.7
 
 
 def _classify_signal_and_tier(
@@ -6219,6 +6219,20 @@ def build_report_message_tiered(
                 msg_lines.append(f"⏱️ 訊號產生於 `{age_sec}` 秒前，動能可能已衰退，請先確認現價")
             else:
                 msg_lines.append(f"⏱️ 訊號產生於 `{age_sec}` 秒前")
+
+        # ⑩ 加碼備註（冷卻到期後再次觸發同方向）
+        prev_push_ts_val = x.get("prev_push_ts")
+        if prev_push_ts_val and x.get("is_add_position"):
+            try:
+                prev_time_str = datetime.fromtimestamp(float(prev_push_ts_val), tz=TAIPEI_TZ).strftime("%m/%d %H:%M")
+                _add_dir = "多" if is_bull_sig else "空"
+                msg_lines.append(
+                    f"📌 此幣曾於 `{prev_time_str}` 推播同方向{_add_dir}單"
+                    f"  ▸ 未上車者：可視訊號強度決定是否補入"
+                    f"  ▸ 已在場者：可考慮加碼，SL 維持原結構位"
+                )
+            except Exception:
+                pass
 
         # ── 儲存供後續倉位追蹤（冷卻 / TP/SL 觸發更新 / 績效統計）──────
         x["sl_price_str"] = _fmt_price(sl)
@@ -7512,7 +7526,7 @@ def fetch_position_change():
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 3：價格波動過濾（|15m 漲跌幅| >= PRICE_GATEKEEPER）
     # ════════════════════════════════════════════════════════
-    PRICE_GATEKEEPER = 1.0   # 15m MTF：|漲跌幅| ≥1.0% 才符合 4 象限進場條件
+    PRICE_GATEKEEPER = 0.85  # 15m MTF：|漲跌幅| ≥0.85%（原 1.0% × 0.85）
     active_symbols: List[Dict] = []
     stub_pass_count = 0
     for coin in bingx_filtered:
@@ -7851,7 +7865,7 @@ def fetch_position_change():
             price_chg_1h=price_1h,
         )
         if classified is None:
-            logger.info(f"[MTF] 跳過 {sym}: OI>=2% & Price 15m>=1.0% 未達標，或 1H 趨勢逆風")
+            logger.info(f"[MTF] 跳過 {sym}: OI>={OI_THRESHOLD_30M}% & Price 15m>={PRICE_THRESHOLD_30M}% 未達標，或 1H 趨勢逆風")
             continue
         signal_label, zone, stars, rsi_desc, reason = classified
         rsi_val = tech.get("rsi") if tech else None
@@ -7916,7 +7930,7 @@ def fetch_position_change():
 
     logger.info(f"[Enrichment 完成] {len(all_top)} 個訊號進入推播流程")
     if len(all_top) == 0:
-        logger.info("本輪無符合條件訊號（15m OI>=2% & Price>=1.0% & 1H順勢 & 成交額>=7M USD）")
+        logger.info(f"本輪無符合條件訊號（15m OI>={OI_THRESHOLD_30M}% & Price>={PRICE_THRESHOLD_30M}% & 1H順勢 & 成交額>=7M USD）")
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
@@ -8704,6 +8718,14 @@ def fetch_position_change():
             if s and s not in last_round_by_sym:
                 last_round_by_sym[s] = str(e["dir"])
 
+    # 上一次同方向推播時間（供「再次推播加碼備註」使用）
+    last_push_ts_by_sym_dir: Dict[Tuple[str, str], float] = {}
+    for e in history:
+        if isinstance(e, dict) and e.get("symbol") and e.get("dir"):
+            key = (_cooldown_symbol(str(e["symbol"])), str(e["dir"]))
+            if key not in last_push_ts_by_sym_dir or (e.get("ts") or 0) > last_push_ts_by_sym_dir[key]:
+                last_push_ts_by_sym_dir[key] = float(e.get("ts") or 0)
+
     # 依 symbol 建立「最新一單」快取（來自 push_log_signals）
     latest_signal_by_sym: Dict[str, Dict[str, Any]] = {}
     for e in push_log_signals:
@@ -8726,25 +8748,43 @@ def fetch_position_change():
         last_sig = latest_signal_by_sym.get(sym_norm)
 
         skip = False
-        # 情況 A：還在車上 / 未 closed → 阻擋新推播，改由倉位追蹤做同向加強或反轉提醒
+        # 情況 A：還在車上 / 未 closed
+        #   - 4h 內：阻擋（避免短時間連推同一標的）
+        #   - 4h 後：開放推播，標記為「加碼提醒」，並記錄上一次推播時間
         if last_sig and not last_sig.get("closed"):
-            logger.info(f"智慧冷卻跳過: {sym_norm} ({cur_dir}) 上一單尚未結案(還在車上)")
-            skip = True
+            last_sig_ts = last_sig.get("ts") or 0
+            if (now_ts - last_sig_ts) < cooldown_sec:
+                logger.info(f"智慧冷卻跳過: {sym_norm} ({cur_dir}) 上一單尚未結案且未滿 {COOLDOWN_HOURS}h")
+                skip = True
+            else:
+                logger.info(f"智慧冷卻放行(加碼): {sym_norm} ({cur_dir}) 上一單未結案但已過 {COOLDOWN_HOURS}h，標記加碼機會")
+                x["prev_push_ts"] = float(last_sig_ts)
+                x["is_add_position"] = True
         # 情況 C：上一單被停損 sl，8 小時內嚴格冷卻
         elif last_sig and last_sig.get("closed") and last_sig.get("exit_reason") == "sl":
             closed_ts = last_sig.get("closed_ts") or last_sig.get("ts") or 0
             if (now_ts - closed_ts) < 8 * 3600:
                 logger.info(f"智慧冷卻跳過: {sym_norm} ({cur_dir}) 最近一單止損結束未滿 8 小時，嚴格冷卻中")
                 skip = True
-        # 情況 B：上一單已止盈 (tp1/tp2) → 無視 4 小時時間冷卻，允許重新推播
+        # 情況 B：上一單已止盈 (tp1/tp2) → 無視 4 小時時間冷卻，允許重新推播（加碼/第二車）
         elif last_sig and last_sig.get("closed") and last_sig.get("exit_reason") in ("tp1", "tp2"):
             logger.info(f"智慧冷卻放行: {sym_norm} ({cur_dir}) 上一單已止盈結案，允許主力開第二車")
-            skip = False
+            prev_ts = last_push_ts_by_sym_dir.get((sym_norm, cur_dir))
+            if prev_ts:
+                x["prev_push_ts"] = prev_ts
+                x["is_add_position"] = True
         else:
-            # 其他情況：沿用原本「同幣同向 4 小時內不重推」邏輯
+            # 情況 D：一般 4 小時冷卻邏輯
             if (sym_norm, cur_dir) in cooldown_symbol_dir_4h:
                 logger.info(f"冷卻跳過: {sym_norm} ({cur_dir}) (4h 內同幣同方向已報過)")
                 skip = True
+            else:
+                # 4h 冷卻到期，若之前推過同方向 → 標記加碼備註
+                prev_ts = last_push_ts_by_sym_dir.get((sym_norm, cur_dir))
+                if prev_ts and prev_ts > 0:
+                    x["prev_push_ts"] = prev_ts
+                    x["is_add_position"] = True
+                    logger.info(f"冷卻放行(加碼): {sym_norm} ({cur_dir}) 上次推播於 {datetime.fromtimestamp(prev_ts, tz=TAIPEI_TZ).strftime('%m/%d %H:%M')}")
 
         if skip:
             continue
