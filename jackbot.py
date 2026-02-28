@@ -12481,9 +12481,9 @@ def run_gold_signal():
         if hit:
             msg_tpsl = format_tp_sl_hit_message(hit, last_dir, last_entry, last_sl, last_tp)
             send_telegram_message(msg_tpsl, TG_THREAD_IDS.get("gold_signal", 254), parse_mode=None)
-            logger.info("[黃金訊號] 已推播 %s 觸及", "止盈" if hit == "tp" else "止損")
-            state = {}
-            _save_gold_state(state)
+            logger.info("[黃金訊號] 已推播 %s 觸及，本輪結束（不再接受同方向新訊號）", "止盈" if hit == "tp" else "止損")
+            _save_gold_state({})
+            return  # TP/SL 觸及後本輪直接結束，避免同一輪又推新單
 
     df_dxy = None
     if cfg.USE_DXY_FILTER:
