@@ -285,8 +285,9 @@ _dynamic_oi_4star: Optional[float] = None
 _dynamic_oi_5star: Optional[float] = None
 _dynamic_oi_sample_size: int = 0
 
-# 大盤環境順勢濾網：掃描前取得 BTC 30m 漲跌幅，供 long_open 降級/警告用
+# 大盤環境順勢濾網：掃描前取得 BTC 30m / 1H 漲跌幅，供訊號備註大盤狀態用
 _btc_30m_pct: Optional[float] = None
+_btc_1h_pct: Optional[float] = None   # BTC 1H 方向，配合 30m 判斷大盤強弱
 
 # 緊急備援：GitHub Action timeout (SIGTERM) 前確保 sniper_cooldown.json 能寫回磁碟
 # fetch_position_change 執行時會持續更新此 dict，atexit/SIGTERM handler 讀取後寫入
@@ -5779,6 +5780,7 @@ def build_report_message_tiered(
         pre_breakout_low: Optional[float] = None,
         pre_breakout_high: Optional[float] = None,
         ema20: Optional[float] = None,
+        rsi: Optional[float] = None,
     ):
         """
         SL 選點邏輯（做多為例）：
@@ -5845,16 +5847,26 @@ def build_report_message_tiered(
         if risk <= 0:
             risk = price * (0.005 if is_squeeze else 0.015)
 
+        # 動態 TP 倍率：RSI 過熱/過冷時縮短目標，快速落袋
+        # 做多 RSI>75 = 超買追高，TP 保守；做多 RSI<40 = 低位多頭，空間充足
+        # 做空 RSI<25 = 超賣追空，TP 保守；做空 RSI>60 = 高位空頭，空間充足
+        rsi_val_f = float(rsi) if rsi and isinstance(rsi, (int, float)) else None
         if is_squeeze:
-            tp1_price = price + 1.0 * risk if is_long else price - 1.0 * risk
-            tp2_price = price + 2.0 * risk if is_long else price - 2.0 * risk
+            r1, r2 = 1.0, 2.0
+            tp_mode = "squeeze"
+        elif rsi_val_f is not None and ((is_long and rsi_val_f >= 75) or (not is_long and rsi_val_f <= 25)):
+            r1, r2 = 1.0, 2.0   # RSI 過熱/過冷：縮短 TP，快速落袋
+            tp_mode = "rsi_hot"
         else:
-            tp1_price = price + 1.5 * risk if is_long else price - 1.5 * risk
-            tp2_price = price + 3.0 * risk if is_long else price - 3.0 * risk
+            r1, r2 = 1.5, 3.0   # 正常趨勢：標準 TP
+            tp_mode = "normal"
+
+        tp1_price = price + r1 * risk if is_long else price - r1 * risk
+        tp2_price = price + r2 * risk if is_long else price - r2 * risk
 
         sl_pct = abs(price - sl_price) / price * 100 if price > 0 else 0
         warn_pct = sl_pct if sl_pct > 8.0 else None
-        return sl_price, tp1_price, tp2_price, sl_pct, warn_pct, sl_label
+        return sl_price, tp1_price, tp2_price, sl_pct, warn_pct, sl_label, tp_mode, r1, r2
 
     def _is_bull(x: Dict) -> bool:
         cat = x.get("category", "")
@@ -6021,13 +6033,14 @@ def build_report_message_tiered(
         # 建倉型 → "trend"：TP1=1.5R / TP2=3.0R / SL=0.5*ATR
         # 平倉軋空型 → "squeeze"：TP1=1.0R / TP2=2.0R / SL=0.2*ATR
         _sig_type = "squeeze" if category in ("long_close", "short_close") else "trend"
-        sl, tp1, tp2, sl_pct, warn_pct, sl_label = calc_sl_tp(
+        sl, tp1, tp2, sl_pct, warn_pct, sl_label, tp_mode, _r1, _r2 = calc_sl_tp(
             price, is_bull_sig, atr_val,
             x.get("recent_high_2h"), x.get("recent_low_2h"),
             signal_type=_sig_type,
             pre_breakout_low=x.get("pre_breakout_low"),
             pre_breakout_high=x.get("pre_breakout_high"),
             ema20=x.get("ema20"),
+            rsi=rsi_val,
         )
 
         # ── 手機優化排版（簡潔 + 教學理由 + 訊號分級）────────────────
@@ -6100,16 +6113,16 @@ def build_report_message_tiered(
         else:
             msg_lines.append("🛑 停損   無數據")
 
+        _r_tp1_val, _r_tp2_val = _r1, _r2
         if tp1 is not None:
             tp1_gain = abs(tp1 - price) / price * 100 if price > 0 else 0
-            if _sig_type == "squeeze":
-                _r_tp1_val, _r_tp2_val = 1.0, 2.0
-            else:
-                _r_tp1_val, _r_tp2_val = 1.5, 3.0
-            msg_lines.append(f"🎯 TP1    `{_fmt_price(tp1)}`  (`+{tp1_gain:.1f}%`)")
-        else:
-            _r_tp1_val = 1.0 if _sig_type == "squeeze" else 1.5
-            _r_tp2_val = 2.0 if _sig_type == "squeeze" else 3.0
+            # 動態 TP 模式標示
+            tp1_mode_note = ""
+            if tp_mode == "rsi_hot":
+                tp1_mode_note = "  _(RSI過熱，縮短目標)_"
+            elif tp_mode == "squeeze":
+                tp1_mode_note = "  _(快進快出)_"
+            msg_lines.append(f"🎯 TP1    `{_fmt_price(tp1)}`  (`+{tp1_gain:.1f}%`){tp1_mode_note}")
 
         if tp2 is not None:
             tp2_gain = abs(tp2 - price) / price * 100 if price > 0 else 0
@@ -6141,7 +6154,48 @@ def build_report_message_tiered(
                 f"⚠️ SL距離 `{warn_pct:.1f}%`，結構點較遠，風報比偏低，可考慮跳過或減半倉位"
             )
 
-        # ⑥ RSI 熱度標示（影響勝率提示）
+        # ⑥ 觸發 K 線漲幅警示（身處 > 2*ATR = 動能已大幅釋放，起漲偏晚）
+        _kline_open = x.get("last_kline_open_30m")
+        _kline_close = x.get("last_kline_close_30m") or price
+        if _kline_open and atr_val and atr_val > 0:
+            _body = abs(_kline_close - _kline_open)
+            _body_atr = _body / atr_val
+            if _body_atr >= 3.0:
+                msg_lines.append(
+                    f"⚡ 觸發K噴出 `{_body_atr:.1f}x ATR`，起漲偏晚，動能多已釋放，入場需謹慎"
+                )
+            elif _body_atr >= 2.0:
+                msg_lines.append(
+                    f"⚡ 觸發K強勢 `{_body_atr:.1f}x ATR`，注意回踩再進場較佳"
+                )
+
+        # ⑦ BTC 大盤狀態備註（OI+籌碼是王道，但大盤環境仍影響成功率）
+        _btc_weak = (_btc_30m_pct is not None and _btc_30m_pct < -0.3 and
+                     _btc_1h_pct is not None and _btc_1h_pct < 0)
+        _btc_strong = (_btc_30m_pct is not None and _btc_30m_pct > 0.3 and
+                       _btc_1h_pct is not None and _btc_1h_pct > 0)
+        if is_bull_sig:
+            if _btc_weak:
+                msg_lines.append(
+                    f"🌐 大盤弱勢（BTC 30m `{_btc_30m_pct:+.2f}%` / 1H `{_btc_1h_pct:+.2f}%`）"
+                    f"  OI籌碼訊號有效，但建議快進快出，莫貪 TP2"
+                )
+            elif _btc_strong:
+                msg_lines.append(
+                    f"🌐 大盤同向（BTC 30m `{_btc_30m_pct:+.2f}%` / 1H `{_btc_1h_pct:+.2f}%`）  多單環境佳 ✅"
+                )
+        else:
+            if _btc_strong:
+                msg_lines.append(
+                    f"🌐 大盤強勢（BTC 30m `{_btc_30m_pct:+.2f}%` / 1H `{_btc_1h_pct:+.2f}%`）"
+                    f"  OI籌碼訊號有效，但逆勢空單風險較高，嚴守 SL"
+                )
+            elif _btc_weak:
+                msg_lines.append(
+                    f"🌐 大盤同向（BTC 30m `{_btc_30m_pct:+.2f}%` / 1H `{_btc_1h_pct:+.2f}%`）  空單環境佳 ✅"
+                )
+
+        # ⑧ RSI 熱度標示（影響勝率提示）
         if rsi_val is not None and isinstance(rsi_val, (int, float)):
             if is_bull_sig:
                 if rsi_val >= 80:
@@ -6158,7 +6212,7 @@ def build_report_message_tiered(
                 elif rsi_val >= 60:
                     msg_lines.append(f"💚 RSI `{rsi_val:.0f}` 高位空頭，超買做空，勝率更佳")
 
-        # ⑦ 訊號時差（提醒用戶訊號新鮮度）
+        # ⑨ 訊號時差（提醒用戶訊號新鮮度）
         if detected_ts is not None:
             age_sec = int(time.time() - detected_ts)
             if age_sec >= 120:
@@ -7418,14 +7472,20 @@ def fetch_position_change():
             return
     logger.info(f"📊 [掃描漏斗] 1. CoinGlass 全網共 {len(all_symbols_data)} 幣種")
 
-    # ── 大盤環境順勢濾網：取得 BTC 30m 漲跌幅（山寨做多前先看大盤）────────────────
-    global _btc_30m_pct
+    # ── 大盤環境：取得 BTC 30m + 1H 漲跌幅，供訊號推播備註大盤狀態 ──────────────
+    global _btc_30m_pct, _btc_1h_pct
     _btc_30m_pct = None
+    _btc_1h_pct = None
     for _c in all_symbols_data:
         _s = (_c.get("symbol") or _c.get("coin") or "").replace("USDT", "").replace("-", "").strip().upper()
         if _s == "BTC":
             _btc_30m_pct = extract_price_change_30m(_c)
-            logger.info(f"📊 [大盤濾網] BTC 30m 漲跌幅: {_btc_30m_pct:+.2f}%" if _btc_30m_pct is not None else "📊 [大盤濾網] BTC 30m 無數據")
+            _btc_1h_pct = _c.get("price_change_percent_1h")
+            try:
+                _btc_1h_pct = float(_btc_1h_pct) if _btc_1h_pct is not None else None
+            except (TypeError, ValueError):
+                _btc_1h_pct = None
+            logger.info(f"📊 [大盤濾網] BTC 30m {(_btc_30m_pct or 0):+.2f}%  1H {(_btc_1h_pct or 0):+.2f}%")
             break
 
     # ── 24h 漲跌幅快取（CoinGlass 已含此欄位，直接讀取）────────────────────────
@@ -7815,6 +7875,8 @@ def fetch_position_change():
             "ema20": tech.get("ema20_close") if tech else None,
             "last_kline_high_30m": tech.get("last_kline_high_30m") if tech else None,
             "last_kline_low_30m": tech.get("last_kline_low_30m") if tech else None,
+            "last_kline_open_30m": tech.get("last_kline_open_30m") if tech else None,
+            "last_kline_close_30m": tech.get("last_kline_close_30m") if tech else None,
             "signal_label": signal_label,
             "zone": zone,
             "stars": stars,
