@@ -5987,92 +5987,100 @@ def build_report_message_tiered(
             signal_type=_sig_type,
         )
 
-        # ── 1. 標題與白話理由 ──────────────────────────────────────────
+        # ── 新版手機極簡排版 ─────────────────────────────────────────
         msg_lines: List[str] = []
-        msg_lines.append(f"{title} {sym_base} / USDT")
-        msg_lines.append(f"💡 理由：{_signal_reason.get(category, '')}")
+
+        # 短版標題與一句話理由
+        _short_title = {
+            "long_open":   "🟢 *做多*",
+            "short_close": "🟢 *做多（軋空）*",
+            "short_open":  "🔴 *做空*",
+            "long_close":  "🔴 *做空（崩跌）*",
+        }
+        _short_reason = {
+            "long_open":   "主力建倉 + 大勢偏多，順勢做長 ✅",
+            "short_close": "空單被強迫平倉，引爆燃料上衝 🚀",
+            "short_open":  "大戶建空 + 大勢偏空，順勢看跌 ✅",
+            "long_close":  "多單恐慌踩踏，連鎖下跌啟動 💥",
+        }
+
+        # ① 標題行
+        short_t = _short_title.get(category, title)
+        msg_lines.append(f"{short_t}  `{sym_base}/USDT`")
+        msg_lines.append(_short_reason.get(category, ""))
         msg_lines.append("")
 
-        # ── 2. 機器人量化掃描 (MTF) ───────────────────────────────────
-        msg_lines.append("📊 *機器人量化掃描 (MTF)*")
-
-        # 15m 動能（白話描述倉位與價格方向）
-        oi_dir = "倉位大增" if (oi30 or 0) > 0 else "倉位大減"
-        p15_dir = "價格上漲" if (p30 or 0) > 0 else "價格下跌"
-        oi_str = fmt_pct(oi30)
+        # ② MTF 數據（OI 附白話說明）
+        oi_str  = fmt_pct(oi30)
         p15_str = fmt_pct(p30)
-        msg_lines.append(f" • 短線動能 (15m)：{oi_dir} {oi_str}，{p15_dir} {p15_str}")
-
-        # 1H 大趨勢
+        oi_desc = "倉位大增" if (oi30 or 0) > 0 else "倉位大減"
         if p1h is not None and isinstance(p1h, (int, float)):
-            p1h_dir = "趨勢向上" if p1h > 0 else "趨勢向下"
-            is_with_trend = (is_bull_sig and p1h > 0) or (not is_bull_sig and p1h < 0)
-            trend_tag = "✅" if is_with_trend else "⚠️ 逆風"
-            msg_lines.append(f" • 大勢護航 (1H)：{p1h_dir} {fmt_pct(p1h)} {trend_tag}")
+            p1h_arrow = "↑" if p1h > 0 else "↓"
+            p1h_part = f"1H {fmt_pct(p1h)}{p1h_arrow}"
         else:
-            msg_lines.append(" • 大勢護航 (1H)：數據缺失 ❓")
-
-        # 資金費率（白話文）
-        if funding_rate is not None and isinstance(funding_rate, (int, float)):
-            fr_pct_val = funding_rate * 100
-            if funding_rate < -0.0005:   # < -0.05%
-                fr_comment = "💡 散戶瘋狂看空，極容易發生「軋空」暴漲！"
-            elif funding_rate > 0.0005:  # > +0.05%
-                fr_comment = "💡 散戶瘋狂看多，當心莊家殺多暴跌！"
-            else:
-                fr_comment = "💡 市場情緒正常"
-            msg_lines.append(f" • 資金費率：{fr_pct_val:+.4f}% ({fr_comment})")
-
-        # 24h 成交額（分級提示）
-        if vol_usd and float(vol_usd) > 0:
-            vol_m = float(vol_usd) / 1e6
-            if vol_m >= 30:
-                msg_lines.append(f" • 24h 成交額：${vol_m:.0f}M (✅ 深度極佳，正常下單)")
-            else:
-                msg_lines.append(
-                    f" • 24h 成交額：${vol_m:.1f}M "
-                    f"(⚠️ 標的偏小，建議單筆本金 < 1500U 以防滑點)"
-                )
-        else:
-            msg_lines.append(" • 24h 成交額：數據不足")
+            p1h_part = "1H —"
+        msg_lines.append(f"📡 OI {oi_str}（{oi_desc}）  價 {p15_str}  |  {p1h_part}")
         msg_lines.append("")
 
-        # ── 3. 傻瓜跟單點位 ────────────────────────────────────────────
-        msg_lines.append("🎯 *傻瓜跟單點位 (已計算 ATR 防插針)*")
-        msg_lines.append(f" • 📍 目前現價：${_fmt_price(price)}")
+        # ③ 點位表
+        msg_lines.append(f"📍 進場   `${_fmt_price(price)}`")
 
         if sl is not None:
-            sl_dist_str = f"{sl_pct:.1f}%" if sl_pct is not None else "—"
-            msg_lines.append(
-                f" • 🛑 嚴格停損 (SL)：${_fmt_price(sl)} "
-                f"(虧損約 {sl_dist_str}，碰觸必出)"
-            )
+            sl_pct_str = f"{sl_pct:.1f}%" if sl_pct is not None else "—"
+            msg_lines.append(f"🛑 停損   `${_fmt_price(sl)}`  (-{sl_pct_str})  碰到就出")
         else:
-            msg_lines.append(" • 🛑 嚴格停損 (SL)：暫無數據")
+            msg_lines.append("🛑 停損   無數據")
 
         if tp1 is not None:
+            tp1_gain = abs(tp1 - price) / price * 100 if price > 0 else 0
             if _sig_type == "squeeze":
-                tp1_note = "快速落袋，平倉一半保本"
-                _r_tp1_val = 1.0
-                _r_tp2_val = 2.0
+                _r_tp1_val, _r_tp2_val = 1.0, 2.0
+                tp1_tag = "快速落袋，出一半"
             else:
-                tp1_note = "賺取 1.5 倍風險利潤，建議平倉一半保本"
-                _r_tp1_val = 1.5
-                _r_tp2_val = 3.0
-            msg_lines.append(f" • ✅ 第一止盈 (TP1)：${_fmt_price(tp1)} ({tp1_note})")
+                _r_tp1_val, _r_tp2_val = 1.5, 3.0
+                tp1_tag = "先出一半保本"
+            msg_lines.append(
+                f"🎯 TP1    `${_fmt_price(tp1)}`  (+{tp1_gain:.1f}%)  ← {tp1_tag}"
+            )
         else:
             _r_tp1_val = 1.0 if _sig_type == "squeeze" else 1.5
             _r_tp2_val = 2.0 if _sig_type == "squeeze" else 3.0
 
         if tp2 is not None:
-            msg_lines.append(f" • 🎯 第二止盈 (TP2)：${_fmt_price(tp2)} (波段終極目標)")
+            tp2_gain = abs(tp2 - price) / price * 100 if price > 0 else 0
+            msg_lines.append(
+                f"🚀 TP2    `${_fmt_price(tp2)}`  (+{tp2_gain:.1f}%)  波段目標"
+            )
+        msg_lines.append("")
+
+        # ④ 底部資訊（成交量 + 費率，一行）
+        if vol_usd and float(vol_usd) > 0:
+            vol_m = float(vol_usd) / 1e6
+            vol_str = (
+                f"💰 {vol_m:.0f}M ✅" if vol_m >= 30
+                else f"💰 {vol_m:.1f}M ⚠️輕倉(<1500U)"
+            )
+        else:
+            vol_str = "💰 量不足"
+
+        if funding_rate is not None and isinstance(funding_rate, (int, float)):
+            fr_val = funding_rate * 100
+            if funding_rate < -0.0005:
+                fr_comment = "散戶狂看空，小心嘎空暴漲！⚡"
+            elif funding_rate > 0.0005:
+                fr_comment = "散戶狂看多，當心莊家殺多！⚠️"
+            else:
+                fr_comment = "情緒正常"
+            fr_str = f"⚡ 費率 {fr_val:+.4f}%  {fr_comment}"
+        else:
+            fr_str = ""
+
+        msg_lines.append(vol_str)
+        if fr_str:
+            msg_lines.append(fr_str)
 
         if warn_pct is not None:
-            msg_lines.append("")
-            msg_lines.append(
-                f"⚠️ *高波動警示：停損距離 {warn_pct:.1f}%，"
-                f"請將下單本金【減半】防滑點穿倉！*"
-            )
+            msg_lines.append(f"⚠️ *SL距離 {warn_pct:.1f}%，請將本金【減半】！*")
 
         # ── 儲存供後續倉位追蹤（冷卻 / TP/SL 觸發更新 / 績效統計）──────
         x["sl_price_str"] = _fmt_price(sl)
@@ -6096,20 +6104,18 @@ def build_report_message_tiered(
 
     if not has_any:
         no_sig_msg = (
-            f"😴 *傑克 MTF 四象限狙擊鏡* | 本輪無符合條件訊號\n"
-            f"⚡ *15m 監控* | 🕐 {now_str} (台灣)\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"條件：15m OI ≥2% & Price ≥1.0% & 1H 順勢 & 成交額 ≥7M USD\n"
+            f"😴 *四象限狙擊鏡* 本輪無訊號\n"
+            f"🕐 {now_str}  條件：15m OI≥2% & 價≥1% & 1H順勢 & 量≥7M\n"
             f"繼續監控中..."
         )
         return no_sig_msg, False, 0
 
     header = (
-        f"🎯 *傑克 MTF 四象限狙擊鏡* | 本輪 {push_count} 個訊號\n"
-        f"⚡ *15m 監控* | 🕐 {now_str} (台灣)\n"
-        f"━━━━━━━━━━━━━━\n"
+        f"🎯 *四象限狙擊鏡*  本輪 *{push_count}* 個訊號\n"
+        f"🕐 {now_str} 台北  |  15m MTF 掃描\n"
+        f"{'─' * 20}\n"
     )
-    sep = "\n━━━━━━━━━━━━━━\n"
+    sep = f"\n{'─' * 20}\n"
     body = sep.join(messages_out)
 
     # ── 以下為舊版渲染殘留（已棄用，直接 return 跳過）──────────────
