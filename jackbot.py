@@ -1765,6 +1765,54 @@ def _fetch_coinglass_24h_map() -> Dict[str, float]:
         return {}
 
 
+def fetch_bingx_futures_24h_vol() -> Dict[str, float]:
+    """
+    Plan B 成交值備援：BingX 永續合約 24h quoteVolume（USDT）批次取得。
+    單一 API call 涵蓋所有 BingX 上市幣種，市場數據端點無需 API Key。
+    回傳 {base_symbol: vol_usdt_24h}，例如 {"BTC": 2.3e10, "ETH": 5e9}。
+    失敗時靜默回傳空 dict，不影響主流程。
+    """
+    try:
+        r = requests.get(
+            "https://open-api.bingx.com/openApi/swap/v2/quote/ticker",
+            timeout=10
+        )
+        if r.status_code != 200:
+            logger.warning(f"[備援B-BingX] HTTP {r.status_code}，跳過")
+            return {}
+        j = r.json()
+        # BingX 回傳格式：{"code": 0, "data": [...]} 或直接 list
+        data = j.get("data") if isinstance(j, dict) else j
+        if not isinstance(data, list):
+            return {}
+        result: Dict[str, float] = {}
+        for item in data:
+            sym = item.get("symbol", "")           # 格式："BTC-USDT"
+            if not sym.endswith("-USDT"):
+                continue
+            base = sym[:-5]                         # "BTC-USDT" → "BTC"
+            # 處理 1000xxx / 1000000xxx 命名（BingX 用全稱，CoinGlass 用縮寫）
+            # 例：BingX "1000PEPE" → CoinGlass "1KPEPE"（但此處保留 BingX 原名供對照）
+            try:
+                vol = float(item.get("quoteVolume") or 0)
+                if vol > 0:
+                    result[base] = vol
+                    # 同時建立縮寫別名：1000xxx → 1Kxxx；1000000xxx → 1Mxxx
+                    if base.startswith("1000000"):
+                        result.setdefault("1M" + base[7:], vol)
+                    elif base.startswith("10000"):
+                        result.setdefault("1W" + base[5:], vol)
+                    elif base.startswith("1000"):
+                        result.setdefault("1K" + base[4:], vol)
+            except (TypeError, ValueError):
+                pass
+        logger.info(f"[備援B-BingX✅] 取得 {len(result)} 幣種 24h USDT 成交值")
+        return result
+    except Exception as e:
+        logger.warning(f"[備援B-BingX] 失敗: {type(e).__name__}: {e}")
+        return {}
+
+
 def fetch_price_change_24h_coinglass_klines(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
     """
     CoinGlass 交易对K线历史 24h 漲跌幅。
@@ -5222,6 +5270,26 @@ def _calc_indicators_from_ohlcv(
     if ema20_touch_high is not None:
         out["ema20_touch_high"] = ema20_touch_high
 
+    # ── Plan C：從 K 線估算 24h USD 成交值（close × volume 加總後按比例推估至 24h）
+    # 用於當 CoinGlass 與 Binance 備援均無成交值資料時的最後防線
+    try:
+        n_candles = len(closes)
+        if n_candles >= 2 and len(volumes) == n_candles:
+            # 使用最近 96 根 (=24h 若為 15m K) 或全部現有 K 線
+            n_use = min(n_candles, 96)
+            kline_vol_usd = sum(
+                float(closes[-(n_use - i)]) * float(volumes[-(n_use - i)])
+                for i in range(n_use)
+                if closes[-(n_use - i)] and volumes[-(n_use - i)]
+            )
+            # 如果 K 線數量不足 96 根，按比例外推至 24h
+            if n_use < 96 and kline_vol_usd > 0:
+                kline_vol_usd = kline_vol_usd * (96 / n_use)
+            if kline_vol_usd > 0:
+                out["kline_vol_usd_24h"] = kline_vol_usd
+    except Exception:
+        pass  # 估算失敗不影響主流程
+
     logger.info(
         f"[{source_label}指標] {clean}: RSI={rsi_val:.2f} BB上={ub_value} BB下={lb_value} "
         f"現價={current_price} ATR={atr_val} VWAP_2h={vwap_2h} EMA20={ema20_close} "
@@ -5810,6 +5878,7 @@ def build_report_message_tiered(
         is_counter      = category in ("short_close", "long_close")
 
         vol_m_val = float(vol_usd) / 1e6 if vol_usd and float(vol_usd) > 0 else 0.0
+        _vol_src_tag = x.get("_vol_source", "CoinGlass")  # CoinGlass / Binance / K線估算
         is_consensus = bool(x.get("is_global_consensus"))
         fr_aligned = False
         if funding_rate is not None and isinstance(funding_rate, (int, float)):
@@ -5909,26 +5978,26 @@ def build_report_message_tiered(
             msg_lines.append(f"🚀 TP2    `{_fmt_price(tp2)}`  (`+{tp2_gain:.1f}%`)")
         msg_lines.append("")
 
-        # ④ 成交量
-        _is_fastpass = x.get("_vol_fastpass", False)
+        # ④ 成交值
         # 小面額幣判斷：價格小數點第 2 位後才有非零值（如 0.00xxx）
         _is_micro_price = price is not None and isinstance(price, (int, float)) and 0 < price < 0.01
-        _micro_note = "  _（小面額幣，成交值偏低屬正常，請直接看盤口深度判斷流動性）_" if _is_micro_price else ""
+        _micro_note = "  _（小面額幣，成交值偏低屬正常，請直接看盤口深度判斷）_" if _is_micro_price else ""
 
+        # 非 CoinGlass 來源時加上標注（Binance 備援 or K線估算）
+        _src_note = "" if _vol_src_tag == "CoinGlass" else f" _({_vol_src_tag})_"
         if vol_m_val >= 30:
-            msg_lines.append(f"💰 成交值 `{vol_m_val:.0f}M` ✅ 深度充足")
+            msg_lines.append(f"💰 成交值 `{vol_m_val:.0f}M`{_src_note} ✅ 深度充足")
         elif vol_m_val >= 7:
-            msg_lines.append(f"💰 成交值 `{vol_m_val:.1f}M` ⚠️ 輕倉下注，避免滑價{_micro_note}")
+            msg_lines.append(f"💰 成交值 `{vol_m_val:.1f}M`{_src_note} ⚠️ 輕倉下注，避免滑價{_micro_note}")
         elif vol_m_val >= 5:
-            msg_lines.append(f"💰 成交值 `{vol_m_val:.1f}M` 🔴 成交值偏低，單筆建議 <1000U{_micro_note}")
+            msg_lines.append(f"💰 成交值 `{vol_m_val:.1f}M`{_src_note} 🔴 成交值偏低，單筆建議 <1000U{_micro_note}")
         elif vol_m_val >= 3:
-            msg_lines.append(f"💰 成交值 `{vol_m_val:.1f}M` 🔴 成交值偏低，單筆 <500U{_micro_note}")
+            msg_lines.append(f"💰 成交值 `{vol_m_val:.1f}M`{_src_note} 🔴 成交值偏低，單筆 <500U{_micro_note}")
         elif vol_m_val >= 1:
-            msg_lines.append(f"💰 成交值 `{vol_m_val:.2f}M` ⛔ 成交值極低，單筆 <200U{_micro_note}")
-        elif _is_fastpass:
-            msg_lines.append("💰 ⚠️ 成交值無法確認，謹慎操作")
+            msg_lines.append(f"💰 成交值 `{vol_m_val:.2f}M`{_src_note} ⛔ 成交值極低，單筆 <200U{_micro_note}")
         else:
-            msg_lines.append("💰 成交值數據不足")
+            # vol = 0：三路均無成交值資料（CoinGlass + Binance + K線估算均失敗）
+            msg_lines.append(f"💰 成交值 ⚠️ 無法取得，請自行確認盤口深度{_micro_note}")
 
         # ⑤ 資金費率（白話完整說明）
         if funding_rate is not None and isinstance(funding_rate, (int, float)):
@@ -7234,9 +7303,11 @@ def fetch_position_change():
         coinglass_24h_map = _fetch_coinglass_24h_map()
 
     # ════════════════════════════════════════════════════════
-    # 漏斗 Step 2：CoinGlass 全市場放行（訊號以 CoinGlass 為準，不做 BingX 過濾）
-    # 訊息中會加上提示，請用戶自行確認交易所是否支援此標的
+    # Plan B：BingX 永續合約 24h USDT 成交值（備援，用於 CoinGlass 無資料的幣種）
+    # 單一 API call，失敗時靜默回傳空 dict 不影響主流程
     # ════════════════════════════════════════════════════════
+    _binance_vol_map: Dict[str, float] = fetch_bingx_futures_24h_vol()
+
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 3：價格波動過濾（|15m 漲跌幅| >= PRICE_GATEKEEPER）
     # ════════════════════════════════════════════════════════
@@ -7258,51 +7329,59 @@ def fetch_position_change():
     )
 
     # ════════════════════════════════════════════════════════
-    # 漏斗 Step 4：成交值預篩（純 CoinGlass 模式）
-    # coins-markets Top-100 提供 long_volume_usd_24h + short_volume_usd_24h
-    # 其他幣種無 CoinGlass 成交值 → OI 快速通道補救
+    # 漏斗 Step 4：成交值預篩（三路來源：CoinGlass A → Binance B → 待 K 線估算 C）
+    # 規則：
+    #   combined_vol ≥ 1M  → 放行
+    #   combined_vol = 0   → CoinGlass + Binance 均無資料 → 放行，等 K 線估算（Plan C）
+    #   0 < combined_vol < 1M → 確認流動性極差 → 過濾
     # ════════════════════════════════════════════════════════
-    VOLUME_PREFILTER_MIN_USD = 7_000_000
+    VOLUME_PREFILTER_MIN_USD = 1_000_000
 
     active_above_volume: List[Dict[str, Any]] = []
-    vol_cg_only = 0
-    vol_below = 0
-    vol_oi_fastpass = 0
+    vol_cg = 0         # Plan A (CoinGlass) 有資料且 ≥ 1M
+    vol_binance = 0    # Plan B (Binance) 補救且 ≥ 1M
+    vol_no_data = 0    # A+B 均無資料 → 放行等 Plan C
+    vol_below = 0      # 確認 < 1M → 過濾
 
     for coin in active_symbols:
+        # ── Plan A：CoinGlass 成交值 ─────────────────────────────
         cg_vol = coin.get("_cg_volume_usd")
         try:
             cg_vol = float(cg_vol) if cg_vol is not None else 0.0
         except (TypeError, ValueError):
             cg_vol = 0.0
 
-        coin["_volume_usd"] = cg_vol
-        coin["_cg_volume_usd"] = cg_vol
+        # ── Plan B：Binance 備援（CoinGlass 無資料時使用）──────────
+        combined_vol = cg_vol
+        _vol_source = "CoinGlass"
+        if cg_vol == 0.0 and _binance_vol_map:
+            base_key = (coin.get("symbol") or coin.get("coin") or "").replace("USDT", "").replace("-", "").upper()
+            b_vol = _binance_vol_map.get(base_key, 0.0)
+            if b_vol > 0:
+                combined_vol = b_vol
+                _vol_source = "BingX"
 
-        if cg_vol >= VOLUME_PREFILTER_MIN_USD:
-            vol_cg_only += 1
+        coin["_volume_usd"] = combined_vol
+        coin["_cg_volume_usd"] = combined_vol
+        coin["_vol_source"] = _vol_source
+
+        if combined_vol == 0.0:
+            # A+B 均無資料 → 放行，等 enrichment 階段 Plan C（K 線估算）補充
+            coin["_vol_need_planc"] = True
+            vol_no_data += 1
+            active_above_volume.append(coin)
+        elif combined_vol >= VOLUME_PREFILTER_MIN_USD:
+            if _vol_source == "CoinGlass":
+                vol_cg += 1
+            else:
+                vol_binance += 1
             active_above_volume.append(coin)
         else:
-            # ── OI 快速通道：coins-markets Top-100 OI 達標 + 價格達標 + 最低 1M 成交值 ──
-            _cg_oi = coin.get("_cg_oi_change_15m")
-            _p15 = coin.get("price_change_percent_30m")
-            _OI_FASTPASS_MIN_VOL = 1_000_000
-            if (
-                cg_vol >= _OI_FASTPASS_MIN_VOL and
-                _cg_oi is not None and
-                abs(float(_cg_oi)) >= OI_THRESHOLD_30M and
-                _p15 is not None and
-                abs(float(_p15)) >= PRICE_GATEKEEPER
-            ):
-                coin["_vol_fastpass"] = True
-                active_above_volume.append(coin)
-                vol_oi_fastpass += 1
-            else:
-                vol_below += 1
+            vol_below += 1
 
     logger.info(
-        f"📊 [漏斗 4] 成交值篩選 ≥7M: 通過 {len(active_above_volume)} 個"
-        f"（直接 {vol_cg_only} | OI快速通道[1M~7M] {vol_oi_fastpass} | 淘汰[<1M] {vol_below}）"
+        f"📊 [漏斗 4] 成交值篩選 ≥1M: 通過 {len(active_above_volume)} 個"
+        f"（CoinGlass: {vol_cg} | BingX備援: {vol_binance} | 待K線估算: {vol_no_data} | 淘汰[確認<1M]: {vol_below}）"
     )
 
     # ── Step 5：排序 + 限制數量（前 50 固定，其餘隨機保多樣性）─────────────────
@@ -7511,6 +7590,16 @@ def fetch_position_change():
         # 技術指標：CoinGlass K 線計算 RSI / ATR / 結構高低點
         time.sleep(0.2)
         tech = calculate_technicals(sym)
+
+        # ── Plan C：K 線估算成交值（補充 CoinGlass + Binance 均無資料的幣種）──────
+        if item.get("_vol_need_planc") and tech:
+            kline_vol_est = tech.get("kline_vol_usd_24h")
+            if kline_vol_est and kline_vol_est > 0:
+                item["_volume_usd"] = kline_vol_est
+                item["_cg_volume_usd"] = kline_vol_est
+                item["_vol_source"] = "K線估算"
+                item.pop("_vol_need_planc", None)
+                logger.debug(f"[Plan C] {sym}: K線估算 24h 成交值 {kline_vol_est/1e6:.2f}M USD")
 
         # 資金費率：CoinGlass 批次表（純 CoinGlass 模式，不再呼叫 BingX）
         _base_fr = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
