@@ -8088,9 +8088,10 @@ def fetch_position_change():
                     f"recent_2h=({recent_high_2h},{recent_low_2h})"
                 )
 
-            # ── 進場價 2h 範圍保護（最強防護）───────────────────────────────────
-            # 若進場價完全超出近2小時K線高低點 5% 以外，代表進場價是假數據（CoinGlass 瞬間異常）
-            # → 靜默取消，不記 -R
+            # ── 進場價 2h 範圍保護（防止 CoinGlass 瞬間異常價格造成誤判）─────────
+            # 進場價超出近2h高低點 5% 外：
+            #   → 若止損已被突破（價格穿越 SL）→ 是真實的止損，繼續往下走通知
+            #   → 若止損未被突破 → 才是資料異常，靜默取消
             _entry_price_raw = entry.get("entry_price")
             if _entry_price_raw and isinstance(_entry_price_raw, (int, float)) and _entry_price_raw > 0:
                 _ep = float(_entry_price_raw)
@@ -8098,18 +8099,43 @@ def fetch_position_change():
                 _outside_range = False
                 if recent_high_2h and recent_low_2h and recent_high_2h > 0 and recent_low_2h > 0:
                     if _is_long_pos and _ep > recent_high_2h * 1.05:
+                        # 做多：進場價遠高於當前高點 → 可能是幣種名稱抓錯
                         _outside_range = True
-                    elif (not _is_long_pos) and _ep < recent_low_2h * 0.95:
+                    elif not _is_long_pos and _ep < recent_low_2h * 0.95:
+                        # 做空：進場價遠低於當前低點 → 可能是幣種名稱抓錯
+                        _outside_range = True
+                    elif not _is_long_pos and _ep > recent_high_2h * 1.10:
+                        # 做空：進場價遠高於當前高點（價格跌太多） → 可能是抓到不同幣種
                         _outside_range = True
                 if _outside_range:
-                    logger.warning(
-                        f"[進場價範圍保護] {sym_base}: 進場={_ep} 但近2h高低=({recent_high_2h},{recent_low_2h})，"
-                        f"進場價超出近2h價格範圍，可能是資料異常，靜默取消"
-                    )
-                    entry["notified_exit"] = True
-                    entry["closed"] = True
-                    entry["exit_reason"] = "entry_price_error"
-                    continue
+                    # 再確認：止損是否已被突破？
+                    _sl_level = entry.get("sl")
+                    _sl_hit = False
+                    if _sl_level and cur_price is not None:
+                        try:
+                            _sl_f = float(_sl_level)
+                            if _is_long_pos and cur_price < _sl_f:
+                                _sl_hit = True   # 做多：現價跌破止損
+                            elif not _is_long_pos and cur_price > _sl_f:
+                                _sl_hit = True   # 做空：現價漲破止損
+                        except (TypeError, ValueError):
+                            pass
+                    if _sl_hit:
+                        # 真實止損：繼續往下走由 SL/TP 比對邏輯處理通知
+                        logger.warning(
+                            f"[進場價範圍保護] {sym_base}: 進場={_ep} 超出近2h範圍({recent_high_2h},{recent_low_2h})，"
+                            f"但現價={cur_price} 已穿越 SL={_sl_level} → 判定為真實止損，繼續追蹤"
+                        )
+                    else:
+                        # 資料異常：進場價異常且未觸及止損，靜默取消
+                        logger.warning(
+                            f"[進場價範圍保護] {sym_base}: 進場={_ep} 超出近2h範圍({recent_high_2h},{recent_low_2h})，"
+                            f"且現價={cur_price} 未觸及 SL → 判定為資料異常，靜默取消"
+                        )
+                        entry["notified_exit"] = True
+                        entry["closed"] = True
+                        entry["exit_reason"] = "entry_price_error"
+                        continue
             # 若 CoinGlass K 線不可用，跳過本輪比對等待下輪重試
             if kline_tech is None or cur_price is None:
                 logger.info(
