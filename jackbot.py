@@ -6816,6 +6816,41 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
         return {'status': 'error', 'symbol': symbol, 'error': str(e)}
 
 
+def fetch_binance_24h_volume() -> Dict[str, float]:
+    """獲取幣安合約全市場 24h 成交額 (USD) 作為 CoinGlass 成交量欄位的權威備援。
+
+    幣安 /fapi/v1/ticker/24hr 免費、無需 API Key，且欄位穩定，
+    用於解決 CoinGlass coins-markets 成交量欄位命名混亂導致全量為 None 的問題。
+
+    回傳 dict: { "BTC": 1_500_000_000.0, "ETH": 800_000_000.0, ... }
+    """
+    try:
+        resp = requests.get(
+            "https://fapi.binance.com/fapi/v1/ticker/24hr",
+            timeout=8
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            result: Dict[str, float] = {}
+            for item in data:
+                raw_sym = str(item.get("symbol") or "")
+                base = raw_sym.replace("USDT", "").replace("BUSD", "") \
+                              .replace("PERP", "").replace("-", "").upper()
+                if not base:
+                    continue
+                try:
+                    vol = float(item.get("quoteVolume") or 0)
+                except (TypeError, ValueError):
+                    vol = 0.0
+                if vol > 0:
+                    result[base] = vol
+            logger.info(f"[成交量備援] 幣安 24h 成交額載入完成：{len(result)} 個幣種")
+            return result
+    except Exception as e:
+        logger.warning(f"[成交量備援] 幣安 API 獲取失敗（不影響主流程，將以 CoinGlass 數據為主）: {e}")
+    return {}
+
+
 def fetch_coinglass_coins_markets() -> List[Dict]:
     """【標準版 CoinGlass-First】拉取 CoinGlass 全市場幣種快照。
 
@@ -6865,10 +6900,15 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             item.get("price_change_percent_24h") or
             item.get("priceChange24h") or item.get("change_24h")
         )
-        vol = (
+        # 成交量欄位：CoinGlass 命名混亂，盡量窮舉所有可能的 key
+        vol_raw = (
+            item.get("turnover24h") or
             item.get("volUsd24h") or item.get("volumeUsd24h") or
             item.get("volume24h") or item.get("vol24h") or
-            item.get("quoteVolume24h") or item.get("usdtVolume")
+            item.get("quoteVolume24h") or item.get("usdtVolume") or
+            item.get("volume") or item.get("quoteVolume") or
+            item.get("volUsd") or item.get("usdVolume") or
+            item.get("tradeVolume24h") or item.get("turnover")
         )
         try:
             p15 = float(p15) if p15 is not None else None
@@ -6883,16 +6923,16 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
         except (TypeError, ValueError):
             p24 = None
         try:
-            vol = float(vol) if vol is not None else None
+            vol = float(vol_raw) if vol_raw is not None else 0.0
         except (TypeError, ValueError):
-            vol = None
+            vol = 0.0
         return {
             "symbol": sym,
             "coin": sym,
             "price_change_percent_30m": p15,
             "price_change_percent_1h": p1h,
             "price_change_percent_24h": p24,
-            "_cg_volume_usd": vol,
+            "_cg_volume_usd": vol,   # 0.0 代表 CoinGlass 拿不到，由幣安備援補齊
             "_raw_cg": item,
         }
 
@@ -7210,32 +7250,50 @@ def fetch_position_change():
     )
 
     # ════════════════════════════════════════════════════════
-    # 漏斗 Step 4：成交量預篩（直接讀 CoinGlass _cg_volume_usd）
+    # 漏斗 Step 4：成交量預篩（CoinGlass + 幣安備援雙源合一）
     # ════════════════════════════════════════════════════════
-    # 【嚴格防滑點】：24h 成交額必須 >= 30M USD
-    # 抓不到成交量（_cg_volume_usd 為 None）→ 直接淘汰，絕不放行
-    VOLUME_PREFILTER_MIN_USD = 7_000_000    # 基礎防滑點門檻：<7M 直接淘汰（7~30M 在推播中加輕倉警告）
+    # 策略：CoinGlass 成交量優先；若為 0 或 None，以幣安 24h quoteVolume 補齊。
+    # 確認 >= 7M USD 才放行；7M~30M 在推播中加輕倉警告。
+    VOLUME_PREFILTER_MIN_USD = 7_000_000
+
+    # 提前一次性載入幣安備援（免費端點，耗時約 1~2 秒）
+    logger.info("[成交量備援] 開始載入幣安合約 24h 成交額...")
+    _binance_vol_map: Dict[str, float] = fetch_binance_24h_volume()
+
     active_above_volume: List[Dict[str, Any]] = []
-    vol_no_data = 0
+    vol_cg_only = 0
+    vol_binance_fill = 0
     vol_below = 0
     for coin in active_symbols:
         cg_vol = coin.get("_cg_volume_usd")
-        if cg_vol is None:
-            vol_no_data += 1
-            # 無量資料 → 直接淘汰（防滑點核心規則）
-            continue
         try:
-            vol = float(cg_vol)
+            cg_vol = float(cg_vol) if cg_vol is not None else 0.0
         except (TypeError, ValueError):
-            vol = 0.0
-        coin["_volume_usd"] = vol
-        if vol >= VOLUME_PREFILTER_MIN_USD:
+            cg_vol = 0.0
+
+        # 若 CoinGlass 拿不到成交量，用幣安權威數據補齊
+        if cg_vol == 0.0 and _binance_vol_map:
+            sym_base = (coin.get("symbol") or "").replace("USDT", "").replace("-", "").replace("_", "").upper()
+            binance_vol = _binance_vol_map.get(sym_base, 0.0)
+            if binance_vol > 0:
+                cg_vol = binance_vol
+                vol_binance_fill += 1
+        else:
+            if cg_vol > 0:
+                vol_cg_only += 1
+
+        coin["_volume_usd"] = cg_vol
+        coin["_cg_volume_usd"] = cg_vol  # 同步更新，供後續推播成交額顯示使用
+
+        if cg_vol >= VOLUME_PREFILTER_MIN_USD:
             active_above_volume.append(coin)
         else:
             vol_below += 1
+
     logger.info(
-        f"📊 [掃描漏斗] 4. 成交量篩選(>=7M USD，7-30M 推播加輕倉警告)："
-        f"通過 {len(active_above_volume)} 個（無量資料淘汰 {vol_no_data} 個，<7M 淘汰 {vol_below} 個）"
+        f"📊 [掃描漏斗] 4. 成交量篩選(>=7M USD)："
+        f"通過 {len(active_above_volume)} 個 "
+        f"（CoinGlass有量 {vol_cg_only} 個 | 幣安備援補齊 {vol_binance_fill} 個 | <7M淘汰 {vol_below} 個）"
     )
 
     # ── Step 4.5：BingX 支援過濾（不支援的幣不運算、不推播）────────────────
