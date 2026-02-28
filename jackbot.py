@@ -5263,16 +5263,19 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
     if len(closes) < 20:
         logger.warning(f"[本地換算] {clean}: K線有效根數 {len(closes)} < 20，無法計算")
         return None
-    # 15分K 最常用「關鍵均線」：EMA20（指數移動平均），對近期價格權重高、反應快，實戰多當動態支撐/阻力
-    # 做空時停損至少設在 EMA20 上方、做多時在 EMA20 下方，避免被回測均線洗掉
+    # EMA20（同時保留逐根序列，供「EMA20 回踩結構低」計算）
     ema20_close = None
+    _ema20_full_b: list = []
     if len(closes) >= 20:
-        period = 20
-        alpha = 2.0 / (period + 1)
-        ema = float(np.mean(closes[:period]))
-        for i in range(period, len(closes)):
-            ema = alpha * float(closes[i]) + (1.0 - alpha) * ema
-        ema20_close = ema
+        _period_b = 20
+        _alpha_b = 2.0 / (_period_b + 1)
+        _ema_b = float(np.mean(closes[:_period_b]))
+        _ema20_series_b: list = []
+        for _i_b in range(_period_b, len(closes)):
+            _ema_b = _alpha_b * float(closes[_i_b]) + (1.0 - _alpha_b) * _ema_b
+            _ema20_series_b.append(_ema_b)
+        ema20_close = _ema_b
+        _ema20_full_b = [None] * _period_b + _ema20_series_b
     # VWAP：小幣深度不足時 24h VWAP 易失真。Plan B 用「最近 2 小時（8 根 15m K 線）」成交量加權，更貼近短線狙擊成本位
     vwap_2h = None
     vwap_std = None
@@ -5393,9 +5396,33 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         out["pre_breakout_low"] = min(lows[-4:-1])   # 觸發 K 線之前 3 根最低
     if len(highs) >= 4:
         out["pre_breakout_high"] = max(highs[-4:-1]) # 觸發 K 線之前 3 根最高
+
+    # ── EMA20 回踩結構低/高（BingX 版）──────────────────────────────────
+    _ema20_touch_low_b = None
+    _ema20_touch_high_b = None
+    if _ema20_full_b:
+        _se = len(closes) - 1
+        _ss = max(20, _se - 30)
+        for _i in range(_se - 1, _ss - 1, -1):
+            _ev = _ema20_full_b[_i] if _i < len(_ema20_full_b) else None
+            if _ev is None:
+                continue
+            _ev = float(_ev)
+            if _ema20_touch_low_b is None and float(lows[_i]) <= _ev * 1.015:
+                _ema20_touch_low_b = float(lows[_i])
+            if _ema20_touch_high_b is None and float(highs[_i]) >= _ev * 0.985:
+                _ema20_touch_high_b = float(highs[_i])
+            if _ema20_touch_low_b is not None and _ema20_touch_high_b is not None:
+                break
+    if _ema20_touch_low_b is not None:
+        out["ema20_touch_low"] = _ema20_touch_low_b
+    if _ema20_touch_high_b is not None:
+        out["ema20_touch_high"] = _ema20_touch_high_b
+
     logger.info(
         f"[本地換算] {clean}: 完成 RSI={rsi_val:.2f} 布林上={ub_value} 布林下={lb_value} "
         f"現價={current_price} ATR={atr_val} VWAP_2h={vwap_2h} EMA20={ema20_close} "
+        f"EMA20回踩低={_ema20_touch_low_b} "
         f"最近2h高低=({out.get('recent_high_2h')}, {out.get('recent_low_2h')}) "
         f"最後K線OHLC=({out.get('last_kline_open_30m')}, {out.get('last_kline_high_30m')}, "
         f"{out.get('last_kline_low_30m')}, {out.get('last_kline_close_30m')})"
@@ -5414,14 +5441,18 @@ def _calc_indicators_from_ohlcv(
         logger.warning(f"[指標計算] {clean}: 有效 K 線根數 {len(closes)} < 20，無法計算")
         return None
 
-    # EMA20
+    # EMA20（同時保留逐根序列，供「EMA20 回踩結構低」計算）
     ema20_close = None
+    ema20_series: list = []   # index 對齊 closes[period:]
     period = 20
     alpha = 2.0 / (period + 1)
     ema = float(np.mean(closes[:period]))
     for i in range(period, len(closes)):
         ema = alpha * float(closes[i]) + (1.0 - alpha) * ema
+        ema20_series.append(ema)
     ema20_close = ema
+    # 還原成與 closes 等長的完整序列（前 period 根填 None）
+    ema20_full = [None] * period + ema20_series
 
     # VWAP_2h（最近 8 根 15m K 線）與收盤價相對 VWAP 的標準差（供 TP2 軌道用）
     vwap_2h = None
@@ -5523,9 +5554,36 @@ def _calc_indicators_from_ohlcv(
     if len(highs) >= 4:
         out["pre_breakout_high"] = max(highs[-4:-1])
 
+    # ── EMA20 回踩結構低/高：往回最多掃 30 根，找最近一次 K 線低點觸碰 EMA20 的位置
+    # 「市場驗證過 EMA20 守住的最低點」= 比靜態 EMA20-pad 更精準的 SL 錨點
+    _scan_end = len(closes) - 1           # 排除訊號 K 線本身（最後一根）
+    _scan_start = max(period, _scan_end - 30)
+    ema20_touch_low = None   # 供做多 SL 用
+    ema20_touch_high = None  # 供做空 SL 用
+    for _i in range(_scan_end - 1, _scan_start - 1, -1):
+        _ev = ema20_full[_i]
+        if _ev is None:
+            continue
+        _ev = float(_ev)
+        # 做多方向：找 K 線低點曾觸碰/略低於 EMA20（允差 1.5%），且收盤在 EMA20 附近或上方
+        if ema20_touch_low is None:
+            if float(lows[_i]) <= _ev * 1.015:
+                ema20_touch_low = float(lows[_i])
+        # 做空方向：找 K 線高點曾觸碰/略高於 EMA20
+        if ema20_touch_high is None:
+            if float(highs[_i]) >= _ev * 0.985:
+                ema20_touch_high = float(highs[_i])
+        if ema20_touch_low is not None and ema20_touch_high is not None:
+            break
+    if ema20_touch_low is not None:
+        out["ema20_touch_low"] = ema20_touch_low
+    if ema20_touch_high is not None:
+        out["ema20_touch_high"] = ema20_touch_high
+
     logger.info(
         f"[{source_label}指標] {clean}: RSI={rsi_val:.2f} BB上={ub_value} BB下={lb_value} "
         f"現價={current_price} ATR={atr_val} VWAP_2h={vwap_2h} EMA20={ema20_close} "
+        f"EMA20回踩低={ema20_touch_low} "
         f"2h高低=({out.get('recent_high_2h')}, {out.get('recent_low_2h')}) "
         f"末K=({out.get('last_kline_open_30m')},{out.get('last_kline_high_30m')},"
         f"{out.get('last_kline_low_30m')},{out.get('last_kline_close_30m')})"
@@ -5781,6 +5839,8 @@ def build_report_message_tiered(
         pre_breakout_high: Optional[float] = None,
         ema20: Optional[float] = None,
         rsi: Optional[float] = None,
+        ema20_touch_low: Optional[float] = None,   # 最近 EMA20 回踩低點（最精準結構位）
+        ema20_touch_high: Optional[float] = None,  # 最近 EMA20 回踩高點（做空結構位）
     ):
         """
         SL 選點邏輯（做多為例）：
@@ -5805,25 +5865,58 @@ def build_report_message_tiered(
         def _valid_above(v):  # 對做空：有效的壓力點 = 在現價以上
             return v and isinstance(v, (int, float)) and float(v) > price
 
+        # pad_tight：EMA20 回踩結構位用極小緩衝（只防插針，不擴大距離）
+        pad_tight = atr_val * 0.15 if atr_val else price * 0.003
+
         candidates = []  # [(sl_price, label)]
 
-        if is_long:
-            # 候選 1：EMA20 — 動態均線防守（回測 EMA20 不破才算有效突破）
-            if _valid_below(ema20):
-                candidates.append((float(ema20) - pad, "EMA20防守"))
-            # 候選 2：突破前 3 根回檔低 — 靜態結構失效點
-            if _valid_below(pre_breakout_low):
-                candidates.append((float(pre_breakout_low) - pad, "結構低防守"))
-            # 備援：2H 整體低點
-            if _valid_below(recent_low_2h):
-                candidates.append((float(recent_low_2h) - pad, "2H低點"))
+        if is_squeeze:
+            # ── 軋空 / 軋多（摸底/摸頭）─────────────────────────────────────────
+            # 邏輯：逼倉動能型訊號，EMA20 通常遠離現價且無防守意義。
+            # SL 以「動能起漲結構點」為基準：
+            #   軋空（做多）→ 軋空那根 K 之前的低點失守 = 動能消失 → 出場
+            #   軋多（做空）→ 軋多那根 K 之前的高點突破 = 動能消失 → 出場
+            if is_long:
+                if _valid_below(pre_breakout_low):
+                    candidates.append((float(pre_breakout_low) - pad, "軋空起漲低"))
+                if _valid_below(recent_low_2h):
+                    candidates.append((float(recent_low_2h) - pad, "2H低點"))
+            else:
+                if _valid_above(pre_breakout_high):
+                    candidates.append((float(pre_breakout_high) + pad, "軋多起漲高"))
+                if _valid_above(recent_high_2h):
+                    candidates.append((float(recent_high_2h) + pad, "2H高點"))
         else:
-            if _valid_above(ema20):
-                candidates.append((float(ema20) + pad, "EMA20防守"))
-            if _valid_above(pre_breakout_high):
-                candidates.append((float(pre_breakout_high) + pad, "結構高防守"))
-            if _valid_above(recent_high_2h):
-                candidates.append((float(recent_high_2h) + pad, "2H高點"))
+            # ── 建倉型（做多突破 / 做空突破）─────────────────────────────────────
+            # 邏輯：EMA20 是核心防守依據。
+            # 優先用「最近一次 EMA20 回踩的實際低點」（市場驗證過），
+            # 其次靜態 EMA20 位置，最後退回 2H 結構。
+            if is_long:
+                # 優先：EMA20 回踩低（市場驗證過的真實結構位）
+                if _valid_below(ema20_touch_low):
+                    candidates.append((float(ema20_touch_low) - pad_tight, "EMA20回踩低"))
+                # 次選：EMA20 靜態位置
+                if _valid_below(ema20):
+                    candidates.append((float(ema20) - pad, "EMA20防守"))
+                # 備援：突破前 3 根結構低
+                if _valid_below(pre_breakout_low):
+                    candidates.append((float(pre_breakout_low) - pad, "結構低防守"))
+                # 最終備援：2H 整體低點
+                if _valid_below(recent_low_2h):
+                    candidates.append((float(recent_low_2h) - pad, "2H低點"))
+            else:
+                # 優先：EMA20 回踩高（市場驗證過的真實結構位）
+                if _valid_above(ema20_touch_high):
+                    candidates.append((float(ema20_touch_high) + pad_tight, "EMA20回踩高"))
+                # 次選：EMA20 靜態位置
+                if _valid_above(ema20):
+                    candidates.append((float(ema20) + pad, "EMA20防守"))
+                # 備援：突破前 3 根結構高
+                if _valid_above(pre_breakout_high):
+                    candidates.append((float(pre_breakout_high) + pad, "結構高防守"))
+                # 最終備援：2H 整體高點
+                if _valid_above(recent_high_2h):
+                    candidates.append((float(recent_high_2h) + pad, "2H高點"))
 
         if candidates:
             if is_long:
@@ -6041,6 +6134,8 @@ def build_report_message_tiered(
             pre_breakout_high=x.get("pre_breakout_high"),
             ema20=x.get("ema20"),
             rsi=rsi_val,
+            ema20_touch_low=x.get("ema20_touch_low"),
+            ema20_touch_high=x.get("ema20_touch_high"),
         )
 
         # ── 手機優化排版（簡潔 + 教學理由 + 訊號分級）────────────────
@@ -7887,6 +7982,8 @@ def fetch_position_change():
             "pre_breakout_low": tech.get("pre_breakout_low") if tech else None,
             "pre_breakout_high": tech.get("pre_breakout_high") if tech else None,
             "ema20": tech.get("ema20_close") if tech else None,
+            "ema20_touch_low": tech.get("ema20_touch_low") if tech else None,
+            "ema20_touch_high": tech.get("ema20_touch_high") if tech else None,
             "last_kline_high_30m": tech.get("last_kline_high_30m") if tech else None,
             "last_kline_low_30m": tech.get("last_kline_low_30m") if tech else None,
             "last_kline_open_30m": tech.get("last_kline_open_30m") if tech else None,
