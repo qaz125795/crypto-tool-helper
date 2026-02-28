@@ -285,6 +285,9 @@ _dynamic_oi_4star: Optional[float] = None
 _dynamic_oi_5star: Optional[float] = None
 _dynamic_oi_sample_size: int = 0
 
+# 大盤環境順勢濾網：掃描前取得 BTC 30m 漲跌幅，供 long_open 降級/警告用
+_btc_30m_pct: Optional[float] = None
+
 # 緊急備援：GitHub Action timeout (SIGTERM) 前確保 sniper_cooldown.json 能寫回磁碟
 # fetch_position_change 執行時會持續更新此 dict，atexit/SIGTERM handler 讀取後寫入
 _emergency_sniper_state: Dict[str, Any] = {}
@@ -2734,14 +2737,14 @@ def fetch_rsi_5m(symbol: str) -> Optional[float]:
 
 # ── 標準版特有：多所共識檢查 ─────────────────────────────────────────────────
 _CONSENSUS_MAJOR_EXCHANGES = ["Binance", "OKX", "Bybit", "BingX", "Bitget"]
-_consensus_cache: Dict[str, Tuple[bool, float]] = {}  # {symbol: (is_consensus, ts)}
+_consensus_cache: Dict[str, Tuple[bool, Optional[float], float]] = {}  # {symbol: (is_consensus, total_oi_usd, ts)}
 _CONSENSUS_CACHE_TTL = 60.0  # 60 秒快取，避免高頻重複呼叫
 
 
-def fetch_exchange_oi_consensus(symbol: str) -> bool:
+def fetch_exchange_oi_consensus(symbol: str) -> Tuple[bool, Optional[float]]:
     """【標準版專屬】多所共識：檢查前五大交易所的 OI 在 15m 內是否同向變動。
-    若 3 家以上同向（同增或同減），回傳 True（代表有全網資金共識）。
-    結果快取 60 秒以避免頻繁 API 呼叫。
+    若 3 家以上同向（同增或同減），回傳 (True, total_oi_usd)。
+    同時回傳全網 OI 總和（USD）供量倉比計算用。結果快取 60 秒。
     """
     base_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     cache_key = base_symbol
@@ -2749,9 +2752,9 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
 
     # 快取命中
     if cache_key in _consensus_cache:
-        cached_val, cached_ts = _consensus_cache[cache_key]
+        cached_consensus, cached_oi, cached_ts = _consensus_cache[cache_key]
         if now - cached_ts < _CONSENSUS_CACHE_TTL:
-            return cached_val
+            return (cached_consensus, cached_oi)
 
     # 使用 CG_EP 定義的路徑（自動處理新舊路徑差異），同時準備舊路徑備援
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
@@ -2788,13 +2791,15 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
 
     try:
         if not data_list:
-            _consensus_cache[cache_key] = (False, now)
-            return False
+            _consensus_cache[cache_key] = (False, None, now)
+            return (False, None)
 
-        # 統計各大所的 OI 15m 變化方向
+        # 統計各大所的 OI 15m 變化方向，並加總 open_interest_usd（量倉比用）
         positive_count = 0  # OI 增加
         negative_count = 0  # OI 減少
         found_exchanges = 0
+        total_oi_usd: Optional[float] = None
+        _oi_usd_sum = 0.0
         # 記錄第一筆欄位名，方便 debug
         _sample_keys = list(data_list[0].keys()) if data_list and isinstance(data_list[0], dict) else []
         logger.info(f"[多所共識] API 回應欄位樣本（第一筆）: {_sample_keys}")
@@ -2843,6 +2848,16 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
                     negative_count += 1
             except (TypeError, ValueError):
                 pass
+            # 加總 OI（USD）供量倉比用
+            oi_usd = entry.get("open_interest_usd") or entry.get("openInterestUsd") or entry.get("oiUsd")
+            if oi_usd is not None:
+                try:
+                    _oi_usd_sum += float(oi_usd)
+                except (TypeError, ValueError):
+                    pass
+
+        if _oi_usd_sum > 0:
+            total_oi_usd = _oi_usd_sum
 
         # 3 家以上同向 → 方案A 共識確立
         consensus_a = (positive_count >= 3) or (negative_count >= 3)
@@ -2852,8 +2867,8 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
             f"{'✅ 共識確立' if consensus_a else '❌ 無共識'}"
         )
         if consensus_a:
-            _consensus_cache[cache_key] = (True, now)
-            return True
+            _consensus_cache[cache_key] = (True, total_oi_usd, now)
+            return (True, total_oi_usd)
 
         # ── 方案B：exchange-history-chart 多棒趨勢確認（文檔確認：用 range= 而非 interval=）
         # 文檔：/open-interest/exchange-history-chart?symbol=BTC&range=12h
@@ -2890,18 +2905,18 @@ def fetch_exchange_oi_consensus(symbol: str) -> bool:
                 f" OI增 {hist_positive} OI減 {hist_negative}"
                 f" {'✅ 歷史趨勢共識' if consensus_b else '❌ 歷史無共識'}"
             )
-            _consensus_cache[cache_key] = (consensus_b, now)
-            return consensus_b
+            _consensus_cache[cache_key] = (consensus_b, total_oi_usd, now)
+            return (consensus_b, total_oi_usd)
         except Exception as e_b:
             logger.debug(f"[多所共識-B] {base_symbol} 歷史K線分析異常: {e_b}")
 
-        _consensus_cache[cache_key] = (False, now)
-        return False
+        _consensus_cache[cache_key] = (False, total_oi_usd, now)
+        return (False, total_oi_usd)
 
     except Exception as e:
         logger.debug(f"[多所共識] {base_symbol} 查詢異常: {e}")
-        _consensus_cache[cache_key] = (False, now)
-        return False
+        _consensus_cache[cache_key] = (False, None, now)
+        return (False, None)
 
 
 # ── 爆倉熱力圖預警 ─────────────────────────────────────────────────────────────
@@ -4719,6 +4734,53 @@ def fetch_oi_weighted_funding_rate(symbol: str, interval: str = "8h", limit: int
     return None
 
 
+def fetch_funding_rate_trend(symbol: str, interval: str = "8h", limit: int = 2) -> Tuple[Optional[float], Optional[float]]:
+    """取得資金費率與上一週期的變化斜率 (fr_trend = current - previous)。
+    若費率短時間內急劇下降（fr_trend < -0.02%）且 OI 上升，可標記為潛在軋空訊號。
+    回傳：(current_rate, fr_trend)，無數據時為 (None, None)。
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    cache_key = f"fr_trend:{base}:{interval}"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 900:  # 15 分鐘快取
+            return val if val else (None, None)
+
+    for ep_key in ["fr_oi_weight", "fr_vol_weight", "fr_history"]:
+        try:
+            j = _cg_get(CG_EP[ep_key], {"symbol": base, "interval": interval, "limit": max(limit, 2),
+                                        "exchange": "Binance"})
+            if not j:
+                continue
+            rows = j.get("data") or j.get("list") or []
+            if not isinstance(rows, list) or len(rows) < 2:
+                continue
+            def _rate_from_row(r):
+                if isinstance(r, dict):
+                    v = r.get("fundingRate") or r.get("funding_rate") or r.get("rate") or r.get("c") or r.get("close")
+                elif isinstance(r, (list, tuple)) and len(r) >= 2:
+                    v = r[-1]
+                else:
+                    v = None
+                return float(v) if v is not None else None
+            current_f = _rate_from_row(rows[-1])
+            prev_f = _rate_from_row(rows[-2])
+            if current_f is None or prev_f is None:
+                continue
+            fr_trend = current_f - prev_f
+            out = (current_f, fr_trend)
+            _flow_cache[cache_key] = (out, now)
+            logger.debug(f"[費率斜率] {base} current={current_f*100:.4f}% prev={prev_f*100:.4f}% fr_trend={fr_trend*100:.4f}%")
+            return out
+        except Exception as e:
+            logger.debug(f"[費率斜率-{ep_key}] {base} 異常: {e}")
+            continue
+
+    _flow_cache[cache_key] = (None, now)
+    return (None, None)
+
+
 def fetch_accumulated_funding_score(symbol: str) -> Dict[str, Any]:
     """累積資金費率極端值偵測。
     用途：判斷市場是否已「費率過熱」或「費率極度負值（嘎空潛力）」。
@@ -5212,6 +5274,7 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         ema20_close = ema
     # VWAP：小幣深度不足時 24h VWAP 易失真。Plan B 用「最近 2 小時（8 根 15m K 線）」成交量加權，更貼近短線狙擊成本位
     vwap_2h = None
+    vwap_std = None
     if len(closes) >= 8 and len(volumes) >= 8:
         use_c = closes[-8:]
         use_h = highs[-8:]
@@ -5221,6 +5284,14 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
             typical = [(use_h[i] + use_l[i] + use_c[i]) / 3.0 for i in range(len(use_c))]
             vwap_2h = sum(typical[i] * use_v[i] for i in range(len(typical))) / sum(use_v)
             logger.info(f"[本地換算] {clean}: VWAP_2h 使用最近 8 根 15m K 線成交量加權 (典型價 H+L+C/3)，避免小幣 24h VWAP 失真")
+        if vwap_2h is not None and use_c:
+            try:
+                devs = [float(c) - float(vwap_2h) for c in use_c]
+                vwap_std = float(np.std(devs)) if len(devs) >= 2 else None
+                if vwap_std is not None and (vwap_std != vwap_std or vwap_std <= 0):
+                    vwap_std = None
+            except (TypeError, ValueError):
+                vwap_std = None
     series = pd.Series(closes)
     rsi_series = _rsi(series, period=14)
     if rsi_series.empty or pd.isna(rsi_series.iloc[-1]):
@@ -5307,6 +5378,8 @@ def _fetch_bingx_klines_and_calc(symbol: str, preferred_symbol: Optional[str] = 
         out["last_kline_close_30m"] = float(closes[-1])
     if vwap_2h is not None:
         out["vwap_2h"] = vwap_2h
+    if vwap_std is not None:
+        out["vwap_std"] = vwap_std
     if ema20_close is not None:
         out["ema20_close"] = ema20_close
     # 近期結構（2h 內高低）：15m × 8 根 = 2h，供 SL/TP「OI 起漲點防守」使用
@@ -5343,8 +5416,9 @@ def _calc_indicators_from_ohlcv(
         ema = alpha * float(closes[i]) + (1.0 - alpha) * ema
     ema20_close = ema
 
-    # VWAP_2h（最近 8 根 15m K 線）
+    # VWAP_2h（最近 8 根 15m K 線）與收盤價相對 VWAP 的標準差（供 TP2 軌道用）
     vwap_2h = None
+    vwap_std = None
     if len(closes) >= 8 and len(volumes) >= 8:
         uc, uh, ul, uv = closes[-8:], highs[-8:], lows[-8:], volumes[-8:]
         typical = [(uh[i] + ul[i] + uc[i]) / 3.0 for i in range(len(uc))]
@@ -5353,9 +5427,16 @@ def _calc_indicators_from_ohlcv(
             vwap_2h = sum(typical[i] * uv[i] for i in range(len(typical))) / total_vol
             logger.info(f"[指標計算] {clean}: VWAP_2h 使用最近 8 根 K 線成交量加權 (典型價 H+L+C/3)")
         else:
-            # CoinGlass price/history 不含 volume → 退為等權典型價均值（TWAP 近似）
             vwap_2h = sum(typical) / len(typical)
             logger.info(f"[指標計算] {clean}: VWAP_2h 無 volume，改用等權典型價均值 (TWAP 近似)")
+        if vwap_2h is not None and uc:
+            try:
+                devs = [float(c) - float(vwap_2h) for c in uc]
+                vwap_std = float(np.std(devs)) if len(devs) >= 2 else None
+                if vwap_std is not None and (vwap_std != vwap_std or vwap_std <= 0):
+                    vwap_std = None
+            except (TypeError, ValueError):
+                vwap_std = None
 
     series = pd.Series(closes)
     rsi_series = _rsi(series, period=14)
@@ -5423,6 +5504,8 @@ def _calc_indicators_from_ohlcv(
         out["last_kline_close_30m"] = float(closes[-1])
     if vwap_2h is not None:
         out["vwap_2h"] = vwap_2h
+    if vwap_std is not None:
+        out["vwap_std"] = vwap_std
     if ema20_close is not None:
         out["ema20_close"] = ema20_close
     if len(highs) >= 8:
@@ -5554,54 +5637,18 @@ ZONE_TOP = "摸頭區"
 ZONE_BREAKOUT_LONG = "突破追漲區"
 ZONE_BREAKOUT_SHORT = "跌破追跌區"
 
-# 資金費率門檻（持倉異常＋費率為主，少依賴 K 線）
-FUNDING_POSITIVE = 0.0005   # 0.05%，高於此視為多頭擁擠
-FUNDING_NEGATIVE = -0.0005  # -0.05%，低於此視為空頭擁擠（易嘎空）
-FUNDING_EXTREME = 0.0003    # v3.0 極端費率 0.03%，用於嘎空/殺多加權標註
+# 資金費率門檻
+FUNDING_EXTREME = 0.0003    # 極端費率 0.03%，用於標註
 
-# 【持倉異常 = 99% 山寨幣】15m 高頻模式，門檻已針對 15m 週期 + 山寨幣精品化校準
-# 目標：每輪推播 3~6 個高勝率「精品」，過濾小幣/資料不足的垃圾訊號
-MAIN_COINS = {"BTC", "ETH"}   # 主流幣
-OI_MAIN_COIN_MIN = 3.0       # 主流幣初選門檻
-OI_ALTCOIN_MIN = 1.5         # 山寨幣初選門檻（提高至 1.5%，過濾微小 OI 波動）
-
-# 星等門檻（基礎值；實際 4/5 星門檻會在 runtime 依 OI 分佈動態調整，以適應不同波動環境）
-OI_FOR_5_STAR = 3.0   # 5星門檻（15m 山寨 ≥3% 才算真正強勢）
-OI_FOR_4_STAR = 2.2   # 4星門檻（≥2.2% 有明確資金進場）
-OI_FOR_ELITE = 3.0    # 鑽石 💎 門檻（同 5 星）
-
-# 狙擊鏡止盈風報門檻：止盈若低於此 R 不推播（避免賠率差、維持勝率品質）
-MIN_TP1_R_FOR_PUSH = 0.8
-
-# 抄底/摸頭 15m 門檻（山寨）：略放寬仍算低位/高位，減少誤殺
-PRICE_DIP_MAX = 3.0    # 抄底：15m 漲幅 ≤ 3% 才算低位，超過改標追漲
-PRICE_TOP_MIN = -3.0   # 摸頭：15m 跌幅 ≥ -3% 才算高位，跌破改標追跌
-
-# 24H 趨勢門檻（保守山寨）：12% 以上才當假抄底/假摸頭，適應日波動
-TREND_24H_THRESHOLD = 12.0
-
-# ── 訊號分級策略設計（三級制）────────────────────────────────────────────────
-# ┌──────────────┬──────────────────────────────────────────┬──────────────┬──────────────────────────────────────┐
-# │ 訊號         │ 門檻                                      │ 倉位         │ 目標勝率 / 說明                        │
-# ├──────────────┼──────────────────────────────────────────┼──────────────┼──────────────────────────────────────┤
-# │ 👻賭鬼 ⭐×4  │ OI≥2.2%，CVD 未確認                      │ 試單 2.5%    │ 樂透策略，低勝率高風報比 TP2 可達 4R   │
-# │ 🚅列車 ⭐×5  │ OI≥3.0%+CVD 同向確認                     │ 標準倉 5%    │ 目標勝率 ≥65%，TP1=1.2R TP2=2~3R      │
-# │ ✈️頭等 ⭐×6  │ 5★+摸頭/抄底+量≥1M+訂單流+RSI 極端      │ 重倉 7~10%   │ 目標勝率 ≥75%，三重確認最高 10%        │
-# └──────────────┴──────────────────────────────────────────┴──────────────┴──────────────────────────────────────┘
-# 頭等艙內部細分：普通頭等(7%) / 鑽石共振(三重確認 10%)，對外統一顯示 ✈️ 頭等機艙
-# 價格位階：抄底 15m≤3%；摸頭 15m≥-3%。24h 假訊號門檻 12%。主流幣 OI≥3.0% 才進榜。
-
-# 鑽石 RSI 輔助：摸頭≥60 / 抄底≤40，無 RSI 不擋
-RSI_FILTER_TOP_MIN = 60
-RSI_FILTER_DIP_MAX = 40
-RSI_FILTER_BREAKOUT_LONG_MIN = 45   # v3.0 追漲時 RSI 不低於 45
-RSI_FILTER_BREAKOUT_SHORT_MAX = 55  # v3.0 追跌時 RSI 不高於 55
-# 鑽石級 CVD 驗證：CVD 變化量需至少佔 OI 變化的一定比例，避免主力對敲假量
-CVD_ELITE_MIN_RATIO = 0.3
-# 鑽石級 24h 成交量門檻（略放寬：5M 即給頭等艙）
-VOLUME_ELITE_MIN_USD = 1_000_000   # 山寨幣成交量普遍較低，1M 即可
-# A 級費率硬過濾：資金費率 > 0.05% 視為多頭擁擠，不推 A 級防接盤殺多
-FUNDING_A_GRADE_MAX = 0.0005
+# 15m MTF 四象限進場門檻（15m 扳機 + 1h 趨勢濾網，雙週期共振）
+MAIN_COINS = {"BTC", "ETH"}
+OI_THRESHOLD_30M = 2.0     # 15m OI 扳機門檻 >=2%（MTF 升級版）
+PRICE_THRESHOLD_30M = 1.0  # 15m 價格扳機門檻 >=1.0%（MTF 升級版）
+OI_MAIN_COIN_MIN = 2.0
+OI_ALTCOIN_MIN = 2.0
+OI_FOR_5_STAR = 2.0
+OI_FOR_4_STAR = 2.0
+OI_FOR_ELITE = 2.0
 
 
 def _classify_signal_and_tier(
@@ -5610,234 +5657,92 @@ def _classify_signal_and_tier(
     tech: Optional[Dict],
     funding_rate: Optional[float] = None,
     price_chg_24h: Optional[float] = None,
+    price_chg_1h: Optional[float] = None,
     cvd_change_1h: Optional[float] = None,
     whale_index: Optional[float] = None,
     retail_ratio: Optional[float] = None,
+    btc_30m_pct: Optional[float] = None,
 ) -> Optional[Tuple[str, str, int, str, str]]:
     """
-    分級核心邏輯 (v4.0 極速版)：
-    1. 刪除所有 3 星邏輯，未達 4 星直接回傳 None (提升效率)。
-    2. 引入 CVD 驗證：5 星必須 CVD 同向，否則降級為 4 星 (區分共識 vs 博弈)。
+    四象限訊號分類（15m 扳機 + 1h 趨勢濾網，MTF 雙週期共振版）：
+
+    扳機條件（15m）：
+      |OI 15m| >= 2.0%  且  |Price 15m| >= 1.0%
+
+    趨勢濾網（1h）：
+      多頭訊號（long_open / short_close）：price_1h > 0（大趨勢順風）
+      空頭訊號（short_open / long_close）：price_1h < 0（大趨勢順風）
+      ⚠️ 若 price_1h 數據不可用（None），允許放行但加上「逆風警示」標記
+
+    同時達標 → 5 星高勝率訊號；趨勢逆風 → 降為 None（直接過濾）
     """
-
-    # 0. 效率過濾：OI 未達 4 星門檻，直接丟棄，不進行後續運算
     oi = item.get("oiChange30m") or 0
-    abs_oi = abs(oi)
+    price_chg_15m = item.get("priceChange30m")
+    if price_chg_15m is not None and not isinstance(price_chg_15m, (int, float)):
+        price_chg_15m = None
 
-    # 動態 OI 門檻：若本輪樣本數足夠，採用「平均 + k*標準差」作為 4/5 星實際門檻，
-    # 讓 5 星只落在極端 OI 爆發（>2σ）的標的上，適應牛熊不同波動環境。
-    global _dynamic_oi_4star, _dynamic_oi_5star, _dynamic_oi_sample_size
-    oi_4 = OI_FOR_4_STAR
-    oi_5 = OI_FOR_5_STAR
-    if _dynamic_oi_sample_size and _dynamic_oi_sample_size >= 10:
-        if _dynamic_oi_4star is not None:
-            oi_4 = max(OI_FOR_4_STAR, _dynamic_oi_4star)
-        if _dynamic_oi_5star is not None:
-            oi_5 = max(OI_FOR_5_STAR, _dynamic_oi_5star)
-
-    if abs_oi < oi_4:
+    # 扳機條件：OI 15m 絕對值 >= 2%，Price 15m 絕對值 >= 1.0%
+    if abs(oi) < OI_THRESHOLD_30M:
+        return None
+    if price_chg_15m is None or abs(price_chg_15m) < PRICE_THRESHOLD_30M:
         return None
 
-    # A 級費率硬過濾：
-    # - 多單：賭鬼樂透(A級) 且 資金費率 > 0.05% 不推，防接盤殺多
-    # - 空單：賭鬼樂透(A級) 且 資金費率 < -0.05% 不推，防錯殺空頭（費率過度負值）
-    def _ret_4(label: str, zone: str, rsi_desc: str, reason: str):
-        if funding_rate is not None:
-            # 多單 A 級：費率過高不推
-            if zone in (ZONE_BREAKOUT_LONG, ZONE_DIP) and funding_rate > FUNDING_A_GRADE_MAX:
-                return None
-            # 空單 A 級：費率過負不推
-            if zone in (ZONE_BREAKOUT_SHORT, ZONE_TOP) and funding_rate < -FUNDING_A_GRADE_MAX:
-                return None
-        return _apply_retail_funding(apply_24h(label, zone, 4, rsi_desc, reason))
+    # 1H 趨勢濾網：多頭訊號需 1h > 0，空頭訊號需 1h < 0
+    is_bull_signal = category in ("long_open", "short_close")
+    is_bear_signal = category in ("short_open", "long_close")
+    mtf_trend_ok = True
+    mtf_note = ""
+    if price_chg_1h is not None and isinstance(price_chg_1h, (int, float)):
+        if is_bull_signal and price_chg_1h <= 0:
+            return None  # 多頭扳機但 1h 下跌，逆勢過濾
+        if is_bear_signal and price_chg_1h >= 0:
+            return None  # 空頭扳機但 1h 上漲，逆勢過濾
+        mtf_note = " ✅1H順勢"
+    else:
+        # 1H 數據缺失：放行但加警示（CoinGlass API 有時不回傳該欄位）
+        mtf_note = " ❓1H數據缺失"
 
-    # 輔助函數：24H 趨勢修正 (Truth Protocol)
-    def apply_24h(label: str, zone: str, stars: int, rsi_desc: str, reason: str) -> Tuple[str, str, int, str, str]:
-        if price_chg_24h is not None and isinstance(price_chg_24h, (int, float)):
-            if zone == ZONE_DIP and price_chg_24h > TREND_24H_THRESHOLD:
-                return ("🟢 強勢嘎空", ZONE_BREAKOUT_LONG, stars, rsi_desc, f"🔥 強勢嘎空 (24h漲 {price_chg_24h:.1f}%)")
-            if zone == ZONE_TOP and price_chg_24h < -TREND_24H_THRESHOLD:
-                return ("🔴 恐慌下殺", ZONE_BREAKOUT_SHORT, stars, rsi_desc, f"🩸 恐慌下殺 (24h跌 {abs(price_chg_24h):.1f}%)")
-            if zone == ZONE_BREAKOUT_LONG and price_chg_24h < -TREND_24H_THRESHOLD:
-                return ("🟢 深跌反彈", ZONE_DIP, stars, rsi_desc, f"📉 深跌反彈 (24h跌 {abs(price_chg_24h):.1f}%)")
-        return (label, zone, stars, rsi_desc, reason)
-
-    # 輔助函數：v3.0 散戶濾網 & 極端費率 & 槓桿擁擠聯合降級
-    def _apply_retail_funding(tup: Tuple[str, str, int, str, str]) -> Tuple[str, str, int, str, str]:
-        label, zone, stars, rsi_desc, reason = tup
-        # 做多訊號：突破追漲(long_open) 或 多軍斷頭抄底(long_close)
-        is_long = category in ("long_open", "long_close")
-        # 做空訊號：跌破追跌(short_open) 或 空軍被軋摸頭(short_close)
-        is_short = category in ("short_open", "short_close")
-
-        # 散戶過熱降級
-        if retail_ratio is not None and retail_ratio > 1.45:
-            if is_long:
-                stars = max(4, stars - 1)
-                reason = reason + " ⚠️ 散戶過熱"
-            elif is_short:
-                reason = reason + " ✅ 散戶接盤"
-
-        # 【槓桿極度擁擠聯合濾網】
-        # Funding > 0.1% + L/S Ratio > 2.0 → 多頭擠壓（Short Squeeze 的反面）前兆
-        # 大量多頭以高費率堆積，一旦行情反轉，連鎖爆倉極易產生插針
-        _fr = funding_rate if isinstance(funding_rate, (int, float)) else None
-        _rr = retail_ratio if isinstance(retail_ratio, (int, float)) else None
-        if _fr is not None and _rr is not None:
-            if _fr > 0.001 and _rr > 2.0:  # 0.1% 費率 且 散戶多空比 > 2.0
-                if stars == 5:
-                    stars = 4
-                    reason = reason + f" ⚠️槓桿極度擁擠(FR={_fr*100:.3f}% L/S={_rr:.1f})，謹防插針"
-                    logger.info(
-                        f"[槓桿擁擠降星] {item.get('symbol','')} "
-                        f"FR={_fr*100:.3f}% L/S={_rr:.1f} → 5星降4星"
-                    )
-                else:
-                    reason = reason + f" ⚠️槓桿擁擠(FR={_fr*100:.3f}%)"
-
-        # 極端費率方向性標註
-        if funding_rate is not None:
-            if funding_rate < -FUNDING_EXTREME and is_long:
-                reason = reason + " 🔥 費率負(嘎空)"
-            if funding_rate > FUNDING_EXTREME and is_short:
-                reason = reason + " ⛽ 費率正(殺多)"
-        return (label, zone, stars, rsi_desc, reason)
-
-    # 1. 準備基礎數據
-    price_chg_30m = item.get("priceChange30m")
-    if price_chg_30m is not None and not isinstance(price_chg_30m, (int, float)):
-        price_chg_30m = None
-
+    # RSI 描述
     rsi = tech.get("rsi") if tech else None
-    touch_upper = tech.get("touch_upper", False) if tech else False
-    touch_lower = tech.get("touch_lower", False) if tech else False
-    rsi_desc = "RSI —"
-    if tech and rsi is not None:
+    if rsi is not None:
         if rsi > 70:
             rsi_desc = f"RSI {rsi:.0f}(超買)"
         elif rsi < 30:
             rsi_desc = f"RSI {rsi:.0f}(超賣)"
         else:
             rsi_desc = f"RSI {rsi:.0f}"
-        if touch_upper:
-            rsi_desc += " 觸頂"
-        if touch_lower:
-            rsi_desc += " 觸底"
+    else:
+        rsi_desc = "RSI —"
 
-    funding_negative = funding_rate is not None and funding_rate < FUNDING_NEGATIVE
-    funding_positive = funding_rate is not None and funding_rate > FUNDING_POSITIVE
+    # 資金費率標註
+    fr_note = ""
+    if funding_rate is not None and isinstance(funding_rate, (int, float)):
+        if funding_rate > FUNDING_EXTREME:
+            fr_note = " ⛽費率偏正"
+        elif funding_rate < -FUNDING_EXTREME:
+            fr_note = " 🔥費率偏負"
 
-    # 2. CVD 趨勢驗證 (用於決定是否降級)
-    # 順勢：開多且 CVD 買 / 開空且 CVD 賣 / 平倉視為「原趨勢的反向」確認
-    is_trend_confirmed = False
-    cvd_price_divergent = False
-    if cvd_change_1h is not None:
-        if category == "long_open" and cvd_change_1h > 0:
-            # 開多 + CVD 買 → 多頭共識
-            is_trend_confirmed = True
-        elif category == "short_open" and cvd_change_1h < 0:
-            # 開空 + CVD 賣 → 空頭共識
-            is_trend_confirmed = True
-        elif category == "long_close" and cvd_change_1h < 0:
-            # 多頭斷頭 + CVD 恐慌賣極值 → 抄底方向強確認
-            is_trend_confirmed = True
-        elif category == "short_close" and cvd_change_1h > 0:
-            # 空頭被軋 + CVD FOMO買極值 → 摸頭方向強確認
-            is_trend_confirmed = True
+    # 四象限分類（依 category 決定訊號標籤與 zone）
+    if category == "long_open":
+        label = "🚀 多頭入場"
+        zone = ZONE_BREAKOUT_LONG
+        reason = f"15m OI↑+Price↑，多頭建倉中，1H順勢護航{fr_note}{mtf_note}"
+    elif category == "short_open":
+        label = "🐻 空頭入場"
+        zone = ZONE_BREAKOUT_SHORT
+        reason = f"15m OI↑+Price↓，空頭積極建倉，1H順勢護航{fr_note}{mtf_note}"
+    elif category == "long_close":
+        label = "💥 多頭平倉"
+        zone = ZONE_DIP
+        reason = f"15m OI↓+Price↓，多頭被迫斷頭平倉，1H下行加速{fr_note}{mtf_note}"
+    elif category == "short_close":
+        label = "🔥 空頭平倉"
+        zone = ZONE_TOP
+        reason = f"15m OI↓+Price↑，空頭遭軋空強制回補，1H上行加速{fr_note}{mtf_note}"
+    else:
+        return None
 
-    # CVD 與價格 30m 方向相反 → 強制僅視為賭鬼級 (4 星) 或不推播
-    price_chg_30m = item.get("priceChange30m")
-    if isinstance(price_chg_30m, (int, float)) and cvd_change_1h is not None and isinstance(cvd_change_1h, (int, float)):
-        if price_chg_30m > 0 and cvd_change_1h < 0:
-            cvd_price_divergent = True
-        elif price_chg_30m < 0 and cvd_change_1h > 0:
-            cvd_price_divergent = True
-
-    # 3. 判斷邏輯開始
-
-    # === 5 星邏輯 (需 OI 達標 且 CVD 確認) ===
-    if abs_oi >= oi_5 and not cvd_price_divergent:
-        if is_trend_confirmed:
-            # [真 5 星]：量大 + 方向對 = 共識盤
-            reason_suffix = " (CVD確認)"
-
-            if oi > 0 and (funding_negative or (funding_rate is not None and funding_rate < -0.001)):
-                return _apply_retail_funding(apply_24h("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 主力共識+費率負" + reason_suffix))
-
-            # 多頭斷頭（long_close）→ 鑽石抄底
-            if category == "long_close":
-                return _apply_retail_funding(
-                    apply_24h("🟢 鑽石抄底", ZONE_DIP, 5, rsi_desc, "🩸 恐慌殺跌+CVD賣極值" + reason_suffix)
-                )
-
-            # 空頭被軋（short_close）→ 鑽石摸頭
-            if category == "short_close":
-                return _apply_retail_funding(
-                    apply_24h("🔴 鑽石摸頭", ZONE_TOP, 5, rsi_desc, "⛽ 軋空爆發+CVD買極值" + reason_suffix)
-                )
-
-            if oi > 0 and category == "long_open":
-                return _apply_retail_funding(apply_24h("🟢 順勢追多", ZONE_BREAKOUT_LONG, 5, rsi_desc, "🚀 量價齊揚" + reason_suffix))
-
-            if oi > 0 and category == "short_open":
-                return _apply_retail_funding(apply_24h("🔴 順勢追空", ZONE_BREAKOUT_SHORT, 5, rsi_desc, "📉 量價齊跌" + reason_suffix))
-
-            zone = ZONE_BREAKOUT_LONG if oi > 0 else ZONE_BREAKOUT_SHORT
-            return _apply_retail_funding(apply_24h("🟡 順勢觀察", zone, 5, rsi_desc, "🚀 主力共識盤" + reason_suffix))
-
-        else:
-            # [降級 4 星]：OI 很大 但 CVD 背離 = 激戰/轉折盤
-            downgrade_reason = "⚠️ 持倉大增但CVD背離 (多空激戰)"
-            if oi > 0:
-                zone = ZONE_BREAKOUT_LONG if category == "long_open" else ZONE_BREAKOUT_SHORT
-                return _ret_4("🟡 激戰博弈", zone, rsi_desc, downgrade_reason)
-            else:
-                zone = ZONE_DIP if category == "short_close" else ZONE_TOP
-                return _ret_4("🟡 激戰博弈", zone, rsi_desc, downgrade_reason)
-
-    # === 4 星邏輯 (OI 中等 或 5 星降級) ===
-
-    # 4 星 + CVD 順向：對「空頭平倉 / 多頭平倉」給更精確的摸底 / 摸頭文案
-    if is_trend_confirmed:
-        reason_suffix_4 = " (CVD確認)"
-        if category == "short_close":
-            # 空頭平倉 + CVD 賣極值 → 恐慌殺跌（抄底）
-            return _apply_retail_funding(
-                apply_24h("🟢 抄底", ZONE_DIP, 4, rsi_desc, "🩸 恐慌殺跌+CVD賣極值" + reason_suffix_4)
-            )
-        elif category == "long_close":
-            # 多頭平倉 + CVD 買極值 → 軋空爆發（摸頭）
-            return _apply_retail_funding(
-                apply_24h("🔴 摸頭", ZONE_TOP, 4, rsi_desc, "⛽ 軋空爆發+CVD買極值" + reason_suffix_4)
-            )
-
-    # 4 星一般邏輯（含 CVD 背離分開 open/close 文案）
-    if oi > 0 and (funding_negative or category == "long_open"):
-        return _ret_4("🟢 試單做多", ZONE_BREAKOUT_LONG, rsi_desc, "持倉增加 (觀察動能)")
-
-    if oi < 0 and (funding_positive or category == "short_close"):
-        if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-            return _ret_4("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, rsi_desc, "價已跌→追空")
-        # 空頭平倉＝持倉驟降，用「被軋」語氣
-        return _ret_4("🔴 偏空過熱", ZONE_TOP, rsi_desc, "空頭被軋 (摸頭試單)")
-
-    if oi < 0 and (funding_negative or category == "long_close"):
-        if price_chg_30m is not None and price_chg_30m > PRICE_DIP_MAX:
-            return _ret_4("🟢 潛在嘎空", ZONE_BREAKOUT_LONG, rsi_desc, "價已漲→追多")
-        # 多頭平倉＝持倉驟降，用「斷頭」語氣
-        return _ret_4("🟢 超跌試多", ZONE_DIP, rsi_desc, "多頭斷頭 (摸底試單)")
-
-    if oi > 0:
-        zone = ZONE_BREAKOUT_LONG if category == "long_open" else ZONE_BREAKOUT_SHORT
-        return _ret_4("🟡 順勢觀察", zone, rsi_desc, "持倉異動順勢")
-
-    if oi < 0:
-        if price_chg_30m is not None and price_chg_30m < PRICE_TOP_MIN:
-            return _ret_4("🟡 順勢觀察", ZONE_BREAKOUT_SHORT, rsi_desc, "價跌→追空")
-        # 持倉減少的一般摸頭情境
-        return _ret_4("🔴 摸頭做空", ZONE_TOP, rsi_desc, "持倉減 (偏空)")
-
-    return None
+    return (label, zone, 5, rsi_desc, reason)
 
 
 def build_report_message_tiered(
@@ -5846,410 +5751,100 @@ def build_report_message_tiered(
     oi_success_count: int = 0,
 ) -> str:
     """
-    【傑克 15分狙擊鏡 - 暴力喊單版】
-    文案極度簡化，只給重點：方向、點位、理由。SL 與 TP 同源（主力成本 或 ATR）。
+    【傑克 30m 四象限訊號推播 - 極簡高勝率版】
+    格式：乾淨、一眼看懂，ATR 動態防守，嚴格防滑點。
     """
-    def star_str(n: int) -> str:
-        return "⭐" * (n or 0)
-
     def fmt_pct(num):
         if num is None or (isinstance(num, float) and (num != num)):
             return "0.00%"
         return f"{'+' if num >= 0 else ''}{num:.2f}%"
 
     def calc_sl_tp(
-        atr: Optional[float],
         price: float,
-        zone: str,
         is_long: bool,
-        stars: int,
-        is_elite: bool,
-        vwap_2h: Optional[float] = None,
-        ema20_close: Optional[float] = None,
-        ub_value: Optional[float] = None,
-        lb_value: Optional[float] = None,
-        cvd_divergence: bool = False,
+        atr: Optional[float] = None,
         recent_high_2h: Optional[float] = None,
         recent_low_2h: Optional[float] = None,
-        last_kline_high_30m: Optional[float] = None,
-        last_kline_low_30m: Optional[float] = None,
-        fp_support: Optional[float] = None,    # 腳步圖最近支撐位
-        fp_resistance: Optional[float] = None,  # 腳步圖最近阻力位
-        fp_poc: Optional[float] = None,         # 腳步圖 Point of Control
+        signal_type: str = "trend",
     ):
         """
-        【OI 起漲點防守法 v2 — 腳步圖增強版】
-        SL 優先順序（做多）：腳步圖支撐 → 結構低點(recent_low_2h) → ATR floor
-        TP 優先順序（做多）：腳步圖阻力 → VWAP對稱 → R倍數
-        - 列車(S/S+)：SL 上限 8~12%（依波動動態）
-        - 賭鬼(A)：SL 上限 6~10%（依波動動態）
-        - 腳步圖阻力在 1.0R~3.5R 範圍內才採用，超出則回退 R 倍數
+        ATR 動態防守法（MTF 雙策略版）：
+
+        【建倉型】signal_type="trend"  (long_open / short_open)
+          屬於長趨勢跟隨，有足夠時間走出空間。
+          SL：結構點 ± 0.5 * ATR
+          TP1：1.5R（分批止盈）
+          TP2：3.0R（趨勢目標）
+
+        【平倉軋空型】signal_type="squeeze"  (long_close / short_close)
+          屬於短線爆發，容易快速反轉畫門，必須保守落袋。
+          SL：結構點 ± 0.2 * ATR（更貼近，快速確認失效）
+          TP1：1.0R（盡快落袋）
+          TP2：2.0R（延伸目標）
+
+        返回: (sl_price, tp1_price, tp2_price, sl_pct, warn_pct)
+        warn_pct: 若 SL 距現價 > 6%，回傳實際百分比（警示減倉）
         """
-        _na = "-"
-        def fmt_p(p):
-            if p is None or (isinstance(p, float) and (p != p)) or p <= 0:
-                return _na
-            if p < 0.0001:
-                return f"{p:.8f}"
-            if p < 0.01:
-                return f"{p:.6f}"
-            if p < 1:
-                return f"{p:.5f}"
-            if p < 10:
-                return f"{p:.4f}"
-            return f"{p:.2f}"
+        if not price or price <= 0:
+            return None, None, None, None, None
 
-        # 確保回傳長度固定 13 個值（避免解包錯誤）
-        def _ret(
-            sl_price: Optional[float],
-            tp1_price: Optional[float],
-            tp2_price: Optional[float],
-            r_tp1: Optional[float],
-            r_tp2: Optional[float],
-            tp1_label: Optional[str],
-            tp2_label: Optional[str],
-            sl_capped: bool,
-            energy_exhausted: bool,
-            tp1_real_note: str = "",
-            tp1_atr_str: str = "-",
-            tp1_atr_note: str = "",
-        ):
-            sl_str = fmt_p(sl_price) if sl_price is not None else _na
-            tp1_str = fmt_p(tp1_price) if tp1_price is not None else _na
-            tp2_str = fmt_p(tp2_price) if tp2_price is not None else _na
-            tp1_real_str = tp1_str
-            return (
-                sl_str,
-                tp1_str,
-                tp2_str,
-                r_tp1,
-                r_tp2,
-                tp1_label or "",
-                tp2_label or "",
-                sl_capped,
-                energy_exhausted,
-                tp1_real_str,
-                tp1_real_note,
-                tp1_atr_str,
-                tp1_atr_note,
-            )
+        is_squeeze = (signal_type == "squeeze")
+        atr_val = float(atr) if atr and isinstance(atr, (int, float)) and atr > 0 else None
 
-        if price is None or price <= 0:
-            return _ret(None, None, None, None, None, None, None, False, False)
+        # ATR 緩衝倍率：建倉型 0.5 倍，軋空/平倉型 0.2 倍（更貼近，確認快速失效）
+        atr_mult = 0.2 if is_squeeze else 0.5
+        pad = atr_mult * atr_val if atr_val else price * (0.005 if is_squeeze else 0.015)
 
-        # 分級：列車 (S/S+) vs 賭鬼 (A)
-        is_train = (stars or 0) >= 5
-        is_gambler = (stars or 0) == 4
-
-        # 結構 SL 基礎：recent_low_2h / recent_high_2h 優先，否則用當前 30m K 線 high/low
-        basis_low = None
-        basis_high = None
-        if recent_low_2h is not None and isinstance(recent_low_2h, (int, float)) and recent_low_2h > 0:
-            basis_low = float(recent_low_2h)
-        elif last_kline_low_30m is not None and isinstance(last_kline_low_30m, (int, float)) and last_kline_low_30m > 0:
-            basis_low = float(last_kline_low_30m)
-
-        if recent_high_2h is not None and isinstance(recent_high_2h, (int, float)) and recent_high_2h > 0:
-            basis_high = float(recent_high_2h)
-        elif last_kline_high_30m is not None and isinstance(last_kline_high_30m, (int, float)) and last_kline_high_30m > 0:
-            basis_high = float(last_kline_high_30m)
-
-        atr_val = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
-        buffer_pct = 0.005  # 0.5% buffer（結構位微調）
-        sl_price = None
-        sl_capped = False
-        sl_source = "ATR"  # 紀錄 SL 來源，用於訊息說明
-
-        # ── ATR 波動等級分類（決定 ATR 倍率與上限）────────────────────────────
-        # 15m 高頻模式：SL 須貼近結構，過寬意味信號已失效
-        # 列車(5星) / 賭鬼(4星)
-        # 高波動(ATR>3%)：最大 8% / 6%
-        # 中波動(ATR 2-3%)：最大 6% / 5%
-        # 低波動(ATR<2%)：最大 5% / 4%
-        vol_pct = (atr_val / price) * 100.0 if (atr_val is not None and price > 0) else 0.0
-        if vol_pct > 3.0:
-            atr_mult = 1.5    # 高波動：PEPE/SOL 系，避免 15M 正常波動洗出場
-            max_pct = 0.08 if is_train else 0.06
-        elif vol_pct > 2.0:
-            atr_mult = 1.35   # 中波動：適度放寬
-            max_pct = 0.06 if is_train else 0.05
+        if is_long:
+            basis = float(recent_low_2h) if recent_low_2h and isinstance(recent_low_2h, (int, float)) and recent_low_2h > 0 else None
+            sl_price = (basis - pad) if basis else (price - pad)
         else:
-            atr_mult = 1.2    # 低波動：保守
-            max_pct = 0.05 if is_train else 0.04
+            basis = float(recent_high_2h) if recent_high_2h and isinstance(recent_high_2h, (int, float)) and recent_high_2h > 0 else None
+            sl_price = (basis + pad) if basis else (price + pad)
 
-        # ── 腳步圖支撐/阻力有效性校驗 ─────────────────────────────────────────
-        # fp_support 必須在現價下方（做多），且距現價不超過 max_pct×1.1
-        _fp_sup_valid = (
-            fp_support is not None
-            and isinstance(fp_support, (int, float))
-            and fp_support > 0
-            and is_long
-            and fp_support < price
-            and abs(price - fp_support) / price <= max_pct * 1.1
-        )
-        _fp_res_valid = (
-            fp_resistance is not None
-            and isinstance(fp_resistance, (int, float))
-            and fp_resistance > 0
-            and fp_resistance > price
-            and abs(fp_resistance - price) / price <= 0.15  # 阻力不超過 15%
-        )
-        # 對應做空的鏡像
-        if not is_long:
-            _fp_sup_valid = (
-                fp_support is not None
-                and isinstance(fp_support, (int, float))
-                and fp_support > price
-                and abs(fp_support - price) / price <= max_pct * 1.1
-            )
-            _fp_res_valid = (
-                fp_resistance is not None
-                and isinstance(fp_resistance, (int, float))
-                and fp_resistance > 0
-                and fp_resistance < price
-                and abs(price - fp_resistance) / price <= 0.15
-            )
+        risk = (price - sl_price) if is_long else (sl_price - price)
+        if risk <= 0:
+            risk = price * (0.005 if is_squeeze else 0.015)
 
-        if is_train:
-            # ── 列車：SL 優先順序：腳步圖支撐 > 結構低點 > ATR floor ──
-            if _fp_sup_valid:
-                fp_sl = (float(fp_support) * (1.0 - buffer_pct) if is_long
-                         else float(fp_support) * (1.0 + buffer_pct))
-                # ATR 保底（不能比 ATR floor 更窄）
-                atr_floor = (atr_mult * atr_val) if atr_val is not None else price * 0.02
-                proposed_dist = abs(price - fp_sl)
-                sl_dist = max(proposed_dist, atr_floor)
-                sl_price = price - sl_dist if is_long else price + sl_dist
-                sl_source = "腳步圖支撐"
-            else:
-                basis_price = basis_low if is_long else basis_high
-                struct_dist = None
-                if basis_price is not None:
-                    adj = basis_price * (1 - buffer_pct) if is_long else basis_price * (1 + buffer_pct)
-                    struct_dist = abs(price - adj)
-                atr_floor = (atr_mult * atr_val) if atr_val is not None else price * 0.02
-                sl_dist = max(struct_dist, atr_floor) if struct_dist is not None else atr_floor
-                sl_price = price - sl_dist if is_long else price + sl_dist
-                sl_source = "結構低點" if struct_dist is not None else "ATR"
-            dist_pct = abs(price - sl_price) / price if price > 0 else 0
-            if dist_pct > max_pct:
-                sl_capped = True
-                sl_price = price * (1.0 - max_pct) if is_long else price * (1.0 + max_pct)
+        # 風報比：建倉型 TP1=1.5R / TP2=3.0R；軋空型 TP1=1.0R / TP2=2.0R
+        if is_squeeze:
+            tp1_price = price + 1.0 * risk if is_long else price - 1.0 * risk
+            tp2_price = price + 2.0 * risk if is_long else price - 2.0 * risk
         else:
-            # ── 賭鬼：SL 優先順序：腳步圖支撐 > 結構優先 > ATR ──
-            if _fp_sup_valid:
-                fp_sl = (float(fp_support) * (1.0 - buffer_pct) if is_long
-                         else float(fp_support) * (1.0 + buffer_pct))
-                atr_floor = (atr_mult * atr_val) if atr_val is not None else price * 0.02
-                proposed_dist = abs(price - fp_sl)
-                sl_dist = max(proposed_dist, atr_floor * 0.8)
-                sl_price = price - sl_dist if is_long else price + sl_dist
-                sl_source = "腳步圖支撐"
-            elif is_long and basis_low is not None:
-                sl_price = basis_low * (1.0 - buffer_pct)
-                sl_source = "結構低點"
-            elif (not is_long) and basis_high is not None:
-                sl_price = basis_high * (1.0 + buffer_pct)
-                sl_source = "結構高點"
+            tp1_price = price + 1.5 * risk if is_long else price - 1.5 * risk
+            tp2_price = price + 3.0 * risk if is_long else price - 3.0 * risk
 
-            if sl_price is None:
-                sl_dist = (atr_mult * atr_val) if atr_val is not None else price * (0.03 if is_gambler else 0.02)
-                sl_price = price - sl_dist if is_long else price + sl_dist
-                sl_source = "ATR"
-
-            dist_pct = abs(price - sl_price) / price if price > 0 else 0
-            if dist_pct > max_pct:
-                sl_capped = True
-                sl_price = price * (1.0 - max_pct) if is_long else price * (1.0 + max_pct)
-
-        # 風險距離（R 的母數）
-        risk_dist = (price - sl_price) if is_long else (sl_price - price)
-        # 若 SL 在錯誤側（空單 SL 低於現價 / 多單 SL 高於現價）導致 risk_dist <= 0，
-        # 用 ATR 或 1% 價當 fallback，仍算出 TP 避免推播顯示「暫無數據」
-        if not risk_dist or risk_dist <= 0:
-            atr_floor = (atr_mult * atr_val) if atr_val is not None else price * 0.02
-            risk_dist = max(atr_floor, price * 0.005)
-        # 避免太小距離導致 R 異常飆高
-        min_risk = price * 0.005
-        if risk_dist < min_risk:
-            risk_dist = min_risk
-
-        # 列車 / 賭鬼 TP 設定
-        tp1_price = tp2_price = None
-        tp1_label = tp2_label = ""
-        r_tp1 = r_tp2 = None
-
-        # 列車 (S/S+)：TP 優先順序：腳步圖阻力 > VWAP對稱 > 1.2R
-        if is_train:
-            # 腳步圖阻力在 1.0R~3.5R 區間才採用（避免目標過近/過遠）
-            if _fp_res_valid:
-                fp_res_val = float(fp_resistance) if is_long else float(fp_resistance)
-                r_candidate = abs(fp_res_val - price) / risk_dist
-                if 1.0 <= r_candidate <= 3.5:
-                    tp1_price = fp_res_val
-                    tp1_label = f"腳步圖阻力({r_candidate:.1f}R)"
-                    r_tp1 = round(r_candidate, 1)
-
-            if tp1_price is None:
-                if vwap_2h is not None and isinstance(vwap_2h, (int, float)) and vwap_2h > 0:
-                    vwap = float(vwap_2h)
-                    if is_long:
-                        cand = 2.0 * price - vwap
-                        if cand > price:
-                            tp1_price = cand
-                            tp1_label = "主力成本"
-                        else:
-                            tp1_price = price + 1.2 * risk_dist
-                            tp1_label = "1.2R"
-                    else:
-                        cand = 2.0 * vwap - price
-                        if 0 < cand < price:
-                            tp1_price = cand
-                            tp1_label = "主力成本"
-                        else:
-                            tp1_price = price - 1.2 * risk_dist
-                            tp1_label = "1.2R"
-                else:
-                    tp1_price = price + 1.2 * risk_dist if is_long else price - 1.2 * risk_dist
-                    tp1_label = "1.2R"
-            if r_tp1 is None and tp1_price is not None:
-                r_tp1 = round(((tp1_price - price) / risk_dist) if is_long else ((price - tp1_price) / risk_dist), 1)
-
-            # 列車/頭等艙 TP2：延伸目標 2.0R~3.0R（高信心訊號有更遠空間）
-            # 腳步圖有遠端阻力（> TP1 且 ≤ 5.0R）→ 用腳步圖，否則依波動度給 2.0~3.0R
-            _atr2_train = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
-            _target_r2_train = 2.5
-            if _atr2_train is not None and price > 0:
-                _vp2_train = (_atr2_train / price) * 100.0
-                if _vp2_train >= 3.0:
-                    _target_r2_train = 2.0   # 高波動：目標保守
-                elif _vp2_train <= 1.5:
-                    _target_r2_train = 3.0   # 低波動：目標遠一些
-                else:
-                    _ratio_train = (_vp2_train - 1.5) / (3.0 - 1.5)
-                    _target_r2_train = 3.0 - _ratio_train * 1.0
-            _target_r2_train = max(2.0, min(3.0, _target_r2_train))
-            if _fp_res_valid:
-                _fp_r2_val = float(fp_resistance)
-                _r_fp2_train = abs(_fp_r2_val - price) / risk_dist
-                if _r_fp2_train > (r_tp1 or 1.2) and _r_fp2_train <= 5.0:
-                    tp2_price = _fp_r2_val
-                    tp2_label = f"腳步圖阻力({_r_fp2_train:.1f}R)"
-                    r_tp2 = round(_r_fp2_train, 1)
-            if tp2_price is None:
-                tp2_price = price + _target_r2_train * risk_dist if is_long else price - _target_r2_train * risk_dist
-                tp2_label = f"{_target_r2_train:.1f}R"
-                r_tp2 = round(_target_r2_train, 1)
-
-        # 賭鬼 (A)：TP1 優先腳步圖阻力(0.8R~2.5R 內才採)，否則固定 1.0R；TP2 理論目標
-        else:
-            # TP1：嘗試腳步圖阻力
-            if _fp_res_valid:
-                fp_res_val = float(fp_resistance)
-                r_candidate = abs(fp_res_val - price) / risk_dist
-                if 0.8 <= r_candidate <= 2.5:
-                    tp1_price = fp_res_val
-                    tp1_label = f"腳步圖阻力({r_candidate:.1f}R)"
-                    r_tp1 = round(r_candidate, 1)
-            if tp1_price is None:
-                tp1_price = price + 1.0 * risk_dist if is_long else price - 1.0 * risk_dist
-                tp1_label = "1.0R"
-                r_tp1 = 1.0
-            # TP2：依波動度動態選擇 2.5R~4.0R（績效評估用理論目標）
-            _atr2 = float(atr) if atr is not None and isinstance(atr, (int, float)) and atr > 0 else None
-            target_r2 = 3.0
-            if _atr2 is not None and price > 0:
-                _vp2 = (_atr2 / price) * 100.0
-                if _vp2 >= 3.0:
-                    target_r2 = 2.5
-                elif _vp2 <= 1.5:
-                    target_r2 = 3.5
-                else:
-                    ratio = (_vp2 - 1.5) / (3.0 - 1.5)
-                    target_r2 = 3.5 - ratio * (3.5 - 2.5)
-            target_r2 = max(2.5, min(4.0, target_r2))
-            # 如果腳步圖阻力比 TP2 更遠，用腳步圖做 TP2
-            if _fp_res_valid:
-                fp_res_val = float(fp_resistance)
-                r_fp2 = abs(fp_res_val - price) / risk_dist
-                if r_fp2 > (r_tp1 or 1.0) and r_fp2 <= 5.0:
-                    tp2_price = fp_res_val
-                    tp2_label = f"腳步圖阻力({r_fp2:.1f}R)"
-                    r_tp2 = round(r_fp2, 1)
-            if tp2_price is None:
-                tp2_price = price + target_r2 * risk_dist if is_long else price - target_r2 * risk_dist
-                tp2_label = f"{target_r2:.1f}R"
-                r_tp2 = round(target_r2, 1)
-
-        # energy_exhausted / cvd_divergence 保留為附註旗標
-        energy_exhausted = bool(cvd_divergence)
-        # tp1_note 只保留乾淨的 R 比值標籤，不混入止損來源（避免 tp_plain_desc 解析出錯）
-        tp1_note = tp1_label
-        return _ret(sl_price, tp1_price, tp2_price, r_tp1, r_tp2, tp1_label, tp2_label, sl_capped, energy_exhausted, tp1_note)
+        sl_pct = abs(price - sl_price) / price * 100 if price > 0 else 0
+        warn_pct = sl_pct if sl_pct > 6.0 else None
+        return sl_price, tp1_price, tp2_price, sl_pct, warn_pct
 
     def _is_bull(x: Dict) -> bool:
-        sig = x.get("signal_label") or ""
-        return "做多" in sig or "追多" in sig or "嘎空" in sig or "抄底" in sig
+        cat = x.get("category", "")
+        return cat in ("long_open", "short_close")
 
     def _pass_rsi_filter(x: Dict, z: str) -> bool:
-        rsi = x.get("rsi")
-        if z == ZONE_TOP and RSI_FILTER_TOP_MIN is not None:
-            return rsi is not None and rsi >= RSI_FILTER_TOP_MIN
-        if z == ZONE_DIP and RSI_FILTER_DIP_MAX is not None:
-            return rsi is not None and rsi <= RSI_FILTER_DIP_MAX
-        if z == ZONE_BREAKOUT_LONG and RSI_FILTER_BREAKOUT_LONG_MIN is not None:
-            return rsi is not None and rsi >= RSI_FILTER_BREAKOUT_LONG_MIN
-        if z == ZONE_BREAKOUT_SHORT and RSI_FILTER_BREAKOUT_SHORT_MAX is not None:
-            return rsi is not None and rsi <= RSI_FILTER_BREAKOUT_SHORT_MAX
-        return True
+        return True  # 新版不過濾 RSI（OI+Price 絕對條件已足夠）
 
     # 頭等艙 ✈️ = 摸頭/抄底 + 5星 + |OI|>=OI_FOR_ELITE + 成交量≥1M + 至少一項訂單流數據 + RSI 輔助
     # 鯨魚指數不強制（山寨幣普遍無覆蓋）；成交量門檻放寬（山寨幣量級較低）
     def _is_elite(x: Dict) -> bool:
-        if (x.get("stars") or 0) != 5:
-            return False
-        z = x.get("zone")
-        if z not in (ZONE_TOP, ZONE_DIP):
-            return False
-        if abs(x.get("oiChange30m") or 0) < OI_FOR_ELITE:
-            return False
-        if (x.get("volume_usd") or 0) < VOLUME_ELITE_MIN_USD:
-            return False  # 最低流動性門檻（1M），避免極端冷門幣
-        # 至少一項訂單流數據（taker/大戶多空比/OI趨勢任一有值）
-        # 三項全 None 代表市場微結構資料完全缺失，無法確認方向，不給頭等艙
-        _has_flow_data = (
-            x.get("taker_ratio") is not None or
-            x.get("top_ls_ratio") is not None or
-            x.get("oi_trend") is not None
-        )
-        if not _has_flow_data:
-            return False
-        rsi = x.get("rsi")
-        if rsi is not None and isinstance(rsi, (int, float)):
-            if z == ZONE_TOP:
-                if rsi < RSI_FILTER_TOP_MIN:
-                    return False
-            if z == ZONE_DIP:
-                if rsi > RSI_FILTER_DIP_MAX:
-                    return False
-        return True
+        return (x.get("stars") or 0) >= 5  # 新版：所有通過條件的訊號皆為5星
+    # ── 以下為新版渲染邏輯起始點 ──────────────────────────────────────────────
 
-    # 💎 鑽石共振 = elite + 5M動能共振 + 全網資金共識（三重確認，最高信號）
-    def _is_diamond(x: Dict) -> bool:
-        # 路徑 A（原三重確認）：頭等艙 + 5m OI 共振 + 全網共識
-        path_a = (
-            _is_elite(x)
-            and x.get("has_5m_resonance") is True
-            and x.get("is_global_consensus") is True
-        )
-        # 路徑 B（RSI 底部鑽石）：頭等艙 + 5m RSI 極端超賣/超買 → 底部/頂部共振升等
-        path_b = (
-            _is_elite(x)
-            and x.get("has_5m_rsi_extreme") is True
-        )
-        return path_a or path_b
+    def _fmt_price(p: Optional[float]) -> str:
+        if p is None or (isinstance(p, float) and p != p) or p <= 0:
+            return "—"
+        if p < 0.0001:
+            return f"{p:.8f}"
+        if p < 0.01:
+            return f"{p:.6f}"
+        if p < 1:
+            return f"{p:.5f}"
+        if p < 10:
+            return f"{p:.4f}"
+        return f"{p:.2f}"
 
-    def _action_label(zone: str, is_bull: bool) -> str:
+    def _action_label(zone: str, is_bull_flag: bool) -> str:
         if zone == ZONE_TOP:
             return "摸頭做空"
         if zone == ZONE_DIP:
@@ -6261,10 +5856,8 @@ def build_report_message_tiered(
         return "做多" if is_bull else "做空"
 
     def _reason_plain(reason: str) -> str:
-        """
-        把邏輯裡的持倉 / 費率 / CVD 專業術語，轉成跟單者聽得懂的白話說明。
-        盡量描述「主力在做什麼」與「對我代表什麼風險 / 機會」。
-        """
+        return (reason or "籌碼有異動").strip()
+        # ── 以下舊版邏輯已棄用（新版 reason 已直接在 _classify_signal_and_tier 產生） ──
         if not reason:
             return "籌碼有異動"
         r = (reason or "").strip()
@@ -6336,7 +5929,192 @@ def build_report_message_tiered(
 
         return r if r.strip() else "籌碼有異動"
 
-    # 四象限：只推 4 星以上（3 星不推播）
+    # ══════════════════════════════════════════════════
+    # 新版渲染邏輯：30m 四象限極簡格式
+    # ══════════════════════════════════════════════════
+
+    # ── 小白友善標題對應（直球做多/做空指令）────────────────────────────
+    _signal_title = {
+        "long_open":   "🟢 【強勢做多 Long】",
+        "short_close": "🟢 【報復反彈 (做多)】",
+        "short_open":  "🔴 【順勢做空 Short】",
+        "long_close":  "🔴 【恐慌崩跌 (做空)】",
+    }
+    # ── 白話文進場邏輯（一句話秒懂）────────────────────────────────────
+    _signal_reason = {
+        "long_open":   "莊家正投入真金白銀買進，且大趨勢偏多，順勢跟上！",
+        "short_close": "做空的人正在被嘎空強制平倉，引發燃料上漲，搶短多！",
+        "short_open":  "大戶正在大舉建倉做空，且大趨勢偏空，順勢看跌！",
+        "long_close":  "做多的人正在恐慌拋售踩踏，引發連鎖跌勢，搶短空！",
+    }
+
+    now_str = datetime.now(TAIPEI_TZ).strftime("%m/%d %H:%M")
+    messages_out: List[str] = []
+    push_count = 0
+    has_any = False
+    seen_syms: set = set()
+
+    for x in enriched_items:
+        sym = x.get("symbol", "")
+        if not sym or sym in seen_syms:
+            continue
+        seen_syms.add(sym)
+        category = x.get("category", "")
+        title = _signal_title.get(category)
+        if not title:
+            continue
+
+        sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+        is_bull_sig = category in ("long_open", "short_close")
+        price = x.get("current_price")
+        if not price or not isinstance(price, (int, float)) or price <= 0:
+            continue
+
+        oi30 = x.get("oiChange30m")
+        p30 = x.get("priceChange30m")
+        p1h = x.get("priceChange1h")
+        vol_usd = x.get("volume_usd") or x.get("_cg_volume_usd") or 0
+        funding_rate = x.get("funding_rate")
+        atr_val = x.get("atr")
+
+        # SL/TP 計算（ATR 動態防守）
+        # 建倉型 → "trend"：TP1=1.5R / TP2=3.0R / SL=0.5*ATR
+        # 平倉軋空型 → "squeeze"：TP1=1.0R / TP2=2.0R / SL=0.2*ATR
+        _sig_type = "squeeze" if category in ("long_close", "short_close") else "trend"
+        sl, tp1, tp2, sl_pct, warn_pct = calc_sl_tp(
+            price, is_bull_sig, atr_val,
+            x.get("recent_high_2h"), x.get("recent_low_2h"),
+            signal_type=_sig_type,
+        )
+
+        # ── 1. 標題與白話理由 ──────────────────────────────────────────
+        msg_lines: List[str] = []
+        msg_lines.append(f"{title} {sym_base} / USDT")
+        msg_lines.append(f"💡 理由：{_signal_reason.get(category, '')}")
+        msg_lines.append("")
+
+        # ── 2. 機器人量化掃描 (MTF) ───────────────────────────────────
+        msg_lines.append("📊 *機器人量化掃描 (MTF)*")
+
+        # 15m 動能（白話描述倉位與價格方向）
+        oi_dir = "倉位大增" if (oi30 or 0) > 0 else "倉位大減"
+        p15_dir = "價格上漲" if (p30 or 0) > 0 else "價格下跌"
+        oi_str = fmt_pct(oi30)
+        p15_str = fmt_pct(p30)
+        msg_lines.append(f" • 短線動能 (15m)：{oi_dir} {oi_str}，{p15_dir} {p15_str}")
+
+        # 1H 大趨勢
+        if p1h is not None and isinstance(p1h, (int, float)):
+            p1h_dir = "趨勢向上" if p1h > 0 else "趨勢向下"
+            is_with_trend = (is_bull_sig and p1h > 0) or (not is_bull_sig and p1h < 0)
+            trend_tag = "✅" if is_with_trend else "⚠️ 逆風"
+            msg_lines.append(f" • 大勢護航 (1H)：{p1h_dir} {fmt_pct(p1h)} {trend_tag}")
+        else:
+            msg_lines.append(" • 大勢護航 (1H)：數據缺失 ❓")
+
+        # 資金費率（白話文）
+        if funding_rate is not None and isinstance(funding_rate, (int, float)):
+            fr_pct_val = funding_rate * 100
+            if funding_rate < -0.0005:   # < -0.05%
+                fr_comment = "💡 散戶瘋狂看空，極容易發生「軋空」暴漲！"
+            elif funding_rate > 0.0005:  # > +0.05%
+                fr_comment = "💡 散戶瘋狂看多，當心莊家殺多暴跌！"
+            else:
+                fr_comment = "💡 市場情緒正常"
+            msg_lines.append(f" • 資金費率：{fr_pct_val:+.4f}% ({fr_comment})")
+
+        # 24h 成交額（分級提示）
+        if vol_usd and float(vol_usd) > 0:
+            vol_m = float(vol_usd) / 1e6
+            if vol_m >= 30:
+                msg_lines.append(f" • 24h 成交額：${vol_m:.0f}M (✅ 深度極佳，正常下單)")
+            else:
+                msg_lines.append(
+                    f" • 24h 成交額：${vol_m:.1f}M "
+                    f"(⚠️ 標的偏小，建議單筆本金 < 1500U 以防滑點)"
+                )
+        else:
+            msg_lines.append(" • 24h 成交額：數據不足")
+        msg_lines.append("")
+
+        # ── 3. 傻瓜跟單點位 ────────────────────────────────────────────
+        msg_lines.append("🎯 *傻瓜跟單點位 (已計算 ATR 防插針)*")
+        msg_lines.append(f" • 📍 目前現價：${_fmt_price(price)}")
+
+        if sl is not None:
+            sl_dist_str = f"{sl_pct:.1f}%" if sl_pct is not None else "—"
+            msg_lines.append(
+                f" • 🛑 嚴格停損 (SL)：${_fmt_price(sl)} "
+                f"(虧損約 {sl_dist_str}，碰觸必出)"
+            )
+        else:
+            msg_lines.append(" • 🛑 嚴格停損 (SL)：暫無數據")
+
+        if tp1 is not None:
+            if _sig_type == "squeeze":
+                tp1_note = "快速落袋，平倉一半保本"
+                _r_tp1_val = 1.0
+                _r_tp2_val = 2.0
+            else:
+                tp1_note = "賺取 1.5 倍風險利潤，建議平倉一半保本"
+                _r_tp1_val = 1.5
+                _r_tp2_val = 3.0
+            msg_lines.append(f" • ✅ 第一止盈 (TP1)：${_fmt_price(tp1)} ({tp1_note})")
+        else:
+            _r_tp1_val = 1.0 if _sig_type == "squeeze" else 1.5
+            _r_tp2_val = 2.0 if _sig_type == "squeeze" else 3.0
+
+        if tp2 is not None:
+            msg_lines.append(f" • 🎯 第二止盈 (TP2)：${_fmt_price(tp2)} (波段終極目標)")
+
+        if warn_pct is not None:
+            msg_lines.append("")
+            msg_lines.append(
+                f"⚠️ *高波動警示：停損距離 {warn_pct:.1f}%，"
+                f"請將下單本金【減半】防滑點穿倉！*"
+            )
+
+        # ── 儲存供後續倉位追蹤（冷卻 / TP/SL 觸發更新 / 績效統計）──────
+        x["sl_price_str"] = _fmt_price(sl)
+        x["tp1_price_str"] = _fmt_price(tp1)
+        x["tp2_price_str"] = _fmt_price(tp2)
+        x["r_tp1"] = _r_tp1_val
+        x["r_tp2"] = _r_tp2_val
+        x["sl_source"] = "ATR動態止損"
+        x["selected_for_push"] = True
+        x["tier"] = "train"
+        x["stars"] = 5
+        x["dir"] = "多" if is_bull_sig else "空"
+
+        messages_out.append("\n".join(msg_lines))
+        push_count += 1
+        has_any = True
+        logger.info(
+            f"[推播] {sym_base} {title} 現價=${_fmt_price(price)} "
+            f"SL=${_fmt_price(sl)} TP1=${_fmt_price(tp1)} TP2=${_fmt_price(tp2)}"
+        )
+
+    if not has_any:
+        no_sig_msg = (
+            f"😴 *傑克 MTF 四象限狙擊鏡* | 本輪無符合條件訊號\n"
+            f"⚡ *15m 監控* | 🕐 {now_str} (台灣)\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"條件：15m OI ≥2% & Price ≥1.0% & 1H 順勢 & 成交額 ≥7M USD\n"
+            f"繼續監控中..."
+        )
+        return no_sig_msg, False, 0
+
+    header = (
+        f"🎯 *傑克 MTF 四象限狙擊鏡* | 本輪 {push_count} 個訊號\n"
+        f"⚡ *15m 監控* | 🕐 {now_str} (台灣)\n"
+        f"━━━━━━━━━━━━━━\n"
+    )
+    sep = "\n━━━━━━━━━━━━━━\n"
+    body = sep.join(messages_out)
+
+    # ── 以下為舊版渲染殘留（已棄用，直接 return 跳過）──────────────
+    return header + body, has_any, push_count
+
     long_dip = [x for x in enriched_items if x.get("zone") == ZONE_DIP and _is_bull(x) and (x.get("stars") or 0) >= 4]
     long_break = [x for x in enriched_items if x.get("zone") == ZONE_BREAKOUT_LONG and _is_bull(x) and (x.get("stars") or 0) >= 4]
     short_top = [x for x in enriched_items if x.get("zone") == ZONE_TOP and not _is_bull(x) and (x.get("stars") or 0) >= 4]
@@ -6490,7 +6268,7 @@ def build_report_message_tiered(
                 tech_exhausted = bool(x.get("energy_exhausted"))
                 sl_val, tp1_val, tp2_val, r_tp1, r_tp2, tp1_label, tp2_label, sl_capped, energy_exhausted, tp1_real_str, tp1_real_note, tp1_atr_str, tp1_atr_note = calc_sl_tp(
                     x.get("atr"), x.get("current_price"), zone or ZONE_TOP, is_bull, stars, is_elite_sig,
-                    x.get("vwap_2h"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value"),
+                    x.get("vwap_2h"), x.get("vwap_std"), x.get("ema20_close"), x.get("ub_value"), x.get("lb_value"),
                     cvd_divergence=(cvd_div or tech_exhausted),
                     recent_high_2h=x.get("recent_high_2h"),
                     recent_low_2h=x.get("recent_low_2h"),
@@ -6649,6 +6427,20 @@ def build_report_message_tiered(
                 else:
                     reason_display = reason or "籌碼異動"
                 lines.append(f"💡 邏輯：{_reason_plain(reason_display)}")
+                if x.get("btc_regime_warn"):
+                    lines.append("⚠️ *BTC 處於短線急跌，山寨做多勝率低*")
+                if x.get("volume_oi_warn"):
+                    lines.append("⚠️ *量倉比異常 (<3x)，當心莊家假突破畫門*")
+                # 順勢追多：進場點與上方阻力牆距離 < 1.5% → 盈虧比極差，強制警告
+                _res = x.get("fp_resistance")
+                _px = x.get("current_price")
+                if is_bull and zone == ZONE_BREAKOUT_LONG and _res is not None and _px is not None and _px > 0:
+                    try:
+                        _dist_pct = (float(_res) - float(_px)) / float(_px)
+                        if 0 < _dist_pct < 0.015:
+                            lines.append("⚠️ *距離上方強阻力 < 1.5%，潛在利潤空間受限，建議觀望或等待突破*")
+                    except (TypeError, ValueError):
+                        pass
                 lines.append(f"📋 訂單簿：{'有大單在跟，可參考' if cvd_in_reason else '這檔量太小，查不到大單'}")
                 # 5. Price targets (separate lines, card-style) + 24h 必顯示
                 p24 = x.get("priceChange24h")
@@ -6972,7 +6764,7 @@ def build_report_message(top_long_open: List, top_long_close: List, top_short_op
 
 
 def process_single_symbol(coin: Dict) -> Optional[Dict]:
-    """處理單個幣種（用於並行處理，使用原本的邏輯）"""
+    """處理單個幣種（用於並行處理，MTF：15m OI/Price 扳機 + 1h 方向）"""
     symbol = normalize_symbol(coin)
     if not symbol:
         return None
@@ -6983,7 +6775,7 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
         if oi_change_30m is None:
             return {'status': 'oi_failed', 'symbol': symbol}
         category = None
-        # 價格 / 持倉變化 → 四象限分類（名詞依交易實務修正）
+        # 15m 扳機四象限分類（price_change_30m 實際存的是 15m 數據）
         # 價格漲 + OI 漲 = long_open  (多頭開倉)
         # 價格漲 + OI 跌 = short_close (空軍被軋，空頭平倉)
         # 價格跌 + OI 漲 = short_open (空頭開倉)
@@ -6992,14 +6784,20 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
             if oi_change_30m > 0:
                 category = 'long_open'
             elif oi_change_30m < 0:
-                category = 'short_close'  # 價漲 + OI 跌 = 空軍被軋平倉
+                category = 'short_close'
         elif price_change_30m < 0:
             if oi_change_30m > 0:
                 category = 'short_open'
             elif oi_change_30m < 0:
-                category = 'long_close'   # 價跌 + OI 跌 = 多軍斷頭平倉
+                category = 'long_close'
         if category:
             price_change_24h = extract_price_change_24h(coin)
+            # 1H 趨勢方向（MTF 濾網用）
+            price_change_1h = coin.get("price_change_percent_1h")
+            try:
+                price_change_1h = float(price_change_1h) if price_change_1h is not None else None
+            except (TypeError, ValueError):
+                price_change_1h = None
             return {
                 'status': 'success',
                 'category': category,
@@ -7007,6 +6805,8 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
                 'priceChange30m': price_change_30m,
                 'oiChange30m': oi_change_30m,
                 'priceChange24h': price_change_24h,
+                'priceChange1h': price_change_1h,
+                '_cg_volume_usd': coin.get("_volume_usd") or coin.get("_cg_volume_usd"),
             }
         else:
             return {'status': 'no_category', 'symbol': symbol}
@@ -7054,6 +6854,12 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             item.get("price_change_percent_30m") or
             item.get("change15m") or item.get("change_15m")
         )
+        p1h = (
+            item.get("priceChangePercent1h") or
+            item.get("price_change_percent_1h") or
+            item.get("priceChange1h") or
+            item.get("change1h") or item.get("change_1h")
+        )
         p24 = (
             item.get("priceChangePercent24h") or
             item.get("price_change_percent_24h") or
@@ -7069,6 +6875,10 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
         except (TypeError, ValueError):
             p15 = None
         try:
+            p1h = float(p1h) if p1h is not None else None
+        except (TypeError, ValueError):
+            p1h = None
+        try:
             p24 = float(p24) if p24 is not None else None
         except (TypeError, ValueError):
             p24 = None
@@ -7080,6 +6890,7 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             "symbol": sym,
             "coin": sym,
             "price_change_percent_30m": p15,
+            "price_change_percent_1h": p1h,
             "price_change_percent_24h": p24,
             "_cg_volume_usd": vol,
             "_raw_cg": item,
@@ -7165,9 +6976,13 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
                     item.get("priceChangePercent15m") or
                     item.get("price_change_percent_15m") or
                     item.get("priceChangePercent30m") or
-                    item.get("price_change_percent_30m") or
+                    item.get("price_change_percent_30m")
+                )
+                p1h = (
                     item.get("priceChangePercent1h") or
-                    item.get("price_change_percent_1h")
+                    item.get("price_change_percent_1h") or
+                    item.get("priceChange1h") or
+                    item.get("change1h") or item.get("change_1h")
                 )
                 p24 = (
                     item.get("priceChangePercent24h") or
@@ -7183,6 +6998,10 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
                 except (TypeError, ValueError):
                     p15 = None
                 try:
+                    p1h = float(p1h) if p1h is not None else None
+                except (TypeError, ValueError):
+                    p1h = None
+                try:
                     p24 = float(p24) if p24 is not None else None
                 except (TypeError, ValueError):
                     p24 = None
@@ -7194,6 +7013,7 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
                     "symbol": sym,
                     "coin": sym,
                     "price_change_percent_30m": p15,
+                    "price_change_percent_1h": p1h,
                     "price_change_percent_24h": p24,
                     "_cg_volume_usd": vol,
                 })
@@ -7338,6 +7158,16 @@ def fetch_position_change():
             return
     logger.info(f"📊 [掃描漏斗] 1. CoinGlass 全網共 {len(all_symbols_data)} 幣種")
 
+    # ── 大盤環境順勢濾網：取得 BTC 30m 漲跌幅（山寨做多前先看大盤）────────────────
+    global _btc_30m_pct
+    _btc_30m_pct = None
+    for _c in all_symbols_data:
+        _s = (_c.get("symbol") or _c.get("coin") or "").replace("USDT", "").replace("-", "").strip().upper()
+        if _s == "BTC":
+            _btc_30m_pct = extract_price_change_30m(_c)
+            logger.info(f"📊 [大盤濾網] BTC 30m 漲跌幅: {_btc_30m_pct:+.2f}%" if _btc_30m_pct is not None else "📊 [大盤濾網] BTC 30m 無數據")
+            break
+
     # ── 24h 漲跌幅快取（CoinGlass 已含此欄位，直接讀取）────────────────────────
     coinglass_24h_map: Dict[str, float] = {}
     for coin in all_symbols_data:
@@ -7362,7 +7192,7 @@ def fetch_position_change():
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 3：價格波動過濾（|15m 漲跌幅| >= PRICE_GATEKEEPER）
     # ════════════════════════════════════════════════════════
-    PRICE_GATEKEEPER = 0.6   # 15m 山寨幣：|漲跌幅| ≥0.6% 才有動能
+    PRICE_GATEKEEPER = 1.0   # 15m MTF：|漲跌幅| ≥1.0% 才符合 4 象限進場條件
     active_symbols: List[Dict] = []
     stub_pass_count = 0
     for coin in bingx_filtered:
@@ -7382,10 +7212,9 @@ def fetch_position_change():
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 4：成交量預篩（直接讀 CoinGlass _cg_volume_usd）
     # ════════════════════════════════════════════════════════
-    # coins-price-change 端點絕大多數幣的 _cg_volume_usd 為 None（API 本身不帶量）
-    # 真正的精品門撒由 Step 4.5 BingX 支援過濾承擔；Step 4 只做「確定超小幣」淘汰
-    # 邏輯：有量資料且明確 < 1M USD → 淘汰；其餘（含 None）一律放行給 BingX 過濾
-    VOLUME_PREFILTER_MIN_USD = 1_000_000   # 僅淘汰確定 <1M 的超小幣
+    # 【嚴格防滑點】：24h 成交額必須 >= 30M USD
+    # 抓不到成交量（_cg_volume_usd 為 None）→ 直接淘汰，絕不放行
+    VOLUME_PREFILTER_MIN_USD = 7_000_000    # 基礎防滑點門檻：<7M 直接淘汰（7~30M 在推播中加輕倉警告）
     active_above_volume: List[Dict[str, Any]] = []
     vol_no_data = 0
     vol_below = 0
@@ -7393,21 +7222,20 @@ def fetch_position_change():
         cg_vol = coin.get("_cg_volume_usd")
         if cg_vol is None:
             vol_no_data += 1
-            coin["_volume_usd"] = 0.0
-            active_above_volume.append(coin)   # 無量資料放行，主力信號不依賴成交量
+            # 無量資料 → 直接淘汰（防滑點核心規則）
+            continue
+        try:
+            vol = float(cg_vol)
+        except (TypeError, ValueError):
+            vol = 0.0
+        coin["_volume_usd"] = vol
+        if vol >= VOLUME_PREFILTER_MIN_USD:
+            active_above_volume.append(coin)
         else:
-            try:
-                vol = float(cg_vol)
-            except (TypeError, ValueError):
-                vol = 0.0
-            coin["_volume_usd"] = vol
-            if vol > 0 and vol < VOLUME_PREFILTER_MIN_USD:
-                vol_below += 1   # 確定 <1M 才淘汰
-            else:
-                active_above_volume.append(coin)
+            vol_below += 1
     logger.info(
-        f"📊 [掃描漏斗] 4. 成交量預篩(確定<{VOLUME_PREFILTER_MIN_USD/1e6:.0f}M 才淘汰)："
-        f"通過 {len(active_above_volume)} 個（無量資料放行 {vol_no_data} 個，超小幣淘汰 {vol_below} 個）"
+        f"📊 [掃描漏斗] 4. 成交量篩選(>=7M USD，7-30M 推播加輕倉警告)："
+        f"通過 {len(active_above_volume)} 個（無量資料淘汰 {vol_no_data} 個，<7M 淘汰 {vol_below} 個）"
     )
 
     # ── Step 4.5：BingX 支援過濾（不支援的幣不運算、不推播）────────────────
@@ -7492,7 +7320,15 @@ def fetch_position_change():
                 price_change = result.get('priceChange30m')
                 oi_change = result.get('oiChange30m')
                 price_change_24h = result.get('priceChange24h')
-                item = {'symbol': symbol, 'priceChange30m': price_change, 'oiChange30m': oi_change, 'priceChange24h': price_change_24h}
+                price_change_1h = result.get('priceChange1h')
+                item = {
+                    'symbol': symbol,
+                    'priceChange30m': price_change,
+                    'oiChange30m': oi_change,
+                    'priceChange24h': price_change_24h,
+                    'priceChange1h': price_change_1h,
+                    '_cg_volume_usd': result.get('_cg_volume_usd'),
+                }
                 base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
                 oi_min = OI_MAIN_COIN_MIN if base in MAIN_COINS else OI_ALTCOIN_MIN
                 if abs(oi_change) >= oi_min:
@@ -7615,16 +7451,15 @@ def fetch_position_change():
         f"base_to_symbol {len(base_to_symbol)} 個映射"
     )
 
-    # 批次預載全市場 15m RSI（一次 API 呼叫，enrichment 直接查表，節省大量單幣請求）
-    _cg_rsi_map: Dict[str, Optional[float]] = fetch_cg_rsi_bulk(interval="15m")
-    logger.info(f"[RSI批次] 預載完成，共 {len(_cg_rsi_map)} 個幣種 15m RSI 可直接查表")
-
+    # ════════════════════════════════════════════════════════
+    # Enrichment：僅保留核心資料（技術指標 + 資金費率）
+    # 已刪除：CVD、掛單牆、大戶多空比、主動買賣比、5m共振
+    # ════════════════════════════════════════════════════════
     # 批次預載全市場 Funding Rate（CoinGlass exchange-list，一次取全部）
     _cg_fr_map: Dict[str, float] = _fetch_funding_rate_map()
     logger.info(f"[FR批次] CoinGlass Funding Rate 預載完成，共 {len(_cg_fr_map)} 個幣種")
 
-    # 對 top 標的取 RSI/布林帶（僅 4 星以上候選，3 星不計算）
-    time.sleep(2)
+    time.sleep(1)
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
         sym = item.get("symbol", "")
@@ -7632,341 +7467,74 @@ def fetch_position_change():
         preferred = base_to_symbol.get(clean_base) if base_to_symbol else None
         if not preferred:
             preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
+
+        # 技術指標：K 線計算 RSI / ATR / 結構高低點（主力來源）
         time.sleep(0.2)
         tech = calculate_technicals(sym, bingx_symbol_override=preferred)
-        # Funding Rate：優先 CoinGlass 預載批次表，找不到再逐幣呼叫 BingX 備援
+
+        # 資金費率：優先 CoinGlass 批次表，找不到再逐幣呼叫 BingX 備援
         _base_fr = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
         funding_rate = _cg_fr_map.get(_base_fr)
         if funding_rate is None:
             funding_rate = _fetch_bingx_funding_rate(sym, preferred_symbol=preferred)
+
+        # 24h 漲跌幅
         price_24h = item.get("priceChange24h") if isinstance(item.get("priceChange24h"), (int, float)) else None
         if price_24h is None:
             price_24h = coinglass_24h_map.get(clean_base)
-        if price_24h is None:
-            price_24h = fetch_price_change_24h_coinglass_klines(sym, preferred)
-        if price_24h is None:
-            price_24h = fetch_price_change_24h_bingx(sym, preferred)
-        cvd_change_1h = _cvd_change_last2(clean_base, "1h")
-        time.sleep(0.25)
-        whale_idx = _whale_index_latest(clean_base, "1d")
-        time.sleep(0.2)
-        # v3.0 散戶多空比（僅對 4/5 星候選額外調用）
-        # BingX-only 幣種不在 Binance，跳過以避免預期外 400 呼叫
-        symbol_param = clean_base + "USDT"
-        if get_major_exchanges_for_coin(clean_base, ["Binance"]):
-            global_data = fetch_global_account_ratio(symbol_param, "1h")
-            time.sleep(0.5)
-        else:
-            global_data = None
-            logger.debug(f"全局帳戶比 {clean_base}: BingX-only 幣種，跳過 Binance 查詢")
-        latest_point = get_latest_data_point(global_data) if global_data else None
-        retail_ratio = latest_point.get("global_account_long_short_ratio") if isinstance(latest_point, dict) else None
-        if retail_ratio is not None and isinstance(retail_ratio, (int, float)):
-            logger.info(f"散戶多空比 {clean_base}: {retail_ratio}")
+
+        # 1H 趨勢方向（MTF 濾網）
+        price_1h = item.get("priceChange1h")
+        try:
+            price_1h = float(price_1h) if price_1h is not None else None
+        except (TypeError, ValueError):
+            price_1h = None
+
+        # 四象限分類（15m 扳機 + 1h 趨勢濾網）
         classified = _classify_signal_and_tier(
             item, cat, tech, funding_rate,
             price_chg_24h=price_24h,
-            cvd_change_1h=cvd_change_1h,
-            whale_index=whale_idx,
-            retail_ratio=retail_ratio,
+            price_chg_1h=price_1h,
         )
         if classified is None:
-            logger.info(f"狙擊鏡跳過 {sym}: 分類未通過 (_classify_signal_and_tier 回傳 None，可能 OI/方向/價位未符合任一訊號分支)")
-            continue  # 未達 4 星門檻或被濾掉，直接略過
+            logger.info(f"[MTF] 跳過 {sym}: OI>=2% & Price 15m>=1.0% 未達標，或 1H 趨勢逆風")
+            continue
         signal_label, zone, stars, rsi_desc, reason = classified
         rsi_val = tech.get("rsi") if tech else None
-        # 若 BingX K 線未能計算出 RSI，嘗試用預載的 CoinGlass RSI 批次表補齊
-        if rsi_val is None:
-            _base_key_rsi = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
-            rsi_val = _cg_rsi_map.get(_base_key_rsi)
-            if rsi_val is not None:
-                logger.debug(f"[RSI批次補齊] {sym}: RSI={rsi_val:.1f}（CoinGlass 批次表）")
-        ub_val = tech.get("ub_value") if tech else None
-        lb_val = tech.get("lb_value") if tech else None
         atr_val = tech.get("atr") if tech else None
 
-        # ── 5M 動能共振驗證（標準版核心濾網）────────────────────────────────
-        resonance_5m = fetch_oi_resonance_5m(sym, cat)
-        if resonance_5m is False and stars == 5:
-            stars = 4
-            reason = f"{reason} ⚠️[5M動能已竭:已降星]"
-            logger.info(f"[5M共振] {sym} 5M OI 與 15M 反向，5星降為4星")
-
-        # ── 5M RSI 超賣/超買升等鑽石路徑 ────────────────────────────────────
-        # 做多訊號且 5m RSI < 35（超賣）→ 有底部反轉共振，標記升等旗標
-        # 做空訊號且 5m RSI > 65（超買）→ 有頂部反轉共振，標記升等旗標
-        rsi_5m_val = fetch_rsi_5m(sym)
-        has_5m_rsi_extreme = False
-        if rsi_5m_val is not None:
-            if cat in ("long_open", "short_close") and rsi_5m_val < 35:
-                has_5m_rsi_extreme = True
-                reason = f"{reason} 📉5mRSI={rsi_5m_val:.0f}超賣底部共振"
-                logger.info(f"[5mRSI鑽石] {sym} 做多 5mRSI={rsi_5m_val:.0f}<35，升等鑽石資格")
-            elif cat in ("short_open", "long_close") and rsi_5m_val > 65:
-                has_5m_rsi_extreme = True
-                reason = f"{reason} 📈5mRSI={rsi_5m_val:.0f}超買頂部共振"
-                logger.info(f"[5mRSI鑽石] {sym} 做空 5mRSI={rsi_5m_val:.0f}>65，升等鑽石資格")
-
-        # ── 深度籌碼背離（15m OI vs 價格方向，嚴格 3% OI 門檻）─────────────
-        _p15 = item.get("priceChange15m") or item.get("priceChange30m")
-        _oi15 = item.get("oiChange15m") or item.get("oiChange30m")
-        chip_divergence: Optional[str] = None
-        try:
-            _p15_f = float(_p15) if _p15 is not None else None
-            _oi15_f = float(_oi15) if _oi15 is not None else None
-            if _p15_f is not None and _oi15_f is not None:
-                if _oi15_f > 3.0 and _p15_f < 0:
-                    chip_divergence = "absorption"
-                    if _is_long_signal:
-                        # 多單方向：OI大增+價格下跌 → 主力逆勢在低點逢低買入（吸籌）
-                        reason = f"{reason} 🕵️主力底部吸籌(OI+{_oi15_f:.1f}%↑價{_p15_f:.1f}%↓)"
-                        logger.info(f"[籌碼背離] {sym} 底部吸籌(多向): OI+{_oi15_f:.1f}% 但價格{_p15_f:.1f}%")
-                    else:
-                        # 空單方向：OI大增+價格下跌 → 主力積極建空（空頭加倉確認下跌）
-                        reason = f"{reason} 🐻主力積極建空(OI+{_oi15_f:.1f}%↑價{_p15_f:.1f}%↓)"
-                        logger.info(f"[籌碼背離] {sym} 主力建空(空向): OI+{_oi15_f:.1f}% 價格{_p15_f:.1f}%")
-                elif _oi15_f < -3.0 and _p15_f > 0:
-                    chip_divergence = "distribution"
-                    if _is_long_signal:
-                        # 多單方向：OI大縮+價格上漲 → 主力高位出貨（多頭獲利了結）
-                        reason = f"{reason} ⚠️主力高位出貨(OI{_oi15_f:.1f}%↓價+{_p15_f:.1f}%↑)"
-                        logger.info(f"[籌碼背離] {sym} 高位出貨(多向): OI{_oi15_f:.1f}% 但價格+{_p15_f:.1f}%")
-                    else:
-                        # 空單方向：OI大縮+價格上漲 → 空頭撤退（空方認輸回補）
-                        reason = f"{reason} ⚠️空頭撤退(OI{_oi15_f:.1f}%↓價+{_p15_f:.1f}%↑)"
-                        logger.info(f"[籌碼背離] {sym} 空頭撤退(空向): OI{_oi15_f:.1f}% 但價格+{_p15_f:.1f}%")
-        except (TypeError, ValueError):
-            pass
-
-        # ── 爆量偵測（從 K 線計算結果讀取）──────────────────────────────────
-        vol_spike_ratio = tech.get("vol_spike_ratio") if tech else None
-        has_vol_spike = isinstance(vol_spike_ratio, (int, float)) and vol_spike_ratio >= 2.0
-
-        # ── 爆倉熱力圖 + 掛單牆（僅 4/5 星候選，降低 API 負擔）────────────────
+        # 取得現價（K 線收盤）
         _cur_price = tech.get("current_price") if tech else None
-        _is_long_signal = cat in ("long_open", "long_close")
-        liq_nearby: Optional[Dict] = None
-        ob_wall: Optional[Dict] = None
-        if _cur_price and isinstance(_cur_price, (int, float)) and _cur_price > 0:
-            liq_nearby = fetch_liq_heatmap_nearby(sym, _cur_price, _is_long_signal)
-            time.sleep(0.1)
-            ob_wall = check_orderbook_wall(sym, _cur_price, _is_long_signal, preferred_symbol=preferred)
-
-        # ── 🐋 主力同步建倉判斷 ─────────────────────────────────────────────
-        whale_sync = False
-        if whale_idx is not None and isinstance(whale_idx, (int, float)):
-            if _is_long_signal and whale_idx >= 65:
-                whale_sync = True
-                reason = reason + f" 🐋主力同步做多({whale_idx:.0f})"
-            elif not _is_long_signal and whale_idx <= 35:
-                whale_sync = True
-                reason = reason + f" 🐋主力同步做空({whale_idx:.0f})"
-
-        # ── 💱 累積費率極端值偵測（嘎空/殺多潛力）──────────────────────────
-        _accum_fr_data: Dict[str, Any] = {}
-        try:
-            _accum_fr_data = fetch_accumulated_funding_score(sym)
-            _squeeze_risk = _accum_fr_data.get("squeeze_risk") or "neutral"
-            if _squeeze_risk == "short_squeeze" and _is_long_signal:
-                # 空頭費用過高 + 做多訊號 = 嘎空機率大，加分
-                reason = reason + f" 🔥費率嘎空({_accum_fr_data.get('accumulated_7d',0)*100:.2f}%累積)"
-                logger.info(f"[累積費率] {sym} 空頭過熱+做多訊號=嘎空潛力")
-            elif _squeeze_risk == "long_squeeze" and _is_long_signal:
-                # 多頭費用過高 + 做多訊號 = 追多風險，降信心
-                reason = reason + f" ⚠️費率多頭過熱({_accum_fr_data.get('accumulated_7d',0)*100:.2f}%累積)"
-                logger.info(f"[累積費率] {sym} 多頭過熱+做多訊號=追多風險")
-            elif _squeeze_risk == "long_squeeze" and not _is_long_signal:
-                # 多頭費用過高 + 做空訊號 = 殺多潛力大
-                reason = reason + f" ⛽費率殺多({_accum_fr_data.get('accumulated_7d',0)*100:.2f}%累積)"
-        except Exception as _fe2:
-            logger.debug(f"[累積費率] {sym} 獲取失敗: {_fe2}")
-
-        # ── 📊 訂單流分析（主動買賣比 + 淨多倉位 + 腳步圖 + OI趨勢 + 大戶L/S）──
-        _taker_ratio: Optional[float] = None
-        _net_pos_delta: Optional[float] = None
-        _footprint: Dict[str, Any] = {}
-        _fp_sup: Optional[float] = None
-        _fp_res: Optional[float] = None
-        _fp_poc: Optional[float] = None
-        _flow_score_val: int = 0
-        _oi_trend_data: Dict[str, Any] = {}
-        _top_ls_ratio: Optional[float] = None
-        if _cur_price and isinstance(_cur_price, (int, float)) and _cur_price > 0:
-            try:
-                _taker_ratio = fetch_taker_bvs_ratio(sym)
-                time.sleep(0.12)
-                _net_pos_delta = fetch_net_position_delta(sym)
-                time.sleep(0.12)
-                _footprint = fetch_footprint_key_levels(sym, _cur_price, _is_long_signal)
-                time.sleep(0.12)
-                _oi_trend_data = fetch_oi_trend_analysis(sym)
-                time.sleep(0.12)
-                _top_ls_ratio = fetch_top_account_ls_ratio(sym)
-                if _is_long_signal:
-                    _fp_sup = _footprint.get("nearest_support")
-                    _fp_res = _footprint.get("nearest_resistance")
-                else:
-                    # 做空方向：阻力在上（壓力SL），支撐在下（TP目標）
-                    _fp_sup = _footprint.get("nearest_resistance")
-                    _fp_res = _footprint.get("nearest_support")
-                _fp_poc = _footprint.get("poc")
-                _flow_score_val = compute_flow_score(_taker_ratio, _net_pos_delta, _is_long_signal)
-                # OI 加速建倉 → 額外加分
-                if _oi_trend_data.get("acceleration") and (
-                    (_is_long_signal and _oi_trend_data.get("trend") == "building") or
-                    (not _is_long_signal and _oi_trend_data.get("trend") == "declining")
-                ):
-                    _flow_score_val = min(_flow_score_val + 1, 4)
-                if _flow_score_val >= 3:
-                    reason = reason + f" 🌊訂單流強確認(+{_flow_score_val})"
-                elif _flow_score_val <= 0 and _taker_ratio is not None:
-                    pass  # 中性不加標籤
-            except Exception as _fe:
-                logger.debug(f"[訂單流] {sym} 獲取失敗: {_fe}")
-
-        # ── 🔬 訂單流智能升降星（基於 flow_score / oi_trend / top_ls / taker）────
-        # 規則：
-        #   升 4→5：flow_score≥3 + oi_trend=building(多)/declining(空) + 大戶同向
-        #   升 5→保持：flow_score=4 且 top_ls 確認 → 加「強升」標籤
-        #   降 5→4：flow_score≤0 且 taker 反向 且 top_ls 反向 → 降星
-        #   降 4→None(丟棄)：flow_score=0 且 taker 強烈反向(>65%反向) → 丟棄
-        _oi_trend_str = _oi_trend_data.get("trend") if _oi_trend_data else None
-        _oi_accel_b = _oi_trend_data.get("acceleration") if _oi_trend_data else False
-        _taker_aligned = (
-            (_is_long_signal and _taker_ratio is not None and _taker_ratio > 55) or
-            (not _is_long_signal and _taker_ratio is not None and _taker_ratio < 45)
-        )
-        _taker_strongly_opposed = (
-            (_is_long_signal and _taker_ratio is not None and _taker_ratio < 38) or
-            (not _is_long_signal and _taker_ratio is not None and _taker_ratio > 62)
-        )
-        _oi_trend_aligned = (
-            (_is_long_signal and _oi_trend_str == "building") or
-            (not _is_long_signal and _oi_trend_str == "declining")
-        )
-        _top_ls_aligned = (
-            (_is_long_signal and _top_ls_ratio is not None and _top_ls_ratio > 1.05) or
-            (not _is_long_signal and _top_ls_ratio is not None and _top_ls_ratio < 0.95)
-        )
-        _top_ls_opposed = (
-            (_is_long_signal and _top_ls_ratio is not None and _top_ls_ratio < 0.92) or
-            (not _is_long_signal and _top_ls_ratio is not None and _top_ls_ratio > 1.08)
-        )
-
-        # 升 4→5：三重訂單流確認（taker強確認 + OI趨勢對齊 + 大戶同向）
-        if stars == 4 and _flow_score_val >= 3 and _oi_trend_aligned and _top_ls_aligned:
-            stars = 5
-            reason = reason + f" ⬆️訂單流三重升星(flow={_flow_score_val}/OI={_oi_trend_str}/大戶={_top_ls_ratio:.2f})"
-            logger.info(f"[升星] {sym} 4→5星：flow={_flow_score_val} oi={_oi_trend_str} top_ls={_top_ls_ratio}")
-
-        # 強加速升等標記：5星 + flow_score=4 + OI加速建倉 → 信心最強
-        elif stars == 5 and _flow_score_val == 4 and _oi_accel_b and _oi_trend_aligned:
-            reason = reason + " 🚀訂單流極強(三重加速確認)"
-            logger.info(f"[極強] {sym} 5星訂單流極強加速確認")
-
-        # 降 5→4：taker反向 + 大戶反向 + flow_score低
-        elif stars == 5 and _flow_score_val <= 0 and _taker_strongly_opposed and _top_ls_opposed:
-            stars = 4
-            reason = reason + f" ⬇️訂單流警告降星(taker={_taker_ratio:.0f}%反向,大戶={_top_ls_ratio:.2f}反向)" if _taker_ratio and _top_ls_ratio else reason + " ⬇️訂單流警告降星"
-            logger.info(f"[降星] {sym} 5→4星：taker={_taker_ratio} top_ls={_top_ls_ratio} flow={_flow_score_val}")
-
-        # 降 5→4：市場微結構資料完全缺失（taker/大戶/OI趨勢全為 None）→ 無法確認，降為賭鬼
-        # 5星(列車)代表「高度確認的趨勢」，資料全無則缺乏確認，只能算賭鬼級
-        elif stars == 5 and _taker_ratio is None and _top_ls_ratio is None and _flow_score_val == 0:
-            stars = 4
-            reason = reason + " ⬇️微結構資料不足降4★"
-            logger.info(f"[降星] {sym} 5→4星：taker/大戶/訂單流全部無法取得，資料不足無法確認為列車級")
-
-        # 丟棄4星：taker強烈反向且訂單流完全背離（保護勝率）
-        elif stars == 4 and _taker_strongly_opposed and _flow_score_val <= 0 and _top_ls_opposed:
-            logger.info(f"[丟棄] {sym} 4星被訂單流反向丟棄：taker={_taker_ratio} top_ls={_top_ls_ratio} flow={_flow_score_val}")
-            continue  # 不進 all_top，相當於無訊號
-
-        # 判斷此幣 BingX 是否支援（合併 BingX API + CoinGlass exchange-pairs 兩個來源）
-        _base_key = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
-        _bingx_ok = _base_key in all_bingx_supported
 
         all_top.append({
             **item,
             "priceChange24h": price_24h,
+            "priceChange1h": price_1h,
             "category": cat,
             "current_price": _cur_price,
             "rsi": rsi_val,
             "atr": atr_val,
-            "ub_value": tech.get("ub_value") if tech else None,
-            "lb_value": tech.get("lb_value") if tech else None,
-            "vwap_2h": tech.get("vwap_2h") if tech else None,
-            "ema20_close": tech.get("ema20_close") if tech else None,
             "recent_high_2h": tech.get("recent_high_2h") if tech else None,
             "recent_low_2h": tech.get("recent_low_2h") if tech else None,
-            "last_kline_open_30m": tech.get("last_kline_open_30m") if tech else None,
             "last_kline_high_30m": tech.get("last_kline_high_30m") if tech else None,
             "last_kline_low_30m": tech.get("last_kline_low_30m") if tech else None,
-            "last_kline_close_30m": tech.get("last_kline_close_30m") if tech else None,
-            "whale_index": whale_idx,
-            "cvd_change_1h": cvd_change_1h,
             "signal_label": signal_label,
             "zone": zone,
             "stars": stars,
             "rsi_desc": rsi_desc,
             "reason": reason,
             "funding_rate": funding_rate,
-            "plan_b_used": bool(tech.get("plan_b_used")) if tech else False,
-            "energy_exhausted": bool(tech.get("energy_exhausted")) if tech else False,
-            "has_5m_resonance": resonance_5m is True,
-            "resonance_5m_raw": resonance_5m,
-            "rsi_5m": rsi_5m_val,               # 5m RSI 數值
-            "has_5m_rsi_extreme": has_5m_rsi_extreme,  # 5m RSI 極端值升等旗標
-            "chip_divergence": chip_divergence,  # 籌碼背離類型
-            "is_global_consensus": False,
-            # ── 新增情報欄位 ──
-            "vol_spike_ratio": vol_spike_ratio,
-            "has_vol_spike": has_vol_spike,
-            "liq_nearby": liq_nearby,     # 爆倉熱力圖
-            "ob_wall": ob_wall,           # 掛單牆
-            "whale_sync": whale_sync,     # 主力同步
-            "bingx_supported": _bingx_ok,  # BingX 是否支援（CoinGlass exchange-pairs 驗證）
-            # ── 訂單流分析 ──
-            "taker_ratio": _taker_ratio,          # 主動買盤佔比 %（>50=買盤主導）
-            "net_pos_delta": _net_pos_delta,       # 淨多倉位方向（+1=強做多,-1=強做空）
-            "fp_support": _fp_sup,                 # 關鍵支撐位（SL 精準化用）
-            "fp_resistance": _fp_res,              # 關鍵阻力位（TP 精準化用）
-            "fp_poc": _fp_poc,                     # 成交密集點（Point of Control）
-            "fp_data_source": _footprint.get("data_source") or "unavailable",  # 數據來源標籤
-            "flow_score": _flow_score_val,         # 訂單流綜合評分 0~4
-            "oi_trend": _oi_trend_data.get("trend"),  # OI趨勢: building/declining/flat/reversing
-            "oi_acceleration": _oi_trend_data.get("acceleration"),  # OI加速建倉旗標
-            "oi_change_1h_pct": _oi_trend_data.get("change_1h_pct"),  # 近1h OI 變化%
-            "oi_change_4h_pct": _oi_trend_data.get("change_4h_pct"),  # 近4h OI 變化%（若資料不足則為 None）
-            "top_ls_ratio": _top_ls_ratio,         # 大戶多空比（>1大戶偏多，<1大戶偏空）
-            "accum_fr_7d": _accum_fr_data.get("accumulated_7d"),   # 7日累積資金費率
-            "accum_fr_squeeze": _accum_fr_data.get("squeeze_risk") or "neutral",  # 擠壓風險類型
-            "accum_fr_label": _accum_fr_data.get("squeeze_label") or "",  # 推播用標籤
         })
-        resonance_str = "🔥共振" if resonance_5m is True else ("⚠️已竭" if resonance_5m is False else "❓未知")
-        vol_str = f"⚡{vol_spike_ratio:.1f}×" if has_vol_spike else "-"
-        logger.info(
-            f"Top 入選 {sym}: 星{stars} 區={zone} RSI={rsi_val} ATR={atr_val} "
-            f"5M={resonance_str} 爆量={vol_str} 鯨魚={whale_idx} | {reason}"
-        )
+        logger.info(f"[Enrichment] {sym} 已加入 all_top：RSI={rsi_val} ATR={atr_val} 現價={_cur_price} | {reason}")
 
-    # ══════════════════════════════════════════════════════════
-    # 品質門撒：ATR=None 代表兩路 K 線均無法取得，數據殘缺不推
-    # 這類幣通常是 CG/BingX 均無上架的極小幣，非 API 問題
-    # ══════════════════════════════════════════════════════════
+    # 品質門撒：ATR=None → K 線無數據，不推播
     pre_quality = len(all_top)
     all_top = [x for x in all_top if x.get("atr") is not None]
     skipped_no_kline = pre_quality - len(all_top)
     if skipped_no_kline > 0:
         logger.info(f"[品質門撒] 淘汰 {skipped_no_kline} 個 ATR=None（K線無數據小幣），剩餘 {len(all_top)} 個精品訊號")
 
-    # ── CoinGlass-First 架構：不做 BingX 守門過濾，訊號全數保留 ────
-    # 訊息中已加入數據源提示，用戶自行確認交易所是否支援
-    logger.info(f"[CoinGlass-First] 全部 {len(all_top)} 個訊號進入推播流程（訊號以 CoinGlass 為準）")
-
-    # 用 BingX ticker 取現價 + 24h 成交額（僅標示低流動性與 5 星降星，不再做成交量門檻過濾）
-    VOLUME_SOFT_MIN_USD = 500_000      # <500K 才標示低流動性（山寨幣量級調低）
-    VOLUME_5STAR_MIN_USD = 500_000     # 5星僅在確認 <500K 時才降為 4星
+    # 用 BingX ticker 更新現價（交叉驗證，差距 > 8% 保留 K 線價）
     for x in all_top:
         sym = x.get("symbol", "")
         clean_base = sym.replace("USDT", "").replace("-", "").upper()
@@ -7974,43 +7542,21 @@ def fetch_position_change():
         if not preferred:
             preferred = base_to_symbol.get(sym.upper()) if base_to_symbol else None
         snap = _fetch_bingx_ticker_snapshot(sym, preferred_symbol=preferred)
-        if snap:
-            if snap.get("price") is not None:
-                snap_price = float(snap["price"])
-                kline_price = x.get("current_price")
-                # 交叉驗證：若 Ticker 快照與 K 線收盤價差距 > 8%，保留 K 線價（更可靠）
-                # 避免 Ticker 瞬間閃崩/快照異常導致 SL/TP 基準錯誤、推播後立即觸損
-                if kline_price and isinstance(kline_price, (int, float)) and kline_price > 0:
-                    _diff_pct = abs(snap_price - kline_price) / kline_price * 100
-                    if _diff_pct > 8.0:
-                        logger.warning(
-                            f"[現價驗證] {clean_base}: Ticker={snap_price} vs K線={kline_price:.4g} "
-                            f"差距={_diff_pct:.1f}% > 8%，保留 K 線價格，捨棄可能異常的 Ticker 快照"
-                        )
-                        x["data_source_warning"] = True
-                    else:
-                        x["current_price"] = snap_price
-                else:
+        if snap and snap.get("price") is not None:
+            snap_price = float(snap["price"])
+            kline_price = x.get("current_price")
+            if kline_price and isinstance(kline_price, (int, float)) and kline_price > 0:
+                _diff_pct = abs(snap_price - kline_price) / kline_price * 100
+                if _diff_pct <= 8.0:
                     x["current_price"] = snap_price
-            vol = snap.get("volume_usd")
-            if vol is not None:
-                x["low_liquidity_warning"] = vol < VOLUME_SOFT_MIN_USD
-                x["volume_usd"] = float(vol)
-                # 只在確認量 < 500K 時才降星（山寨幣量級低，不應因無量數據而懲罰）
-                if (x.get("stars") or 0) == 5 and vol <= VOLUME_5STAR_MIN_USD:
-                    x["stars"] = 4
             else:
-                # BingX ticker 未回傳量數據時：不降星，CoinGlass 預篩已過濾超小幣
-                x["low_liquidity_warning"] = False
-                x["volume_usd"] = 0
-        else:
-            # BingX ticker 完全失敗時：同上，不降星
-            x["low_liquidity_warning"] = False
-            x["volume_usd"] = 0
-    low_liq_count = sum(1 for x in all_top if x.get("low_liquidity_warning"))
-    logger.info(f"本輪 {len(all_top)} 筆進入推播；其中 {low_liq_count} 筆標示低流動性 (<{VOLUME_SOFT_MIN_USD/1e6:.1f}M)")
+                x["current_price"] = snap_price
+        # 成交額（從 _cg_volume_usd 或 item 原有數據）
+        x["volume_usd"] = x.get("_volume_usd") or x.get("_cg_volume_usd") or 0
+
+    logger.info(f"[Enrichment 完成] {len(all_top)} 個訊號進入推播流程")
     if len(all_top) == 0:
-        logger.info("本輪 0 筆推播：請看上方「狙擊鏡跳過」或「四類 TOP 候選數」排查（分類未通過 / 冷卻 / 止盈風報比<0.65R）")
+        logger.info("本輪無符合條件訊號（OI>=3% & Price>=1.5% & 成交額>=30M USD）")
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
@@ -8442,30 +7988,31 @@ def fetch_position_change():
                     )
                     continue
 
-            # 優先以「近 2h 區間內是否曾觸及」判斷 SL/TP，避免單一錯誤收盤價誤觸發（如 POL 誤報 TP 達標）
-            # 若無 2h 區間則退回僅用 cur_price
+            # 只用「當下最新這根 K 線」高低點判斷 SL/TP，避免拿開倉前 2h 歷史高點誤判空單止損（幽靈平倉）
+            # 若無當根 K 線高低則退回僅用 cur_price
             if cur_price is not None:
                 is_long = pushed_dir == "多"
                 hit_sl = False
                 hit_tp = False
                 hit_tp2 = False
-                use_range = recent_high_2h is not None and recent_low_2h is not None and recent_high_2h > 0 and recent_low_2h > 0
+                use_range = kline_high is not None and kline_low is not None and kline_high > 0 and kline_low > 0
                 if use_range:
-                    # 以 2h 內實際高低點判斷「是否曾觸及」，較抗單點取價錯誤
+                    # 多單：當下這根 K 線最低點跌破止損 → 止損；最高點觸及 TP → 止盈
+                    # 空單：當下這根 K 線最高點突破止損 → 止損；最低點觸及 TP → 止盈
                     if sl_level is not None:
-                        if is_long and recent_low_2h <= sl_level:
+                        if is_long and kline_low <= sl_level:
                             hit_sl = True
-                        elif (not is_long) and recent_high_2h >= sl_level:
+                        elif (not is_long) and kline_high >= sl_level:
                             hit_sl = True
                     if tp1_level is not None:
-                        if is_long and recent_high_2h >= tp1_level:
+                        if is_long and kline_high >= tp1_level:
                             hit_tp = True
-                        elif (not is_long) and recent_low_2h <= tp1_level:
+                        elif (not is_long) and kline_low <= tp1_level:
                             hit_tp = True
                     if tp2_level is not None:
-                        if is_long and recent_high_2h >= tp2_level:
+                        if is_long and kline_high >= tp2_level:
                             hit_tp2 = True
-                        elif (not is_long) and recent_low_2h <= tp2_level:
+                        elif (not is_long) and kline_low <= tp2_level:
                             hit_tp2 = True
                 else:
                     # 無 2h 區間時沿用原邏輯：僅以當下快照價/收盤價判斷
@@ -8504,7 +8051,7 @@ def fetch_position_change():
                             entry["exit_reason"] = "entry_price_error"
                             hit_sl = False
 
-                _range_note = " (判定依2h區間)" if use_range else " (判定依cur_price)"
+                _range_note = " (判定依當根K線)" if use_range else " (判定依cur_price)"
                 _recent2h_str = f"{recent_high_2h},{recent_low_2h}" if (recent_high_2h is not None and recent_low_2h is not None) else "None"
                 _log_msg = (
                     f"【倉位追蹤比對】{sym_base} dir={pushed_dir} "
@@ -8844,12 +8391,23 @@ def fetch_position_change():
     if _skipped > 0:
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
 
-    # ── 標準版：多所共識檢查（只對最終入選訊號查詢，節省 API 用量）────────────
+    # ── 標準版：多所共識檢查 + 量倉比（只對最終入選訊號查詢，節省 API 用量）────────────
     if cooled_top:
         for _item in cooled_top:
             _sym = _item.get("symbol", "")
             if _sym:
-                _item["is_global_consensus"] = fetch_exchange_oi_consensus(_sym)
+                _consensus, _aggregate_oi_usd = fetch_exchange_oi_consensus(_sym)
+                _item["is_global_consensus"] = _consensus
+                _item["_aggregate_oi_usd"] = _aggregate_oi_usd
+                # 量倉比：15m 成交額 < OI 增量 3 倍 → 換手不充分，標記警告
+                _vol_24h = _item.get("_cg_volume_usd") or 0
+                _vol_15m = (float(_vol_24h) / 96.0) if _vol_24h else 0.0
+                _oi_pct = abs(_item.get("oiChange30m") or 0)
+                _oi_delta_usd = (float(_aggregate_oi_usd) * _oi_pct / 100.0) if _aggregate_oi_usd and _oi_pct else None
+                if _oi_delta_usd and _oi_delta_usd > 0 and _vol_15m > 0 and _vol_15m < 3.0 * _oi_delta_usd:
+                    _item["volume_oi_warn"] = True
+                else:
+                    _item["volume_oi_warn"] = False
 
     # 僅在「實際有至少一則訊號」時才推主報表；無訊號或全被風報比篩掉 → 不推，安靜
     has_any = False
