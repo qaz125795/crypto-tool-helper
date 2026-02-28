@@ -12459,6 +12459,14 @@ def run_gold_signal():
             logger.warning("[黃金訊號] 寫入狀態檔失敗: %s", e)
 
     state = _load_gold_state()
+    now_utc = datetime.now(timezone.utc)
+    # 今日交易日日期（以 SESSION_START_HOUR_UTC=1 為基準）
+    orb_hour = getattr(cfg, "SESSION_START_HOUR_UTC", 1)
+    if now_utc.hour < orb_hour:
+        today_trade_date = (now_utc - timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        today_trade_date = now_utc.strftime("%Y-%m-%d")
+
     last_bar_row = df_1h.iloc[-1]
     bar_high = float(last_bar_row["High"])
     bar_low = float(last_bar_row["Low"])
@@ -12481,9 +12489,13 @@ def run_gold_signal():
         if hit:
             msg_tpsl = format_tp_sl_hit_message(hit, last_dir, last_entry, last_sl, last_tp)
             send_telegram_message(msg_tpsl, TG_THREAD_IDS.get("gold_signal", 254), parse_mode=None)
-            logger.info("[黃金訊號] 已推播 %s 觸及，本輪結束（不再接受同方向新訊號）", "止盈" if hit == "tp" else "止損")
-            _save_gold_state({})
-            return  # TP/SL 觸及後本輪直接結束，避免同一輪又推新單
+            logger.info("[黃金訊號] 已推播 %s 觸及，本輪結束（今日同方向不再開新倉）", "止盈" if hit == "tp" else "止損")
+            # 記錄「今日已結束的方向」，防止同一交易日重複開同方向
+            _save_gold_state({
+                "closed_direction": last_dir,
+                "closed_trade_date": today_trade_date,
+            })
+            return  # 本輪直接結束，不再找新單
 
     df_dxy = None
     if cfg.USE_DXY_FILTER:
@@ -12500,7 +12512,6 @@ def run_gold_signal():
         last_bar_utc = last_bar.tz_convert("UTC") if getattr(last_bar, "tzinfo", None) else last_bar.tz_localize("UTC")
     except Exception:
         last_bar_utc = last_bar
-    now_utc = datetime.now(timezone.utc)
     try:
         age_sec = (pd.Timestamp(now_utc) - pd.Timestamp(last_bar_utc)).total_seconds()
     except Exception:
@@ -12508,15 +12519,22 @@ def run_gold_signal():
     if age_sec > 24 * 3600:
         logger.info("[黃金訊號] 數據過舊（最後 K 線已逾 24h，可能休市），跳過推播")
         return
+    # 同向持倉中：不重複推
+    if state.get("last_direction") == signal.direction:
+        logger.info("[黃金訊號] 同向訊號重疊（目前仍有 %s 倉），跳過推播", signal.direction)
+        return
+    # 同日同方向已觸及 TP/SL：本交易日不再開同方向新倉
+    if (
+        state.get("closed_direction") == signal.direction
+        and state.get("closed_trade_date") == today_trade_date
+    ):
+        logger.info("[黃金訊號] 今日 %s 方向已觸及 TP/SL，同交易日不再開同方向新倉", signal.direction)
+        return
     ok, reason = apply_filters(
         signal.direction, cfg, df_1h, df_dxy=df_dxy, now=now_utc
     )
     if not ok:
         logger.info("[黃金訊號] 訊號被濾網拒絕: %s", reason)
-        return
-    # 同向訊號過濾：該倉未結束或尚未出現反向訊號前，不再推同向
-    if state.get("last_direction") == signal.direction:
-        logger.info("[黃金訊號] 同向訊號重疊（目前仍有 %s 倉），跳過推播", signal.direction)
         return
     thread_id = TG_THREAD_IDS.get("gold_signal", 254)
     msg = format_signal_message(signal, data_cutoff_utc=last_bar_utc)
@@ -12528,7 +12546,8 @@ def run_gold_signal():
             "last_entry": signal.entry,
             "last_sl": signal.sl,
             "last_tp": signal.tp,
-            "last_time_utc": datetime.now(timezone.utc).isoformat(),
+            "last_time_utc": now_utc.isoformat(),
+            "trade_date": today_trade_date,
         })
     logger.info("[黃金訊號] 推播完成 | thread_id=%s 發送結果=%s", thread_id, sent)
 
