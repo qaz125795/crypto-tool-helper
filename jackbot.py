@@ -8432,20 +8432,60 @@ def fetch_position_change():
                 else:
                     logger.info(f"【倉位追蹤快照】{sym_base} full_symbol={full_sym} cur_price={cur_price}")
 
-            # 僅以當下快照價/收盤價檢查是否觸及 SL/TP/TP2（不再使用 30m K 線 high/low 避免提前誤判）
+            # 取價一致性檢查：cur_price 必須落在該標的 K 線區間內，否則可能取錯標的（如 POL 誤用他幣價格）
+            if cur_price is not None and kline_high is not None and kline_low is not None and kline_high > 0 and kline_low > 0:
+                _band = 0.005  # 允許 0.5% 邊界（收盤與 high/low 可能略超出）
+                if cur_price < kline_low * (1 - _band) or cur_price > kline_high * (1 + _band):
+                    logger.warning(
+                        f"[倉位追蹤-取價異常] {sym_base}: cur_price={cur_price} 不在 30m K 線區間 "
+                        f"[{kline_low},{kline_high}] 內，可能取錯標的或快照異常，本輪跳過 SL/TP 比對"
+                    )
+                    continue
+
+            # 優先以「近 2h 區間內是否曾觸及」判斷 SL/TP，避免單一錯誤收盤價誤觸發（如 POL 誤報 TP 達標）
+            # 若無 2h 區間則退回僅用 cur_price
             if cur_price is not None:
                 is_long = pushed_dir == "多"
                 hit_sl = False
                 hit_tp = False
                 hit_tp2 = False
-                # SL 觸發條件：全系統統一僅使用當下快照價，避免 30m high 包含暴跌前價格而提前停損
-                if sl_level is not None:
-                    if is_long and cur_price <= sl_level:
-                        hit_sl = True
-                    elif (not is_long) and cur_price >= sl_level:
-                        hit_sl = True
+                use_range = recent_high_2h is not None and recent_low_2h is not None and recent_high_2h > 0 and recent_low_2h > 0
+                if use_range:
+                    # 以 2h 內實際高低點判斷「是否曾觸及」，較抗單點取價錯誤
+                    if sl_level is not None:
+                        if is_long and recent_low_2h <= sl_level:
+                            hit_sl = True
+                        elif (not is_long) and recent_high_2h >= sl_level:
+                            hit_sl = True
+                    if tp1_level is not None:
+                        if is_long and recent_high_2h >= tp1_level:
+                            hit_tp = True
+                        elif (not is_long) and recent_low_2h <= tp1_level:
+                            hit_tp = True
+                    if tp2_level is not None:
+                        if is_long and recent_high_2h >= tp2_level:
+                            hit_tp2 = True
+                        elif (not is_long) and recent_low_2h <= tp2_level:
+                            hit_tp2 = True
+                else:
+                    # 無 2h 區間時沿用原邏輯：僅以當下快照價/收盤價判斷
+                    if sl_level is not None:
+                        if is_long and cur_price <= sl_level:
+                            hit_sl = True
+                        elif (not is_long) and cur_price >= sl_level:
+                            hit_sl = True
+                    if tp1_level is not None:
+                        if is_long and cur_price >= tp1_level:
+                            hit_tp = True
+                        elif (not is_long) and cur_price <= tp1_level:
+                            hit_tp = True
+                    if tp2_level is not None:
+                        if is_long and cur_price >= tp2_level:
+                            hit_tp2 = True
+                        elif (not is_long) and cur_price <= tp2_level:
+                            hit_tp2 = True
 
-                # ── 進場價異常保護：推播後 10 分鐘內觸損 + 現價與 SL 方向差距 > 2倍 SL 距離
+                # ── 進場價異常保護：推播後 30 分鐘內觸損 + 現價與 SL 方向差距 > 2倍 SL 距離
                 # 代表進場價是異常 Ticker 快照（閃崩/stale），而非市場真的突破 SL
                 # → 不記 -1R，直接取消這筆紀錄
                 if hit_sl and sl_level is not None and pushed_ts and (now_ts - pushed_ts) < 1800:
@@ -8463,26 +8503,17 @@ def fetch_position_change():
                             entry["closed"] = True
                             entry["exit_reason"] = "entry_price_error"
                             hit_sl = False
-                # TP1 觸發條件：只用「收盤價/現價」達標才算，避免插針後收回仍誤發 TP1 達標
-                if tp1_level is not None:
-                    if is_long and cur_price >= tp1_level:
-                        hit_tp = True
-                    elif (not is_long) and cur_price <= tp1_level:
-                        hit_tp = True
 
-                # TP2 觸發條件：同上，僅收盤價/現價達標才統計
-                if tp2_level is not None:
-                    if is_long and cur_price >= tp2_level:
-                        hit_tp2 = True
-                    elif (not is_long) and cur_price <= tp2_level:
-                        hit_tp2 = True
-
-                logger.info(
+                _range_note = " (判定依2h區間)" if use_range else " (判定依cur_price)"
+                _recent2h_str = f"{recent_high_2h},{recent_low_2h}" if (recent_high_2h is not None and recent_low_2h is not None) else "None"
+                _log_msg = (
                     f"【倉位追蹤比對】{sym_base} dir={pushed_dir} "
                     f"sl={sl_level} tp1={tp1_level} tp2={tp2_level} "
                     f"cur_price={cur_price} high_30m={kline_high} low_30m={kline_low} "
-                    f"hit_sl={hit_sl} hit_tp={hit_tp} hit_tp2={hit_tp2}"
+                    f"recent_2h=[{_recent2h_str}] "
+                    f"hit_sl={hit_sl} hit_tp={hit_tp} hit_tp2={hit_tp2}{_range_note}"
                 )
+                logger.info(_log_msg)
 
                 # 1-1) 先檢查止損：一旦觸及 SL 即結案（賭鬼若已吃過 TP1，視為整體獲利結束）
                 if sl_level is not None:
@@ -8668,9 +8699,9 @@ def fetch_position_change():
                 except (TypeError, ValueError):
                     cur_price = None
 
-        # 1-3a) 中期預警：持倉超過 3 小時（12 根 15m K 線）仍未達 TP2，且 TP1 也未觸及 → 動能可疑
+        # 1-3a) 中期預警：持倉超過 3 小時（12 根 15m K 線）仍未達 TP2，且 TP1 也未觸及 → 已關閉（使用者覺得太吵）
         _3h_elapsed = pushed_ts and (now_ts - pushed_ts) >= 3 * 3600
-        if (
+        if False and (
             not entry.get("closed")
             and not entry.get("time_warned_3h")
             and _3h_elapsed
