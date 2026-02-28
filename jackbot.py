@@ -1708,13 +1708,32 @@ def fetch_bingx_contracts() -> Tuple[Set[str], Dict[str, str], List[str]]:
             if status != 1:
                 continue
             asset_upper = asset.strip().upper()
+            _sym_clean = sym.strip()
+            # 主鍵：BingX 原始 asset（如 1000000BABYDOGE）
             allowed.add(asset_upper)
-            base_to_symbol[asset_upper] = sym.strip()
+            base_to_symbol[asset_upper] = _sym_clean
             bases_for_price.append(asset_upper)
+            # 衍生別名，讓 CoinGlass 不同命名也能對到同一份 K 線 ─────────────
+            # 1000xxx → xxx（舊邏輯，如 1000PEPE → PEPE）
             if asset_upper.startswith("1000") and len(asset_upper) > 4:
-                short_base = asset_upper[4:]
-                allowed.add(short_base)
-                base_to_symbol[short_base] = sym.strip()
+                _s1 = asset_upper[4:]
+                allowed.add(_s1)
+                base_to_symbol.setdefault(_s1, _sym_clean)
+            # 1000000xxx → 1Mxxx（如 1000000BABYDOGE → 1MBABYDOGE）
+            if asset_upper.startswith("1000000") and len(asset_upper) > 7:
+                _s2 = "1M" + asset_upper[7:]
+                allowed.add(_s2)
+                base_to_symbol.setdefault(_s2, _sym_clean)
+            # 1000xxx → 1Kxxx（如 1000PEPE → 1KPEPE）
+            if asset_upper.startswith("1000") and not asset_upper.startswith("1000000") and len(asset_upper) > 4:
+                _s3 = "1K" + asset_upper[4:]
+                allowed.add(_s3)
+                base_to_symbol.setdefault(_s3, _sym_clean)
+            # 10000xxx → 1Wxxx（如 10000LADYS → 1WLADYS，CoinGlass 偶見此縮寫）
+            if asset_upper.startswith("10000") and len(asset_upper) > 5:
+                _s4 = "1W" + asset_upper[5:]
+                allowed.add(_s4)
+                base_to_symbol.setdefault(_s4, _sym_clean)
         return allowed, base_to_symbol, bases_for_price
     except Exception as e:
         logger.warning(f"BingX contracts API 失敗: {e}")
@@ -5711,13 +5730,13 @@ FUNDING_EXTREME = 0.0003    # 極端費率 0.03%，用於標註
 
 # 15m MTF 四象限進場門檻（15m 扳機 + 1h 趨勢濾網，雙週期共振）
 MAIN_COINS = {"BTC", "ETH"}
-OI_THRESHOLD_30M = 1.7     # 15m OI 扳機門檻（原 2.0% × 0.85 = 1.7%）
-PRICE_THRESHOLD_30M = 0.85 # 15m 價格扳機門檻（原 1.0% × 0.85 = 0.85%）
-OI_MAIN_COIN_MIN = 1.7
-OI_ALTCOIN_MIN = 1.7
-OI_FOR_5_STAR = 1.7
-OI_FOR_4_STAR = 1.7
-OI_FOR_ELITE = 1.7
+OI_THRESHOLD_30M = 1.4     # 15m OI 扳機門檻（下修至 1.4%）
+PRICE_THRESHOLD_30M = 0.85 # 15m 價格扳機門檻
+OI_MAIN_COIN_MIN = 1.4
+OI_ALTCOIN_MIN = 1.4
+OI_FOR_5_STAR = 1.4
+OI_FOR_4_STAR = 1.4
+OI_FOR_ELITE = 1.4
 
 
 def _classify_signal_and_tier(
@@ -6240,13 +6259,25 @@ def build_report_message_tiered(
         msg_lines.append("")
 
         # ④ 成交量
-        if vol_m_val > 0:
-            if vol_m_val >= 30:
-                msg_lines.append(f"💰 `{vol_m_val:.0f}M` ✅ 深度充足")
-            else:
-                msg_lines.append(f"💰 `{vol_m_val:.1f}M` ⚠️ 輕倉下注，避免滑價")
+        _is_fastpass = x.get("_vol_fastpass", False)
+        # 小面額幣判斷：價格小數點第 2 位後才有非零值（如 0.00xxx）
+        _is_micro_price = price is not None and isinstance(price, (int, float)) and 0 < price < 0.01
+        _micro_note = "  _（小面額幣，成交值偏低屬正常，請直接看盤口深度判斷流動性）_" if _is_micro_price else ""
+
+        if vol_m_val >= 30:
+            msg_lines.append(f"💰 成交值 `{vol_m_val:.0f}M` ✅ 深度充足")
+        elif vol_m_val >= 7:
+            msg_lines.append(f"💰 成交值 `{vol_m_val:.1f}M` ⚠️ 輕倉下注，避免滑價{_micro_note}")
+        elif vol_m_val >= 5:
+            msg_lines.append(f"💰 成交值 `{vol_m_val:.1f}M` 🔴 成交值偏低，單筆建議 <1000U{_micro_note}")
+        elif vol_m_val >= 3:
+            msg_lines.append(f"💰 成交值 `{vol_m_val:.1f}M` 🔴 成交值偏低，單筆 <500U{_micro_note}")
+        elif vol_m_val >= 1:
+            msg_lines.append(f"💰 成交值 `{vol_m_val:.2f}M` ⛔ 成交值極低，單筆 <200U{_micro_note}")
+        elif _is_fastpass:
+            msg_lines.append("💰 ⚠️ 成交值無法確認，謹慎操作")
         else:
-            msg_lines.append("💰 成交量數據不足")
+            msg_lines.append("💰 成交值數據不足")
 
         # ⑤ 資金費率（白話完整說明）
         if funding_rate is not None and isinstance(funding_rate, (int, float)):
@@ -7240,6 +7271,13 @@ def fetch_bingx_24h_volume() -> Dict[str, float]:
                     vol = 0.0
                 if vol > 0:
                     result[base] = vol
+                    # 同步寫入 CoinGlass 可能用的縮寫別名，確保名稱不同也能對到成交值
+                    if base.startswith("1000000") and len(base) > 7:
+                        result.setdefault("1M" + base[7:], vol)   # 1000000BABYDOGE → 1MBABYDOGE
+                    if base.startswith("1000") and not base.startswith("1000000") and len(base) > 4:
+                        result.setdefault("1K" + base[4:], vol)   # 1000PEPE → 1KPEPE
+                    if base.startswith("10000") and len(base) > 5:
+                        result.setdefault("1W" + base[5:], vol)   # 10000LADYS → 1WLADYS
             logger.info(f"[成交量備援-BingX✅] 24h 成交額載入完成：{len(result)} 個幣種")
             return result
         else:
@@ -7299,6 +7337,12 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             item.get("priceChange24h") or item.get("change_24h")
         )
         # 成交量欄位：CoinGlass 命名混亂，盡量窮舉所有可能的 key
+        # ── 一次性診斷：首筆印出所有欄位 ──
+        if not getattr(_parse_cg_item, "_diag_done", False):
+            logger.info(f"[CG診斷] _parse_cg_item 首筆原始 keys: {list(item.keys())}")
+            vol_hint = {k: v for k, v in item.items() if any(x in k.lower() for x in ("vol", "turn", "amount", "usd", "trade", "quote"))}
+            logger.info(f"[CG診斷] _parse_cg_item 成交值相關欄位: {vol_hint}")
+            _parse_cg_item._diag_done = True
         vol_raw = (
             item.get("turnover24h") or
             item.get("volUsd24h") or item.get("volumeUsd24h") or
@@ -7306,7 +7350,11 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             item.get("quoteVolume24h") or item.get("usdtVolume") or
             item.get("volume") or item.get("quoteVolume") or
             item.get("volUsd") or item.get("usdVolume") or
-            item.get("tradeVolume24h") or item.get("turnover")
+            item.get("tradeVolume24h") or item.get("turnover") or
+            item.get("tradeAmount") or item.get("tradeAmount24h") or
+            item.get("volUSDT") or item.get("usdtTurnover") or
+            item.get("totalTurnover") or item.get("totalVol") or
+            item.get("vol_usd") or item.get("volume_usd")
         )
         try:
             p15 = float(p15) if p15 is not None else None
@@ -7324,13 +7372,28 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             vol = float(vol_raw) if vol_raw is not None else 0.0
         except (TypeError, ValueError):
             vol = 0.0
+        # CoinGlass coins-markets 已含 15m OI 變化率，直接保留，供後續「OI快速通道」用
+        oi_15m_raw = (
+            item.get("open_interest_change_percent_15m") or
+            item.get("openInterestChangePercent15m") or
+            item.get("oi_change_percent_15m") or
+            item.get("oiChangePercent15m") or
+            item.get("openInterestChangePercent30m") or
+            item.get("open_interest_change_percent_30m")
+        )
+        try:
+            cg_oi_15m = float(oi_15m_raw) if oi_15m_raw is not None else None
+        except (TypeError, ValueError):
+            cg_oi_15m = None
+
         return {
             "symbol": sym,
             "coin": sym,
             "price_change_percent_30m": p15,
             "price_change_percent_1h": p1h,
             "price_change_percent_24h": p24,
-            "_cg_volume_usd": vol,   # 0.0 代表 CoinGlass 拿不到，由幣安備援補齊
+            "_cg_volume_usd": vol,      # 0.0 代表 CoinGlass 拿不到，由幣安備援補齊
+            "_cg_oi_change_15m": cg_oi_15m,  # CoinGlass 已算好的 15m OI 變化率（coins-markets 限定）
             "_raw_cg": item,
         }
 
@@ -7361,6 +7424,12 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             raw = j.get("data", j.get("list", j if isinstance(j, list) else []))
             if not isinstance(raw, list):
                 return out_page
+            # ── 診斷：印出 coins-markets 第一筆所有 key 和成交值相關欄位 ──
+            if raw and isinstance(raw[0], dict) and not getattr(_fetch_one_coins_markets_page, "_diag_done", False):
+                logger.info(f"[CG診斷] coins-markets 第一筆所有欄位: {list(raw[0].keys())}")
+                vol_fields = {k: v for k, v in raw[0].items() if any(x in k.lower() for x in ("vol", "turn", "amount", "usd", "trade"))}
+                logger.info(f"[CG診斷] coins-markets 成交值相關欄位: {vol_fields}")
+                _fetch_one_coins_markets_page._diag_done = True
             added = 0
             for item in raw:
                 parsed = _parse_cg_item(item)
@@ -7398,6 +7467,10 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             raw = j.get("data", j.get("list", j if isinstance(j, list) else []))
             if not isinstance(raw, list) or not raw:
                 return []
+            # ── 診斷：印出第一筆的所有 key，確認 CoinGlass 成交值欄位名稱 ──
+            if raw and isinstance(raw[0], dict):
+                logger.info(f"[CG診斷] coins-price-change 第一筆所有欄位: {list(raw[0].keys())}")
+                logger.info(f"[CG診斷] coins-price-change 第一筆原始值: { {k: v for k, v in raw[0].items() if 'vol' in k.lower() or 'turn' in k.lower() or 'amount' in k.lower()} }")
             out = []
             for item in raw:
                 if not isinstance(item, dict):
@@ -7429,7 +7502,11 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
                 )
                 vol = (
                     item.get("volUsd24h") or item.get("volumeUsd24h") or
-                    item.get("volume24h") or item.get("vol24h")
+                    item.get("volume24h") or item.get("vol24h") or
+                    item.get("turnover24h") or item.get("turnover") or
+                    item.get("quoteVolume24h") or item.get("quoteVolume") or
+                    item.get("usdVolume") or item.get("usdtVolume") or
+                    item.get("volUsd") or item.get("vol")
                 )
                 try:
                     p15 = float(p15) if p15 is not None else None
@@ -7674,6 +7751,7 @@ def fetch_position_change():
     vol_binance_fill = 0
     vol_bingx_fill = 0
     vol_below = 0
+    vol_oi_fastpass = 0  # OI 快速通道：coins-markets 已知 OI 達標，繞過成交量門檻
 
     for coin in active_symbols:
         cg_vol = coin.get("_cg_volume_usd")
@@ -7706,11 +7784,29 @@ def fetch_position_change():
         if cg_vol >= VOLUME_PREFILTER_MIN_USD:
             active_above_volume.append(coin)
         else:
-            vol_below += 1
+            # ── OI 快速通道 ────────────────────────────────────────────────────
+            # coins-markets 已提供該幣 15m OI 變化率（不需個別 API 呼叫）
+            # 條件：OI 達標 + 價格達標 + 至少有 3M 成交量（完全沒量的幣不放行）
+            # 5M 以下在推播中加「成交量偏小」警告，7M 以上才算正常
+            _cg_oi = coin.get("_cg_oi_change_15m")
+            _p15 = coin.get("price_change_percent_30m")
+            _OI_FASTPASS_MIN_VOL = 1_000_000   # 快速通道最低量門檻（1M，面額小的幣仍需基本流動性）
+            if (
+                cg_vol >= _OI_FASTPASS_MIN_VOL and
+                _cg_oi is not None and
+                abs(float(_cg_oi)) >= OI_THRESHOLD_30M and
+                _p15 is not None and
+                abs(float(_p15)) >= PRICE_GATEKEEPER
+            ):
+                coin["_vol_fastpass"] = True   # 標記：推播時加成交量不明警示
+                active_above_volume.append(coin)
+                vol_oi_fastpass += 1
+            else:
+                vol_below += 1
 
     _vol_src = (
         f"CoinGlass {vol_cg_only} | 幣安備援 {vol_binance_fill} | BingX備援 {vol_bingx_fill} | "
-        f"<7M淘汰 {vol_below}"
+        f"OI快速通道 {vol_oi_fastpass} | <7M淘汰 {vol_below}"
     )
     logger.info(
         f"📊 [掃描漏斗] 4. 成交量篩選(>=7M USD)：通過 {len(active_above_volume)} 個 （{_vol_src}）"
