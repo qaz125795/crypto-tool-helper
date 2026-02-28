@@ -2493,7 +2493,7 @@ def fetch_exchange_oi_consensus(symbol: str) -> Tuple[bool, Optional[float]]:
         _oi_usd_sum = 0.0
         # 記錄第一筆欄位名，方便 debug
         _sample_keys = list(data_list[0].keys()) if data_list and isinstance(data_list[0], dict) else []
-        logger.info(f"[多所共識] API 回應欄位樣本（第一筆）: {_sample_keys}")
+        logger.debug(f"[多所共識] API 欄位樣本: {_sample_keys}")
 
         for entry in data_list:
             exch = (entry.get("exchange") or entry.get("exchangeName") or "").strip()
@@ -5912,6 +5912,13 @@ def build_report_message_tiered(
         short_t = _short_title.get(category, "")
         msg_lines.append(f"{sig_emoji} *{short_t}*  `{sym_base}`")
         msg_lines.append(f"💡 理由：{_signal_reason.get(category, '')}")
+        # 1H 逆風警示（reason 含逆風說明時補出）
+        _reason_text = x.get("reason", "")
+        if "1H逆風" in _reason_text:
+            if is_bull_sig:
+                msg_lines.append("⚠️ _1H大週期逆風，OI仍強可跟，注意是否為假突破_")
+            else:
+                msg_lines.append("⚠️ _1H大週期逆風，OI仍強可跟，注意是否為摸底反彈_")
         msg_lines.append("")
 
         # ② MTF 數據
@@ -5954,6 +5961,7 @@ def build_report_message_tiered(
         msg_lines.append("")
 
         # ③ 點位（無 $ 符號，直接複製貼上）
+        msg_lines.append(f"💵 現價   `{_fmt_price(price)}`")
         msg_lines.append(f"📍 進場   `{_fmt_price(price)}`")
 
         if sl is not None:
@@ -6073,13 +6081,17 @@ def build_report_message_tiered(
                 elif rsi_val >= 60:
                     msg_lines.append(f"💚 RSI `{rsi_val:.0f}` 高位空頭，超買做空，勝率更佳")
 
-        # ⑨ 訊號時差（提醒用戶訊號新鮮度）
+        # ⑨ 持倉異動起始時間（OI 15m 變化窗口的開始 = 掃描時間 - 15 分鐘）
         if detected_ts is not None:
+            import datetime as _dt
+            _change_start_ts = detected_ts - 15 * 60   # 15m 窗口開始
+            _tz_tw = _dt.timezone(_dt.timedelta(hours=8))
+            _start_str = _dt.datetime.fromtimestamp(_change_start_ts, tz=_tz_tw).strftime("%H:%M")
             age_sec = int(time.time() - detected_ts)
             if age_sec >= 120:
-                msg_lines.append(f"⏱️ 訊號產生於 `{age_sec}` 秒前，動能可能已衰退，請先確認現價")
+                msg_lines.append(f"⏱️ 持倉開始異動 `{_start_str}` 台北（⚠️ 訊號已延遲 {age_sec}s，請確認現價）")
             else:
-                msg_lines.append(f"⏱️ 訊號產生於 `{age_sec}` 秒前")
+                msg_lines.append(f"⏱️ 持倉開始異動 `{_start_str}` 台北")
 
         # ⑩ 加碼備註（冷卻到期後再次觸發同方向）
         prev_push_ts_val = x.get("prev_push_ts")
@@ -7680,7 +7692,7 @@ def fetch_position_change():
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
-    COOLDOWN_HOURS = 4
+    COOLDOWN_HOURS = 1
     HISTORY_HOURS = 24   # 冷卻歷史保留 24 小時（供 cooldown 與 direction_flip 使用）
 
     def _item_direction(x: Dict) -> str:
