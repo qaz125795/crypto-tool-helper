@@ -6064,8 +6064,11 @@ def build_report_message_tiered(
 
         # 風險距離（R 的母數）
         risk_dist = (price - sl_price) if is_long else (sl_price - price)
+        # 若 SL 在錯誤側（空單 SL 低於現價 / 多單 SL 高於現價）導致 risk_dist <= 0，
+        # 用 ATR 或 1% 價當 fallback，仍算出 TP 避免推播顯示「暫無數據」
         if not risk_dist or risk_dist <= 0:
-            return _ret(sl_price, None, None, None, None, None, None, sl_capped, bool(cvd_divergence))
+            atr_floor = (atr_mult * atr_val) if atr_val is not None else price * 0.02
+            risk_dist = max(atr_floor, price * 0.005)
         # 避免太小距離導致 R 異常飆高
         min_risk = price * 0.005
         if risk_dist < min_risk:
@@ -8809,13 +8812,6 @@ def fetch_position_change():
     _skipped = len(all_top) - len(cooled_top)
     if _skipped > 0:
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
-    # 寫入冷卻檔時也用正規化 symbol，確保下次讀取比對一致
-    # 僅針對「實際有推播」的標的寫入冷卻（selected_for_push=True）
-    pairs_this_run = [
-        (_cooldown_symbol(x.get("symbol")), _item_direction(x))
-        for x in cooled_top
-        if x.get("symbol") and x.get("selected_for_push")
-    ]
 
     # ── 標準版：多所共識檢查（只對最終入選訊號查詢，節省 API 用量）────────────
     if cooled_top:
@@ -8842,6 +8838,13 @@ def fetch_position_change():
             logger.info(f"【未推播原因】本輪無達 OI 門檻之標的（四類皆 0 筆），不發送主報表")
         else:
             logger.info(f"【未推播原因】本輪 {len(all_top)} 筆候選皆被冷卻（4h 內同幣同方向已推過），不發送主報表")
+
+    # 冷卻用：僅「本輪實際有推播」的標的才寫入 history（selected_for_push 在 build_report_message_tiered 內設定）
+    pairs_this_run = [
+        (_cooldown_symbol(x.get("symbol")), _item_direction(x))
+        for x in cooled_top
+        if x.get("symbol") and x.get("selected_for_push")
+    ]
 
     # GitHub Step Summary：若在 GitHub Actions 環境中，輸出本輪關鍵統計摘要
     step_summary_path = os.getenv("GITHUB_STEP_SUMMARY")
