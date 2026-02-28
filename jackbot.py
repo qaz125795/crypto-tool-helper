@@ -5965,25 +5965,28 @@ def build_report_message_tiered(
         msg_lines.append(f"📍 進場   `{_fmt_price(price)}`")
 
         if sl is not None:
-            sl_pct_str = f"{sl_pct:.1f}%" if sl_pct is not None else "—"
-            msg_lines.append(f"🛑 停損   `{_fmt_price(sl)}`  (`-{sl_pct_str}`)  _{sl_label}_")
+            msg_lines.append(f"🛑 停損   `{_fmt_price(sl)}`  (`-1R`)  _{sl_label}_")
         else:
             msg_lines.append("🛑 停損   無數據")
 
         _r_tp1_val, _r_tp2_val = _r1, _r2
         if tp1 is not None:
-            tp1_gain = abs(tp1 - price) / price * 100 if price > 0 else 0
-            # 動態 TP 模式標示
+            # 若 calc_sl_tp 沒回傳 r1，以價格比估算
+            if _r_tp1_val is None and sl_pct and sl_pct > 0:
+                _r_tp1_val = round(abs(tp1 - price) / price * 100 / sl_pct, 2) if price > 0 else None
+            _r1_str = f"+{_r_tp1_val:.1f}R" if _r_tp1_val is not None else "+?R"
             tp1_mode_note = ""
             if tp_mode == "rsi_hot":
                 tp1_mode_note = "  _(RSI過熱，縮短目標)_"
             elif tp_mode == "squeeze":
                 tp1_mode_note = "  _(快進快出)_"
-            msg_lines.append(f"🎯 TP1    `{_fmt_price(tp1)}`  (`+{tp1_gain:.1f}%`){tp1_mode_note}")
+            msg_lines.append(f"🎯 TP1    `{_fmt_price(tp1)}`  (`{_r1_str}`){tp1_mode_note}")
 
         if tp2 is not None:
-            tp2_gain = abs(tp2 - price) / price * 100 if price > 0 else 0
-            msg_lines.append(f"🚀 TP2    `{_fmt_price(tp2)}`  (`+{tp2_gain:.1f}%`)")
+            if _r_tp2_val is None and sl_pct and sl_pct > 0:
+                _r_tp2_val = round(abs(tp2 - price) / price * 100 / sl_pct, 2) if price > 0 else None
+            _r2_str = f"+{_r_tp2_val:.1f}R" if _r_tp2_val is not None else "+?R"
+            msg_lines.append(f"🚀 TP2    `{_fmt_price(tp2)}`  (`{_r2_str}`)")
         msg_lines.append("")
 
         # ④ 成交值
@@ -7865,13 +7868,19 @@ def fetch_position_change():
             logger.info(f"每日績效總結今日已發送過（{summary_date}），跳過重複推播")
         else:
             pushed_today = [e for e in push_log_signals if isinstance(e, dict) and e.get("ts") and datetime.fromtimestamp(e["ts"], tz=TAIPEI_TZ).date() == summary_date]
-            closed_today = [e for e in push_log_signals if isinstance(e, dict) and e.get("closed") and e.get("closed_ts") and datetime.fromtimestamp(e["closed_ts"], tz=TAIPEI_TZ).date() == summary_date]
-            # 勝負只計「止盈(tp1/tp1_sl) / 止損(sl)」，timeout / reversal 視為平局，不納入分母
+            # 排除資料異常取消的倉位，只計真實交易結果
+            closed_today = [
+                e for e in push_log_signals
+                if isinstance(e, dict) and e.get("closed") and e.get("closed_ts")
+                and datetime.fromtimestamp(e["closed_ts"], tz=TAIPEI_TZ).date() == summary_date
+                and e.get("exit_reason") != "entry_price_error"
+            ]
+            # 勝負：止盈(tp1/tp1_sl/tp2) 算贏，止損(sl) 算輸，timeout 平局
             n_sl = sum(1 for e in closed_today if e.get("exit_reason") == "sl")
             n_tp1 = sum(1 for e in closed_today if e.get("exit_reason") in ("tp1", "tp1_sl"))
+            n_tp2_win = sum(1 for e in closed_today if e.get("exit_reason") == "tp2")
             n_timeout = sum(1 for e in closed_today if e.get("exit_reason") == "timeout")
-            n_reversal = 0
-            n_win = n_tp1
+            n_win = n_tp1 + n_tp2_win
             n_closed = len(closed_today)
             n_pushed = len(pushed_today)
             win_rate = (n_win / (n_win + n_sl) * 100) if (n_win + n_sl) else None
@@ -7924,30 +7933,20 @@ def fetch_position_change():
             else:
                 battle_header = f"🛡️ 【昨日戰報：風控機制有效保護本金】"
 
-            # 分級工具：依 tier / stars 判斷列車 / 賭鬼 / 飛機
-            def _entry_tier(e: Dict[str, Any]) -> str:
-                t = (e.get("tier") or "").strip()
-                if t:
-                    return t
-                stars_val = e.get("stars")
-                try:
-                    stars_val = int(stars_val) if stars_val is not None else None
-                except (TypeError, ValueError):
-                    stars_val = None
-                if stars_val is not None and stars_val >= 5:
-                    return "train"
-                if stars_val is not None and stars_val < 5:
-                    return "gambler"
-                return "unknown"
+            # 分類工具：依 sig_emoji 判斷訊號種類（💎/🏎️/🎲）
+            def _entry_sig_type(e: Dict[str, Any]) -> str:
+                return (e.get("sig_emoji") or "").strip()
 
+            _tp_breakdown = f"TP1 {n_tp1}" + (f" TP2滿貫 {n_tp2_win}" if n_tp2_win else "")
             summary_lines = [
                 f"*{battle_header}*",
                 f"📊 *【{summary_date} 每日績效總結】*",
                 f"",
                 f"📤 當日推播：{n_pushed} 單",
-                f"✅ 已結案：{n_closed} 單（止盈 {n_tp1}｜止損 {n_sl}｜超時撤退 {n_timeout}）",
+                f"✅ 已結案：{n_closed} 單（止盈 {n_win}｜止損 {n_sl}｜超時撤退 {n_timeout}）",
+                f"   └ 止盈明細：{_tp_breakdown}",
                 f"🎯 R 統計：贏 {sum_r_win:.2f}R｜輸 {sum_r_loss:.2f}R｜淨 {sum_r:.2f}R",
-                f"※ 止盈算贏、止損算輸（timeout 視為平局）→ {n_win} 贏 / {n_sl} 輸",
+                f"※ 止盈算贏、止損算輸（timeout 平局）→ {n_win} 贏 / {n_sl} 輸",
             ]
             if win_rate is not None:
                 summary_lines.append(f"📈 整體勝率：{win_rate:.1f}%")
@@ -7959,48 +7958,33 @@ def fetch_position_change():
             summary_lines.append(f"　📆 近 {week_days} 日（週）：{week_sign}{sum_r_week:.2f}R")
             summary_lines.append(f"　🗓️ 近 {month_days} 日（月）：{month_sign}{sum_r_month:.2f}R")
             summary_lines.append(f"")
-            # 依等級（飛機/列車/賭鬼）細分績效
-            tier_defs = [
-                ("elite", "✈️ 飛機 (S+)"),
-                ("train", "🚅 列車 (S)"),
-                ("gambler", "👻 賭鬼 (A)"),
+            # 依訊號類型（💎精品 / 🏎️順勢 / 🎲逆勢）細分績效
+            sig_type_defs = [
+                ("💎", "💎 精品（高確信）"),
+                ("🏎️", "🏎️ 順勢（追勢型）"),
+                ("🎲", "🎲 逆勢（左側博弈）"),
             ]
-            for tier_key, tier_label in tier_defs:
-                pushed_t = [e for e in pushed_today if isinstance(e, dict) and _entry_tier(e) == tier_key]
-                closed_t = [e for e in closed_today if isinstance(e, dict) and _entry_tier(e) == tier_key]
+            for sig_key, sig_label in sig_type_defs:
+                pushed_t = [e for e in pushed_today if isinstance(e, dict) and _entry_sig_type(e) == sig_key]
+                closed_t = [e for e in closed_today if isinstance(e, dict) and _entry_sig_type(e) == sig_key]
                 if not pushed_t and not closed_t:
                     continue
                 n_sl_t = sum(1 for e in closed_t if e.get("exit_reason") == "sl")
-                n_tp1_t = sum(1 for e in closed_t if e.get("exit_reason") in ("tp1", "tp1_sl"))
-                win_rate_t = (n_tp1_t / (n_tp1_t + n_sl_t) * 100) if (n_tp1_t + n_sl_t) else None
+                n_win_t = sum(1 for e in closed_t if e.get("exit_reason") in ("tp1", "tp1_sl", "tp2"))
+                win_rate_t = (n_win_t / (n_win_t + n_sl_t) * 100) if (n_win_t + n_sl_t) else None
                 sum_r_t = sum(float(e.get("realized_R") or 0.0) for e in closed_t)
                 wr_str_t = f"{win_rate_t:.1f}%" if win_rate_t is not None else "-"
-                if tier_key == "gambler":
-                    # 賭鬼：額外統計 TP2 命中次數與理論 R
-                    n_tp2_t = sum(
-                        1 for e in closed_t
-                        if e.get("tp2_hit") and (e.get("tp2_R") is not None)
-                    )
-                    sum_tp2_r_t = sum(
-                        float(e.get("tp2_R") or 0.0)
-                        for e in closed_t
-                        if e.get("tp2_hit") and (e.get("tp2_R") is not None)
-                    )
-                    summary_lines.append(
-                        f"{tier_label}：TP1 {n_tp1_t} 單｜TP2 命中 {n_tp2_t} 單（理論 +{sum_tp2_r_t:.2f}R）｜淨 {sum_r_t:.2f}R"
-                    )
-                else:
-                    summary_lines.append(
-                        f"{tier_label}：推播 {len(pushed_t)}｜結案 {len(closed_t)}（止盈 {n_tp1_t}｜止損 {n_sl_t}）"
-                        f" 勝率 {wr_str_t}｜淨 {sum_r_t:.2f}R"
-                    )
+                summary_lines.append(
+                    f"{sig_label}：推播 {len(pushed_t)}｜結案 {len(closed_t)}（止盈 {n_win_t}｜止損 {n_sl_t}）"
+                    f" 勝率 {wr_str_t}｜淨 {sum_r_t:.2f}R"
+                )
             summary_lines.append(f"")
             # 各分類（多單/空單）勝率
             for _dir, _label in (("多", "多單"), ("空", "空單")):
                 p_d = [e for e in pushed_today if (e.get("dir") or "").strip() == _dir]
                 c_d = [e for e in closed_today if (e.get("dir") or "").strip() == _dir]
                 sl_d = sum(1 for e in c_d if e.get("exit_reason") == "sl")
-                tp_win_d = sum(1 for e in c_d if e.get("exit_reason") in ("tp1", "tp1_sl"))
+                tp_win_d = sum(1 for e in c_d if e.get("exit_reason") in ("tp1", "tp1_sl", "tp2"))
                 w_d = tp_win_d + sl_d
                 wr_d = (tp_win_d / w_d * 100) if w_d else None
                 _wr_str = f"{wr_d:.1f}%" if wr_d is not None else "-"
@@ -8010,7 +7994,7 @@ def fetch_position_change():
             send_telegram_message("\n".join(summary_lines), TG_THREAD_IDS["position_change"], parse_mode="Markdown")
             # 記錄已發送，防止本輪後續迭代重複推播
             save_json_file(_last_summary_file, {"last_sent_date": str(summary_date)})
-            logger.info(f"每日績效總結已發送: {summary_date} 推播 {n_pushed} 結案 {n_closed} 止盈 {n_tp1} 止損 {n_sl} 超時 {n_timeout} 勝率 {win_rate}% | 週R={sum_r_week:.2f} 月R={sum_r_month:.2f}")
+            logger.info(f"每日績效總結已發送: {summary_date} 推播 {n_pushed} 結案 {n_closed} 止盈(TP1 {n_tp1} TP2 {n_tp2_win}) 止損 {n_sl} 超時 {n_timeout} 勝率 {win_rate}% | 週R={sum_r_week:.2f} 月R={sum_r_month:.2f}")
     # 倉位追蹤依賴「上一輪（及之前）寫入的推播紀錄」；若 data 目錄在排程間未持久化（如 CI 無 cache），此處會一直是 0 筆
     in_window = [
         e for e in push_log_signals
@@ -8363,14 +8347,14 @@ def fetch_position_change():
                         entry["notified_exit"] = True
                         entry["closed"] = True
                         entry["exit_reason"] = "tp2"
-                        if r_tp2_val is not None:
-                            entry["realized_R"] = round(r_tp2_val, 3)
-                        else:
-                            entry["realized_R"] = entry.get("realized_R") or 0.0
+                        _final_r = round(r_tp2_val, 3) if r_tp2_val is not None else (entry.get("realized_R") or 0.0)
+                        entry["realized_R"] = _final_r
+                        entry["tp2_hit"] = True
+                        entry["tp2_R"] = _final_r
                         entry["closed_ts"] = int(now_ts)
                         exit_notified_set.add(sym_base)
                         price_closed = True
-                        logger.info(f"倉位追蹤已發送: {sym_base} 賭鬼 TP2 滿貫結案 (realized_R={entry.get('realized_R')})")
+                        logger.info(f"倉位追蹤已發送: {sym_base} 賭鬼 TP2 滿貫結案 (realized_R={_final_r})")
                 if not price_closed:
                     logger.info(
                         f"比對價格: {sym_base} 現價 {cur_price} | "
@@ -8697,10 +8681,13 @@ def fetch_position_change():
                     "sl_source": x.get("sl_source") or "結構防守",
                     "tp1_notified": False,
                     "stars": x.get("stars") or 0,
+                    "tier": x.get("tier") or "",
+                    "sig_emoji": x.get("_sig_emoji") or "",
                     "r_tp1": x.get("r_tp1"),
                     "tp2": _parse_price_str(x.get("tp2_price_str")),
                     "r_tp2": x.get("r_tp2"),
                     "tp2_hit": False,
+                    "tp2_R": None,
                 }
                 new_push_entries.append(entry)
                 # 48h 內同標的已有推播：同方向提醒調整防守、不同方向提醒可考慮反手
