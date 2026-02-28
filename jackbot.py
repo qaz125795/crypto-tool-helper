@@ -6006,28 +6006,28 @@ def build_report_message_tiered(
 
         # ① 標題行
         short_t = _short_title.get(category, title)
-        msg_lines.append(f"{short_t}  `{sym_base}/USDT`")
+        msg_lines.append(f"{short_t}  `{sym_base}`")
         msg_lines.append(_short_reason.get(category, ""))
         msg_lines.append("")
 
-        # ② MTF 數據（OI 附白話說明）
+        # ② MTF 數據（OI 附白話說明，數值可一鍵複製）
         oi_str  = fmt_pct(oi30)
         p15_str = fmt_pct(p30)
         oi_desc = "倉位大增" if (oi30 or 0) > 0 else "倉位大減"
         if p1h is not None and isinstance(p1h, (int, float)):
             p1h_arrow = "↑" if p1h > 0 else "↓"
-            p1h_part = f"1H {fmt_pct(p1h)}{p1h_arrow}"
+            p1h_part = f"1H `{fmt_pct(p1h)}`{p1h_arrow}"
         else:
-            p1h_part = "1H —"
-        msg_lines.append(f"📡 OI {oi_str}（{oi_desc}）  價 {p15_str}  |  {p1h_part}")
+            p1h_part = "1H `—`"
+        msg_lines.append(f"📡 OI `{oi_str}`（{oi_desc}）  價 `{p15_str}`  |  {p1h_part}")
         msg_lines.append("")
 
-        # ③ 點位表
+        # ③ 點位表（所有價格與漲跌幅均可一鍵複製）
         msg_lines.append(f"📍 進場   `${_fmt_price(price)}`")
 
         if sl is not None:
             sl_pct_str = f"{sl_pct:.1f}%" if sl_pct is not None else "—"
-            msg_lines.append(f"🛑 停損   `${_fmt_price(sl)}`  (-{sl_pct_str})  碰到就出")
+            msg_lines.append(f"🛑 停損   `${_fmt_price(sl)}`  (`-{sl_pct_str}`)")
         else:
             msg_lines.append("🛑 停損   無數據")
 
@@ -6035,12 +6035,10 @@ def build_report_message_tiered(
             tp1_gain = abs(tp1 - price) / price * 100 if price > 0 else 0
             if _sig_type == "squeeze":
                 _r_tp1_val, _r_tp2_val = 1.0, 2.0
-                tp1_tag = "快速落袋，出一半"
             else:
                 _r_tp1_val, _r_tp2_val = 1.5, 3.0
-                tp1_tag = "先出一半保本"
             msg_lines.append(
-                f"🎯 TP1    `${_fmt_price(tp1)}`  (+{tp1_gain:.1f}%)  ← {tp1_tag}"
+                f"🎯 TP1    `${_fmt_price(tp1)}`  (`+{tp1_gain:.1f}%`)"
             )
         else:
             _r_tp1_val = 1.0 if _sig_type == "squeeze" else 1.5
@@ -6049,19 +6047,20 @@ def build_report_message_tiered(
         if tp2 is not None:
             tp2_gain = abs(tp2 - price) / price * 100 if price > 0 else 0
             msg_lines.append(
-                f"🚀 TP2    `${_fmt_price(tp2)}`  (+{tp2_gain:.1f}%)  波段目標"
+                f"🚀 TP2    `${_fmt_price(tp2)}`  (`+{tp2_gain:.1f}%`)"
             )
         msg_lines.append("")
 
-        # ④ 底部資訊（成交量 + 費率，一行）
+        # ④ 底部資訊（成交量 + 費率）
         if vol_usd and float(vol_usd) > 0:
             vol_m = float(vol_usd) / 1e6
             vol_str = (
-                f"💰 {vol_m:.0f}M ✅" if vol_m >= 30
-                else f"💰 {vol_m:.1f}M ⚠️輕倉(<1500U)"
+                f"💰 `{vol_m:.0f}M` ✅ 深度足"
+                if vol_m >= 30
+                else f"💰 `{vol_m:.1f}M` ⚠️ 輕倉標的，單筆 <1500U"
             )
         else:
-            vol_str = "💰 量不足"
+            vol_str = "💰 成交量數據不足"
 
         if funding_rate is not None and isinstance(funding_rate, (int, float)):
             fr_val = funding_rate * 100
@@ -6071,7 +6070,7 @@ def build_report_message_tiered(
                 fr_comment = "散戶狂看多，當心莊家殺多！⚠️"
             else:
                 fr_comment = "情緒正常"
-            fr_str = f"⚡ 費率 {fr_val:+.4f}%  {fr_comment}"
+            fr_str = f"⚡ 費率 `{fr_val:+.4f}%`  {fr_comment}"
         else:
             fr_str = ""
 
@@ -6080,7 +6079,7 @@ def build_report_message_tiered(
             msg_lines.append(fr_str)
 
         if warn_pct is not None:
-            msg_lines.append(f"⚠️ *SL距離 {warn_pct:.1f}%，請將本金【減半】！*")
+            msg_lines.append(f"⚠️ *SL距離 `{warn_pct:.1f}%`，請將本金【減半】！*")
 
         # ── 儲存供後續倉位追蹤（冷卻 / TP/SL 觸發更新 / 績效統計）──────
         x["sl_price_str"] = _fmt_price(sl)
