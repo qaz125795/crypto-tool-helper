@@ -5635,8 +5635,9 @@ OI_FOR_ELITE = 1.5
 # 原則：歷史表現差、流動性不足、長期被操控的幣種
 SYMBOL_BLACKLIST: set = {
     "BULLA", "FIO", "ORBS", "NEIROCTO", "DENT",
-        "RTX", "IKA", "POND", "1000NEIROCTO",
-        "ULTIMA", "REAL", "CRCLX", "TFUEL",
+    "RTX", "IKA", "POND", "1000NEIROCTO",
+    "ULTIMA", "REAL", "CRCLX", "TFUEL",
+    "WHITEWHALE",
 }
 
 
@@ -8502,6 +8503,23 @@ def fetch_position_change():
                     f"recent_2h=({recent_high_2h},{recent_low_2h})"
                 )
 
+            # ── 倉位追蹤即時報價（BingX Swap）──────────────────────────────────────
+            # 入場價來自 BingX Swap，cur_price 也用同一來源，避免跨市場（Spot vs Swap）
+            # 價差導致 K 線 high/low 誤觸 TP/SL。
+            # 若 BingX Swap 無此幣或取值失敗，退回 K 線收盤價。
+            _live_snap = _fetch_bingx_ticker_snapshot(sym_base)
+            _live_price = _live_snap.get("price") if _live_snap else None
+            if _live_price and isinstance(_live_price, (int, float)) and _live_price > 0:
+                _kline_cur = cur_price  # 保留 K 線收盤供 log 對比
+                cur_price = float(_live_price)
+                logger.info(
+                    f"[倉位追蹤即時價] {sym_base}: BingX Swap={cur_price} "
+                    f"(K線收盤={_kline_cur}，差異={abs(cur_price-_kline_cur)/_kline_cur*100:.2f}% "
+                    f"{'→ 以即時價為準' if abs(cur_price-_kline_cur)/(_kline_cur or 1) > 0.005 else ''})"
+                    if _kline_cur else
+                    f"[倉位追蹤即時價] {sym_base}: BingX Swap={cur_price}"
+                )
+
             # ── 進場價 2h 範圍保護（防止 CoinGlass 瞬間異常價格造成誤判）─────────
             # 進場價超出近2h高低點 5% 外：
             #   → 若止損已被突破（價格穿越 SL）→ 是真實的止損，繼續往下走通知
@@ -8558,13 +8576,15 @@ def fetch_position_change():
                 )
                 continue
 
-            # 取價一致性檢查：cur_price 必須落在該標的 K 線區間內，否則可能取錯標的（如 POL 誤用他幣價格）
+            # 取價一致性檢查：cur_price 必須在 K 線區間合理範圍內，防止取到完全不同的幣種。
+            # cur_price 現在優先來自 BingX Swap（跨市場），而 K 線來自 BingX Spot 或 Bybit，
+            # 小幣種 Spot vs Swap 最大可有 5~8% 價差，因此放寬至 15% 作為「取錯幣」的硬性邊界。
             if cur_price is not None and kline_high is not None and kline_low is not None and kline_high > 0 and kline_low > 0:
-                _band = 0.005  # 允許 0.5% 邊界（收盤與 high/low 可能略超出）
+                _band = 0.15  # 15% 邊界：跨市場正常價差 < 10%，超過則視為取錯標的
                 if cur_price < kline_low * (1 - _band) or cur_price > kline_high * (1 + _band):
                     logger.warning(
                         f"[倉位追蹤-取價異常] {sym_base}: cur_price={cur_price} 不在 30m K 線區間 "
-                        f"[{kline_low},{kline_high}] 內，可能取錯標的或快照異常，本輪跳過 SL/TP 比對"
+                        f"[{kline_low},{kline_high}] ±15% 內，可能取錯標的，本輪跳過 SL/TP 比對"
                     )
                     continue
 
