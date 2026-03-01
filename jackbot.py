@@ -8051,8 +8051,22 @@ def fetch_position_change():
             )
             continue
 
-        # 取得現價（K 線收盤）
-        _cur_price = tech.get("current_price") if tech else None
+        # ── K 線新鮮度驗證（防止 BingX/Bybit 回傳舊蠟燭導致進場價嚴重偏差）──────────
+        # 若 K 線最新收盤與 CoinGlass 即時現價偏差 > 3%，代表 K 線已過期（例如幣種剛暴噴
+        # 但 API 仍回傳噴前的收盤），整組技術指標全部失效，直接跳過此訊號。
+        _cg_price = item.get("price")  # CoinGlass 即時現價（掃描週期取得，較即時）
+        _kline_close = tech.get("current_price") if tech else None
+        if _cg_price and _kline_close and _cg_price > 0 and _kline_close > 0:
+            _kline_divergence = abs(_kline_close - _cg_price) / _cg_price
+            if _kline_divergence > 0.03:
+                logger.warning(
+                    f"[K線過期⚠️] {sym}: K線收盤 {_kline_close:.6f} 與 CoinGlass現價 "
+                    f"{_cg_price:.6f} 偏差 {_kline_divergence:.1%}（>3%），K線為舊數據，跳過此訊號"
+                )
+                continue
+
+        # 現價：優先採用 CoinGlass 即時現價，K 線收盤作備援
+        _cur_price = _cg_price if (_cg_price and _cg_price > 0) else _kline_close
 
         all_top.append({
             **item,
@@ -8101,6 +8115,8 @@ def fetch_position_change():
     # ── 黑名單：永久禁止推播的標的（品質太差 / 流動性不足 / 歷史表現差）────────────
     SYMBOL_BLACKLIST: set = {
         "BULLA", "FIO", "ORBS", "NEIROCTO", "DENT",
+        "RTX", "IKA", "POND", "1000NEIROCTO",
+        "ULTIMA",
     }
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
