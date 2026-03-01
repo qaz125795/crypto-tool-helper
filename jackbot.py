@@ -5361,17 +5361,119 @@ def _parse_kline_rows(raw: list) -> Tuple[list, list, list, list, list]:
     return opens, highs, lows, closes, volumes
 
 
+def _try_binance_futures_klines_direct(
+    symbol_base: str, interval: str = "15m", limit: int = 60
+) -> Optional[Dict[str, Any]]:
+    """
+    直接打 Binance 期貨公開 K 線 API（免 API Key），取得帶 volume 的完整 OHLCV。
+    解決 CoinGlass price/history 只回傳 OHLC 而無 volume 導致 VWAP 退化的問題。
+    """
+    clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    for sym_pair in [f"{clean}USDT", f"1000{clean}USDT"]:
+        try:
+            r = requests.get(
+                "https://fapi.binance.com/fapi/v1/klines",
+                params={"symbol": sym_pair, "interval": interval, "limit": limit},
+                timeout=5,
+            )
+            if r.status_code != 200:
+                continue
+            raw = r.json()
+            if not isinstance(raw, list) or len(raw) < 20:
+                continue
+            # Binance 期貨 K 線格式：
+            # [ts, open, high, low, close, vol, close_ts, quote_vol, trades, taker_buy_base, taker_buy_quote, ignore]
+            opens, highs, lows, closes, volumes = [], [], [], [], []
+            for bar in raw:
+                try:
+                    opens.append(float(bar[1]))
+                    highs.append(float(bar[2]))
+                    lows.append(float(bar[3]))
+                    closes.append(float(bar[4]))
+                    volumes.append(float(bar[5]))  # base volume（幣本位成交量）
+                except (IndexError, TypeError, ValueError):
+                    pass
+            if len(closes) < 20:
+                continue
+            result = _calc_indicators_from_ohlcv(
+                opens, highs, lows, closes, volumes, clean, "Binance-Direct", sym_pair
+            )
+            if result:
+                result["source"] = "Binance-Direct"
+                logger.info(
+                    f"[BinanceDirect✅] {clean}: {sym_pair} {interval} {len(closes)} 根（含 volume）"
+                )
+                return result
+        except Exception as e:
+            logger.debug(f"[BinanceDirect] {clean}/{sym_pair} 異常: {e}")
+    return None
+
+
+def _try_bingx_spot_klines_direct(
+    symbol_base: str, interval: str = "15m", limit: int = 60
+) -> Optional[Dict[str, Any]]:
+    """
+    BingX 現貨公開 K 線（免簽名），作為最後 fallback。
+    覆蓋只在 BingX 上線、其他大所未上的山寨幣，同樣帶 volume。
+    格式：[ts, open, high, low, close, volume, close_ts, quote_vol]
+    """
+    clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    sym_pair = f"{clean}-USDT"
+    try:
+        r = requests.get(
+            "https://open-api.bingx.com/openApi/spot/v2/market/kline",
+            params={"symbol": sym_pair, "interval": interval, "limit": limit},
+            timeout=5,
+        )
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        raw = j.get("data") if isinstance(j, dict) else j
+        if not isinstance(raw, list) or len(raw) < 20:
+            return None
+        opens, highs, lows, closes, volumes = [], [], [], [], []
+        for bar in raw:
+            try:
+                opens.append(float(bar[1]))
+                highs.append(float(bar[2]))
+                lows.append(float(bar[3]))
+                closes.append(float(bar[4]))
+                volumes.append(float(bar[5]))
+            except (IndexError, TypeError, ValueError):
+                pass
+        if len(closes) < 20:
+            return None
+        result = _calc_indicators_from_ohlcv(
+            opens, highs, lows, closes, volumes, clean, "BingX-Spot", sym_pair
+        )
+        if result:
+            result["source"] = "BingX-Spot"
+            logger.info(
+                f"[BingX-Spot✅] {clean}: {sym_pair} {interval} {len(closes)} 根（含 volume）"
+            )
+            return result
+    except Exception as e:
+        logger.debug(f"[BingX-Spot] {clean}/{sym_pair} 異常: {e}")
+    return None
+
+
 def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 60) -> Optional[Dict[str, Any]]:
-    """【CoinGlass-First K 線】使用 CoinGlass /api/futures/price/history 取 OHLCV，
-    本地計算 RSI/布林帶/ATR/EMA20/VWAP_2h/MACD/結構高低點，回傳與 BingX 版本相同格式。
-    依序嘗試 Binance → OKX → Bybit，直到取得足夠 K 線。
+    """
+    K 線三層降級策略（含 volume 優先）：
+      1. Binance 期貨直連（免 Key，有 volume → VWAP 精確）
+      2. CoinGlass 代理各交易所（無 volume → VWAP 退化為 TWAP，但覆蓋 OKX/Bybit/BingX 幣種）
+      3. BingX 現貨直連（免 Key，有 volume，覆蓋 BingX-only 小幣）
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-    # CoinGlass symbol 格式：通常為 {base}USDT（如 BTCUSDT）或 1000PEPEUSDT
+
+    # ── Step 1: Binance 期貨直連（最優先，有 volume）───────────────────────
+    _direct = _try_binance_futures_klines_direct(clean, interval, limit)
+    if _direct:
+        return _direct
+
+    # ── Step 2: CoinGlass 代理各交易所（覆蓋非 Binance 幣種）──────────────
     try_pairs = [f"{clean}USDT", f"1000{clean}USDT"]
-    # 優先用大所（流動性佳），BingX 和 Bitget 作為後補覆蓋 BingX-only 小幣
-    # → 讓 CoinGlass 統一拉 K 線，不再需要 Plan B 直接打 BingX
-    exchanges_to_try = ["Binance", "OKX", "Bybit", "BingX", "Bitget"]
+    exchanges_to_try = ["OKX", "Bybit", "BingX", "Bitget"]  # Binance 已由 Step 1 直連
     headers_cg = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
     for exchange in exchanges_to_try:
@@ -5415,7 +5517,15 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
                 logger.debug(f"[CG K線] {clean}/{exchange}/{sym_pair} 異常: {e}")
                 continue
 
-    logger.warning(f"[CG K線] {clean}: 所有交易所/交易對均無法取得足夠 K 線（嘗試 {exchanges_to_try}）")
+    # ── Step 3: BingX 現貨直連（最終 fallback，有 volume）────────────────
+    _bingx = _try_bingx_spot_klines_direct(clean, interval, limit)
+    if _bingx:
+        return _bingx
+
+    logger.warning(
+        f"[CG K線] {clean}: 所有來源均無法取得足夠 K 線"
+        f"（Binance直連 + CoinGlass/{exchanges_to_try} + BingX現貨）"
+    )
     return None
 
 
@@ -5448,7 +5558,7 @@ FUNDING_EXTREME = 0.0003    # 極端費率 0.03%，用於標註
 # 15m MTF 四象限進場門檻（15m 扳機 + 1h 趨勢濾網，雙週期共振）
 MAIN_COINS = {"BTC", "ETH"}
 OI_THRESHOLD_30M = 1.5     # 15m OI 扳機門檻
-PRICE_THRESHOLD_30M = 0.85 # 15m 價格扳機門檻
+PRICE_THRESHOLD_30M = 0.5  # 15m 價格扳機門檻
 OI_MAIN_COIN_MIN = 1.5
 OI_ALTCOIN_MIN = 1.5
 OI_FOR_5_STAR = 1.5
@@ -6033,13 +6143,12 @@ def build_report_message_tiered(
         # ── 訊號分級 ──────────────────────────────────────────────────
         # 🏎️ 順勢右側：OI & 價格 & 1H 三者方向一致（追勢型）
         # 🎲 逆勢左側：OI 反向（軋空/踩踏），屬反轉型（左側博弈）
-        # 💎 精品升級：流動性充足(≥30M) + 多所共識 + 費率/taker/1H OI 三選一確認
+        # 💎 精品升級：流動性充足(≥30M) + 費率/taker/1H OI 三選一確認（多所共識已移除）
         is_trend_follow = category in ("long_open", "short_open")
         is_counter      = category in ("short_close", "long_close")
 
         vol_m_val = float(vol_usd) / 1e6 if vol_usd and float(vol_usd) > 0 else 0.0
         _vol_src_tag = x.get("_vol_source", "CoinGlass")  # CoinGlass / Binance / K線估算
-        is_consensus = bool(x.get("is_global_consensus"))
         fr_aligned = False
         if funding_rate is not None and isinstance(funding_rate, (int, float)):
             if is_bull_sig and funding_rate < -0.0005:
@@ -6059,8 +6168,8 @@ def build_report_message_tiered(
         # 1H OI 同向確認（_classify_signal_and_tier 已計算，存在 item 中）
         oi_1h_confirmed = bool(x.get("_oi_1h_confirmed"))
 
-        # 精品：成交值≥30M + 多所共識 + (費率助攻 OR taker 確認 OR 1H OI同向剛啟動)
-        is_premium = vol_m_val >= 30 and is_consensus and (fr_aligned or taker_aligned or oi_1h_confirmed)
+        # 精品：成交值≥30M + (費率助攻 OR taker 確認 OR 1H OI同向剛啟動)
+        is_premium = vol_m_val >= 30 and (fr_aligned or taker_aligned or oi_1h_confirmed)
 
         if is_premium:
             sig_emoji = "💎"
@@ -7514,7 +7623,7 @@ def fetch_position_change():
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 3：價格波動過濾（|15m 漲跌幅| >= PRICE_GATEKEEPER）
     # ════════════════════════════════════════════════════════
-    PRICE_GATEKEEPER = 0.85  # 15m MTF：|漲跌幅| ≥0.85%（原 1.0% × 0.85）
+    PRICE_GATEKEEPER = 0.5   # 15m MTF：|漲跌幅| ≥0.5%
     active_symbols: List[Dict] = []
     stub_pass_count = 0
     for coin in all_symbols_data:
@@ -8800,23 +8909,12 @@ def fetch_position_change():
     if _skipped > 0:
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
 
-    # ── 標準版：多所共識檢查 + 量倉比（只對最終入選訊號查詢，節省 API 用量）────────────
+    # ── 多所共識已移除（原 fetch_exchange_oi_consensus API 回傳資料與 15m 時間窗口不符，誤判多）────
+    # is_global_consensus 欄位保留但固定為 False，is_premium 已不依賴此欄位
     if cooled_top:
         for _item in cooled_top:
-            _sym = _item.get("symbol", "")
-            if _sym:
-                _consensus, _aggregate_oi_usd = fetch_exchange_oi_consensus(_sym)
-                _item["is_global_consensus"] = _consensus
-                _item["_aggregate_oi_usd"] = _aggregate_oi_usd
-                # 量倉比：15m 成交額 < OI 增量 3 倍 → 換手不充分，標記警告
-                _vol_24h = _item.get("_cg_volume_usd") or 0
-                _vol_15m = (float(_vol_24h) / 96.0) if _vol_24h else 0.0
-                _oi_pct = abs(_item.get("oiChange30m") or 0)
-                _oi_delta_usd = (float(_aggregate_oi_usd) * _oi_pct / 100.0) if _aggregate_oi_usd and _oi_pct else None
-                if _oi_delta_usd and _oi_delta_usd > 0 and _vol_15m > 0 and _vol_15m < 3.0 * _oi_delta_usd:
-                    _item["volume_oi_warn"] = True
-                else:
-                    _item["volume_oi_warn"] = False
+            _item["is_global_consensus"] = False
+            _item["volume_oi_warn"] = False
 
     # 僅在「實際有至少一則訊號」時才推主報表；無訊號或全被風報比篩掉 → 不推，安靜
     has_any = False
