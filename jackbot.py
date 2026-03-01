@@ -7999,7 +7999,8 @@ def fetch_position_change():
         sym = item.get("symbol", "")
 
         # ── 黑名單前置過濾（在 K 線抓取前攔截，節省 API 次數）──────────────────────
-        if _cooldown_symbol(sym).upper() in SYMBOL_BLACKLIST:
+        _sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+        if _sym_base in SYMBOL_BLACKLIST:
             logger.info(f"[黑名單🚫] {sym} 在 enrichment 前即封鎖，跳過 K 線抓取")
             continue
 
