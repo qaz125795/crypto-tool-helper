@@ -8098,6 +8098,11 @@ def fetch_position_change():
     if len(all_top) == 0:
         logger.info(f"本輪無符合條件訊號（OI≥{OI_THRESHOLD_30M}% & 價格≥{PRICE_THRESHOLD_30M}% & 成交值≥3.5M USD）")
 
+    # ── 黑名單：永久禁止推播的標的（品質太差 / 流動性不足 / 歷史表現差）────────────
+    SYMBOL_BLACKLIST: set = {
+        "BULLA", "FIO", "ORBS", "NEIROCTO", "DENT",
+    }
+
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
     COOLDOWN_HOURS = 1
@@ -8941,6 +8946,16 @@ def fetch_position_change():
         prev = latest_signal_by_sym.get(s)
         if prev is None or (e.get("ts") or 0) > (prev.get("ts") or 0):
             latest_signal_by_sym[s] = e
+
+    # ── 黑名單過濾 ────────────────────────────────────────────────────────────────
+    _before_bl = len(all_top)
+    all_top = [
+        x for x in all_top
+        if _cooldown_symbol(x.get("symbol") or "").upper() not in SYMBOL_BLACKLIST
+    ]
+    _bl_removed = _before_bl - len(all_top)
+    if _bl_removed > 0:
+        logger.info(f"[黑名單🚫] 封鎖 {_bl_removed} 個標的（{SYMBOL_BLACKLIST}）")
 
     cooled_top = []
     for x in all_top:
