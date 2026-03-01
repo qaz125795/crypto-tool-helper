@@ -8575,7 +8575,17 @@ def fetch_position_change():
                 hit_sl = False
                 hit_tp = False
                 hit_tp2 = False
-                use_range = kline_high is not None and kline_low is not None and kline_high > 0 and kline_low > 0
+                # ── 首根 K 線保護：推播後未滿一個 K 線週期（15 分鐘）前，禁用 K 線高低點判斷。
+                # 原因：偵測蠟燭的 high/low 可能已超出 TP/SL，若即刻用其判斷會立即誤觸發（幽靈止盈/止損）。
+                # 至少等一根新 K 線（900 秒）完整收盤後，才允許用 kline_high/kline_low 驗證 TP/SL。
+                _kline_period_secs = 900
+                _since_push = (now_ts - pushed_ts) if (pushed_ts and now_ts > pushed_ts) else 999999
+                _allow_range = _since_push >= _kline_period_secs
+                use_range = (
+                    _allow_range
+                    and kline_high is not None and kline_low is not None
+                    and kline_high > 0 and kline_low > 0
+                )
                 # 跨越確認輔助：TP/SL 必須「從進場側穿越」才算真實觸發
                 # 原理：若錯抓了不同幣種，其 2h 區間很可能整體在 TP/SL 另一側，
                 # 以此排除「price 一直都在 TP 那側、根本從未有過進場空間」的偽觸發
