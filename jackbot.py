@@ -26,10 +26,12 @@ TAIPEI_TZ = timezone(timedelta(hours=8))
 
 # 配置日誌：執行時終端顯示 + 寫入 log 檔，方便排查
 _log_fmt = '%(asctime)s - %(levelname)s - %(message)s'
+_stream_handler = logging.StreamHandler(sys.stdout)
+_stream_handler.stream.reconfigure(encoding="utf-8", errors="replace") if hasattr(_stream_handler.stream, "reconfigure") else None
 logging.basicConfig(
     level=logging.INFO,
     format=_log_fmt,
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[_stream_handler],
     force=True
 )
 logger = logging.getLogger(__name__)
@@ -7878,12 +7880,12 @@ def fetch_position_change():
         })
         logger.info(f"[Enrichment] {sym} 已加入 all_top：RSI={rsi_val} ATR={atr_val} 現價={_cur_price} | {reason}")
 
-    # 品質門撒：ATR=None → K 線無數據，不推播
+    # 品質門撒：ATR=None → K 線無數據，SL/TP/RSI 均無法計算，不推播
     pre_quality = len(all_top)
     all_top = [x for x in all_top if x.get("atr") is not None]
     skipped_no_kline = pre_quality - len(all_top)
     if skipped_no_kline > 0:
-        logger.info(f"[品質門撒] 淘汰 {skipped_no_kline} 個 ATR=None（K線無數據小幣），剩餘 {len(all_top)} 個精品訊號")
+        logger.info(f"[品質門撒] 淘汰 {skipped_no_kline} 個 ATR=None（K線無數據小幣），剩餘 {len(all_top)} 個訊號")
 
     # 成交額同步（從 _cg_volume_usd 寫入供推播使用）
     for x in all_top:
@@ -8327,7 +8329,6 @@ def fetch_position_change():
                     f"跳過本輪 SL/TP 比對，等待下一輪重試"
                 )
                 continue
-            logger.info(f"【倉位追蹤K線】{sym_base} full_symbol={full_sym} cur_price={cur_price}")
 
             # 取價一致性檢查：cur_price 必須落在該標的 K 線區間內，否則可能取錯標的（如 POL 誤用他幣價格）
             if cur_price is not None and kline_high is not None and kline_low is not None and kline_high > 0 and kline_low > 0:
