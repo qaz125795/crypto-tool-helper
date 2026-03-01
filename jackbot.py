@@ -5539,8 +5539,9 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
         return _bybit
 
     # ── Step 3: CoinGlass 代理（覆蓋剩餘幣種，無 volume）──────────────────
+    # 保留 Bybit 作為 CoinGlass 代理備援，防止 Bybit 直連偶爾超時/失敗時完全無資料
     try_pairs = [f"{clean}USDT", f"1000{clean}USDT"]
-    exchanges_to_try = ["OKX", "BingX", "Bitget"]  # Binance/Bybit 已由 Step 1/2 直連
+    exchanges_to_try = ["OKX", "Bybit", "BingX", "Bitget"]
     headers_cg = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
     for exchange in exchanges_to_try:
@@ -5592,6 +5593,7 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
     logger.warning(
         f"[CG K線] {clean}: 所有來源均無法取得足夠 K 線"
         f"（Binance直連 + Bybit直連 + CoinGlass/{exchanges_to_try} + BingX現貨）"
+        f" → 可能為 Hyperliquid/Gate.io 專屬幣種"
     )
     return None
 
@@ -7735,17 +7737,17 @@ def fetch_position_change():
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 4：成交值預篩（三路來源：CoinGlass A → Binance B → 待 K 線估算 C）
     # 規則：
-    #   combined_vol ≥ 1M  → 放行
-    #   combined_vol = 0   → CoinGlass + Binance 均無資料 → 放行，等 K 線估算（Plan C）
-    #   0 < combined_vol < 1M → 確認流動性極差 → 過濾
+    #   combined_vol ≥ 3.5M → 放行（流動性門檻，低於此難以建倉且易被畫門）
+    #   combined_vol = 0    → CoinGlass + Binance 均無資料 → 放行，等 K 線估算（Plan C）
+    #   0 < combined_vol < 3.5M → 確認流動性不足 → 過濾
     # ════════════════════════════════════════════════════════
-    VOLUME_PREFILTER_MIN_USD = 1_000_000
+    VOLUME_PREFILTER_MIN_USD = 3_500_000
 
     active_above_volume: List[Dict[str, Any]] = []
-    vol_cg = 0         # Plan A (CoinGlass) 有資料且 ≥ 1M
-    vol_binance = 0    # Plan B (Binance) 補救且 ≥ 1M
+    vol_cg = 0         # Plan A (CoinGlass) 有資料且 ≥ 3.5M
+    vol_binance = 0    # Plan B (Binance) 補救且 ≥ 3.5M
     vol_no_data = 0    # A+B 均無資料 → 放行等 Plan C
-    vol_below = 0      # 確認 < 1M → 過濾
+    vol_below = 0      # 確認 < 3.5M → 過濾
 
     for coin in active_symbols:
         # ── Plan A：CoinGlass 成交值 ─────────────────────────────
@@ -7784,8 +7786,8 @@ def fetch_position_change():
             vol_below += 1
 
     logger.info(
-        f"📊 [漏斗 4] 成交值篩選 ≥1M: 通過 {len(active_above_volume)} 個"
-        f"（CoinGlass: {vol_cg} | BingX備援: {vol_binance} | 待K線估算: {vol_no_data} | 淘汰[確認<1M]: {vol_below}）"
+        f"📊 [漏斗 4] 成交值篩選 ≥3.5M: 通過 {len(active_above_volume)} 個"
+        f"（CoinGlass: {vol_cg} | BingX備援: {vol_binance} | 待K線估算: {vol_no_data} | 淘汰[確認<3.5M]: {vol_below}）"
     )
 
     # ── Step 5：排序 + 限制數量（前 50 固定，其餘隨機保多樣性）─────────────────
@@ -8094,7 +8096,7 @@ def fetch_position_change():
 
     logger.info(f"[Enrichment 完成] {len(all_top)} 個訊號進入推播流程")
     if len(all_top) == 0:
-        logger.info(f"本輪無符合條件訊號（OI≥{OI_THRESHOLD_30M}% & 價格≥{PRICE_THRESHOLD_30M}% & 成交值≥1M USD）")
+        logger.info(f"本輪無符合條件訊號（OI≥{OI_THRESHOLD_30M}% & 價格≥{PRICE_THRESHOLD_30M}% & 成交值≥3.5M USD）")
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
