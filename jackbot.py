@@ -3523,8 +3523,8 @@ OI_THRESHOLD_1H    = 2.0            # 2.0%（初期測試寬鬆版；穩定後�
 PRICE_THRESHOLD_1H = 1.5            # 1H 價格扳機門檻
 
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
-MTF_RSI_OVERBOUGHT = 80             # 做多阻斷線（初期寬鬆：80；嚴格版用 75）
-MTF_RSI_OVERSOLD   = 20             # 做空阻斷線（初期寬鬆：20；嚴格版用 25）
+MTF_RSI_OVERBOUGHT = 85             # 做多降級線（>85 降為 Tier2 觀察；單邊牛市容忍 RSI 鈍化）
+MTF_RSI_OVERSOLD   = 15             # 做空降級線（<15 降為 Tier2 觀察；單邊熊市容忍 RSI 鈍化）
 
 # ── 衍生/向後相容別名（供其他函數引用）──────────────────────────────
 OI_MAIN_COIN_MIN    = OI_THRESHOLD_1H
@@ -3738,29 +3738,40 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
     }
 
     # ══════════════════════════════════════════════════════════
-    # 嚴格決策樹：只允許 A（確定籌碼）或 B（完美回踩），其餘 return None
+    # 三層決策樹 v4（鐵三角 + 5m 雜訊容忍 + Tier2 觀察名單）
+    #
+    # ✅ A. confirmed（確定籌碼）：1H = 30m = 15m 三層完全一致，5m 允許雜訊
+    #       RSI 極端（>85 / <15）→ 降為 Tier2，不直接丟棄
+    # 🎯 B. pullback（完美回踩）：1H/30m 同向 + 15m/5m 呈短線反向
+    # ⚠️ C. tier2（觀察名單）：1H/30m 同方向陣營，但 15m 凌亂或 RSI 極端
+    #       推播時加「⚠️ 觀察名單」標籤，提醒輕倉
+    # ✘ D. 其餘（Step2 衝突 / 1H&30m 大方向完全相反）→ return None 丟棄
     # ══════════════════════════════════════════════════════════
 
-    # Step 2 衝突 → None（Lazy Fetching 外層已提前攔截，此為第二道防線）
+    # Step 2 衝突 → 直接丟（Lazy Fetching 外層已提前攔截，此為第二道防線）
     if step2_conflict:
         return None
 
-    # 有效 TF 列表（過濾 None）
-    all_cats = [c for c in [cat_1h, cat_30m, cat_15m, cat_5m] if c is not None]
-
-    # ══ A. 確定籌碼（Confirmed）：≥3 層方向完全一致 ══════════════════════════
-    all_same = len(all_cats) >= 3 and len(set(all_cats)) == 1
-    if all_same:
-        # RSI 過熱/過冷保護：四層共振但已追高/追低 → 放棄，等回調
-        if (is_1h_bull and rsi_overbought) or (is_1h_bear and rsi_oversold):
-            return None  # RSI 極端，放棄追高追低
-        return {**base, "version": "confirmed", "subtype": "",
-                "aligned_count": len(all_cats), "reversal_hint": ""}
-
-    # ══ B. 完美回踩（Perfect Pullback）：1H/30m 同向 + 15m/5m 出現反向 ════════
-    # 做多語境：1H/30m = long_open 或 short_cover（多頭），15m/5m 短線回踩
+    # ──────────── 前置：方向陣營判定 ─────────────────────────────────────
     is_30m_bull = cat_30m in ("long_open", "short_cover")
     is_30m_bear = cat_30m in ("short_open", "long_close")
+
+    # ══ A. 確定籌碼（鐵三角）：1H = 30m = 15m 精確一致，5m 不強制 ══════════
+    iron_triangle = (
+        cat_1h is not None
+        and cat_1h == cat_30m
+        and (cat_15m == cat_1h or cat_15m is None)
+    )
+    if iron_triangle:
+        if (is_1h_bull and rsi_overbought) or (is_1h_bear and rsi_oversold):
+            # RSI 極端：趨勢仍明確，但追高/追空風險高 → 降級為 Tier2 觀察
+            return {**base, "version": "tier2", "subtype": "RSI極端",
+                    "aligned_count": 3,
+                    "reversal_hint": f"⚠️ RSI={rsi_f:.0f} 已達極端，鐵三角成立但建議輕倉觀察"}
+        return {**base, "version": "confirmed", "subtype": "",
+                "aligned_count": 3, "reversal_hint": ""}
+
+    # ══ B. 完美回踩（Pullback）：1H/30m 同向 + 15m/5m 短線反向 ════════════
     small_reversing_from_bull = any(
         c in ("long_close", "short_open") for c in [cat_15m, cat_5m] if c
     )
@@ -3774,7 +3785,23 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
         return {**base, "version": "potential", "subtype": "pullback",
                 "aligned_count": 2, "reversal_hint": ""}
 
-    # ══ 其他所有情況（弱共振、逆勢反轉、方向凌亂）→ 直接放棄 ══════════════
+    # ══ C. 次級訊號（Tier2）：1H/30m 大方向同陣營，但 15m 凌亂 ═══════════
+    # 比 confirmed/pullback 弱，但仍有方向性價值 → 觀察名單推播
+    big_picture_aligned = (
+        (is_1h_bull and is_30m_bull) or
+        (is_1h_bear and is_30m_bear)
+    )
+    if big_picture_aligned:
+        _t2_dir  = "多" if is_1h_bull else "空"
+        _t2_hint = (
+            f"1H/30m 同{_t2_dir}方向，"
+            f"但 15m={_cat_name.get(cat_15m,'N/A')} / 5m={_cat_name.get(cat_5m,'N/A')} 尚未確認"
+        )
+        return {**base, "version": "tier2", "subtype": "弱共振",
+                "aligned_count": 2,
+                "reversal_hint": f"⚠️ {_t2_hint}，建議等待 15m 方向確認再進場"}
+
+    # ══ D. 其他（大方向矛盾）→ 丟棄 ════════════════════════════════════════
     return None
 
 
@@ -3806,10 +3833,8 @@ def _classify_signal_and_tier(
     if price_chg_1h_main is not None and not isinstance(price_chg_1h_main, (int, float)):
         price_chg_1h_main = None
 
-    # 扳機條件：1H OI 絕對值 >= 1.5%，1H Price 絕對值 >= 1.5%
+    # 扳機條件：1H OI 絕對值 >= 門檻（純 OI 驅動，不用價格當門）
     if abs(oi) < OI_THRESHOLD_1H:
-        return None
-    if price_chg_1h_main is None or abs(price_chg_1h_main) < PRICE_THRESHOLD_1H:
         return None
 
     # 1H 趨勢濾網：多頭訊號需 1h > 0，空頭訊號需 1h < 0
@@ -4273,15 +4298,21 @@ def build_report_message_tiered(
         _mtf_desc      = x.get("mtf_desc") or ""
         _reversal_hint = x.get("reversal_hint") or ""
 
-        # 標題標籤（嚴格版：只剩 confirmed / pullback 兩種合法狀態）
+        # 標題標籤（三層訊號：confirmed / pullback / tier2）
         _dir_str   = "做多" if is_bull_sig else "做空"
         _dir_emoji = "🟢"   if is_bull_sig else "🔴"
         if _sig_version == "confirmed":
             _type_str  = "確定籌碼・右側突破"
             _badge_emo = "🚀"
-            _ver_label = "✅ *確定籌碼*（四層完全共振）"
+            _ver_label = "✅ *確定籌碼*（鐵三角共振 1H/30m/15m 一致）"
             sig_emoji  = "💎"
-        else:  # pullback（唯一合法的潛在機會）
+        elif _sig_version == "tier2":
+            _t2_sub    = _sig_subtype or "弱共振"
+            _type_str  = f"觀察名單・{_t2_sub}"
+            _badge_emo = "⚠️"
+            _ver_label = f"⚠️ *觀察名單*（{_t2_sub}，建議輕倉）"
+            sig_emoji  = "👀"
+        else:  # pullback
             _type_str  = "潛在機會・牛回頭低接" if is_bull_sig else "潛在機會・熊反彈做空"
             _badge_emo = "🧲"
             _ver_label = "🎯 *潛在機會*（完美回踩）"
@@ -4291,16 +4322,22 @@ def build_report_message_tiered(
 
         # ── 策略短評（自動生成）───────────────────────────────────────
         def _gen_comment(cat: str, ver: str, sub: str, hint: str, rsi_v) -> str:
-            # 只會進入 confirmed 或 pullback（嚴格過濾後的兩種合法狀態）
             if ver == "confirmed":
-                if cat == "long_open":   return "主力四層全面建多倉，動能共振強勁，右側追多機會！"
-                if cat == "short_open":  return "主力四層全面建空倉，空頭共振明確，右側追空機會！"
-                if cat == "short_cover": return "空方四層全面回補，軋空燃料充足，右側做多機會！"
-                return "多方四層全面平倉，看空動能聚積，右側做空機會！"
+                if cat == "long_open":   return "主力三層共振建多倉，動能明確，右側追多機會！"
+                if cat == "short_open":  return "主力三層共振建空倉，空頭動能確認，右側追空機會！"
+                if cat == "short_cover": return "空方三層共振回補，軋空燃料充足，右側做多機會！"
+                return "多方三層共振平倉，看空動能聚積，右側做空機會！"
             if sub == "pullback":
                 if cat in ("long_open", "short_cover"):
                     return "大時框多頭趨勢確立，小週期短暫回調，是低接進場的黃金時機。"
                 return "大時框空頭趨勢確立，小週期短暫反彈，是逢高做空的黃金時機。"
+            if ver == "tier2":
+                if sub == "RSI極端":
+                    rsi_str = f"RSI={rsi_v:.0f}" if rsi_v else "RSI偏高"
+                    if cat in ("long_open", "short_cover"):
+                        return f"鐵三角成立但 {rsi_str} 已偏熱，單邊行情可輕倉，嚴控止損。"
+                    return f"鐵三角成立但 {rsi_str} 已偏冷，反彈可輕倉，嚴控止損。"
+                return "1H/30m 同向但 15m 尚未確認，等待小週期方向收斂後再進場。"
             return "籌碼方向確認中，嚴守止損。"
 
         _strategy_comment = _gen_comment(category, _sig_version, _sig_subtype, _reversal_hint, rsi_val)
@@ -4474,8 +4511,13 @@ def build_report_message_tiered(
         )
 
     _confirmed_in_msg = sum(1 for m_x in messages_out if "確定籌碼" in (m_x or ""))
-    _potential_in_msg = push_count - _confirmed_in_msg
-    _mtf_tag = f"✅確定 {_confirmed_in_msg}" + (f" 🎯潛在 {_potential_in_msg}" if _potential_in_msg > 0 else "")
+    _tier2_in_msg     = sum(1 for m_x in messages_out if "觀察名單" in (m_x or ""))
+    _potential_in_msg = push_count - _confirmed_in_msg - _tier2_in_msg
+    _mtf_tag = f"✅確定 {_confirmed_in_msg}"
+    if _potential_in_msg > 0:
+        _mtf_tag += f" 🎯潛在 {_potential_in_msg}"
+    if _tier2_in_msg > 0:
+        _mtf_tag += f" ⚠️觀察 {_tier2_in_msg}"
     header = (
         f"🎯 *山寨幣莊家狙擊鏡*  1H MTF  {emoji_summary}\n"
         f"🕐 {now_str} 台北  |  {_mtf_tag}\n"
@@ -5558,14 +5600,12 @@ def fetch_position_change():
         return
     logger.info(f"📊 [漏斗 1] CoinGlass 全網 {len(all_symbols_data)} 幣種")
 
-    # ── 單次迴圈完成三件事：BTC大盤、24h快取、價格波動篩選 ──────────────────────
+    # ── 單次迴圈完成兩件事：BTC大盤、24h快取 ─────────────────────────────────
     global _btc_30m_pct, _btc_1h_pct
     _btc_30m_pct = None
     _btc_1h_pct = None
-    PRICE_GATEKEEPER = 1.5   # 1H MTF：|1H漲跌幅| ≥1.5% 才進 OI 運算
     coinglass_24h_map: Dict[str, float] = {}
     active_symbols: List[Dict] = []
-    stub_pass_count = 0
     for coin in all_symbols_data:
         sym_raw = normalize_symbol(coin) or ""
         clean_sym = sym_raw.replace("USDT", "").replace("-", "").replace("_", "").upper()
@@ -5585,18 +5625,7 @@ def fetch_position_change():
         if pct24 is not None and clean_sym:
             coinglass_24h_map[clean_sym] = pct24
 
-        # ③ 漏斗 Step 3：1H 價格波動過濾（≥1.5% 才進 OI 運算）
-        if coin.get("_stub"):
-            active_symbols.append(coin)
-            stub_pass_count += 1
-            continue
-        p_change_1h = coin.get("price_change_percent_1h")
-        try:
-            p_change_1h = float(p_change_1h) if p_change_1h is not None else 0.0
-        except (TypeError, ValueError):
-            p_change_1h = 0.0
-        if abs(p_change_1h) >= PRICE_GATEKEEPER:
-            active_symbols.append(coin)
+        active_symbols.append(coin)
 
     if not coinglass_24h_map:
         coinglass_24h_map = _fetch_coinglass_24h_map()
@@ -5606,10 +5635,6 @@ def fetch_position_change():
     # 單一 API call，失敗時靜默回傳空 dict 不影響主流程
     # ════════════════════════════════════════════════════════
     _binance_vol_map: Dict[str, float] = fetch_bingx_futures_24h_vol()
-    logger.info(
-        f"📊 [漏斗 3] 1H價格波動>={PRICE_GATEKEEPER}% → {len(active_symbols)} 幣種進 1H OI 運算"
-        f"（淘汰 {len(all_symbols_data) - len(active_symbols) + stub_pass_count} | stub直通 {stub_pass_count}）"
-    )
 
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 4：成交值預篩（三路來源：CoinGlass A → Binance B → 待 K 線估算 C）
@@ -5984,6 +6009,11 @@ def fetch_position_change():
         else:
             _cat_30m_prelim = None
 
+        logger.info(
+            f"[Step2 30m OI] {sym}: OI={(_oi_30m or 0):+.2f}% → {_cat_30m_prelim or 'N/A'}"
+            f"  (1H={cat})"
+        )
+
         # Step 2 衝突阻斷：主力方向相反 → 節省 API，直接放棄
         _is_1h_bull_ctx = cat in ("long_open", "short_cover")
         _is_1h_bear_ctx = cat in ("short_open", "long_close")
@@ -5999,8 +6029,10 @@ def fetch_position_change():
         # ── Step 3 & 4：15m + 5m OI（僅針對通過 Step 2 的極少數幣種）──────────
         time.sleep(0.2)
         _oi_15m = fetch_oi_change_tf(sym, "15m")
+        logger.info(f"[Step3 15m OI] {sym}: OI={(_oi_15m or 0):+.2f}%")
         time.sleep(0.2)
         _oi_5m  = fetch_oi_change_tf(sym, "5m")
+        logger.info(f"[Step4  5m OI] {sym}: OI={(_oi_5m or 0):+.2f}%")
 
         # ── MTF 訊號分類（嚴格版：不符合 A/B → None → continue）──────────────
         _mtf_item_preview = {
@@ -6066,7 +6098,12 @@ def fetch_position_change():
             "rsi_4h":          _rsi_4h,
             "is_above_4h_ema": _is_above_4h_ema,
         })
-        _ver_tag = "✅確定籌碼" if _mtf_result.get("version") == "confirmed" else f"🎯潛在機會({_mtf_result.get('subtype','')})"
+        _v = _mtf_result.get("version", "potential")
+        _ver_tag = (
+            "✅確定籌碼（鐵三角）" if _v == "confirmed"
+            else f"⚠️觀察名單({_mtf_result.get('subtype','')})" if _v == "tier2"
+            else f"🎯潛在機會({_mtf_result.get('subtype','')})"
+        )
         logger.info(f"[Enrichment] {sym} 已加入 all_top：RSI={rsi_val} ATR={atr_val} 現價={_cur_price} | {_ver_tag} | {reason}")
 
     # 品質門撒：ATR=None → K 線無數據，SL/TP/RSI 均無法計算，不推播
@@ -6081,13 +6118,14 @@ def fetch_position_change():
         x["volume_usd"] = x.get("_volume_usd") or x.get("_cg_volume_usd") or 0
 
     _confirmed_cnt = sum(1 for x in all_top if x.get("signal_version") == "confirmed")
-    _potential_cnt = len(all_top) - _confirmed_cnt
+    _tier2_cnt     = sum(1 for x in all_top if x.get("signal_version") == "tier2")
+    _potential_cnt = len(all_top) - _confirmed_cnt - _tier2_cnt
     logger.info(
         f"[Enrichment 完成] {len(all_top)} 個訊號進入推播流程"
-        f"（確定籌碼 {_confirmed_cnt} | 潛在機會 {_potential_cnt}）"
+        f"（✅確定籌碼 {_confirmed_cnt} | 🎯潛在機會 {_potential_cnt} | ⚠️觀察名單 {_tier2_cnt}）"
     )
     if len(all_top) == 0:
-        logger.info(f"本輪無符合條件訊號（1H OI≥{OI_THRESHOLD_1H}% & 1H Price≥{PRICE_THRESHOLD_1H}% & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD）")
+        logger.info(f"本輪無符合條件訊號（1H OI≥{OI_THRESHOLD_1H}% & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
 
     # 冷卻規則：同一幣 2h 內同方向不重複推（1H 格局，冷卻時間對應拉長）
     COOLDOWN_HOURS = 4   # 同幣同方向 4h 冷卻（Google 建議：1H 波段策略最佳間隔）
