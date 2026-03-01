@@ -5409,6 +5409,67 @@ def _try_binance_futures_klines_direct(
     return None
 
 
+def _try_bybit_futures_klines_direct(
+    symbol_base: str, interval: str = "15m", limit: int = 60
+) -> Optional[Dict[str, Any]]:
+    """
+    直接打 Bybit V5 線性永續 K 線 API（免 API Key），取得帶 volume 的完整 OHLCV。
+    覆蓋 Bybit-only 幣種（如 XION, WHITEWHALE, PLAYSOUT 等不在 Binance 上的幣）。
+    Bybit interval 格式：1/3/5/15/30/60/120/240/D/W/M（分鐘以數字表示）
+    注意：Bybit list 為新到舊，需反轉後計算指標。
+    """
+    clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    # Binance "15m" → Bybit "15"；"1h" → "60"；"4h" → "240"
+    _interval_map = {
+        "1m": "1", "3m": "3", "5m": "5", "15m": "15",
+        "30m": "30", "1h": "60", "2h": "120", "4h": "240",
+    }
+    bybit_interval = _interval_map.get(interval, "15")
+
+    for sym_pair in [f"{clean}USDT", f"1000{clean}USDT"]:
+        try:
+            r = requests.get(
+                "https://api.bybit.com/v5/market/kline",
+                params={"category": "linear", "symbol": sym_pair,
+                        "interval": bybit_interval, "limit": limit},
+                timeout=5,
+            )
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            if j.get("retCode") != 0:
+                continue
+            raw = j.get("result", {}).get("list", [])
+            if not isinstance(raw, list) or len(raw) < 20:
+                continue
+            # Bybit 格式：[timestamp, open, high, low, close, volume, turnover]，新→舊，需反轉
+            raw = list(reversed(raw))
+            opens, highs, lows, closes, volumes = [], [], [], [], []
+            for bar in raw:
+                try:
+                    opens.append(float(bar[1]))
+                    highs.append(float(bar[2]))
+                    lows.append(float(bar[3]))
+                    closes.append(float(bar[4]))
+                    volumes.append(float(bar[5]))
+                except (IndexError, TypeError, ValueError):
+                    pass
+            if len(closes) < 20:
+                continue
+            result = _calc_indicators_from_ohlcv(
+                opens, highs, lows, closes, volumes, clean, "Bybit-Direct", sym_pair
+            )
+            if result:
+                result["source"] = "Bybit-Direct"
+                logger.info(
+                    f"[BybitDirect✅] {clean}: {sym_pair} {interval} {len(closes)} 根（含 volume）"
+                )
+                return result
+        except Exception as e:
+            logger.debug(f"[BybitDirect] {clean}/{sym_pair} 異常: {e}")
+    return None
+
+
 def _try_bingx_spot_klines_direct(
     symbol_base: str, interval: str = "15m", limit: int = 60
 ) -> Optional[Dict[str, Any]]:
@@ -5459,10 +5520,11 @@ def _try_bingx_spot_klines_direct(
 
 def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 60) -> Optional[Dict[str, Any]]:
     """
-    K 線三層降級策略（含 volume 優先）：
-      1. Binance 期貨直連（免 Key，有 volume → VWAP 精確）
-      2. CoinGlass 代理各交易所（無 volume → VWAP 退化為 TWAP，但覆蓋 OKX/Bybit/BingX 幣種）
-      3. BingX 現貨直連（免 Key，有 volume，覆蓋 BingX-only 小幣）
+    K 線四層降級策略（優先有 volume 的直連來源）：
+      1. Binance 期貨直連（免 Key，有 volume）→ 覆蓋 Binance 上所有幣種
+      2. Bybit 永續直連（免 Key，有 volume）  → 覆蓋 Bybit-only 幣種（如 XION, WHITEWHALE）
+      3. CoinGlass 代理 OKX/BingX/Bitget     → 無 volume，但覆蓋剩餘冷門幣種
+      4. BingX 現貨直連（免 Key，有 volume）  → 最終 fallback
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
 
@@ -5471,9 +5533,14 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
     if _direct:
         return _direct
 
-    # ── Step 2: CoinGlass 代理各交易所（覆蓋非 Binance 幣種）──────────────
+    # ── Step 2: Bybit 永續直連（覆蓋 Bybit-only 幣種，有 volume）──────────
+    _bybit = _try_bybit_futures_klines_direct(clean, interval, limit)
+    if _bybit:
+        return _bybit
+
+    # ── Step 3: CoinGlass 代理（覆蓋剩餘幣種，無 volume）──────────────────
     try_pairs = [f"{clean}USDT", f"1000{clean}USDT"]
-    exchanges_to_try = ["OKX", "Bybit", "BingX", "Bitget"]  # Binance 已由 Step 1 直連
+    exchanges_to_try = ["OKX", "BingX", "Bitget"]  # Binance/Bybit 已由 Step 1/2 直連
     headers_cg = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
     for exchange in exchanges_to_try:
@@ -5517,14 +5584,14 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
                 logger.debug(f"[CG K線] {clean}/{exchange}/{sym_pair} 異常: {e}")
                 continue
 
-    # ── Step 3: BingX 現貨直連（最終 fallback，有 volume）────────────────
+    # ── Step 4: BingX 現貨直連（最終 fallback，有 volume）────────────────
     _bingx = _try_bingx_spot_klines_direct(clean, interval, limit)
     if _bingx:
         return _bingx
 
     logger.warning(
         f"[CG K線] {clean}: 所有來源均無法取得足夠 K 線"
-        f"（Binance直連 + CoinGlass/{exchanges_to_try} + BingX現貨）"
+        f"（Binance直連 + Bybit直連 + CoinGlass/{exchanges_to_try} + BingX現貨）"
     )
     return None
 
@@ -5920,6 +5987,31 @@ def build_report_message_tiered(
         else:
             sl_price = price * 0.97 if is_long else price * 1.03
             sl_label = "備援3%"
+
+        # ── SL 淨空保護（SL Clear Zone）──────────────────────────────────────────
+        # 核心原則：SL 必須「清越」近 2h 所有價格行為，否則訊號推出後立刻就能被雜訊觸及。
+        #   做空：sl > recent_2h_high + 0.5%（SL 必須站在 2h 最高點之上）
+        #   做多：sl < recent_2h_low  - 0.5%（SL 必須站在 2h 最低點之下）
+        # TP 會在下方自動以新 risk 重算，R 比例不變。
+        _sl_clear_buffer = 0.005  # 0.5%（足夠清越雜訊 + 滑價，同時不過度擴大停損）
+        if not is_long and recent_high_2h and recent_high_2h > 0:
+            _min_sl_short = recent_high_2h * (1.0 + _sl_clear_buffer)
+            if sl_price < _min_sl_short:
+                logger.debug(
+                    f"[SL淨空] 做空 SL {sl_price:.6f} 在 2h高點{recent_high_2h:.6f}之下，"
+                    f"調整至 {_min_sl_short:.6f}（+0.5% 淨空緩衝）"
+                )
+                sl_price = _min_sl_short
+                sl_label += " 淨空"
+        elif is_long and recent_low_2h and recent_low_2h > 0:
+            _max_sl_long = recent_low_2h * (1.0 - _sl_clear_buffer)
+            if sl_price > _max_sl_long:
+                logger.debug(
+                    f"[SL淨空] 做多 SL {sl_price:.6f} 在 2h低點{recent_low_2h:.6f}之上，"
+                    f"調整至 {_max_sl_long:.6f}（-0.5% 淨空緩衝）"
+                )
+                sl_price = _max_sl_long
+                sl_label += " 淨空"
 
         risk = (price - sl_price) if is_long else (sl_price - price)
         if risk <= 0:
