@@ -1571,8 +1571,6 @@ def fetch_whale_position():
 
 
 def fetch_whale_position_old():
-    """主執行函數：巨鯨持倉監控（舊版本，保留作為備份）"""
-    logger.info("開始執行巨鯨持倉監控...")
     
     all_analyses = []
     
@@ -5600,17 +5598,16 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
 
 def calculate_technicals(symbol: str, bingx_symbol_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    技術指標：純 CoinGlass 模式
-    - CoinGlass futures/price/history K 線本地計算（RSI/布林/EMA20/VWAP_2h/ATR/MACD/結構高低點）
+    技術指標計算入口。
+    直接委派給 _fetch_cg_klines_and_calc（四層降級策略：Binance→Bybit→CG代理→BingX現貨）。
+    回傳的 tech["source"] 保留原始來源（Binance-Direct / Bybit-Direct / BingX-Spot / CoinGlass），
+    供上層判斷是否有真實 volume 以決定 VWAP 可信度。
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-
     logger.info(f"[技術指標] {base}: CoinGlass K 線計算技術指標")
     tech = _fetch_cg_klines_and_calc(symbol)
     if tech:
-        tech["source"] = "CoinGlass"
         return tech
-
     logger.warning(f"[技術指標] {base}: CoinGlass K 線失敗，技術指標無法計算")
     return None
 
@@ -5633,6 +5630,14 @@ OI_ALTCOIN_MIN = 1.5
 OI_FOR_5_STAR = 1.5
 OI_FOR_4_STAR = 1.5
 OI_FOR_ELITE = 1.5
+
+# ── 黑名單：永久禁止推播的標的（可隨時新增/移除）────────────────────────────────
+# 原則：歷史表現差、流動性不足、長期被操控的幣種
+SYMBOL_BLACKLIST: set = {
+    "BULLA", "FIO", "ORBS", "NEIROCTO", "DENT",
+        "RTX", "IKA", "POND", "1000NEIROCTO",
+        "ULTIMA", "REAL", "CRCLX",
+}
 
 
 def _check_manipulation_risk(
@@ -6355,7 +6360,13 @@ def build_report_message_tiered(
         msg_lines.append("")
 
         # ③ 點位（無 $ 符號，直接複製貼上）
-        msg_lines.append(f"💵 現價   `{_fmt_price(price)}`")
+        _sig_price_display = x.get("signal_price")
+        if _sig_price_display and price and abs(_sig_price_display - price) / price >= 0.003:
+            # 即時價與觸發點差異 ≥ 0.3%：同時顯示，提醒用戶進場價已不同
+            msg_lines.append(f"📡 觸發   `{_fmt_price(_sig_price_display)}`  _(K線收盤觸發點)_")
+            msg_lines.append(f"💵 現價   `{_fmt_price(price)}`  _(以此計算風報比)_")
+        else:
+            msg_lines.append(f"💵 現價   `{_fmt_price(price)}`")
         msg_lines.append(f"📍 進場   `{_fmt_price(price)}`")
 
         if sl is not None:
@@ -7680,31 +7691,42 @@ def fetch_position_change():
         return
     logger.info(f"📊 [漏斗 1] CoinGlass 全網 {len(all_symbols_data)} 幣種")
 
-    # ── 大盤環境：取得 BTC 30m + 1H 漲跌幅，供訊號推播備註大盤狀態 ──────────────
+    # ── 單次迴圈完成三件事：BTC大盤、24h快取、價格波動篩選 ──────────────────────
     global _btc_30m_pct, _btc_1h_pct
     _btc_30m_pct = None
     _btc_1h_pct = None
-    for _c in all_symbols_data:
-        _s = (_c.get("symbol") or _c.get("coin") or "").replace("USDT", "").replace("-", "").strip().upper()
-        if _s == "BTC":
-            _btc_30m_pct = extract_price_change_30m(_c)
-            _btc_1h_pct = _c.get("price_change_percent_1h")
+    PRICE_GATEKEEPER = 0.5   # 15m MTF：|漲跌幅| ≥0.5%
+    coinglass_24h_map: Dict[str, float] = {}
+    active_symbols: List[Dict] = []
+    stub_pass_count = 0
+    for coin in all_symbols_data:
+        sym_raw = normalize_symbol(coin) or ""
+        clean_sym = sym_raw.replace("USDT", "").replace("-", "").replace("_", "").upper()
+
+        # ① BTC 大盤環境
+        if clean_sym == "BTC" and _btc_30m_pct is None:
+            _btc_30m_pct = extract_price_change_30m(coin)
+            _btc_1h_pct_raw = coin.get("price_change_percent_1h")
             try:
-                _btc_1h_pct = float(_btc_1h_pct) if _btc_1h_pct is not None else None
+                _btc_1h_pct = float(_btc_1h_pct_raw) if _btc_1h_pct_raw is not None else None
             except (TypeError, ValueError):
                 _btc_1h_pct = None
             logger.info(f"📊 [大盤濾網] BTC 30m {(_btc_30m_pct or 0):+.2f}%  1H {(_btc_1h_pct or 0):+.2f}%")
-            break
 
-    # ── 24h 漲跌幅快取（CoinGlass 已含此欄位，直接讀取）────────────────────────
-    coinglass_24h_map: Dict[str, float] = {}
-    for coin in all_symbols_data:
-        pct = extract_price_change_24h(coin)
-        if pct is not None:
-            s = normalize_symbol(coin) or ""
-            clean = s.replace("USDT", "").replace("-", "").replace("_", "").upper()
-            if clean:
-                coinglass_24h_map[clean] = pct
+        # ② 24h 漲跌幅快取
+        pct24 = extract_price_change_24h(coin)
+        if pct24 is not None and clean_sym:
+            coinglass_24h_map[clean_sym] = pct24
+
+        # ③ 漏斗 Step 3：價格波動過濾
+        if coin.get("_stub"):
+            active_symbols.append(coin)
+            stub_pass_count += 1
+            continue
+        p_change = extract_price_change_30m(coin)
+        if abs(p_change) >= PRICE_GATEKEEPER:
+            active_symbols.append(coin)
+
     if not coinglass_24h_map:
         coinglass_24h_map = _fetch_coinglass_24h_map()
 
@@ -7713,22 +7735,6 @@ def fetch_position_change():
     # 單一 API call，失敗時靜默回傳空 dict 不影響主流程
     # ════════════════════════════════════════════════════════
     _binance_vol_map: Dict[str, float] = fetch_bingx_futures_24h_vol()
-
-    # ════════════════════════════════════════════════════════
-    # 漏斗 Step 3：價格波動過濾（|15m 漲跌幅| >= PRICE_GATEKEEPER）
-    # ════════════════════════════════════════════════════════
-    PRICE_GATEKEEPER = 0.5   # 15m MTF：|漲跌幅| ≥0.5%
-    active_symbols: List[Dict] = []
-    stub_pass_count = 0
-    for coin in all_symbols_data:
-        # supported-coins stub（沒有 price 數據）→ 直接放行讓 OI 決定
-        if coin.get("_stub"):
-            active_symbols.append(coin)
-            stub_pass_count += 1
-            continue
-        p_change = extract_price_change_30m(coin)
-        if abs(p_change) >= PRICE_GATEKEEPER:
-            active_symbols.append(coin)
     logger.info(
         f"📊 [漏斗 3] 價格波動>={PRICE_GATEKEEPER}% → {len(active_symbols)} 幣種進 OI 運算"
         f"（淘汰 {len(all_symbols_data) - len(active_symbols) + stub_pass_count} | stub直通 {stub_pass_count}）"
@@ -7988,13 +7994,17 @@ def fetch_position_change():
     _cg_fr_map: Dict[str, float] = _fetch_funding_rate_map()
     logger.info(f"[FR批次] CoinGlass Funding Rate 預載完成，共 {len(_cg_fr_map)} 個幣種")
 
-    time.sleep(1)
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
         sym = item.get("symbol", "")
 
+        # ── 黑名單前置過濾（在 K 線抓取前攔截，節省 API 次數）──────────────────────
+        if _cooldown_symbol(sym).upper() in SYMBOL_BLACKLIST:
+            logger.info(f"[黑名單🚫] {sym} 在 enrichment 前即封鎖，跳過 K 線抓取")
+            continue
+
         # 技術指標：CoinGlass K 線計算 RSI / ATR / 結構高低點
-        time.sleep(0.2)
+        # （_fetch_cg_klines_and_calc 內部已有 _respect_coinglass_rate_limit 限速，無需額外 sleep）
         tech = calculate_technicals(sym)
 
         # ── Plan C：K 線估算成交值（補充 CoinGlass + Binance 均無資料的幣種）──────
@@ -8111,13 +8121,6 @@ def fetch_position_change():
     logger.info(f"[Enrichment 完成] {len(all_top)} 個訊號進入推播流程")
     if len(all_top) == 0:
         logger.info(f"本輪無符合條件訊號（OI≥{OI_THRESHOLD_30M}% & 價格≥{PRICE_THRESHOLD_30M}% & 成交值≥3.5M USD）")
-
-    # ── 黑名單：永久禁止推播的標的（品質太差 / 流動性不足 / 歷史表現差）────────────
-    SYMBOL_BLACKLIST: set = {
-        "BULLA", "FIO", "ORBS", "NEIROCTO", "DENT",
-        "RTX", "IKA", "POND", "1000NEIROCTO",
-        "ULTIMA",
-    }
 
     # 冷卻規則：同一幣 4h 內只推一次，不分多空（避免先推多、半小時後又推空同檔）
     # 例：00:02 推 BNLIFE 多 → 00:31 再出現 BNLIFE 空也跳過，不再重複推同幣。
@@ -8963,7 +8966,7 @@ def fetch_position_change():
         if prev is None or (e.get("ts") or 0) > (prev.get("ts") or 0):
             latest_signal_by_sym[s] = e
 
-    # ── 黑名單過濾 ────────────────────────────────────────────────────────────────
+    # ── 黑名單二道防線（enrichment 前已擋一次，此處確保無漏網之魚）────────────────
     _before_bl = len(all_top)
     all_top = [
         x for x in all_top
@@ -8971,7 +8974,7 @@ def fetch_position_change():
     ]
     _bl_removed = _before_bl - len(all_top)
     if _bl_removed > 0:
-        logger.info(f"[黑名單🚫] 封鎖 {_bl_removed} 個標的（{SYMBOL_BLACKLIST}）")
+        logger.info(f"[黑名單🚫] 二道防線攔截 {_bl_removed} 個標的")
 
     cooled_top = []
     for x in all_top:
@@ -9040,6 +9043,65 @@ def fetch_position_change():
         for _item in cooled_top:
             _item["is_global_consensus"] = False
             _item["volume_oi_warn"] = False
+
+    # ── 推播前即時報價快照（進場價與風報比必須基於即時價）──────────────────────────
+    # 使用者看到訊號後以「市價」下單，所以 SL/TP 必須從即時報價算起，而非 K 線收盤。
+    # 同時保留 signal_price（K 線觸發收盤）供訊息顯示「觸發點 vs 現價」。
+    # 規則：即時 TP1 R 比 < 0.8 代表行情已過、風報比不合，直接捨棄不推。
+    if cooled_top:
+        _drop_low_r: List = []
+        for _x in cooled_top:
+            _sym_rt = _x.get("symbol") or ""
+            _sig_price = _x.get("current_price")   # K 線收盤（訊號觸發點）
+            _atr_rt = _x.get("atr")
+            _x["signal_price"] = _sig_price         # 永遠保留觸發點供顯示
+            if not _sig_price or not _atr_rt or _atr_rt <= 0:
+                continue
+            try:
+                _snap = _fetch_bingx_ticker_snapshot(_sym_rt)
+                if _snap and _snap.get("price") and float(_snap["price"]) > 0:
+                    _live = float(_snap["price"])
+                    _drift = abs(_live - _sig_price) / _sig_price
+                    # 無論偏差大小都更新（即時價才是用戶實際進場價）
+                    _x["current_price"] = _live
+                    if _drift >= 0.003:   # ≥0.3% 才 log，避免洗版
+                        logger.info(
+                            f"[即時報價🔄] {_sym_rt}: 觸發 {_sig_price:.6f} → 即時 {_live:.6f}"
+                            f"（偏差 {_drift:.1%}）"
+                        )
+                    # ── TP1 風報比篩選（基於即時價）──────────────────────────────────
+                    # 快速估算：SL 距離沿用訊號觸發點的結構（recent_2h_high/low + 0.5%），
+                    # 若即時 TP1 R 比 < 0.8 代表行情已大幅移動，不值得再推
+                    _is_long_rt = (_x.get("category") or "") in ("long_open", "short_close")
+                    _r2h_high = _x.get("recent_high_2h")
+                    _r2h_low = _x.get("recent_low_2h")
+                    if _is_long_rt and _r2h_low and _r2h_low > 0:
+                        _sl_est = _r2h_low * 0.995
+                        _risk_est = _live - _sl_est
+                    elif not _is_long_rt and _r2h_high and _r2h_high > 0:
+                        _sl_est = _r2h_high * 1.005
+                        _risk_est = _sl_est - _live
+                    else:
+                        _risk_est = _atr_rt * 1.5   # 備援估算
+                    if _risk_est > 0:
+                        _tp1_est = (_live + _risk_est) if _is_long_rt else (_live - _risk_est)
+                        _r_tp1 = abs(_tp1_est - _live) / _risk_est  # 理論上 = 1.0
+                        # 實際上風報比由「即時進場到原始 TP1 目標」決定
+                        _orig_tp1_est = (_sig_price + _risk_est) if _is_long_rt else (_sig_price - _risk_est)
+                        _rt_reward = (_orig_tp1_est - _live) if _is_long_rt else (_live - _orig_tp1_est)
+                        _rt_r_ratio = _rt_reward / _risk_est if _risk_est > 0 else 0
+                        if _rt_r_ratio < 0.8:
+                            logger.info(
+                                f"[低R比跳過⚠️] {_sym_rt}: 即時 TP1 R={_rt_r_ratio:.2f} < 0.8"
+                                f"（訊號觸發 {_sig_price:.6f} 即時 {_live:.6f}），行情已過，不推"
+                            )
+                            _drop_low_r.append(_x)
+            except Exception as _e:
+                logger.debug(f"[即時報價] {_sym_rt} 快照失敗，沿用 K 線價格: {_e}")
+        # 移除風報比過低的訊號
+        for _drop in _drop_low_r:
+            if _drop in cooled_top:
+                cooled_top.remove(_drop)
 
     # 僅在「實際有至少一則訊號」時才推主報表；無訊號或全被風報比篩掉 → 不推，安靜
     has_any = False
