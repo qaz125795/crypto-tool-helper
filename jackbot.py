@@ -5636,7 +5636,7 @@ OI_FOR_ELITE = 1.5
 SYMBOL_BLACKLIST: set = {
     "BULLA", "FIO", "ORBS", "NEIROCTO", "DENT",
         "RTX", "IKA", "POND", "1000NEIROCTO",
-        "ULTIMA", "REAL", "CRCLX",
+        "ULTIMA", "REAL", "CRCLX", "TFUEL",
 }
 
 
