@@ -2220,6 +2220,40 @@ def fetch_oi_change_30m(symbol: str) -> Optional[float]:
     return None
 
 
+def _fetch_oi_multi_tf(symbol: str) -> Dict[str, Optional[float]]:
+    """Enrichment 專用：對 top 候選幣種補取 CoinGlass 1H OI，推算 1H/4H 變化%。
+    只在 enrichment 少量幣種時呼叫，不影響主掃描效能。
+    回傳 {"1h": float|None, "4h": float|None}
+    """
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    url = f"{CG_API_BASE}/api/futures/open-interest/aggregated-history"
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    try:
+        _respect_coinglass_rate_limit()
+        r = requests.get(url, params={"symbol": base, "interval": "h1", "limit": 5},
+                         headers=headers, timeout=8)
+        if r.status_code != 200:
+            return {"1h": None, "4h": None}
+        j = r.json()
+        if j.get("code") not in (0, "0", 200, "200", None):
+            return {"1h": None, "4h": None}
+        raw = j.get("data") or j.get("list") or []
+        bars: List[float] = []
+        for row in raw:
+            v = row.get("v") or row.get("c") or row.get("close") or row.get("oi")
+            if v is not None:
+                try:
+                    bars.append(float(v))
+                except (TypeError, ValueError):
+                    pass
+        oi_1h = round((bars[-1] - bars[-2]) / bars[-2] * 100, 3) if len(bars) >= 2 and bars[-2] != 0 else None
+        oi_4h = round((bars[-1] - bars[-5]) / bars[-5] * 100, 3) if len(bars) >= 5 and bars[-5] != 0 else (
+                round((bars[-1] - bars[-4]) / bars[-4] * 100, 3) if len(bars) >= 4 and bars[-4] != 0 else None)
+        return {"1h": oi_1h, "4h": oi_4h}
+    except Exception:
+        return {"1h": None, "4h": None}
+
+
 # ── 標準版特有：5M 動能共振驗證 ───────────────────────────────────────────────
 _resonance_cache: Dict[str, Tuple[Optional[bool], float]] = {}
 _RESONANCE_CACHE_TTL = 30.0  # 30 秒快取（比共識更短，動量瞬息萬變）
@@ -5420,6 +5454,105 @@ OI_FOR_4_STAR = 1.5
 OI_FOR_ELITE = 1.5
 
 
+def _check_manipulation_risk(
+    item: Dict,
+    tech: Optional[Dict],
+    atr_val: Optional[float],
+    category: str = "",
+) -> str:
+    """
+    反畫門防護（Anti-Manipulation Gate）。
+
+    莊家用法：花 $50萬美金在冷門山寨幣開一個巨大倉位，讓 15m OI 暴增 5%、價格拉抬 2%，
+    機器人觸發推播，下一根 15m 蠟燭立刻砸盤出貨，追進者被套在山頂（俗稱「畫門」）。
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  類型差異（關鍵設計）                                                 │
+    │  long_open / short_open  = 順勢突破型（容易被畫門，三條件全套用）     │
+    │  long_close / short_close = 逆勢摸頂底型（大蠟燭反而是訊號本身）      │
+    │    → 條件1（蠟燭大小）和條件3（1H OI逆向）對逆勢型無意義，跳過        │
+    │    → 條件2（薄幣大OI）仍套用，但閾值放寬至不影響正常摸頂底            │
+    └─────────────────────────────────────────────────────────────────────┘
+
+    回傳封鎖原因字串（非空 = 封鎖），空字串 = 放行。
+    """
+    oi30 = float(item.get("oiChange30m") or 0)
+    vol_usd = (
+        item.get("_volume_usd")
+        or item.get("_cg_volume_usd")
+        or item.get("volume_usd")
+        or 0
+    )
+    try:
+        vol_m = float(vol_usd) / 1e6
+    except (TypeError, ValueError):
+        vol_m = 0.0
+
+    # 逆勢訊號（摸頂底）：long_close = 頂部做空、short_close = 底部做多
+    is_reversal = category in ("long_close", "short_close")
+
+    abs_oi = abs(oi30)
+
+    # ── 條件 1：觸發蠟燭實體過大（順勢突破型才適用）────────────────────────
+    # 摸頂底本身就是在大蠟燭出現後入場（大陽棒後做空、大陰棒後做多），
+    # 所以逆勢型跳過此條件，只對 long_open / short_open 套用。
+    if not is_reversal and tech and atr_val and atr_val > 0:
+        _ko = tech.get("last_kline_open_30m")
+        _kc = tech.get("last_kline_close_30m")
+        if _ko and _kc:
+            candle_body = abs(float(_kc) - float(_ko))
+            body_atr = candle_body / atr_val
+            if body_atr >= 2.5:
+                return (
+                    f"觸發K實體 {body_atr:.1f}x ATR，"
+                    f"單根蠟燭能量已耗盡（莊家畫門後通常下根即砸回）"
+                )
+
+    # ── 條件 2：薄流動性 + 大幅 OI 暴增（順勢 / 逆勢均套用，閾值不同）────
+    # 逆勢型（摸頂底）放寬閾值：正常的踩踏/軋空 在小幣也可能有 4~5% OI，
+    # 只封鎖明顯異常的極端情況（vol < 2M + OI ≥ 8%）。
+    if is_reversal:
+        if 0 < vol_m < 2.0 and abs_oi >= 8.0:
+            return (
+                f"極薄幣劇烈OI：成交值 {vol_m:.1f}M 但 OI 波動 {abs_oi:.1f}%，"
+                f"單人資金即可偽造踩踏/軋空訊號"
+            )
+    else:
+        # 順勢突破型：較嚴格，少量資金即可偽造突破
+        if 0 < vol_m < 3.0 and abs_oi >= 4.0:
+            return (
+                f"薄幣大OI：成交值 {vol_m:.1f}M 但 OI 暴增 {abs_oi:.1f}%，"
+                f"少量資金即可偽造此突破訊號"
+            )
+        if 0 < vol_m < 5.0 and abs_oi >= 7.0:
+            return (
+                f"低流動性劇烈波動：成交值 {vol_m:.1f}M & OI {abs_oi:.1f}%，"
+                f"畫門風險極高"
+            )
+
+    # ── 條件 3：1H OI 逆向 + 低流動性（順勢突破型才適用）──────────────────
+    # 逆勢摸頂底訊號本來就預期 15m 和 1H OI 方向不一致（這是訊號本身的邏輯），
+    # 套用此條件會錯誤地封鎖幾乎所有摸頂底，因此逆勢型跳過。
+    if not is_reversal:
+        oi_1h_pct = item.get("oi_change_1h_pct")
+        oi_1h_same_dir = (
+            isinstance(oi_1h_pct, (int, float))
+            and oi30 != 0
+            and (oi30 * oi_1h_pct) > 0
+        )
+        if (
+            isinstance(oi_1h_pct, (int, float))
+            and not oi_1h_same_dir
+            and 0 < vol_m < 7.0
+        ):
+            return (
+                f"1H OI逆向（{oi_1h_pct:+.2f}%）+ 成交值僅 {vol_m:.1f}M，"
+                f"15m 孤立操縱嫌疑高，1H 大週期未確認"
+            )
+
+    return ""  # 放行
+
+
 def _classify_signal_and_tier(
     item: Dict,
     category: str,
@@ -5474,6 +5607,28 @@ def _classify_signal_and_tier(
         # 1H 數據缺失：放行但加警示（CoinGlass API 有時不回傳該欄位）
         mtf_note = " ❓1H數據缺失"
 
+    # ── 跨週期 OI 共振分析（1H/4H OI 確認，影響信心度備註）──────────────────
+    oi_1h_pct = item.get("oi_change_1h_pct")
+    oi_4h_pct = item.get("oi_change_4h_pct")
+    _oi_mtf_note = ""
+    oi_1h_confirmed = False   # 供後續 💎 升級邏輯使用
+    if isinstance(oi_1h_pct, (int, float)):
+        _oi_1h_same = (oi * oi_1h_pct) > 0   # 15m 與 1H OI 同向
+        _abs_1h = abs(oi_1h_pct)
+        _abs_4h = abs(oi_4h_pct) if isinstance(oi_4h_pct, (int, float)) else 0.0
+        if not _oi_1h_same:
+            _oi_mtf_note = " ⚠️1H OI逆向（短期反彈，輕倉）"
+        elif _abs_4h >= 4.0:
+            _oi_mtf_note = f" ⚠️4H OI已累積{_abs_4h:.1f}%（偏末段，縮目標）"
+        elif _abs_1h < 0.8:
+            _oi_mtf_note = " 🟢1H OI剛啟動（早進空間足）"
+            oi_1h_confirmed = True
+        elif _abs_1h < 2.5:
+            _oi_mtf_note = " 🟡1H OI持續中"
+            oi_1h_confirmed = True
+        else:
+            _oi_mtf_note = f" 🟠1H OI已達{_abs_1h:.1f}%（縮短持倉）"
+
     # RSI 描述
     rsi = tech.get("rsi") if tech else None
     if rsi is not None:
@@ -5507,24 +5662,27 @@ def _classify_signal_and_tier(
         label = "🚀 多頭入場"
         zone = ZONE_BREAKOUT_LONG
         _trend = "1H逆風⚠️" if not mtf_trend_ok else "1H順勢護航"
-        reason = f"15m OI↑+Price↑，多頭建倉中，{_trend}{fr_note}{mtf_note}{_counter_hint}"
+        reason = f"15m OI↑+Price↑，多頭建倉中，{_trend}{fr_note}{mtf_note}{_counter_hint}{_oi_mtf_note}"
     elif category == "short_open":
         label = "🐻 空頭入場"
         zone = ZONE_BREAKOUT_SHORT
         _trend = "1H逆風⚠️" if not mtf_trend_ok else "1H順勢護航"
-        reason = f"15m OI↑+Price↓，空頭積極建倉，{_trend}{fr_note}{mtf_note}{_counter_hint}"
+        reason = f"15m OI↑+Price↓，空頭積極建倉，{_trend}{fr_note}{mtf_note}{_counter_hint}{_oi_mtf_note}"
     elif category == "long_close":
         label = "💥 多頭平倉"
         zone = ZONE_DIP
         _trend = "1H逆風⚠️" if not mtf_trend_ok else "1H下行加速"
-        reason = f"15m OI↓+Price↓，多頭被迫斷頭平倉，{_trend}{fr_note}{mtf_note}{_counter_hint}"
+        reason = f"15m OI↓+Price↓，多頭被迫斷頭平倉，{_trend}{fr_note}{mtf_note}{_counter_hint}{_oi_mtf_note}"
     elif category == "short_close":
         label = "🔥 空頭平倉"
         zone = ZONE_TOP
         _trend = "1H逆風⚠️" if not mtf_trend_ok else "1H上行加速"
-        reason = f"15m OI↓+Price↑，空頭遭軋空強制回補，{_trend}{fr_note}{mtf_note}{_counter_hint}"
+        reason = f"15m OI↓+Price↑，空頭遭軋空強制回補，{_trend}{fr_note}{mtf_note}{_counter_hint}{_oi_mtf_note}"
     else:
         return None
+
+    # oi_1h_confirmed 存回 item 供 build_report_message_tiered 的 💎 升級邏輯使用
+    item["_oi_1h_confirmed"] = oi_1h_confirmed
 
     return (label, zone, 5, rsi_desc, reason)
 
@@ -5873,7 +6031,7 @@ def build_report_message_tiered(
         # ── 訊號分級 ──────────────────────────────────────────────────
         # 🏎️ 順勢右側：OI & 價格 & 1H 三者方向一致（追勢型）
         # 🎲 逆勢左側：OI 反向（軋空/踩踏），屬反轉型（左側博弈）
-        # 💎 精品升級：流動性充足(≥30M) + 多所共識 + 費率助攻 + taker 方向確認
+        # 💎 精品升級：流動性充足(≥30M) + 多所共識 + 費率/taker/1H OI 三選一確認
         is_trend_follow = category in ("long_open", "short_open")
         is_counter      = category in ("short_close", "long_close")
 
@@ -5896,8 +6054,11 @@ def build_report_message_tiered(
             elif not is_bull_sig and taker_ratio_15m < 47:  # 做空：賣方主導 < 47%
                 taker_aligned = True
 
-        # 精品：成交值≥30M + 多所共識 + (費率助攻 OR taker 確認)
-        is_premium = vol_m_val >= 30 and is_consensus and (fr_aligned or taker_aligned)
+        # 1H OI 同向確認（_classify_signal_and_tier 已計算，存在 item 中）
+        oi_1h_confirmed = bool(x.get("_oi_1h_confirmed"))
+
+        # 精品：成交值≥30M + 多所共識 + (費率助攻 OR taker 確認 OR 1H OI同向剛啟動)
+        is_premium = vol_m_val >= 30 and is_consensus and (fr_aligned or taker_aligned or oi_1h_confirmed)
 
         if is_premium:
             sig_emoji = "💎"
@@ -5922,15 +6083,43 @@ def build_report_message_tiered(
         msg_lines.append("")
 
         # ② MTF 數據
-        oi_str  = fmt_pct(oi30)
+        oi30_val = oi30 or 0
+        oi_1h_val = x.get("oi_change_1h_pct")
+        oi_4h_val = x.get("oi_change_4h_pct")
+
+        # OI 多週期欄位組合
+        oi_15m_str = fmt_pct(oi30)
+        oi_1h_str  = fmt_pct(oi_1h_val) if isinstance(oi_1h_val, (int, float)) else "—"
+        oi_4h_str  = fmt_pct(oi_4h_val) if isinstance(oi_4h_val, (int, float)) else "—"
+        msg_lines.append(f"📡 OI  15m `{oi_15m_str}`  1H `{oi_1h_str}`  4H `{oi_4h_str}`")
+
+        # 跨週期 OI 白話解讀
+        _oi_hint = None
+        if isinstance(oi_1h_val, (int, float)):
+            _same_dir_1h = (oi30_val * oi_1h_val) > 0     # 15m 與 1H 方向一致
+            _abs_1h = abs(oi_1h_val)
+            _abs_4h = abs(oi_4h_val) if isinstance(oi_4h_val, (int, float)) else 0.0
+            if not _same_dir_1h:
+                _oi_hint = "⚠️ _1H方向相反・短線逆勢博弈，快進快出_"
+            elif isinstance(oi_4h_val, (int, float)) and _abs_4h >= 4.0:
+                _oi_hint = "⚠️ _4H已大幅累積，行情偏末段，謹慎追高_"
+            elif _abs_1h < 0.8:
+                _oi_hint = "🟢 _剛啟動・1H僅剛動，入場空間最大_"
+            elif _abs_1h < 2.5:
+                _oi_hint = "🟡 _行情中段・1H已有動能，仍可參與_"
+            else:
+                _oi_hint = "🟠 _1H持續累積，縮短持倉目標_"
+        if _oi_hint:
+            msg_lines.append(f"   ↳ {_oi_hint}")
+
+        # 價格多週期
         p15_str = fmt_pct(p30)
-        oi_desc = "倉位大增" if (oi30 or 0) > 0 else "倉位大減"
         if p1h is not None and isinstance(p1h, (int, float)):
             p1h_arrow = "↑" if p1h > 0 else "↓"
             p1h_part = f"{fmt_pct(p1h)}{p1h_arrow}"
         else:
             p1h_part = "—"
-        msg_lines.append(f"📡 OI `{oi_str}`（{oi_desc}）  價 `{p15_str}`  |  1H `{p1h_part}`")
+        msg_lines.append(f"💹 價格  15m `{p15_str}`  |  1H `{p1h_part}`")
 
         # Taker ratio（主動買賣比）：coins-markets 免費 CVD 資料，只有 top-100 才有
         if taker_ratio_15m is not None:
@@ -6026,17 +6215,14 @@ def build_report_message_tiered(
                 f"⚠️ SL距離 `{warn_pct:.1f}%`，結構點較遠，風報比偏低，可考慮跳過或減半倉位"
             )
 
-        # ⑥ 觸發 K 線漲幅警示（身處 > 2*ATR = 動能已大幅釋放，起漲偏晚）
+        # ⑥ 觸發 K 線漲幅警示
+        # 注意：≥ 2.5x ATR 的訊號已在反畫門防護層攔截，此處只會出現 2.0~2.5x 的邊緣情況
         _kline_open = x.get("last_kline_open_30m")
         _kline_close = x.get("last_kline_close_30m") or price
         if _kline_open and atr_val and atr_val > 0:
             _body = abs(_kline_close - _kline_open)
             _body_atr = _body / atr_val
-            if _body_atr >= 3.0:
-                msg_lines.append(
-                    f"⚡ 觸發K噴出 `{_body_atr:.1f}x ATR`，起漲偏晚，動能多已釋放，入場需謹慎"
-                )
-            elif _body_atr >= 2.0:
+            if 2.0 <= _body_atr < 2.5:
                 msg_lines.append(
                     f"⚡ 觸發K強勢 `{_body_atr:.1f}x ATR`，注意回踩再進場較佳"
                 )
@@ -7616,6 +7802,11 @@ def fetch_position_change():
                 item.pop("_vol_need_planc", None)
                 logger.debug(f"[Plan C] {sym}: K線估算 24h 成交值 {kline_vol_est/1e6:.2f}M USD")
 
+        # 補取 1H/4H OI（Enrichment 用，僅對 top 少量候選幣種呼叫）
+        _oi_tf = _fetch_oi_multi_tf(sym)
+        item["oi_change_1h_pct"] = _oi_tf.get("1h")
+        item["oi_change_4h_pct"] = _oi_tf.get("4h")
+
         # 資金費率：CoinGlass 批次表（純 CoinGlass 模式，不再呼叫 BingX）
         _base_fr = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
         funding_rate = _cg_fr_map.get(_base_fr)
@@ -7645,6 +7836,15 @@ def fetch_position_change():
         signal_label, zone, stars, rsi_desc, reason = classified
         rsi_val = tech.get("rsi") if tech else None
         atr_val = tech.get("atr") if tech else None
+
+        # ── 反畫門防護（Anti-Manipulation Gate）────────────────────────────
+        # 放在分類後（已知是真實訊號候選）、推播前，封鎖莊家假突破/畫門特徵
+        _manip_reason = _check_manipulation_risk(item, tech, atr_val, category=cat)
+        if _manip_reason:
+            logger.info(
+                f"[反畫門🚫] {sym}（{cat}）封鎖推播：{_manip_reason}"
+            )
+            continue
 
         # 取得現價（K 線收盤）
         _cur_price = tech.get("current_price") if tech else None
@@ -8038,8 +8238,8 @@ def fetch_position_change():
 
         if sl_level is not None or tp1_level is not None:
             full_sym = entry.get("full_symbol") or f"{sym_base}USDT"
-            # 使用 K 線 high/low 判斷是否曾觸及 SL/TP（避免只看收盤價漏判插針）
-            kline_tech = _fetch_bingx_klines_and_calc(full_sym, preferred_symbol=None)
+            # 使用 CoinGlass K 線 high/low 判斷是否曾觸及 SL/TP（與訊號產生同一數據源，避免 BingX 符號錯誤）
+            kline_tech = _fetch_cg_klines_and_calc(sym_base)
             cur_price = None
             kline_high = None
             kline_low = None
@@ -8147,40 +8347,77 @@ def fetch_position_change():
                 hit_tp = False
                 hit_tp2 = False
                 use_range = kline_high is not None and kline_low is not None and kline_high > 0 and kline_low > 0
+                # 跨越確認輔助：TP/SL 必須「從進場側穿越」才算真實觸發
+                # 原理：若錯抓了不同幣種，其 2h 區間很可能整體在 TP/SL 另一側，
+                # 以此排除「price 一直都在 TP 那側、根本從未有過進場空間」的偽觸發
+                def _straddle_tp(level: float) -> bool:
+                    """確認近 2h 有「進場側」的價格（代表真的從進場穿越至此）"""
+                    if recent_high_2h is None or recent_low_2h is None:
+                        return True  # 無 2h 資料，無法驗證，保守允許
+                    if is_long:
+                        # 多單止盈在進場上方：2h 低點必須低於 TP（代表曾在 TP 下方進場）
+                        return recent_low_2h < level
+                    else:
+                        # 空單止盈在進場下方：2h 高點必須高於 TP（代表曾在 TP 上方進場）
+                        return recent_high_2h > level
+
+                def _straddle_sl(level: float) -> bool:
+                    """確認近 2h 有「非止損側」的價格（代表真的從進場被推至止損）"""
+                    if recent_high_2h is None or recent_low_2h is None:
+                        return True
+                    if is_long:
+                        # 多單止損在進場下方：2h 高點必須高於 SL（代表曾在 SL 上方持倉）
+                        return recent_high_2h > level
+                    else:
+                        # 空單止損在進場上方：2h 低點必須低於 SL（代表曾在 SL 下方持倉）
+                        return recent_low_2h < level
+
                 if use_range:
                     # 多單：當下這根 K 線最低點跌破止損 → 止損；最高點觸及 TP → 止盈
                     # 空單：當下這根 K 線最高點突破止損 → 止損；最低點觸及 TP → 止盈
                     if sl_level is not None:
-                        if is_long and kline_low <= sl_level:
+                        if is_long and kline_low <= sl_level and _straddle_sl(sl_level):
                             hit_sl = True
-                        elif (not is_long) and kline_high >= sl_level:
+                        elif (not is_long) and kline_high >= sl_level and _straddle_sl(sl_level):
                             hit_sl = True
                     if tp1_level is not None:
-                        if is_long and kline_high >= tp1_level:
+                        if is_long and kline_high >= tp1_level and _straddle_tp(tp1_level):
                             hit_tp = True
-                        elif (not is_long) and kline_low <= tp1_level:
+                        elif (not is_long) and kline_low <= tp1_level and _straddle_tp(tp1_level):
                             hit_tp = True
+                        elif (is_long and kline_high >= tp1_level) or ((not is_long) and kline_low <= tp1_level):
+                            logger.warning(
+                                f"[TP偽觸發保護] {sym_base} {'多' if is_long else '空'}單: "
+                                f"K線觸及 TP1={tp1_level}，但 2h範圍({recent_high_2h},{recent_low_2h}) "
+                                f"未跨越 TP → 判定為錯誤標的，忽略本次觸發"
+                            )
                     if tp2_level is not None:
-                        if is_long and kline_high >= tp2_level:
+                        if is_long and kline_high >= tp2_level and _straddle_tp(tp2_level):
                             hit_tp2 = True
-                        elif (not is_long) and kline_low <= tp2_level:
+                        elif (not is_long) and kline_low <= tp2_level and _straddle_tp(tp2_level):
                             hit_tp2 = True
                 else:
-                    # 無 2h 區間時沿用原邏輯：僅以當下快照價/收盤價判斷
+                    # 無當根 K 線高低時沿用收盤價，同樣加跨越確認
                     if sl_level is not None:
-                        if is_long and cur_price <= sl_level:
+                        if is_long and cur_price <= sl_level and _straddle_sl(sl_level):
                             hit_sl = True
-                        elif (not is_long) and cur_price >= sl_level:
+                        elif (not is_long) and cur_price >= sl_level and _straddle_sl(sl_level):
                             hit_sl = True
                     if tp1_level is not None:
-                        if is_long and cur_price >= tp1_level:
+                        if is_long and cur_price >= tp1_level and _straddle_tp(tp1_level):
                             hit_tp = True
-                        elif (not is_long) and cur_price <= tp1_level:
+                        elif (not is_long) and cur_price <= tp1_level and _straddle_tp(tp1_level):
                             hit_tp = True
+                        elif (is_long and cur_price >= tp1_level) or ((not is_long) and cur_price <= tp1_level):
+                            logger.warning(
+                                f"[TP偽觸發保護] {sym_base} {'多' if is_long else '空'}單(cur_price): "
+                                f"現價觸及 TP1={tp1_level}，但 2h範圍({recent_high_2h},{recent_low_2h}) "
+                                f"未跨越 TP → 判定為錯誤標的，忽略本次觸發"
+                            )
                     if tp2_level is not None:
-                        if is_long and cur_price >= tp2_level:
+                        if is_long and cur_price >= tp2_level and _straddle_tp(tp2_level):
                             hit_tp2 = True
-                        elif (not is_long) and cur_price <= tp2_level:
+                        elif (not is_long) and cur_price <= tp2_level and _straddle_tp(tp2_level):
                             hit_tp2 = True
 
                 # ── 進場價異常保護：推播後 30 分鐘內觸損 + 現價與 SL 方向差距 > 2倍 SL 距離
