@@ -392,7 +392,7 @@ def compute_signal(
             )
     except Exception as e:
         logger.warning("[ORB-DEBUG] 當日 K 線紀錄失敗: %s", e)
-    signal, range_high, range_low, _ = run_orb_signal(
+    signal, range_high, range_low, orb_state = run_orb_signal(
         df_1h,
         session_start_hour_utc=config.SESSION_START_HOUR_UTC,
         candle_composition=config.CANDLE_COMPOSITION,
@@ -409,6 +409,23 @@ def compute_signal(
 
     last = df_1h.iloc[-1]
     close = float(last["Close"])
+
+    # ── 訊號有效性檢查：防止「歷史突破但當前已反轉」的假訊號 ──────────────────
+    # 多單：收盤若已跌回區間下緣以下，突破失效；空單：收盤若已漲回區間上緣以上，突破失效
+    body_high = orb_state.body_high
+    body_low = orb_state.body_low
+    if signal == SIGNAL_LONG and body_low > 0 and close < body_low:
+        logger.info(
+            "[ORB] 多單訊號已失效（當前收盤 %.2f 已跌破區間下緣 %.2f，突破反轉），跳過推播",
+            close, body_low,
+        )
+        return None
+    if signal == SIGNAL_SHORT and body_high > 0 and close > body_high:
+        logger.info(
+            "[ORB] 空單訊號已失效（當前收盤 %.2f 已漲過區間上緣 %.2f，突破反轉），跳過推播",
+            close, body_high,
+        )
+        return None
     # 趨勢濾網使用較快的 SMA_40，必要時回退到原本 MA/SMA_100
     ma = last.get("SMA_40") or last.get("MA") or last.get("SMA_100")
     atr_val = float(last["ATR"])
