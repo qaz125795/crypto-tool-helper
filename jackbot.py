@@ -3544,8 +3544,9 @@ SYMBOL_BLACKLIST: set = {
     "RTX", "IKA", "POND", "1000NEIROCTO",
     "ULTIMA", "REAL", "CRCLX", "TFUEL",
     "WHITEWHALE", "PYR",
-    "MANYU",   # 極小市值 meme 幣，價格 ~7e-9 USD，無交易意義
-    "CITY",    # 用戶手動加入黑名單
+    "MANYU",    # 極小市值 meme 幣，價格 ~7e-9 USD，無交易意義
+    "CITY",     # 用戶手動加入黑名單
+    "MASTOCK",  # Hyperliquid 獨家，無 K 線，OI 數據異常（曾觸發 621% 極端值）
     # ── 代幣化股票（BingX/Bitget/OKX 合約，非加密貨幣）──
     "TSLAX", "TSLA",
     "NVDAX", "NVDA",
@@ -5869,12 +5870,17 @@ def fetch_position_change():
     _dynamic_oi_sample_size = len(oi_samples)
     if _dynamic_oi_sample_size >= 10:
         arr = np.array(oi_samples, dtype=float)
-        _dynamic_oi_mean_30m = float(arr.mean())
-        _dynamic_oi_std_30m = float(arr.std())
+        # 去極端值：截斷至 95th 百分位，防止單一異常幣（如 OI +621%）炸飛門檻
+        cap_95 = float(np.percentile(arr, 95))
+        arr_clean = np.clip(arr, 0, cap_95)
+        _dynamic_oi_mean_30m = float(arr_clean.mean())
+        _dynamic_oi_std_30m = float(arr_clean.std())
         _dynamic_oi_4star = max(OI_FOR_4_STAR, _dynamic_oi_mean_30m + 1.0 * _dynamic_oi_std_30m)
         _dynamic_oi_5star = max(OI_FOR_5_STAR, _dynamic_oi_mean_30m + 2.0 * _dynamic_oi_std_30m)
+        _outlier_count = int(np.sum(arr > cap_95))
         logger.info(
-            f"【動態OI門檻】樣本 {_dynamic_oi_sample_size} 個 | μ={_dynamic_oi_mean_30m:.2f}% σ={_dynamic_oi_std_30m:.2f}% "
+            f"【動態OI門檻】樣本 {_dynamic_oi_sample_size} 個（截斷 {_outlier_count} 個極端值≥{cap_95:.1f}%）"
+            f" | μ={_dynamic_oi_mean_30m:.2f}% σ={_dynamic_oi_std_30m:.2f}% "
             f"→ 4★≥{_dynamic_oi_4star:.2f}% 5★≥{_dynamic_oi_5star:.2f}%"
         )
     else:
@@ -5910,8 +5916,10 @@ def fetch_position_change():
 
         if len(oi_samples) >= 10:
             arr = np.array(oi_samples, dtype=float)
-            _dynamic_oi_mean_30m = float(arr.mean())
-            _dynamic_oi_std_30m = float(arr.std())
+            cap_95 = float(np.percentile(arr, 95))
+            arr_clean = np.clip(arr, 0, cap_95)
+            _dynamic_oi_mean_30m = float(arr_clean.mean())
+            _dynamic_oi_std_30m = float(arr_clean.std())
             _dynamic_oi_4star = max(OI_FOR_4_STAR, _dynamic_oi_mean_30m + 1.0 * _dynamic_oi_std_30m)
             _dynamic_oi_5star = max(OI_FOR_5_STAR, _dynamic_oi_mean_30m + 2.0 * _dynamic_oi_std_30m)
             _dynamic_oi_sample_size = len(oi_samples)
