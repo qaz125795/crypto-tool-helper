@@ -3564,7 +3564,13 @@ SYMBOL_BLACKLIST: set = {
     # ── 波動率指數 / 傳統指數 ──
     "VIX", "VIXINDEX",
     "DXY", "SPX", "NDX", "ES",
-    "US2000", "US30", "US500", "NAS100",  # 股票指數
+    "US2000", "US30", "US500", "NAS100",  # 美股指數
+    # ── 亞洲股票指數期貨（BingX/Bitget 有交易）──
+    "HK50", "HKTECH",                     # 恒生指數 / 恒生科技
+    "JP225", "NIKKEI", "NIKKEI225",       # 日經指數
+    "CN50", "CHINA50", "CSI300",          # 中國A50 / 滬深300
+    "AU200", "SG30",                      # 澳洲/新加坡指數
+    "UK100", "DE40", "FR40", "EU50",      # 歐洲指數
 }
 
 
