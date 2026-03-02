@@ -1542,10 +1542,13 @@ def _parse_oi_bars_from_rows(rows: list) -> list:
     return oi_bars
 
 
-def fetch_oi_change_tf(symbol: str, interval: str = "1h") -> Optional[float]:
+def fetch_oi_change_tf(
+    symbol: str, interval: str = "1h", return_ts: bool = False
+) -> "Optional[float] | tuple":
     """
     計算單一 symbol 指定時框 OI 變化%（支援 1h / 30m / 15m / 5m）。
-    1H MTF 漏斗策略核心：Stage 1 用 "1h"，Stage 2 用 "30m"，Stage 3 用 "15m"，Stage 4 用 "5m"。
+    return_ts=True 時回傳 (change_pct, candle_start_ts)，其中
+    candle_start_ts 為最近一根完整 K線的起始時間戳（Unix 秒）。
     """
     global _coinglass_oi_rate_limiter, _coinglass_oi_first_failure_logged
 
@@ -1576,6 +1579,23 @@ def fetch_oi_change_tf(symbol: str, interval: str = "1h") -> Optional[float]:
                     change = _parse_oi_change_from_data_list(data_list)
                     if change is not None:
                         _cb_record_success()
+                        if return_ts:
+                            # 取最近已收盤 K線的起始時間（data_list[-2]）
+                            try:
+                                _sorted = sorted(
+                                    data_list,
+                                    key=lambda x: x.get("t") or x.get("time") or x.get("timestamp") or 0
+                                )
+                                _candle_ts = int(
+                                    _sorted[-2].get("t") or _sorted[-2].get("time") or
+                                    _sorted[-2].get("timestamp") or 0
+                                )
+                                # CoinGlass 部分接口回傳毫秒，統一轉秒
+                                if _candle_ts > 1e12:
+                                    _candle_ts = int(_candle_ts / 1000)
+                            except Exception:
+                                _candle_ts = 0
+                            return change, _candle_ts
                         return change
                 msg = result.get("msg", "")
                 if "Too Many Requests" in msg or result.get("code") in ("400", "429"):
@@ -4322,7 +4342,11 @@ def build_report_message_tiered(
         detected_ts = x.get("_detected_ts")
         vwap_2h_val = x.get("vwap_2h")
         _now_ts = time.time()
-        _stale_min = int((_now_ts - detected_ts) / 60) if detected_ts else 0
+        # 優先用 CoinGlass 15m OI K線時間戳（持倉真正異動的那根K線起點）
+        # 退一步用系統掃描時間
+        _oi_15m_candle_ts = x.get("_oi_15m_candle_ts") or 0
+        _anomaly_ts = _oi_15m_candle_ts if _oi_15m_candle_ts > 0 else detected_ts
+        _stale_min = int((_now_ts - _anomaly_ts) / 60) if _anomaly_ts else 0
 
         # ══════════════════════════════════════════════════════════
         # ATR 風控計算（Google 建議純 ATR 公式：Risk = 1.5 × 1H_ATR）
@@ -4509,21 +4533,23 @@ def build_report_message_tiered(
                 _vwap_vs = " _（現價低於均價，空方佔優）_" if not is_bull_sig else " _（現價低於均價，多方逆風）_"
             msg_lines.append(f"📐 主力均價：`{_fmt_price(vwap_2h_val)}`{_vwap_vs}")
 
-        # 偵測時間 + 過時警告
-        if detected_ts:
+        # 持倉異動時間 + 過時警告
+        if _anomaly_ts:
             import datetime as _dt
-            _det_time_str = _dt.datetime.fromtimestamp(
-                detected_ts, tz=_dt.timezone(_dt.timedelta(hours=8))
+            _tz_taipei = _dt.timezone(_dt.timedelta(hours=8))
+            _anomaly_time_str = _dt.datetime.fromtimestamp(
+                _anomaly_ts, tz=_tz_taipei
             ).strftime("%H:%M")
+            _label = "15m K線異動" if _oi_15m_candle_ts > 0 else "系統偵測"
             if _stale_min >= 15:
                 msg_lines.append(
-                    f"🕐 偵測時間：{_det_time_str}（{_stale_min} 分前）"
+                    f"🕐 {_label}：{_anomaly_time_str}（約 {_stale_min} 分前）"
                 )
                 msg_lines.append(
-                    f"_⚠️ 訊號偵測已逾 {_stale_min} 分鐘，行情可能已推進，請先確認現況再進場_"
+                    f"_⚠️ 此持倉異動已逾 {_stale_min} 分鐘，行情可能已推進，請先確認現況再進場_"
                 )
             else:
-                msg_lines.append(f"🕐 偵測時間：{_det_time_str}（{_stale_min} 分前）")
+                msg_lines.append(f"🕐 {_label}：{_anomaly_time_str}（約 {_stale_min} 分前）")
 
         msg_lines.append(f"💵 進場：`{_fmt_price(price)}`")
         if sl is not None:
@@ -6174,7 +6200,11 @@ def fetch_position_change():
 
         # ── Step 3 & 4：15m + 5m OI（僅針對通過 Step 2 的極少數幣種）──────────
         time.sleep(0.2)
-        _oi_15m = fetch_oi_change_tf(sym, "15m")
+        _oi_15m_result = fetch_oi_change_tf(sym, "15m", return_ts=True)
+        if isinstance(_oi_15m_result, tuple):
+            _oi_15m, _oi_15m_candle_ts = _oi_15m_result
+        else:
+            _oi_15m, _oi_15m_candle_ts = _oi_15m_result, 0
         logger.info(f"[Step3 15m OI] {sym}: OI={(_oi_15m or 0):+.2f}%")
         time.sleep(0.2)
         _oi_5m  = fetch_oi_change_tf(sym, "5m")
@@ -6231,6 +6261,8 @@ def fetch_position_change():
             # _scan_ts = 1H OI 首次偵測時間（process_single_symbol 打上），保留原始時間
             # 若 item 無此欄位（舊路徑），以當前時間補足
             "_detected_ts": item.get("_scan_ts") or time.time(),
+            # 15m OI K線起始時間（CoinGlass 資料本身的時間戳，代表持倉異動發生的時間窗）
+            "_oi_15m_candle_ts": locals().get("_oi_15m_candle_ts") or 0,
             # MTF 四層數據
             "oiChange_30m": _oi_30m,
             "oiChange_15m": _oi_15m,
