@@ -3547,7 +3547,7 @@ SYMBOL_BLACKLIST: set = {
     "MANYU",      # 極小市值 meme 幣，價格 ~7e-9 USD，無交易意義
     "CITY",       # 用戶手動加入黑名單
     "REQ", "STEEM", "ROAM",  # 用戶手動加入黑名單（2026-03-02）
-    "CELR", "ATA",           # 用戶手動加入黑名單（2026-03-02）
+    "CELR", "ATA", "ICX",    # 用戶手動加入黑名單（2026-03-02）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
     "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
