@@ -3547,6 +3547,7 @@ SYMBOL_BLACKLIST: set = {
     "MANYU",      # 極小市值 meme 幣，價格 ~7e-9 USD，無交易意義
     "CITY",       # 用戶手動加入黑名單
     "REQ", "STEEM", "ROAM",  # 用戶手動加入黑名單（2026-03-02）
+    "CELR", "ATA",           # 用戶手動加入黑名單（2026-03-02）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
     "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
@@ -6039,7 +6040,9 @@ def fetch_position_change():
         _ema20_4h = _tech_4h.get("ema20_close") if _tech_4h else None
         _rsi_4h   = _tech_4h.get("rsi")        if _tech_4h else None
         # 判斷現價是否站上 4H EMA20（順/逆勢天候）
-        _cur_price_prelim = item.get("price")
+        # CoinGlass 有 price 的幣優先用 CoinGlass；BingX-only 幣（price=None）
+        # 用 1H K線收盤（tech.current_price）作備援，確保 4H EMA 比對不失效
+        _cur_price_prelim = item.get("price") or (tech.get("current_price") if tech else None)
         _is_above_4h_ema  = (
             bool(_cur_price_prelim > _ema20_4h)
             if (_cur_price_prelim and _ema20_4h and _ema20_4h > 0)
