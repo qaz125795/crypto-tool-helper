@@ -3554,12 +3554,17 @@ SYMBOL_BLACKLIST: set = {
     "MSFTX", "MSFT",
     "COINX", "COIN",
     "NFLXX", "NFLX",
+    "GME", "GMEX",          # GameStop
+    "LMT", "LMTX",          # Lockheed Martin
+    "BABA", "BABAX",        # Alibaba
+    "ABNBX", "ABNB",        # Airbnb
     # ── 傳統商品期貨 ──
     "COPPER", "SILVER", "GOLD", "XAU", "XAG",
     "XBR", "OIL", "BRENT", "WTI", "USOIL",
     # ── 波動率指數 / 傳統指數 ──
     "VIX", "VIXINDEX",
     "DXY", "SPX", "NDX", "ES",
+    "US2000", "US30", "US500", "NAS100",  # 股票指數
 }
 
 
@@ -4393,7 +4398,9 @@ def build_report_message_tiered(
                 _fr_desc = "略偏多"
             else:
                 _fr_desc = "略偏空"
-            _fr_line = f"💸 *費率：* `{_fr_val:+.4f}%` {_fr_desc}"
+            # 自動去尾零：0.0100% → 0.01%，-0.0500% → -0.05%
+            _fr_str = f"{_fr_val:+.4f}".rstrip('0').rstrip('.')
+            _fr_line = f"💸 *費率：* `{_fr_str}%` {_fr_desc}"
         else:
             _fr_line = "💸 *費率：* 無數據"
 
@@ -5503,6 +5510,42 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             logger.warning(f"coins-price-change 異常: {e}")
             return []
 
+    # ── Step 0：supported-coins 白名單（最先執行，作為合約幣種過濾閘門）──────
+    # 先拉官方支援的合約幣種清單，之後 coins-price-change 的 ~970 個幣
+    # 必須在這份清單內才能進入掃描池（自動過濾掉代幣化股票/指數/商品）
+    _supported_whitelist: set = set()
+
+    def _fetch_supported_whitelist() -> set:
+        try:
+            _respect_coinglass_rate_limit()
+            r = requests.get(
+                f"{CG_API_BASE}{CG_EP['supported_coins']}",
+                headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+                timeout=10
+            )
+            if r.status_code != 200:
+                logger.warning(f"[supported-coins⚠️] HTTP {r.status_code}，白名單停用，改用黑名單保護")
+                return set()
+            j = r.json()
+            coin_list = j.get("data", [])
+            if not isinstance(coin_list, list) or not coin_list:
+                return set()
+            wl: set = set()
+            for c in coin_list:
+                name = str(c).strip().upper() if isinstance(c, str) else (
+                    str(c.get("symbol") or c.get("coin") or "").strip().upper()
+                    if isinstance(c, dict) else ""
+                )
+                if name:
+                    wl.add(name)
+            logger.info(f"[supported-coins✅] 合約白名單載入 {len(wl)} 個幣種（用於過濾非加密貨幣）")
+            return wl
+        except Exception as e:
+            logger.warning(f"[supported-coins⚠️] 異常: {e}，白名單停用")
+            return set()
+
+    _supported_whitelist = _fetch_supported_whitelist()
+
     # ── Step 1：coins-markets（top 100，帶完整 OI/Price 數據）──────────────
     result_markets = _try_coins_markets()
 
@@ -5514,71 +5557,55 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
     else:
         logger.warning("[CoinGlass-First] coins-price-change 無回傳數據")
 
-    # ── Step 3：supported-coins（全量幣種名單，作為最終補充）───────────────
-    # 用 supported-coins 確保掃描涵蓋所有合約幣種（即使 price-change 也有上限）
-    def _try_supported_coins_stubs(seen: set) -> List[Dict]:
-        """從 supported-coins 取得完整幣種名單，為未覆蓋幣種建立最小存根（stub）。
-        stubs 沒有 price_change 數據，會被標記 _stub=True，
-        下游 price filter 會對這類幣「放行進 OI 檢查」而非直接拋棄。"""
-        try:
-            _respect_coinglass_rate_limit()
-            r = requests.get(
-                f"{CG_API_BASE}{CG_EP['supported_coins']}",
-                headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
-                timeout=10
-            )
-            if r.status_code != 200:
-                logger.debug(f"[supported-coins] HTTP {r.status_code}")
-                return []
-            j = r.json()
-            coin_list = j.get("data", [])
-            if not isinstance(coin_list, list) or not coin_list:
-                return []
-            stubs = []
-            for c in coin_list:
-                name = str(c).strip().upper() if isinstance(c, str) else (
-                    str(c.get("symbol") or c.get("coin") or "").strip().upper()
-                    if isinstance(c, dict) else ""
-                )
-                if name and len(name) <= 14 and name not in seen:
-                    seen.add(name)
-                    stubs.append({
-                        "symbol": name, "coin": name,
-                        "price_change_percent_30m": None,
-                        "price_change_percent_24h": None,
-                        "_cg_volume_usd": None,
-                        "_stub": True,  # 標記為 stub：price filter 放行，直接進 OI 檢查
-                    })
-            logger.info(f"[CoinGlass-First] supported-coins 補充 {len(stubs)} 個 stub 幣種（無 price 數據，直接進 OI 掃描）")
-            return stubs
-        except Exception as e:
-            logger.debug(f"[supported-coins] 異常: {e}")
-            return []
-
-    # ── Step 4：三路合併 ──────────────────────────────────────────────────
+    # ── Step 3：三路合併（coins-price-change 需通過白名單閘門）──────────────
     seen_syms: set = set()
     result: List[Dict] = []
+    wl_filtered = 0  # 被白名單過濾掉的非加密幣數量
 
+    # markets top-100 直接進（OI 排序本就是主流合約幣）
     for item in result_markets:
         sym = item.get("symbol", "")
         if sym and sym not in seen_syms:
             seen_syms.add(sym)
             result.append(item)
 
+    # price-change 的補充幣種：若白名單有效，只放行清單內的幣
     pc_added = 0
     for item in result_pc:
         sym = item.get("symbol", "")
-        if sym and sym not in seen_syms:
-            seen_syms.add(sym)
-            result.append(item)
-            pc_added += 1
+        if not sym or sym in seen_syms:
+            continue
+        # 白名單過濾：去掉 USDT 後比對（GME/US2000/LMT 等不在白名單內）
+        sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+        if _supported_whitelist and sym_base not in _supported_whitelist:
+            wl_filtered += 1
+            continue
+        seen_syms.add(sym)
+        result.append(item)
+        pc_added += 1
 
-    stub_list = _try_supported_coins_stubs(seen_syms)
-    result.extend(stub_list)
+    if wl_filtered > 0:
+        logger.info(f"[supported-coins🚫] 白名單過濾掉 {wl_filtered} 個非加密貨幣幣種（代幣化股票/指數等）")
+
+    # supported-coins 中尚未納入的合約幣種，補充為 stub（確保全覆蓋）
+    stub_added = 0
+    for name in _supported_whitelist:
+        if name not in seen_syms and len(name) <= 14:
+            seen_syms.add(name)
+            result.append({
+                "symbol": name, "coin": name,
+                "price_change_percent_30m": None,
+                "price_change_percent_24h": None,
+                "_cg_volume_usd": None,
+                "_stub": True,
+            })
+            stub_added += 1
+    if stub_added:
+        logger.info(f"[CoinGlass-First] supported-coins 補充 {stub_added} 個 stub 幣種（無 price 數據，直接進 OI 掃描）")
 
     logger.info(
         f"[CoinGlass-First] 三路合併完成 → 總計 {len(result)} 個唯一幣種"
-        f"（markets={len(result_markets)} | pc補充={pc_added} | supported-coins stub={len(stub_list)}）"
+        f"（markets={len(result_markets)} | pc補充={pc_added} | supported-coins stub={stub_added} | 白名單過濾={wl_filtered}）"
     )
     return result
 
