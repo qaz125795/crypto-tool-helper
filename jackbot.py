@@ -3539,11 +3539,13 @@ PRICE_THRESHOLD_30M = PRICE_THRESHOLD_1H
 # ── 黑名單：永久禁止推播的標的（可隨時新增/移除）────────────────────────────────
 # 原則：歷史表現差、流動性不足、長期被操控的幣種
 SYMBOL_BLACKLIST: set = {
-    # ── 已知問題幣（操縱/流動性/無意義）──
+    # ── 已知問題幣（操縱/流動性/無意義/極小市值）──
     "BULLA", "FIO", "ORBS", "NEIROCTO", "DENT",
     "RTX", "IKA", "POND", "1000NEIROCTO",
     "ULTIMA", "REAL", "CRCLX", "TFUEL",
     "WHITEWHALE", "PYR",
+    "MANYU",   # 極小市值 meme 幣，價格 ~7e-9 USD，無交易意義
+    "CITY",    # 用戶手動加入黑名單
     # ── 代幣化股票（BingX/Bitget/OKX 合約，非加密貨幣）──
     "TSLAX", "TSLA",
     "NVDAX", "NVDA",
@@ -4149,8 +4151,11 @@ def build_report_message_tiered(
     def _fmt_price(p: Optional[float]) -> str:
         if p is None or (isinstance(p, float) and p != p) or p <= 0:
             return "—"
+        # 極小價格（如 meme 幣 7.18e-9）：動態計算需要幾位才能顯示 4 位有效數字
         if p < 0.0001:
-            return f"{p:.8f}"
+            import math
+            sig_dec = max(8, -int(math.floor(math.log10(abs(p)))) + 3)
+            return f"{p:.{sig_dec}f}".rstrip('0').rstrip('.')
         if p < 0.01:
             return f"{p:.6f}"
         if p < 1:
