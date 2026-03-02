@@ -230,10 +230,14 @@ def run_orb_signal(
     candle_composition: int = 3,
     trades_per_day: int = 2,
     point: float = 0.01,
+    range_lock_candles: int = 0,
 ) -> Tuple[int, Optional[float], Optional[float], RangeState]:
     """
     在當前交易日的 1h K 上跑 ORB，回傳 (signal, range_high, range_low, state)。
     signal: 11=多, 10=空, 0=無。邏輯：每根 K 收盤後用該 K 更新 range，再檢查該 K 是否產生訊號。
+
+    range_lock_candles > 0：開盤後前 N 根 K 確立區間後凍結，後續不再擴張；
+    解決「區間跟著日內最高/最低不斷擴張 → 收盤永遠在區間內 → 永無訊號」的問題。
     """
     day_df = get_trading_day_candles_1h(df_1h, session_start_hour_utc)
     if day_df.empty or len(day_df) < 2:
@@ -256,12 +260,18 @@ def run_orb_signal(
         if pd.isna(atr_prev) or atr_prev <= 0:
             atr_prev = point * 500
 
+        # range_lock_candles > 0：超過鎖定根數後凍結區間，不再呼叫 _candle_update_snr
+        range_is_locked = range_lock_candles > 0 and i > range_lock_candles
+
         if new_trading_day_flag:
             _first_candle_update_snr(state, _get_candle_info(day_df.iloc[0]), atr_prev, point)
             new_trading_day_flag = False
             _update_flags(state, trades_per_day)
-        else:
+        elif not range_is_locked:
             _candle_update_snr(state, prev, atr_prev, point, candle_composition)
+            _update_flags(state, trades_per_day)
+        else:
+            # 區間已凍結：只推進計數器，讓 composition 條件可滿足，不更新高低點
             _update_flags(state, trades_per_day)
 
         last_signal = _get_buy_sell_signal(state, prev, candle_composition, trades_per_day)
@@ -278,7 +288,9 @@ def run_orb_signal(
         atr_last = last_row.get("ATR", point * 500)
         if pd.isna(atr_last) or atr_last <= 0:
             atr_last = point * 500
-        _candle_update_snr(state, last_candle, atr_last, point, candle_composition)
+        last_i = len(day_df) - 1
+        if range_lock_candles == 0 or last_i <= range_lock_candles:
+            _candle_update_snr(state, last_candle, atr_last, point, candle_composition)
         _update_flags(state, trades_per_day)
         last_signal = _get_buy_sell_signal(state, last_candle, candle_composition, trades_per_day)
         if last_signal != SIGNAL_NONE:
@@ -290,6 +302,15 @@ def run_orb_signal(
         range_high = state.wick_high
     if range_low is None and state.wick_low > 0:
         range_low = state.wick_low
+
+    if range_lock_candles > 0:
+        logger.info(
+            "[ORB] 區間凍結模式 lock=%d 根 | 凍結區間 body_high=%.2f body_low=%.2f",
+            range_lock_candles,
+            state.body_high,
+            state.body_low,
+        )
+
     return last_signal, range_high, range_low, state
 
 
@@ -376,6 +397,7 @@ def compute_signal(
         session_start_hour_utc=config.SESSION_START_HOUR_UTC,
         candle_composition=config.CANDLE_COMPOSITION,
         trades_per_day=config.MAX_TRADES_PER_DAY,
+        range_lock_candles=getattr(config, "RANGE_LOCK_CANDLES", 0),
     )
     if signal == SIGNAL_NONE:
         logger.info(

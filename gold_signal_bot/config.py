@@ -24,6 +24,9 @@ class Config:
     SESSION_START_HOUR_UTC: int = 1   # 交易日起始小時 (UTC)，XAUUSD 約 1:02 server
     CANDLE_COMPOSITION: int = 2       # 區間內至少幾根 K 才視為「確立」（原 3，改 2 較寬鬆）
     MAX_TRADES_PER_DAY: int = 2       # 每日最多 1 多 1 空
+    # 區間凍結：開盤後前 N 根 K 確立 ORB 區間後凍結，不再擴張（0 = 不限制，維持原行為）
+    # 建議值 4：亞洲盤 4 小時確立區間（01:00~05:00 UTC），倫敦/紐約盤突破才出訊號
+    RANGE_LOCK_CANDLES: int = 4
 
     # 趨勢濾網 (GOLD_ORB MA100 + Gold-analysis SMA40/100)
     MA_TREND_PERIOD: int = 100       # 趨勢 MA 週期
