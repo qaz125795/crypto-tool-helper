@@ -4540,7 +4540,7 @@ def build_report_message_tiered(
 
     if not has_any:
         no_sig_msg = (
-            f"😴 *山寨幣莊家狙擊鏡* 本輪無訊號\n"
+            f"🔍 *傑克持倉異常狙擊鏡* 本輪無訊號\n"
             f"🕐 {now_str}  條件：1H OI≥{OI_THRESHOLD_1H}% & 量≥{MTF_VOLUME_MIN_USD/1e6:.0f}M & MTF共振\n"
             f"繼續監控中..."
         )
@@ -4579,7 +4579,7 @@ def build_report_message_tiered(
     if _tier2_in_msg > 0:
         _mtf_tag += f" ⚠️觀察 {_tier2_in_msg}"
     header = (
-        f"🎯 *山寨幣莊家狙擊鏡*  1H MTF  {emoji_summary}\n"
+        f"🔍 *傑克持倉異常狙擊鏡*  本輪 {push_count} 個訊號\n"
         f"🕐 {now_str} 台北  |  {_mtf_tag}\n"
         f"{'─' * 20}\n"
     )
