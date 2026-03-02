@@ -12,15 +12,17 @@ from strategy_orb import SignalResult
 
 logger = logging.getLogger(__name__)
 
-# 對價用 K 線（Yahoo GC=F），文字連結 + TG 按鈕共用
+# 圖表連結
+LINK_BINGX_GOLD = "https://bingx.com/zh-tc/perpetual/GOLD(XAU)-USDT/"
 LINK_YAHOO_GC = "https://finance.yahoo.com/quote/GC=F"
 
 
 def get_gold_chart_keyboard() -> Dict[str, Any]:
-    """回傳 Telegram Inline Keyboard：一個「查看 Yahoo K線」按鈕。"""
+    """回傳 Telegram Inline Keyboard：BingX 走勢圖（主要）+ Yahoo 對照。"""
     return {
         "inline_keyboard": [
-            [{"text": "📈 查看 Yahoo K線 (GC=F)", "url": LINK_YAHOO_GC}]
+            [{"text": "📊 BingX 走勢圖（請自行對照）", "url": LINK_BINGX_GOLD}],
+            [{"text": "📈 Yahoo GC=F 參考", "url": LINK_YAHOO_GC}],
         ]
     }
 
@@ -40,16 +42,19 @@ def format_signal_message(
     return (
         f"{side_emoji} XAUUSD {side_text}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 進場：{signal.entry:,.2f}\n"
-        f"🛑 止損：{signal.sl:,.2f}  (ATR {signal.atr:.2f} × 1.5)\n"
-        f"🎯 止盈：{signal.tp:,.2f}  (R:R 1:{signal.rr_ratio:.0f})\n"
+        f"📌 參考進場區：{signal.entry:,.2f}\n"
+        f"🛑 參考防守點：{signal.sl:,.2f}  (ATR {signal.atr:.2f} × 1.5)\n"
+        f"🎯 參考停利點：{signal.tp:,.2f}  (R:R 1:{signal.rr_ratio:.0f})\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 趨勢強度：{signal.trend_strength}\n"
         f"⏰ 訊號時間：{time_str}\n"
         f"{data_line}"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 對價用圖表：Yahoo GC=F {LINK_YAHOO_GC}\n"
-        "⚠️ 由於 BingX 黃金合約報價可能與 GC=F 有價差，下單前請務必打開 BingX 圖表自行核對價格與合約設定。\n"
+        "⚠️ 重要提醒\n"
+        "以上價格僅供參考，請務必自行開啟 BingX 走勢圖，\n"
+        "對照實際K線結構來確認你的防守點與停利點。\n"
+        "切勿直接照單全收輸入上方數字，\n"
+        "BingX報價與參考價可能存在價差，實際點位以圖表為準。\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "#XAUUSD #黃金 #訊號"
     )
@@ -73,11 +78,12 @@ def format_tp_sl_hit_message(
     return (
         f"{side_emoji} XAUUSD {side_text} {title}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 原進場：{entry:,.2f}\n"
-        f"🛑 止損：{sl:,.2f}\n"
-        f"🎯 止盈：{tp:,.2f}\n"
+        f"📌 原參考進場：{entry:,.2f}\n"
+        f"🛑 參考防守點：{sl:,.2f}\n"
+        f"🎯 參考停利點：{tp:,.2f}\n"
         f"⏰ 時間：{time_str}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
+        "提醒：請以 BingX 圖表實際點位為準。\n"
         "#XAUUSD #黃金 #平倉"
     )
 
