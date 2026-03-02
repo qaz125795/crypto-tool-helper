@@ -5528,14 +5528,14 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             return []
 
     # ── Step 0：交易對白名單（最先執行，作為合約幣種過濾閘門）────────────────
-    # 從 supported-exchange-pairs 取得 Binance/Bybit/OKX/BingX 的合約基礎資產。
-    # Binance/Bybit/OKX 為純加密交易所，確保核心白名單無代幣化股票/指數。
-    # BingX 補充山寨幣覆蓋，代幣化股票靠 enrichment 前的 STOCK 後綴過濾器攔截。
+    # 只取 Binance / Bybit / OKX 三大純加密交易所的永續合約基礎資產。
+    # 這三所絕對不上代幣化股票 / 股指 / 商品期貨，因此可當做「加密貨幣白名單」。
+    # BingX/Bitget 有 PLTR、GME、HK50 等代幣化商品，故意排除在外。
     _supported_whitelist: set = set()
 
     def _fetch_supported_whitelist() -> set:
-        # 核心加密交易所（絕無代幣化股票）+ BingX（補充山寨幣，STOCK 後綴過濾）
-        _TARGET_EXCHANGES = {"Binance", "Bybit", "OKX", "BingX", "Bitget"}
+        # 純加密交易所：Binance / Bybit / OKX 均不上架代幣化股票或指數
+        _TARGET_EXCHANGES = {"Binance", "Bybit", "OKX"}
         try:
             _respect_coinglass_rate_limit()
             r = requests.get(
@@ -5586,27 +5586,36 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
     else:
         logger.warning("[CoinGlass-First] coins-price-change 無回傳數據")
 
-    # ── Step 3：三路合併（coins-price-change 需通過白名單閘門）──────────────
+    # ── Step 3：三路合併（所有來源均需通過白名單閘門）──────────────────────
     seen_syms: set = set()
     result: List[Dict] = []
     wl_filtered = 0  # 被白名單過濾掉的非加密幣數量
 
-    # markets top-100 直接進（OI 排序本就是主流合約幣）
+    def _wl_pass(sym: str) -> bool:
+        """白名單檢查：sym_base 必須在 Binance/Bybit/OKX 的永續合約清單內。"""
+        if not _supported_whitelist:
+            return True  # 白名單載入失敗時放行，改靠黑名單保護
+        base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+        return base in _supported_whitelist
+
+    # markets top-100 同樣套白名單（PLTR/HK50 可能在 Hyperliquid OI 排行前列）
     for item in result_markets:
         sym = item.get("symbol", "")
-        if sym and sym not in seen_syms:
-            seen_syms.add(sym)
-            result.append(item)
+        if not sym or sym in seen_syms:
+            continue
+        if not _wl_pass(sym):
+            wl_filtered += 1
+            continue
+        seen_syms.add(sym)
+        result.append(item)
 
-    # price-change 的補充幣種：若白名單有效，只放行清單內的幣
+    # price-change 的補充幣種：同樣套白名單
     pc_added = 0
     for item in result_pc:
         sym = item.get("symbol", "")
         if not sym or sym in seen_syms:
             continue
-        # 白名單過濾：去掉 USDT 後比對（GME/US2000/LMT 等不在白名單內）
-        sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
-        if _supported_whitelist and sym_base not in _supported_whitelist:
+        if not _wl_pass(sym):
             wl_filtered += 1
             continue
         seen_syms.add(sym)
@@ -5614,7 +5623,7 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
         pc_added += 1
 
     if wl_filtered > 0:
-        logger.info(f"[supported-coins🚫] 白名單過濾掉 {wl_filtered} 個非加密貨幣幣種（代幣化股票/指數等）")
+        logger.info(f"[白名單🚫] 過濾掉 {wl_filtered} 個非加密貨幣幣種（Hyperliquid股票/指數/商品等）")
 
     # supported-coins 中尚未納入的合約幣種，補充為 stub（確保全覆蓋）
     stub_added = 0
@@ -5632,9 +5641,10 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
     if stub_added:
         logger.info(f"[CoinGlass-First] supported-coins 補充 {stub_added} 個 stub 幣種（無 price 數據，直接進 OI 掃描）")
 
+    markets_passed = sum(1 for item in result if not item.get("_stub") and item.get("_cg_oi_usd") is not None or item.get("open_interest") is not None)
     logger.info(
         f"[CoinGlass-First] 三路合併完成 → 總計 {len(result)} 個唯一幣種"
-        f"（markets={len(result_markets)} | pc補充={pc_added} | supported-coins stub={stub_added} | 白名單過濾={wl_filtered}）"
+        f"（markets通過={len(result_markets)-wl_filtered if wl_filtered else len(result_markets)} | pc補充={pc_added} | stub={stub_added} | 白名單過濾={wl_filtered}）"
     )
     return result
 
