@@ -9943,6 +9943,16 @@ def run_gold_signal():
     else:
         today_trade_date = now_utc.strftime("%Y-%m-%d")
 
+    # 跨日自動清除：ORB 為日內策略，前一交易日未觸及 TP/SL 的殘留倉位不應封鎖新一天偵測
+    _active_trade_date = state.get("trade_date")
+    if state.get("last_direction") and _active_trade_date and _active_trade_date != today_trade_date:
+        logger.info(
+            "[黃金訊號] 前一交易日（%s）%s 倉 TP/SL 未觸及，跨日自動清除過期狀態，今日（%s）重新偵測",
+            _active_trade_date, state.get("last_direction"), today_trade_date,
+        )
+        state = {}
+        _save_gold_state({})
+
     last_bar_row = df_1h.iloc[-1]
     bar_high = float(last_bar_row["High"])
     bar_low = float(last_bar_row["Low"])
