@@ -3544,9 +3544,14 @@ SYMBOL_BLACKLIST: set = {
     "RTX", "IKA", "POND", "1000NEIROCTO",
     "ULTIMA", "REAL", "CRCLX", "TFUEL",
     "WHITEWHALE", "PYR",
-    "MANYU",    # 極小市值 meme 幣，價格 ~7e-9 USD，無交易意義
-    "CITY",     # 用戶手動加入黑名單
-    "MASTOCK",  # Hyperliquid 獨家，無 K 線，OI 數據異常（曾觸發 621% 極端值）
+    "MANYU",      # 極小市值 meme 幣，價格 ~7e-9 USD，無交易意義
+    "CITY",       # 用戶手動加入黑名單
+    "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
+    "PLTRSTOCK",  # Palantir 代幣化股票
+    # ── 其他非加密貨幣期貨 ──
+    "XTI",        # WTI 原油期貨（XTI/USD）
+    "XBR",        # Brent 原油期貨
+    "KO",         # Coca-Cola 股票
     # ── 代幣化股票（BingX/Bitget/OKX 合約，非加密貨幣）──
     "TSLAX", "TSLA",
     "NVDAX", "NVDA",
@@ -5522,38 +5527,50 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             logger.warning(f"coins-price-change 異常: {e}")
             return []
 
-    # ── Step 0：supported-coins 白名單（最先執行，作為合約幣種過濾閘門）──────
-    # 先拉官方支援的合約幣種清單，之後 coins-price-change 的 ~970 個幣
-    # 必須在這份清單內才能進入掃描池（自動過濾掉代幣化股票/指數/商品）
+    # ── Step 0：交易對白名單（最先執行，作為合約幣種過濾閘門）────────────────
+    # 從 supported-exchange-pairs 取得 Binance/Bybit/OKX/BingX 的合約基礎資產。
+    # Binance/Bybit/OKX 為純加密交易所，確保核心白名單無代幣化股票/指數。
+    # BingX 補充山寨幣覆蓋，代幣化股票靠 enrichment 前的 STOCK 後綴過濾器攔截。
     _supported_whitelist: set = set()
 
     def _fetch_supported_whitelist() -> set:
+        # 核心加密交易所（絕無代幣化股票）+ BingX（補充山寨幣，STOCK 後綴過濾）
+        _TARGET_EXCHANGES = {"Binance", "Bybit", "OKX", "BingX", "Bitget"}
         try:
             _respect_coinglass_rate_limit()
             r = requests.get(
-                f"{CG_API_BASE}{CG_EP['supported_coins']}",
+                f"{CG_API_BASE}/api/futures/supported-exchange-pairs",
                 headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
-                timeout=10
+                timeout=15
             )
             if r.status_code != 200:
-                logger.warning(f"[supported-coins⚠️] HTTP {r.status_code}，白名單停用，改用黑名單保護")
+                logger.warning(f"[exchange-pairs⚠️] HTTP {r.status_code}，白名單停用，改用黑名單保護")
                 return set()
-            j = r.json()
-            coin_list = j.get("data", [])
-            if not isinstance(coin_list, list) or not coin_list:
+            data = r.json().get("data", {})
+            if not isinstance(data, dict) or not data:
                 return set()
             wl: set = set()
-            for c in coin_list:
-                name = str(c).strip().upper() if isinstance(c, str) else (
-                    str(c.get("symbol") or c.get("coin") or "").strip().upper()
-                    if isinstance(c, dict) else ""
-                )
-                if name:
-                    wl.add(name)
-            logger.info(f"[supported-coins✅] 合約白名單載入 {len(wl)} 個幣種（用於過濾非加密貨幣）")
+            ex_counts: dict = {}
+            for exchange, pairs in data.items():
+                if exchange not in _TARGET_EXCHANGES:
+                    continue
+                if not isinstance(pairs, list):
+                    continue
+                cnt = 0
+                for pair in pairs:
+                    base = str(pair.get("base_asset", "")).strip().upper()
+                    if base and not base.endswith("STOCK") and not base.endswith("TOKEN"):
+                        wl.add(base)
+                        cnt += 1
+                ex_counts[exchange] = cnt
+            ex_summary = " | ".join(f"{ex}={n}" for ex, n in sorted(ex_counts.items()))
+            logger.info(
+                f"[exchange-pairs✅] 交易對白名單載入 {len(wl)} 個幣種"
+                f"（{ex_summary}）"
+            )
             return wl
         except Exception as e:
-            logger.warning(f"[supported-coins⚠️] 異常: {e}，白名單停用")
+            logger.warning(f"[exchange-pairs⚠️] 異常: {e}，白名單停用，改用黑名單保護")
             return set()
 
     _supported_whitelist = _fetch_supported_whitelist()
@@ -5966,7 +5983,9 @@ def fetch_position_change():
 
         # ── 黑名單前置過濾（在 K 線抓取前攔截，節省 API 次數）──────────────────────
         _sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
-        if _sym_base in SYMBOL_BLACKLIST:
+        # 代幣化股票自動攔截：PLTRSTOCK / MASTOCK / NVDASTOCK 等以 STOCK 結尾的格式
+        _is_tokenized_stock = _sym_base.endswith("STOCK") or _sym_base.endswith("TOKEN")
+        if _sym_base in SYMBOL_BLACKLIST or _is_tokenized_stock:
             logger.info(f"[黑名單🚫] {sym} 在 enrichment 前即封鎖，跳過 K 線抓取")
             continue
 
