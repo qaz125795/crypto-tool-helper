@@ -4320,6 +4320,9 @@ def build_report_message_tiered(
         taker_ratio_15m = x.get("_taker_ratio_15m")  # 主動買盤%（coins-markets top-100 才有）
         rsi_val = x.get("rsi")
         detected_ts = x.get("_detected_ts")
+        vwap_2h_val = x.get("vwap_2h")
+        _now_ts = time.time()
+        _stale_min = int((_now_ts - detected_ts) / 60) if detected_ts else 0
 
         # ══════════════════════════════════════════════════════════
         # ATR 風控計算（Google 建議純 ATR 公式：Risk = 1.5 × 1H_ATR）
@@ -4496,6 +4499,32 @@ def build_report_message_tiered(
         # ─ 操作計畫 ─（數字全部 backtick，手機點一下即可複製）
         _sl_pct_str = f"  _{sl_pct_val:.1f}%_" if sl_pct_val is not None else ""
         msg_lines.append("🎯 *操作計畫：*")
+
+        # 主力均價（VWAP 2h）：告訴用戶主力的平均持倉成本在哪
+        if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
+            _vwap_vs = ""
+            if price > vwap_2h_val:
+                _vwap_vs = " _（現價高於均價，多方佔優）_" if is_bull_sig else " _（現價高於均價，空方逆風）_"
+            else:
+                _vwap_vs = " _（現價低於均價，空方佔優）_" if not is_bull_sig else " _（現價低於均價，多方逆風）_"
+            msg_lines.append(f"📐 主力均價：`{_fmt_price(vwap_2h_val)}`{_vwap_vs}")
+
+        # 偵測時間 + 過時警告
+        if detected_ts:
+            import datetime as _dt
+            _det_time_str = _dt.datetime.fromtimestamp(
+                detected_ts, tz=_dt.timezone(_dt.timedelta(hours=8))
+            ).strftime("%H:%M")
+            if _stale_min >= 15:
+                msg_lines.append(
+                    f"🕐 偵測時間：{_det_time_str}（{_stale_min} 分前）"
+                )
+                msg_lines.append(
+                    f"_⚠️ 訊號偵測已逾 {_stale_min} 分鐘，行情可能已推進，請先確認現況再進場_"
+                )
+            else:
+                msg_lines.append(f"🕐 偵測時間：{_det_time_str}（{_stale_min} 分前）")
+
         msg_lines.append(f"💵 進場：`{_fmt_price(price)}`")
         if sl is not None:
             msg_lines.append(f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -1.5R")
@@ -5235,6 +5264,7 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
                 'priceChange24h': price_change_24h,
                 'price_change_percent_1h': price_change_1h,
                 '_cg_volume_usd': coin.get("_volume_usd") or coin.get("_cg_volume_usd"),
+                '_scan_ts': time.time(),  # 1H OI 異動首次偵測時間
             }
         else:
             return {'status': 'no_category', 'symbol': symbol}
@@ -6197,7 +6227,10 @@ def fetch_position_change():
             "rsi_desc": rsi_desc,
             "reason": reason,
             "funding_rate": funding_rate,
-            "_detected_ts": time.time(),
+            "vwap_2h": tech.get("vwap_2h") if tech else None,
+            # _scan_ts = 1H OI 首次偵測時間（process_single_symbol 打上），保留原始時間
+            # 若 item 無此欄位（舊路徑），以當前時間補足
+            "_detected_ts": item.get("_scan_ts") or time.time(),
             # MTF 四層數據
             "oiChange_30m": _oi_30m,
             "oiChange_15m": _oi_15m,
