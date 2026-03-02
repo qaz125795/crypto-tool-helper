@@ -2486,47 +2486,48 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
             base = str(base).strip().upper()
 
             rate_found: Optional[float] = None
+            # 交易所優先順序：Binance > Bybit > OKX > BingX > Bitget（量大流動性佳的排前）
+            _EXCHANGE_PRIORITY = ["Binance", "Bybit", "OKX", "BingX", "Bitget"]
 
-            # 優先：USDT 永續（stablecoin_margin_list → Binance）
+            def _parse_rate_from_list(ex_list: list, priority: list) -> Optional[float]:
+                """從 exchange list 中按優先順序找第一個有效費率。
+                CoinGlass exchange-list 的 funding_rate 是百分比格式
+                （如 0.007343 = 0.007343%），除以 100 轉為小數供後續計算。
+                """
+                if not isinstance(ex_list, list):
+                    return None
+                _ex_map: Dict[str, float] = {}
+                for _entry in ex_list:
+                    if not isinstance(_entry, dict):
+                        continue
+                    _ex = _entry.get("exchange")
+                    _r  = _entry.get("funding_rate")
+                    if _ex and _r is not None:
+                        try:
+                            _ex_map[_ex] = float(_r) / 100.0
+                        except (TypeError, ValueError):
+                            pass
+                for _ex in priority:
+                    if _ex in _ex_map:
+                        return _ex_map[_ex]
+                if _ex_map:
+                    return next(iter(_ex_map.values()))
+                return None
+
+            # 優先：USDT 永續（stablecoin_margin_list）
             stablecoin_list = coin_data.get("stablecoin_margin_list") or []
-            for item in (stablecoin_list if isinstance(stablecoin_list, list) else []):
-                if not isinstance(item, dict):
-                    continue
-                if item.get("exchange") != "Binance":
-                    continue
-                raw_rate = item.get("funding_rate")
-                if raw_rate is None:
-                    continue
-                try:
-                    # CoinGlass exchange-list 的 funding_rate 是百分比格式
-                    # (如 -0.1316 = -0.1316%)，需除以 100 轉為小數供後續計算
-                    rate_found = float(raw_rate) / 100.0
-                    break
-                except (TypeError, ValueError):
-                    continue
+            rate_found = _parse_rate_from_list(stablecoin_list, _EXCHANGE_PRIORITY)
 
-            # 備援：幣本位永續（token_margin_list → Binance）
+            # 備援：幣本位永續（token_margin_list）
             if rate_found is None:
                 token_list = coin_data.get("token_margin_list") or []
-                for item in (token_list if isinstance(token_list, list) else []):
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("exchange") != "Binance":
-                        continue
-                    raw_rate = item.get("funding_rate")
-                    if raw_rate is None:
-                        continue
-                    try:
-                        rate_found = float(raw_rate) / 100.0
-                        break
-                    except (TypeError, ValueError):
-                        continue
+                rate_found = _parse_rate_from_list(token_list, _EXCHANGE_PRIORITY)
 
             if rate_found is not None:
                 out[base] = rate_found
 
         if out:
-            logger.info(f"[資金費率✅] 成功解析 {len(out)} 幣種（CoinGlass exchange-list，Binance USDT 永續）")
+            logger.info(f"[資金費率✅] 成功解析 {len(out)} 幣種（CoinGlass exchange-list，Binance>Bybit>OKX>BingX>Bitget 優先）")
         elif lst:
             _sample = list(lst[0].keys()) if lst and isinstance(lst[0], dict) else "n/a"
             logger.warning(f"[資金費率⚠️] 解析 0 筆，首筆結構 keys={_sample}")
@@ -3516,7 +3517,7 @@ FUNDING_EXTREME = 0.0003    # 極端費率 0.03%，用於標註
 MAIN_COINS = {"BTC", "ETH"}
 
 # ── 流動性門檻（24h 成交值，低於此深度不足）──────────────────────────
-MTF_VOLUME_MIN_USD  = 5_000_000     # 5M USD（初期測試寬鬆版；穩定後可調回 10M）
+MTF_VOLUME_MIN_USD  = 4_900_000     # 4.9M USD（初期測試寬鬆版；穩定後可調回 10M）
 
 # ── 1H OI 扳機門檻（Stage 1 主時框）──────────────────────────────────
 OI_THRESHOLD_1H    = 2.0            # 2.0%（初期測試寬鬆版；穩定後可調回 3.0%）
@@ -3538,10 +3539,27 @@ PRICE_THRESHOLD_30M = PRICE_THRESHOLD_1H
 # ── 黑名單：永久禁止推播的標的（可隨時新增/移除）────────────────────────────────
 # 原則：歷史表現差、流動性不足、長期被操控的幣種
 SYMBOL_BLACKLIST: set = {
+    # ── 已知問題幣（操縱/流動性/無意義）──
     "BULLA", "FIO", "ORBS", "NEIROCTO", "DENT",
     "RTX", "IKA", "POND", "1000NEIROCTO",
     "ULTIMA", "REAL", "CRCLX", "TFUEL",
     "WHITEWHALE", "PYR",
+    # ── 代幣化股票（BingX/Bitget/OKX 合約，非加密貨幣）──
+    "TSLAX", "TSLA",
+    "NVDAX", "NVDA",
+    "AAPLX", "AAPL",
+    "AMZNX", "AMZN",
+    "GOOGLX", "GOOGL",
+    "METAX",
+    "MSFTX", "MSFT",
+    "COINX", "COIN",
+    "NFLXX", "NFLX",
+    # ── 傳統商品期貨 ──
+    "COPPER", "SILVER", "GOLD", "XAU", "XAG",
+    "XBR", "OIL", "BRENT", "WTI", "USOIL",
+    # ── 波動率指數 / 傳統指數 ──
+    "VIX", "VIXINDEX",
+    "DXY", "SPX", "NDX", "ES",
 }
 
 
@@ -3667,6 +3685,10 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
       - 弱共振：只有 1H 達標，其他時區方向凌亂
     """
     cat_1h = item.get("category") or ""
+    # 標準化：1H 掃描產生的 "short_close" 與內部 _get_cat() 的 "short_cover" 是同一籌碼狀態
+    # （OI↓ + Price↑ = 空方回補），統一轉為 short_cover 供後續方向比對
+    if cat_1h == "short_close":
+        cat_1h = "short_cover"
     oi_1h  = item.get("oiChange1h") or item.get("oiChange30m") or 0
     p_1h   = item.get("priceChange1h") or 0
     oi_30m = item.get("oiChange_30m")
@@ -4343,68 +4365,72 @@ def build_report_message_tiered(
         _strategy_comment = _gen_comment(category, _sig_version, _sig_subtype, _reversal_hint, rsi_val)
 
         # ── 4H 宏觀天候 ────────────────────────────────────────────────
-        _ema20_4h_val     = x.get("ema20_4h")
-        _rsi_4h_val       = x.get("rsi_4h")
-        _is_above_4h_ema  = x.get("is_above_4h_ema")
+        _ema20_4h_val    = x.get("ema20_4h")
+        _rsi_4h_val      = x.get("rsi_4h")
+        _is_above_4h_ema = x.get("is_above_4h_ema")
         if _is_above_4h_ema is True:
             _macro_trend   = "順勢" if is_bull_sig else "逆勢"
-            _macro_ema_txt = "現價高於 4H EMA20"
+            _macro_ema_txt = "站上 4H EMA20"
         elif _is_above_4h_ema is False:
             _macro_trend   = "逆勢" if is_bull_sig else "順勢"
-            _macro_ema_txt = "現價低於 4H EMA20"
+            _macro_ema_txt = "跌破 4H EMA20"
         else:
-            _macro_trend   = "未知"
+            _macro_trend   = "—"
             _macro_ema_txt = "4H EMA20 無數據"
-        _rsi_4h_str = f", RSI: {_rsi_4h_val:.0f}" if _rsi_4h_val is not None else ""
-        _macro_line = f"🌍 *宏觀天候 (4H)：* {_macro_trend} ({_macro_ema_txt}{_rsi_4h_str})"
+        _rsi_4h_str  = f" · RSI {_rsi_4h_val:.0f}" if _rsi_4h_val is not None else ""
+        _macro_line  = f"🌍 *4H天候：* {_macro_trend} · {_macro_ema_txt}{_rsi_4h_str}"
 
-        # ── 資金費率（精簡版）──────────────────────────────────────────
+        # ── 資金費率 ──────────────────────────────────────────────────
         if funding_rate is not None and isinstance(funding_rate, (int, float)):
             _fr_val = funding_rate * 100
             if abs(funding_rate) <= 0.0001:
-                _fr_desc = "市場中性"
+                _fr_desc = "中性"
             elif funding_rate > 0.0005:
-                _fr_desc = "偏多｜⚠️軋多風險" if not is_bull_sig else "偏多"
+                _fr_desc = "偏多 ⚠️軋多" if not is_bull_sig else "偏多"
             elif funding_rate < -0.0005:
-                _fr_desc = "偏空｜⚠️軋空警告" if is_bull_sig else "偏空"
+                _fr_desc = "偏空 ⚠️軋空" if is_bull_sig else "偏空"
             elif funding_rate > 0:
                 _fr_desc = "略偏多"
             else:
                 _fr_desc = "略偏空"
-            _fr_line = f"💸 *資金費率：* `{_fr_val:+.4f}%` ({_fr_desc})"
+            _fr_line = f"💸 *費率：* `{_fr_val:+.4f}%` {_fr_desc}"
         else:
-            _fr_line = "💸 *資金費率：* 無數據"
+            _fr_line = "💸 *費率：* 無數據"
 
-        # ── 成交值（精簡版）────────────────────────────────────────────
+        # ── 成交值 ────────────────────────────────────────────────────
         vol_m_val    = float(vol_usd) / 1e6 if vol_usd and float(vol_usd) > 0 else 0.0
         _vol_src_tag = x.get("_vol_source", "CoinGlass")
-        _src_note    = "" if _vol_src_tag == "CoinGlass" else f" _({_vol_src_tag})_"
+        _src_note    = f" _{_vol_src_tag}_" if _vol_src_tag not in ("CoinGlass", "") else ""
         if vol_m_val >= 50:
-            _vol_line = f"💰 成交值 `{vol_m_val:.0f}M`{_src_note} ✅ 機構級深度"
+            _vol_line = f"📊 成交值 `{vol_m_val:.0f}M` ✅ 機構級"
         elif vol_m_val >= 20:
-            _vol_line = f"💰 成交值 `{vol_m_val:.0f}M`{_src_note} ✅ 深度充足"
-        elif vol_m_val >= 10:
-            _vol_line = f"💰 成交值 `{vol_m_val:.1f}M`{_src_note} ⚠️ 達門檻，輕倉試水"
+            _vol_line = f"📊 成交值 `{vol_m_val:.0f}M` ✅ 深度充足"
+        elif vol_m_val >= 5:
+            _vol_line = f"📊 成交值 `{vol_m_val:.1f}M`{_src_note} ⚠️ 流動性偏低"
+        elif vol_m_val > 0:
+            _vol_line = f"📊 成交值 `{vol_m_val:.1f}M`{_src_note} ⚠️ 極低流動性"
         else:
-            _vol_line = f"💰 成交值 ⚠️ 無法取得，請確認盤口深度"
+            _vol_line = "📊 成交值 無數據"
 
         # ══════════════════════════════════════════════════════════
-        # 組裝電報訊息（嚴格遵循 Google 設計模板）
+        # 組裝電報訊息（手機優先，去括號，結構清晰）
         # ══════════════════════════════════════════════════════════
         msg_lines: List[str] = []
 
-        # ─ 標題行 ─
-        msg_lines.append(f"{_dir_emoji} [{_dir_str}] `{sym_base}` ｜ {_type_str} {_badge_emo}")
+        # ─ 標題行 ─（sym 用 backtick → 手機單點即可複製交易對）
+        _copy_sym = sym if sym.endswith("USDT") else f"{sym_base}USDT"
+        msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{_copy_sym}` {_badge_emo}")
         msg_lines.append(_ver_label)
         msg_lines.append("")
 
-        # ─ 宏觀天候 + 資金費率 ─
+        # ─ 宏觀天候 · 費率 · 成交值（三行資訊）─
         msg_lines.append(_macro_line)
         msg_lines.append(_fr_line)
+        msg_lines.append(_vol_line)
         msg_lines.append("")
 
         # ─ 籌碼共振漏斗 ─
-        msg_lines.append("📊 *籌碼共振漏斗 (MTF)：*")
+        msg_lines.append("📊 *籌碼漏斗：*")
         if _mtf_desc:
             msg_lines.append(_mtf_desc)
         else:
@@ -4414,49 +4440,45 @@ def build_report_message_tiered(
         if isinstance(oi_4h_val, (int, float)):
             _abs_4h = abs(oi_4h_val)
             if _abs_4h >= 5.0:
-                msg_lines.append(f"  ↳ ⚠️ _4H OI 累積 {oi_4h_val:+.1f}%（偏末段，縮短目標）_")
+                msg_lines.append(f"_4H OI {oi_4h_val:+.1f}% ⚠️ 偏末段，縮短目標_")
             elif _abs_4h >= 2.5:
-                msg_lines.append(f"  ↳ 🟡 _4H OI {oi_4h_val:+.1f}%（中段，可參與）_")
+                msg_lines.append(f"_4H OI {oi_4h_val:+.1f}% 🟡 中段，謹慎_")
             else:
-                msg_lines.append(f"  ↳ 🟢 _4H OI {oi_4h_val:+.1f}%（初期，空間充足）_")
+                msg_lines.append(f"_4H OI {oi_4h_val:+.1f}% 🟢 初期，空間充足_")
         msg_lines.append("")
 
         # ─ 策略短評 ─
-        msg_lines.append(f"💡 *策略短評：* {_strategy_comment}")
-        if _reversal_hint and _sig_version != "confirmed":
-            msg_lines.append(f"   ↳ _{_reversal_hint}_")
+        msg_lines.append(f"💡 {_strategy_comment}")
+        if _reversal_hint:
+            msg_lines.append(f"_{_reversal_hint}_")
         msg_lines.append("")
 
-        # ─ 操作計畫（1H 動態風控）─
-        msg_lines.append("🎯 *操作計畫 (1H 動態風控)：*")
-        msg_lines.append(f"💵 現價：*`{_fmt_price(price)}`*")
+        # ─ 操作計畫 ─（數字全部 backtick，手機點一下即可複製）
+        _sl_pct_str = f"  _{sl_pct_val:.1f}%_" if sl_pct_val is not None else ""
+        msg_lines.append("🎯 *操作計畫：*")
+        msg_lines.append(f"交易對：`{_copy_sym}`")
+        msg_lines.append(f"💵 進場：`{_fmt_price(price)}`")
         if sl is not None:
-            _sl_r_label = f"-1.5R" if atr_val else "-備援"
-            msg_lines.append(f"🛡️ *SL (防守)：`{_fmt_price(sl)}`* ({_sl_r_label})")
+            msg_lines.append(f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -1.5R")
         else:
-            msg_lines.append("🛡️ SL：無法計算（ATR 缺失）")
+            msg_lines.append("🛡️ 止損：無法計算")
         if tp1 is not None:
-            msg_lines.append(f"💰 *TP1 (減倉)：`{_fmt_price(tp1)}`* (盈虧比 1:1.5)")
+            msg_lines.append(f"💰 TP1：`{_fmt_price(tp1)}`  +1.5R")
         if tp2 is not None:
-            msg_lines.append(f"🏆 *TP2 (波段)：`{_fmt_price(tp2)}`* (盈虧比 1:3.0)")
+            msg_lines.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +3.0R")
         if sl_pct_val is not None and sl_pct_val > 8.0:
-            msg_lines.append(f"⚠️ _SL 距離 {sl_pct_val:.1f}%，波動較大，請控制倉位_")
+            msg_lines.append(f"_⚠️ 止損距離 {sl_pct_val:.1f}%，波動較大，請控制倉位_")
         msg_lines.append("")
 
-        # ─ 成交值 + BTC 大盤 ─
-        msg_lines.append(_vol_line)
+        # ─ BTC 大盤提示（緊接操作計畫後，手機滑動自然看到）─
         _btc_weak   = (_btc_30m_pct is not None and _btc_30m_pct < -0.3 and
                        _btc_1h_pct  is not None and _btc_1h_pct  < 0)
         _btc_strong = (_btc_30m_pct is not None and _btc_30m_pct > 0.3 and
                        _btc_1h_pct  is not None and _btc_1h_pct  > 0)
         if is_bull_sig and _btc_weak:
-            msg_lines.append(
-                f"🌐 大盤偏弱 (BTC 1H `{_btc_1h_pct:+.2f}%`) — OI 訊號有效但快進快出"
-            )
+            msg_lines.append(f"_🌐 BTC 偏弱 {_btc_1h_pct:+.2f}% — OI 訊號有效但快進快出_")
         elif not is_bull_sig and _btc_strong:
-            msg_lines.append(
-                f"🌐 大盤偏強 (BTC 1H `{_btc_1h_pct:+.2f}%`) — 逆勢空單風險較高，嚴守 SL"
-            )
+            msg_lines.append(f"_🌐 BTC 偏強 {_btc_1h_pct:+.2f}% — 逆勢空單風險較高，嚴守止損_")
 
         # ─ 儲存供後續使用 ─
         x["sl_price_str"]    = _fmt_price(sl)
@@ -4481,7 +4503,7 @@ def build_report_message_tiered(
     if not has_any:
         no_sig_msg = (
             f"😴 *山寨幣莊家狙擊鏡* 本輪無訊號\n"
-            f"🕐 {now_str}  條件：1H OI≥3% & 價≥1.5% & 量≥10M & MTF四層漏斗\n"
+            f"🕐 {now_str}  條件：1H OI≥{OI_THRESHOLD_1H}% & 量≥{MTF_VOLUME_MIN_USD/1e6:.0f}M & MTF共振\n"
             f"繼續監控中..."
         )
         return no_sig_msg, False, 0
@@ -5646,10 +5668,10 @@ def fetch_position_change():
     VOLUME_PREFILTER_MIN_USD = MTF_VOLUME_MIN_USD  # 從常數讀取（預設 5M，可在頂部常數區調整）
 
     active_above_volume: List[Dict[str, Any]] = []
-    vol_cg = 0         # Plan A (CoinGlass) 有資料且 ≥ 10M
-    vol_binance = 0    # Plan B (Binance) 補救且 ≥ 10M
+    vol_cg = 0         # Plan A (CoinGlass) 有資料且 ≥ MTF_VOLUME_MIN_USD
+    vol_binance = 0    # Plan B (BingX備援) 補救且 ≥ MTF_VOLUME_MIN_USD
     vol_no_data = 0    # A+B 均無資料 → 放行等 Plan C
-    vol_below = 0      # 確認 < 10M → 過濾
+    vol_below = 0      # 確認不足門檻 → 過濾
 
     for coin in active_symbols:
         # ── Plan A：CoinGlass 成交值 ─────────────────────────────
@@ -5688,8 +5710,8 @@ def fetch_position_change():
             vol_below += 1
 
     logger.info(
-        f"📊 [漏斗 4] 成交值篩選 ≥3.5M: 通過 {len(active_above_volume)} 個"
-        f"（CoinGlass: {vol_cg} | BingX備援: {vol_binance} | 待K線估算: {vol_no_data} | 淘汰[確認<3.5M]: {vol_below}）"
+        f"📊 [漏斗 4] 成交值篩選 ≥{MTF_VOLUME_MIN_USD/1e6:.1f}M: 通過 {len(active_above_volume)} 個"
+        f"（CoinGlass: {vol_cg} | BingX備援: {vol_binance} | 待K線估算: {vol_no_data} | 淘汰[確認<{MTF_VOLUME_MIN_USD/1e6:.1f}M]: {vol_below}）"
     )
 
     # ── Step 5：排序 + 限制數量（前 50 固定，其餘隨機保多樣性）─────────────────
