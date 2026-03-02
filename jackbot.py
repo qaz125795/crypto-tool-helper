@@ -9966,6 +9966,16 @@ def run_gold_signal():
     if state.get("last_direction") == signal.direction:
         logger.info("[黃金訊號] 同向訊號重疊（目前仍有 %s 倉），跳過推播", signal.direction)
         return
+    # 反向持倉中：目前有一筆尚未結案的倉位，不開反向新倉（避免訊號矛盾且覆蓋 TP/SL 追蹤）
+    active_direction = state.get("last_direction")
+    opposite = {"long": "short", "short": "long"}.get(active_direction)
+    if active_direction and signal.direction == opposite:
+        logger.info(
+            "[黃金訊號] 目前仍有 %s 倉尚未結案（TP/SL 未觸及），忽略反向 %s 訊號，避免覆蓋追蹤狀態",
+            active_direction,
+            signal.direction,
+        )
+        return
     # 同日同方向已觸及 TP/SL：本交易日不再開同方向新倉
     if (
         state.get("closed_direction") == signal.direction
