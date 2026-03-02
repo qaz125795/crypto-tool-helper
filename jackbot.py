@@ -3546,13 +3546,15 @@ SYMBOL_BLACKLIST: set = {
     "WHITEWHALE", "PYR",
     "MANYU",      # 極小市值 meme 幣，價格 ~7e-9 USD，無交易意義
     "CITY",       # 用戶手動加入黑名單
+    "REQ", "STEEM", "ROAM",  # 用戶手動加入黑名單（2026-03-02）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
-    "PLTRSTOCK",  # Palantir 代幣化股票
+    "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
     "XTI",        # WTI 原油期貨（XTI/USD）
     "XBR",        # Brent 原油期貨
     "KO",         # Coca-Cola 股票
-    # ── 代幣化股票（BingX/Bitget/OKX 合約，非加密貨幣）──
+    # ── 代幣化股票（Bybit/BingX/Bitget 合約，非加密貨幣）──
+    # Bybit 以不帶 STOCK 後綴的格式上架，需明確列出
     "TSLAX", "TSLA",
     "NVDAX", "NVDA",
     "AAPLX", "AAPL",
@@ -3566,6 +3568,18 @@ SYMBOL_BLACKLIST: set = {
     "LMT", "LMTX",          # Lockheed Martin
     "BABA", "BABAX",        # Alibaba
     "ABNBX", "ABNB",        # Airbnb
+    "PLTR",                 # Palantir（Bybit 無 STOCK 後綴格式）
+    "AMD", "AMDX",          # Advanced Micro Devices
+    "INTC", "INTCX",        # Intel
+    "HOOD", "HOODX",        # Robinhood
+    "MSTR", "MSTRX",        # MicroStrategy
+    "MARA", "MARAX",        # Marathon Digital
+    "RIOT", "RIOTX",        # Riot Platforms
+    "BA", "BAX",            # Boeing
+    "DIS", "DISX",          # Disney
+    "SBUX", "SBUXS",        # Starbucks
+    "JPM", "JPMX",          # JPMorgan
+    "PYPL", "PYPLX",        # PayPal
     # ── 傳統商品期貨 ──
     "COPPER", "SILVER", "GOLD", "XAU", "XAG",
     "XBR", "OIL", "BRENT", "WTI", "USOIL",
@@ -4434,23 +4448,24 @@ def build_report_message_tiered(
         elif vol_m_val > 0:
             _vol_line = f"📊 成交值 `{vol_m_val:.1f}M`{_src_note} ⚠️ 極低流動性"
         else:
-            _vol_line = "📊 成交值 無數據"
+            _vol_line = ""  # 無成交值資料時不顯示此行，避免誤導
 
         # ══════════════════════════════════════════════════════════
         # 組裝電報訊息（手機優先，去括號，結構清晰）
         # ══════════════════════════════════════════════════════════
         msg_lines: List[str] = []
 
-        # ─ 標題行 ─（sym 用 backtick → 手機單點即可複製交易對）
+        # ─ 標題行 ─（顯示基礎幣名，無 USDT 後綴；_copy_sym 供操作計畫區使用）
         _copy_sym = sym if sym.endswith("USDT") else f"{sym_base}USDT"
-        msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{_copy_sym}` {_badge_emo}")
+        msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` {_badge_emo}")
         msg_lines.append(_ver_label)
         msg_lines.append("")
 
-        # ─ 宏觀天候 · 費率 · 成交值（三行資訊）─
+        # ─ 宏觀天候 · 費率 · 成交值（有資料才顯示成交值行）─
         msg_lines.append(_macro_line)
         msg_lines.append(_fr_line)
-        msg_lines.append(_vol_line)
+        if _vol_line:
+            msg_lines.append(_vol_line)
         msg_lines.append("")
 
         # ─ 籌碼共振漏斗 ─
@@ -4480,7 +4495,6 @@ def build_report_message_tiered(
         # ─ 操作計畫 ─（數字全部 backtick，手機點一下即可複製）
         _sl_pct_str = f"  _{sl_pct_val:.1f}%_" if sl_pct_val is not None else ""
         msg_lines.append("🎯 *操作計畫：*")
-        msg_lines.append(f"交易對：`{_copy_sym}`")
         msg_lines.append(f"💵 進場：`{_fmt_price(price)}`")
         if sl is not None:
             msg_lines.append(f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -1.5R")
@@ -5589,7 +5603,8 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
     # ── Step 3：三路合併（所有來源均需通過白名單閘門）──────────────────────
     seen_syms: set = set()
     result: List[Dict] = []
-    wl_filtered = 0  # 被白名單過濾掉的非加密幣數量
+    mkt_filtered = 0  # markets top-100 被白名單過濾的數量
+    pc_filtered = 0   # price-change 被白名單過濾的數量
 
     def _wl_pass(sym: str) -> bool:
         """白名單檢查：sym_base 必須在 Binance/Bybit/OKX 的永續合約清單內。"""
@@ -5604,7 +5619,7 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
         if not sym or sym in seen_syms:
             continue
         if not _wl_pass(sym):
-            wl_filtered += 1
+            mkt_filtered += 1
             continue
         seen_syms.add(sym)
         result.append(item)
@@ -5616,14 +5631,15 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
         if not sym or sym in seen_syms:
             continue
         if not _wl_pass(sym):
-            wl_filtered += 1
+            pc_filtered += 1
             continue
         seen_syms.add(sym)
         result.append(item)
         pc_added += 1
 
+    wl_filtered = mkt_filtered + pc_filtered
     if wl_filtered > 0:
-        logger.info(f"[白名單🚫] 過濾掉 {wl_filtered} 個非加密貨幣幣種（Hyperliquid股票/指數/商品等）")
+        logger.info(f"[白名單🚫] 過濾掉 {wl_filtered} 個非加密貨幣幣種（markets={mkt_filtered} | pc={pc_filtered}，Hyperliquid股票/指數/商品等）")
 
     # supported-coins 中尚未納入的合約幣種，補充為 stub（確保全覆蓋）
     stub_added = 0
@@ -5641,10 +5657,10 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
     if stub_added:
         logger.info(f"[CoinGlass-First] supported-coins 補充 {stub_added} 個 stub 幣種（無 price 數據，直接進 OI 掃描）")
 
-    markets_passed = sum(1 for item in result if not item.get("_stub") and item.get("_cg_oi_usd") is not None or item.get("open_interest") is not None)
+    markets_passed = len(result_markets) - mkt_filtered
     logger.info(
         f"[CoinGlass-First] 三路合併完成 → 總計 {len(result)} 個唯一幣種"
-        f"（markets通過={len(result_markets)-wl_filtered if wl_filtered else len(result_markets)} | pc補充={pc_added} | stub={stub_added} | 白名單過濾={wl_filtered}）"
+        f"（markets通過={markets_passed} | pc補充={pc_added} | stub={stub_added} | 白名單過濾={wl_filtered}）"
     )
     return result
 
@@ -6203,12 +6219,21 @@ def fetch_position_change():
         )
         logger.info(f"[Enrichment] {sym} 已加入 all_top：RSI={rsi_val} ATR={atr_val} 現價={_cur_price} | {_ver_tag} | {reason}")
 
-    # 品質門撒：ATR=None → K 線無數據，SL/TP/RSI 均無法計算，不推播
+    # 品質門撒①：ATR=None → K 線無數據，SL/TP/RSI 均無法計算，不推播
     pre_quality = len(all_top)
     all_top = [x for x in all_top if x.get("atr") is not None]
     skipped_no_kline = pre_quality - len(all_top)
     if skipped_no_kline > 0:
-        logger.info(f"[品質門撒] 淘汰 {skipped_no_kline} 個 ATR=None（K線無數據小幣），剩餘 {len(all_top)} 個訊號")
+        logger.info(f"[品質門撒①] 淘汰 {skipped_no_kline} 個 ATR=None（K線無數據小幣），剩餘 {len(all_top)} 個訊號")
+
+    # 品質門撒②：成交值仍未確認（三路均無資料：CoinGlass / BingX / K線估算全失敗）
+    # 這些幣是在漏斗4以「待K線估算」名義放行的，但 Plan C 也沒估出來
+    # → 無法確認流動性達標，不推播，避免推出「成交值 無數據」的訊號
+    pre_vol = len(all_top)
+    all_top = [x for x in all_top if not x.get("_vol_need_planc")]
+    skipped_no_vol = pre_vol - len(all_top)
+    if skipped_no_vol > 0:
+        logger.info(f"[品質門撒②] 淘汰 {skipped_no_vol} 個成交值未確認（三路均無資料），剩餘 {len(all_top)} 個訊號")
 
     # 成交額同步（從 _cg_volume_usd 寫入供推播使用）
     for x in all_top:
