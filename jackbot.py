@@ -4013,6 +4013,127 @@ def _classify_signal_and_tier(
     return (label, zone, 5, rsi_desc, reason)
 
 
+def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
+    """
+    計算訊號綜合評級（S / A / B / C）。
+    返回 (grade_str, score_int, brief_reason_str)
+
+    評分維度（滿分 100）：
+      1. 訊號版本強度   (max 40) ── confirmed=40 / tier2=20 / potential=10
+      2. MTF 多框架對齊 (max 25) ── 4框=25 / 3框=18 / 2框=10 / 1框=3
+      3. 4H 宏觀天候    (−10~+15) ── 順勢+15 / 逆勢−10 / 未知 0
+      4. RSI 技術位      (−5~+10) ── 理想區間+10 / 中性+5 / 危險 −5
+      5. 1H OI 強度     (max 10)  ── >8%=10 / 5-8%=7 / 3-5%=5 / <3%=2
+
+    等級門檻：
+      S ≥ 80  超高勝率・主力三層共振＋順勢格局
+      A ≥ 60  高勝率・強訊號但有小瑕疵
+      B ≥ 40  中等勝率・方向成立但需謹慎
+      C < 40  觀察等級・訊號較弱，輕倉或觀望
+    """
+    score = 0
+    reasons = []
+
+    # ── 1. 訊號版本強度 ──────────────────────────────────────────
+    version = x.get("signal_version") or "potential"
+    if version == "confirmed":
+        score += 40
+        reasons.append("三層共振")
+    elif version == "tier2":
+        score += 20
+        reasons.append("部分共振")
+    else:
+        score += 10
+        reasons.append("潛在訊號")
+
+    # ── 2. MTF 多框架對齊 ──────────────────────────────────────
+    mtf_aligned = x.get("mtf_aligned") or 1
+    if mtf_aligned >= 4:
+        score += 25
+        reasons.append("4框共振")
+    elif mtf_aligned >= 3:
+        score += 18
+        reasons.append("3框共振")
+    elif mtf_aligned >= 2:
+        score += 10
+        reasons.append("2框共振")
+    else:
+        score += 3
+
+    # ── 3. 4H 宏觀天候 ────────────────────────────────────────
+    is_above_4h = x.get("is_above_4h_ema")
+    if is_above_4h is True:
+        if is_bull_sig:
+            score += 15
+            reasons.append("4H順勢")
+        else:
+            score -= 10  # 做空卻在 4H EMA20 上方，逆勢
+    elif is_above_4h is False:
+        if not is_bull_sig:
+            score += 15
+            reasons.append("4H順勢")
+        else:
+            score -= 10  # 做多卻在 4H EMA20 下方，逆勢
+
+    # ── 4. RSI 技術位 ────────────────────────────────────────
+    rsi_v = x.get("rsi")
+    if rsi_v is not None:
+        try:
+            rsi_v = float(rsi_v)
+            if is_bull_sig:
+                if 30 <= rsi_v <= 55:
+                    score += 10   # 底部啟動，空間最大
+                    reasons.append(f"RSI{rsi_v:.0f}理想")
+                elif 55 < rsi_v <= 70:
+                    score += 5    # 中段追，仍可行
+                elif rsi_v > 75:
+                    score -= 5    # 嚴重超買，風險高
+            else:  # 做空
+                if 45 <= rsi_v <= 70:
+                    score += 10   # 頂部起跌，空間最大
+                    reasons.append(f"RSI{rsi_v:.0f}理想")
+                elif 25 <= rsi_v < 45:
+                    score += 5    # 中段追，仍可行
+                elif rsi_v < 25:
+                    score -= 5    # 嚴重超賣，反彈風險高
+        except (TypeError, ValueError):
+            pass
+
+    # ── 5. 1H OI 強度 ────────────────────────────────────────
+    oi_1h = abs(x.get("oiChange1h") or 0)
+    if oi_1h >= 8.0:
+        score += 10
+        reasons.append(f"OI{oi_1h:.1f}%強")
+    elif oi_1h >= 5.0:
+        score += 7
+    elif oi_1h >= 3.0:
+        score += 5
+    else:
+        score += 2
+
+    # ── 評級對應 ─────────────────────────────────────────────
+    score = max(0, min(100, score))  # 夾在 0-100
+    if score >= 80:
+        grade = "S"
+        grade_badge = "🏆 *S 級*"
+        grade_desc = "超高勝率"
+    elif score >= 60:
+        grade = "A"
+        grade_badge = "🥇 *A 級*"
+        grade_desc = "高勝率"
+    elif score >= 40:
+        grade = "B"
+        grade_badge = "🥈 *B 級*"
+        grade_desc = "中等勝率"
+    else:
+        grade = "C"
+        grade_badge = "🥉 *C 級*"
+        grade_desc = "觀察等級"
+
+    brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
+    return grade, score, brief
+
+
 def build_report_message_tiered(
     enriched_items: List[Dict],
     processed_count: int = 0,
@@ -4498,6 +4619,11 @@ def build_report_message_tiered(
             _vol_line = ""  # 無成交值資料時不顯示此行，避免誤導
 
         # ══════════════════════════════════════════════════════════
+        # 訊號評級（S / A / B / C）
+        # ══════════════════════════════════════════════════════════
+        _grade, _grade_score, _grade_brief = _calc_signal_grade(x, is_bull_sig)
+
+        # ══════════════════════════════════════════════════════════
         # 組裝電報訊息（手機優先，去括號，結構清晰）
         # ══════════════════════════════════════════════════════════
         msg_lines: List[str] = []
@@ -4505,6 +4631,7 @@ def build_report_message_tiered(
         # ─ 標題行 ─（顯示基礎幣名，無 USDT 後綴；_copy_sym 供操作計畫區使用）
         _copy_sym = sym if sym.endswith("USDT") else f"{sym_base}USDT"
         msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` {_badge_emo}")
+        msg_lines.append(_grade_brief)
         msg_lines.append(_ver_label)
         msg_lines.append("")
 
