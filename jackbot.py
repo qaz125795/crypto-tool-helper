@@ -3537,10 +3537,10 @@ FUNDING_EXTREME = 0.0003    # 極端費率 0.03%，用於標註
 MAIN_COINS = {"BTC", "ETH"}
 
 # ── 流動性門檻（24h 成交值，低於此深度不足）──────────────────────────
-MTF_VOLUME_MIN_USD  = 4_900_000     # 4.9M USD（初期測試寬鬆版；穩定後可調回 10M）
+MTF_VOLUME_MIN_USD  = 7_000_000     # 7M USD（2026-03-03 調高，過濾低流動性山寨）
 
 # ── 1H OI 扳機門檻（Stage 1 主時框）──────────────────────────────────
-OI_THRESHOLD_1H    = 2.0            # 2.0%（初期測試寬鬆版；穩定後可調回 3.0%）
+OI_THRESHOLD_1H    = 3.0            # 3.0%（2026-03-03 調高，降低訊號頻率）
 PRICE_THRESHOLD_1H = 1.5            # 1H 價格扳機門檻
 
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
@@ -3567,7 +3567,7 @@ SYMBOL_BLACKLIST: set = {
     "MANYU",      # 極小市值 meme 幣，價格 ~7e-9 USD，無交易意義
     "CITY",       # 用戶手動加入黑名單
     "REQ", "STEEM", "ROAM",  # 用戶手動加入黑名單（2026-03-02）
-    "CELR", "ATA", "ICX", "AGT",  # 用戶手動加入黑名單（2026-03-02）
+    "CELR", "ATA", "ICX", "AGT", "ALU", "CAMP",  # 用戶手動加入黑名單（2026-03-02/03）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
     "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
@@ -4342,11 +4342,6 @@ def build_report_message_tiered(
         detected_ts = x.get("_detected_ts")
         vwap_2h_val = x.get("vwap_2h")
         _now_ts = time.time()
-        # 優先用 CoinGlass 15m OI K線時間戳（持倉真正異動的那根K線起點）
-        # 退一步用系統掃描時間
-        _oi_15m_candle_ts = x.get("_oi_15m_candle_ts") or 0
-        _anomaly_ts = _oi_15m_candle_ts if _oi_15m_candle_ts > 0 else detected_ts
-        _stale_min = int((_now_ts - _anomaly_ts) / 60) if _anomaly_ts else 0
 
         # ══════════════════════════════════════════════════════════
         # ATR 風控計算（Google 建議純 ATR 公式：Risk = 1.5 × 1H_ATR）
@@ -4532,24 +4527,6 @@ def build_report_message_tiered(
             else:
                 _vwap_vs = " _（現價低於均價，空方佔優）_" if not is_bull_sig else " _（現價低於均價，多方逆風）_"
             msg_lines.append(f"📐 主力均價：`{_fmt_price(vwap_2h_val)}`{_vwap_vs}")
-
-        # 持倉異動時間 + 過時警告
-        if _anomaly_ts:
-            import datetime as _dt
-            _tz_taipei = _dt.timezone(_dt.timedelta(hours=8))
-            _anomaly_time_str = _dt.datetime.fromtimestamp(
-                _anomaly_ts, tz=_tz_taipei
-            ).strftime("%H:%M")
-            _label = "15m K線異動" if _oi_15m_candle_ts > 0 else "系統偵測"
-            if _stale_min >= 15:
-                msg_lines.append(
-                    f"🕐 {_label}：{_anomaly_time_str}（約 {_stale_min} 分前）"
-                )
-                msg_lines.append(
-                    f"_⚠️ 此持倉異動已逾 {_stale_min} 分鐘，行情可能已推進，請先確認現況再進場_"
-                )
-            else:
-                msg_lines.append(f"🕐 {_label}：{_anomaly_time_str}（約 {_stale_min} 分前）")
 
         msg_lines.append(f"💵 進場：`{_fmt_price(price)}`")
         if sl is not None:
