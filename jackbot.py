@@ -3577,7 +3577,7 @@ SYMBOL_BLACKLIST: set = {
     "CITY",       # 用戶手動加入黑名單
     "REQ", "STEEM", "ROAM",  # 用戶手動加入黑名單（2026-03-02）
     "CELR", "ATA", "ICX", "AGT", "ALU", "CAMP",  # 用戶手動加入黑名單（2026-03-02/03）
-    "BOBA", "AIO",  # 用戶手動加入黑名單（2026-03-03）
+    "BOBA", "AIO", "BTR",  # 用戶手動加入黑名單（2026-03-03）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
     "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
@@ -4453,6 +4453,8 @@ def build_report_message_tiered(
 
     now_str = datetime.now(TAIPEI_TZ).strftime("%m/%d %H:%M")
     messages_out: List[str] = []
+    grade_per_msg: List[str] = []   # 與 messages_out 同步，記錄每則訊號的評級
+    s_grade_msgs: List[str] = []    # S 級訊號獨立收集，供額外推播
     push_count = 0
     has_any = False
     seen_syms: set = set()
@@ -4725,7 +4727,11 @@ def build_report_message_tiered(
         x["stars"]           = 5
         x["dir"]             = "多" if is_bull_sig else "空"
 
-        messages_out.append("\n".join(msg_lines))
+        _msg_str = "\n".join(msg_lines)
+        messages_out.append(_msg_str)
+        grade_per_msg.append(_grade)
+        if _grade == "S":
+            s_grade_msgs.append(_msg_str)
         push_count += 1
         has_any = True
         logger.info(
@@ -4765,24 +4771,28 @@ def build_report_message_tiered(
             f"BTC 若急漲可能同步觸損，請控制總倉位，勿全倉押入"
         )
 
-    _confirmed_in_msg = sum(1 for m_x in messages_out if "確定籌碼" in (m_x or ""))
-    _tier2_in_msg     = sum(1 for m_x in messages_out if "觀察名單" in (m_x or ""))
-    _potential_in_msg = push_count - _confirmed_in_msg - _tier2_in_msg
-    _mtf_tag = f"✅確定 {_confirmed_in_msg}"
-    if _potential_in_msg > 0:
-        _mtf_tag += f" 🎯潛在 {_potential_in_msg}"
-    if _tier2_in_msg > 0:
-        _mtf_tag += f" ⚠️觀察 {_tier2_in_msg}"
+    # ── 評級統計（S/A/B/R）──────────────────────────────────────────
+    _grade_counts = {"S": 0, "A": 0, "B": 0, "R": 0}
+    for _g in grade_per_msg:
+        if _g in _grade_counts:
+            _grade_counts[_g] += 1
+
+    _grade_parts = []
+    for _g, _badge in [("S", "🏆S"), ("A", "🥇A"), ("B", "🥈B"), ("R", "⚡R")]:
+        if _grade_counts[_g] > 0:
+            _grade_parts.append(f"{_badge}×{_grade_counts[_g]}")
+    _grade_tag = "  ".join(_grade_parts) if _grade_parts else "─"
+
     header = (
         f"🔍 *傑克持倉異常狙擊鏡*  本輪 {push_count} 個訊號\n"
-        f"🕐 {now_str} 台北  |  {_mtf_tag}\n"
+        f"🕐 {now_str} 台北  |  {_grade_tag}\n"
         f"{'─' * 20}\n"
     )
     sep = f"\n{'─' * 20}\n"
     body = sep.join(messages_out) + correlation_warn
 
     # ── 以下為舊版渲染殘留（已棄用，直接 return 跳過）──────────────
-    return header + body, has_any, push_count
+    return header + body, has_any, push_count, s_grade_msgs
 
     long_dip = [x for x in enriched_items if x.get("zone") == ZONE_DIP and _is_bull(x) and (x.get("stars") or 0) >= 4]
     long_break = [x for x in enriched_items if x.get("zone") == ZONE_BREAKOUT_LONG and _is_bull(x) and (x.get("stars") or 0) >= 4]
@@ -6740,13 +6750,28 @@ def fetch_position_change():
     # 僅在「實際有至少一則訊號」時才推主報表；無訊號或全被風報比篩掉 → 不推，安靜
     has_any = False
     if cooled_top:
-        msg, has_any, push_count = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
+        msg, has_any, push_count, s_grade_msgs = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
         if has_any:
             logger.info(
                 f"【推播總結】本輪最終推播 {push_count} 檔"
                 f"（冷卻後候選 {len(cooled_top)} 個，RSI+風報比篩選後實推 {push_count} 個）"
                 f"，處理幣種 {processed_count} 個，OI 成功 {oi_success_count} 個"
             )
+            # ── S 級速報：獨立推播（優先於主報表）────────────────────────
+            if s_grade_msgs:
+                _s_sep = f"\n{'─' * 20}\n"
+                _s_header = (
+                    f"🚨 *S 級速報*  本輪 {len(s_grade_msgs)} 個極強訊號\n"
+                    f"{'─' * 20}\n"
+                )
+                _s_body = _s_sep.join(s_grade_msgs)
+                send_telegram_message(
+                    _s_header + _s_body,
+                    TG_THREAD_IDS['position_change'],
+                    parse_mode="Markdown"
+                )
+                logger.info(f"[S級速報] 已推播 {len(s_grade_msgs)} 個 S 級訊號（獨立訊息）")
+            # ── 主報表（含全部訊號）──────────────────────────────────────
             send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
         else:
             logger.info(f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，但 RSI/風報比篩選後 0 筆可推播，不發送主報表")
