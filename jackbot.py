@@ -4496,7 +4496,7 @@ def build_report_message_tiered(
         _r1, _r2 = 1.5, 3.0
         sl_pct_val = None
         if atr_val and atr_val > 0 and price and price > 0:
-            _risk = 1.5 * atr_val
+            _risk = 1.8 * atr_val
             if is_bull_sig:
                 sl  = price - _risk
                 tp1 = price + _risk * 1.5
@@ -6726,7 +6726,7 @@ def fetch_position_change():
                         _sl_est = _r2h_high * 1.005
                         _risk_est = _sl_est - _live
                     else:
-                        _risk_est = _atr_rt * 1.5   # 備援估算
+                        _risk_est = _atr_rt * 1.8   # 備援估算
                     if _risk_est > 0:
                         _tp1_est = (_live + _risk_est) if _is_long_rt else (_live - _risk_est)
                         _r_tp1 = abs(_tp1_est - _live) / _risk_est  # 理論上 = 1.0
