@@ -4026,10 +4026,10 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
       5. 1H OI 強度     (max 10)  ── >8%=10 / 5-8%=7 / 3-5%=5 / <3%=2
 
     等級門檻：
-      S ≥ 80  超高勝率・主力三層共振＋順勢格局
-      A ≥ 60  高勝率・強訊號但有小瑕疵
-      B ≥ 40  中等勝率・方向成立但需謹慎
-      C < 40  觀察等級・訊號較弱，輕倉或觀望
+      S ≥ 80  訊號極強・主力三層共振＋順勢格局
+      A ≥ 60  訊號強・多項條件對齊但有小瑕疵
+      B ≥ 40  訊號中等・方向成立但需謹慎
+      C < 40  訊號偏弱・條件不齊，輕倉或觀望
     """
     score = 0
     reasons = []
@@ -4116,19 +4116,19 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     if score >= 80:
         grade = "S"
         grade_badge = "🏆 *S 級*"
-        grade_desc = "超高勝率"
+        grade_desc = "訊號極強"
     elif score >= 60:
         grade = "A"
         grade_badge = "🥇 *A 級*"
-        grade_desc = "高勝率"
+        grade_desc = "訊號強"
     elif score >= 40:
         grade = "B"
         grade_badge = "🥈 *B 級*"
-        grade_desc = "中等勝率"
+        grade_desc = "訊號中等"
     else:
         grade = "C"
         grade_badge = "🥉 *C 級*"
-        grade_desc = "觀察等級"
+        grade_desc = "訊號偏弱"
 
     brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
     return grade, score, brief
