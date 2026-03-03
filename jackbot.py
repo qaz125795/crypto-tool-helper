@@ -3531,6 +3531,15 @@ ZONE_BREAKOUT_SHORT = "跌破追跌區"
 # 資金費率門檻
 FUNDING_EXTREME = 0.0003    # 極端費率 0.03%，用於標註
 
+# ── 資金費率多空壅擠過濾門檻 ─────────────────────────────────────────────
+# 費率為小數（0.001 = 0.1%）
+# 空頭壅擠（費率偏負）：做空訊號時觸發警戒/封鎖
+FR_SHORT_SQUEEZE_RISK  = 0.001   # -0.1%：空頭開始壅擠 → 做空訊號降級
+FR_SHORT_SQUEEZE_BLOCK = 0.003   # -0.3%：空頭嚴重壅擠，嘎空風險高 → 做空訊號封鎖
+# 多頭壅擠（費率偏正）：做多訊號時觸發警戒/封鎖
+FR_LONG_LIQUIDATION_RISK  = 0.002  # +0.2%：多頭開始壅擠 → 做多訊號降級
+FR_LONG_LIQUIDATION_BLOCK = 0.005  # +0.5%：多頭嚴重壅擠，爆倉風險高 → 做多訊號封鎖
+
 # ══════════════════════════════════════════════════════════════════════
 # 1H MTF 四層漏斗策略門檻（集中管理，調參只需改這裡）
 # ══════════════════════════════════════════════════════════════════════
@@ -3568,6 +3577,7 @@ SYMBOL_BLACKLIST: set = {
     "CITY",       # 用戶手動加入黑名單
     "REQ", "STEEM", "ROAM",  # 用戶手動加入黑名單（2026-03-02）
     "CELR", "ATA", "ICX", "AGT", "ALU", "CAMP",  # 用戶手動加入黑名單（2026-03-02/03）
+    "BOBA", "AIO",  # 用戶手動加入黑名單（2026-03-03）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
     "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
@@ -4439,15 +4449,29 @@ def build_report_message_tiered(
         _rsi_4h_str  = f" · RSI {_rsi_4h_val:.0f}" if _rsi_4h_val is not None else ""
         _macro_line  = f"🌍 *4H天候：* {_macro_trend} · {_macro_ema_txt}{_rsi_4h_str}"
 
-        # ── 資金費率 ──────────────────────────────────────────────────
+        # ── 資金費率（含多空壅擠判讀）────────────────────────────────────────
+        # 費率偏負 = 空頭支付費率（空頭壅擠）→ 做多是順風，做空風險高（嘎空）
+        # 費率偏正 = 多頭支付費率（多頭壅擠）→ 做空是順風，做多風險高（爆倉）
         if funding_rate is not None and isinstance(funding_rate, (int, float)):
             _fr_val = funding_rate * 100
+            # 中性區間
             if abs(funding_rate) <= 0.0001:
                 _fr_desc = "中性"
-            elif funding_rate > 0.0005:
-                _fr_desc = "偏多 ⚠️軋多" if not is_bull_sig else "偏多"
+            # 嚴重壅擠（已被 FR 封鎖門不應到達這裡，但顯示層仍需標註）
+            elif funding_rate <= -FR_SHORT_SQUEEZE_BLOCK:
+                _fr_desc = "🔥 空頭嚴重壅擠，嘎空風險極高！" if is_bull_sig else "🚨 空頭嚴重壅擠，切勿追空！"
+            elif funding_rate >= FR_LONG_LIQUIDATION_BLOCK:
+                _fr_desc = "🚨 多頭嚴重壅擠，切勿追多！" if is_bull_sig else "🔥 多頭嚴重壅擠，空方順風！"
+            # 壅擠警戒（降級訊號可能出現在此）
+            elif funding_rate < -FR_SHORT_SQUEEZE_RISK:
+                _fr_desc = "⚠️ 空頭壅擠，做多順風" if is_bull_sig else "⚠️ 空頭壅擠，嘎空風險偏高"
+            elif funding_rate > FR_LONG_LIQUIDATION_RISK:
+                _fr_desc = "⚠️ 多頭壅擠，做空順風" if not is_bull_sig else "⚠️ 多頭壅擠，爆倉風險偏高"
+            # 輕微偏向
             elif funding_rate < -0.0005:
-                _fr_desc = "偏空 ⚠️軋空" if is_bull_sig else "偏空"
+                _fr_desc = "略偏空（做多略有費率加成）" if is_bull_sig else "略偏空（空頭稍多）"
+            elif funding_rate > 0.0005:
+                _fr_desc = "略偏多（做空略有費率加成）" if not is_bull_sig else "略偏多（多頭稍多）"
             elif funding_rate > 0:
                 _fr_desc = "略偏多"
             else:
@@ -6209,6 +6233,48 @@ def fetch_position_change():
             )
             continue
 
+        # ── 資金費率多空壅擠過濾 ──────────────────────────────────────────────
+        # 原理：費率偏負 = 空頭支付費率給多頭 = 空頭部位壅擠
+        #       → 做空時風險高（嘎空）；做多時是順風（空頭補倉推升）
+        #       費率偏正 = 多頭支付費率給空頭 = 多頭部位壅擠
+        #       → 做多時風險高（多頭爆倉拋售）；做空時是順風
+        _effective_version = _mtf_result.get("version", "potential")
+        _fr_crowding_note = ""
+        if funding_rate is not None and isinstance(funding_rate, (int, float)):
+            _fr_abs = abs(funding_rate)
+            _is_short_sig = cat in ("long_close", "short_open")
+            _is_long_sig  = cat in ("long_open", "short_close")
+            _fr_pct_str   = f"{funding_rate * 100:+.4f}%"
+
+            if _is_short_sig and funding_rate < -FR_SHORT_SQUEEZE_BLOCK:
+                # 費率 < -0.3%：空頭嚴重壅擠，嘎空風險極高，封鎖做空訊號
+                logger.info(
+                    f"[FR封鎖🚫] {sym}: 做空訊號 費率={_fr_pct_str}"
+                    f"（空頭嚴重壅擠 ≤ -{FR_SHORT_SQUEEZE_BLOCK*100}%），封鎖"
+                )
+                continue
+            elif _is_short_sig and funding_rate < -FR_SHORT_SQUEEZE_RISK:
+                # 費率 -0.1%~-0.3%：空頭壅擠警戒，做空訊號降級
+                _effective_version = "tier2"
+                _fr_crowding_note = f"空頭壅擠警示（費率{_fr_pct_str}，嘎空風險偏高）"
+                logger.info(
+                    f"[FR降級⚠️] {sym}: 做空訊號 費率={_fr_pct_str} 空頭壅擠 → 降為觀察名單"
+                )
+            elif _is_long_sig and funding_rate > FR_LONG_LIQUIDATION_BLOCK:
+                # 費率 > +0.5%：多頭嚴重壅擠，爆倉風險高，封鎖做多訊號
+                logger.info(
+                    f"[FR封鎖🚫] {sym}: 做多訊號 費率={_fr_pct_str}"
+                    f"（多頭嚴重壅擠 ≥ +{FR_LONG_LIQUIDATION_BLOCK*100}%），封鎖"
+                )
+                continue
+            elif _is_long_sig and funding_rate > FR_LONG_LIQUIDATION_RISK:
+                # 費率 +0.2%~+0.5%：多頭壅擠警戒，做多訊號降級
+                _effective_version = "tier2"
+                _fr_crowding_note = f"多頭壅擠警示（費率{_fr_pct_str}，爆倉風險偏高）"
+                logger.info(
+                    f"[FR降級⚠️] {sym}: 做多訊號 費率={_fr_pct_str} 多頭壅擠 → 降為觀察名單"
+                )
+
         all_top.append({
             **item,
             "priceChange24h": price_24h,
@@ -6244,9 +6310,9 @@ def fetch_position_change():
             "oiChange_30m": _oi_30m,
             "oiChange_15m": _oi_15m,
             "oiChange_5m":  _oi_5m,
-            # MTF 訊號版本
-            "signal_version":  _mtf_result.get("version", "potential"),
-            "signal_subtype":  _mtf_result.get("subtype", ""),
+            # MTF 訊號版本（已套入 FR 壅擠過濾，_effective_version 可能降級）
+            "signal_version":  _effective_version,
+            "signal_subtype":  _mtf_result.get("subtype", "") or _fr_crowding_note,
             "mtf_desc":        _mtf_result.get("mtf_desc", ""),
             "mtf_oi_line":     _mtf_result.get("mtf_oi_line", ""),
             "mtf_aligned":     _mtf_result.get("aligned_count", 1),
@@ -6256,10 +6322,9 @@ def fetch_position_change():
             "rsi_4h":          _rsi_4h,
             "is_above_4h_ema": _is_above_4h_ema,
         })
-        _v = _mtf_result.get("version", "potential")
         _ver_tag = (
-            "✅確定籌碼（鐵三角）" if _v == "confirmed"
-            else f"⚠️觀察名單({_mtf_result.get('subtype','')})" if _v == "tier2"
+            "✅確定籌碼（鐵三角）" if _effective_version == "confirmed"
+            else f"⚠️觀察名單({_fr_crowding_note or _mtf_result.get('subtype','')})" if _effective_version == "tier2"
             else f"🎯潛在機會({_mtf_result.get('subtype','')})"
         )
         logger.info(f"[Enrichment] {sym} 已加入 all_top：RSI={rsi_val} ATR={atr_val} 現價={_cur_price} | {_ver_tag} | {reason}")
