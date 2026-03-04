@@ -4042,16 +4042,26 @@ def _classify_signal_and_tier(
 def detect_bull_trap_short_setup(oi_candles: list) -> dict:
     """
     偵測「誘多摸頭陷阱」五步驟完整形態，適用於 short_open 訊號。
-    輸入：最近 5 根 15m 已收盤 K棒的 OI 數值列表（由舊到新）
+
+    輸入：最近 6 根 15m 已收盤 K棒的 OI 數值列表（由舊到新）
           格式: [{"t": ts, "c": oi_float, "price": price_or_None}, ...]
+          需要 6 根是因為 K-4 的 OI↓ 要與前一根（K-5）比較
     輸出: {"detected": bool, "matched_steps": int, "note": str}
 
-    五步驟陷阱邏輯（Wyckoff 誘多出貨序列）：
-      K-4  空方停損（price↑ + OI↓）= short_close
-      K-3  回檔回落（price↓）        = 空方停損後的自然回調
-      K-2  誘多建倉（price↑ + OI↑）= long_open 假突破
-      K-1  主力出貨（OI↓）           = long_close 派發
-      K-0  空軍進場（price↓ + OI↑）= short_open ← 當前訊號
+    五步驟陷阱邏輯（Wyckoff 誘多出貨序列）——時間由左到右：
+      K-5  基準根（用於確認 K-4 OI 是否下跌）
+      K-4  空方停損軋空（OI↓：短倉被強制平倉，OI 減少）= short_close
+      K-3  回檔整理（OI 平穩，price 小回）
+      K-2  誘多假突破（OI↑：散戶被騙，新多倉湧入）= long_open  ← 此時不追！
+      K-1  主力高位出貨（OI↓：主力多倉悄悄平掉）= long_close
+      K-0  空軍正式進場（OI↑：空方確認入場）= short_open ← 當前訊號，此時才做空
+
+    比較邏輯：每根 K 棒的 OI「漲跌」= 與其「前一根」比較
+      K-4 OI↓ → k4 < k5
+      K-3 OI 平穩 → 寬鬆判斷（True）
+      K-2 OI↑ → k2 > k3  （k2 比 k3 「新」，k2 > k3 = OI 從 k3 到 k2 上升）
+      K-1 OI↓ → k1 < k2  （k1 比 k2 「新」，k1 < k2 = OI 從 k2 到 k1 下降）
+      K-0 OI↑ → k0 > k1  （k0 最新，k0 > k1 = OI 從 k1 到 k0 上升）
     任何中間步驟缺失 → 部分吻合，仍回報已匹配幾步
     """
     result = {"detected": False, "matched_steps": 0, "note": ""}
@@ -4059,22 +4069,33 @@ def detect_bull_trap_short_setup(oi_candles: list) -> dict:
         return result
 
     try:
-        # 取最後 5 根，k4 最舊，k0 最新（即當前訊號 K棒）
-        k4, k3, k2, k1, k0 = oi_candles[-5], oi_candles[-4], oi_candles[-3], oi_candles[-2], oi_candles[-1]
-
         def _oi(d):  return float(d.get("c") or 0)
-        def _px(d):  return d.get("price")  # 可能為 None
 
-        # 各步驟判斷（OI 比較，price 若有則輔助確認）
-        # K-4：空方停損 = OI↓（short_close 態）
-        step4 = _oi(k4) < _oi(k3) if _oi(k3) > 0 else False   # k4 OI < 前一根 = OI減少
-        # K-3：回檔（price 下跌，或 OI 繼續減少）
-        step3 = _oi(k3) < _oi(k2) or True   # 寬鬆判斷，回檔 K 棒通常 OI 平穩
-        # K-2：誘多 = OI↑（long_open 態）
-        step2 = _oi(k2) > _oi(k1)
-        # K-1：出貨 = OI↓（long_close 態）
-        step1 = _oi(k1) < _oi(k0)
-        # K-0：空軍進場 = OI↑（short_open 態，即當前訊號）
+        # 取最後 6 根（k5 最舊為基準根，k0 最新為當前訊號根）
+        # 若只有 5 根，k5 設為 None，step4 寬鬆通過
+        k5 = oi_candles[-6] if len(oi_candles) >= 6 else None
+        k4, k3, k2, k1, k0 = (
+            oi_candles[-5], oi_candles[-4], oi_candles[-3],
+            oi_candles[-2], oi_candles[-1]
+        )
+
+        # ── 各步驟 OI 方向判斷（每根與前一根比較）──────────────────────
+        # K-4：空方停損 = OI↓（對比前一根 K-5）
+        step4 = (_oi(k4) < _oi(k5)) if (k5 and _oi(k5) > 0) else True   # 無 k5 時寬鬆通過
+
+        # K-3：回檔整理 = OI 平穩（寬鬆，只要不是大幅增加即可）
+        step3 = True   # 回檔 K 棒 OI 通常橫盤，不嚴格要求
+
+        # K-2：誘多建倉 = OI↑（對比前一根 K-3）
+        # k2 比 k3 新，k2 > k3 = OI 從 k3 上升到 k2 = 新多倉湧入（誘多）
+        step2 = _oi(k2) > _oi(k3)
+
+        # K-1：主力出貨 = OI↓（對比前一根 K-2）
+        # k1 比 k2 新，k1 < k2 = OI 從 k2 下降到 k1 = 多倉被平掉（出貨）
+        step1 = _oi(k1) < _oi(k2)
+
+        # K-0：空軍進場 = OI↑（對比前一根 K-1，即當前訊號）
+        # k0 最新，k0 > k1 = OI 從 k1 上升到 k0 = 空倉湧入（空軍確認）
         step0 = _oi(k0) > _oi(k1)
 
         matched = sum([step4, step3, step2, step1, step0])
@@ -10460,33 +10481,55 @@ def run_gold_signal():
 
     last_bar_row = df_1h.iloc[-1]
     bar_high = float(last_bar_row["High"])
-    bar_low = float(last_bar_row["Low"])
-    last_dir = state.get("last_direction")
-    last_sl = state.get("last_sl")
-    last_tp = state.get("last_tp")
+    bar_low  = float(last_bar_row["Low"])
+    last_dir   = state.get("last_direction")
+    last_sl    = state.get("last_sl")
+    last_tp1   = state.get("last_tp1")
+    last_tp2   = state.get("last_tp2") or state.get("last_tp")  # 向下相容舊 state
     last_entry = state.get("last_entry")
-    if last_dir and last_sl is not None and last_tp is not None and last_entry is not None:
+    last_tp1_hit = state.get("last_tp1_hit", False)
+
+    if last_dir and last_sl is not None and last_tp2 is not None and last_entry is not None:
         hit = None
         if last_dir == "long":
-            if bar_high >= last_tp:
-                hit = "tp"
+            if bar_high >= last_tp2:
+                hit = "tp2"                             # 目標二達成（優先判斷）
+            elif last_tp1 and bar_high >= last_tp1 and not last_tp1_hit:
+                hit = "tp1"                             # 目標一達成（尚未通知過）
             elif bar_low <= last_sl:
                 hit = "sl"
         else:
-            if bar_low <= last_tp:
-                hit = "tp"
+            if bar_low <= last_tp2:
+                hit = "tp2"
+            elif last_tp1 and bar_low <= last_tp1 and not last_tp1_hit:
+                hit = "tp1"
             elif bar_high >= last_sl:
                 hit = "sl"
+
         if hit:
-            msg_tpsl = format_tp_sl_hit_message(hit, last_dir, last_entry, last_sl, last_tp)
+            _tp1_for_msg = last_tp1 if last_tp1 is not None else last_entry
+            _tp2_for_msg = last_tp2
+            msg_tpsl = format_tp_sl_hit_message(
+                hit, last_dir, last_entry, last_sl, _tp1_for_msg, _tp2_for_msg
+            )
             send_telegram_message(msg_tpsl, TG_THREAD_IDS.get("gold_signal", 254), parse_mode=None)
-            logger.info("[黃金訊號] 已推播 %s 觸及，本輪結束（今日同方向不再開新倉）", "止盈" if hit == "tp" else "止損")
-            # 記錄「今日已結束的方向」，防止同一交易日重複開同方向
-            _save_gold_state({
-                "closed_direction": last_dir,
-                "closed_trade_date": today_trade_date,
-            })
-            return  # 本輪直接結束，不再找新單
+
+            if hit == "tp1":
+                # 目標一達成：持倉繼續（追蹤 TP2），記錄 tp1 已通知，防止下輪重複推播
+                logger.info("[黃金訊號] 目標一 (TP1) 達成，持倉繼續追蹤目標二 (TP2)")
+                _save_gold_state({
+                    **state,
+                    "last_tp1_hit": True,
+                })
+                # 本輪不 return，繼續執行（但後面會因 same-direction 被擋住不再開新倉）
+            else:
+                # TP2 或 SL 達成：倉位結案
+                logger.info("[黃金訊號] %s 觸及，本輪結案", "目標二 (TP2)" if hit == "tp2" else "止損 (SL)")
+                _save_gold_state({
+                    "closed_direction": last_dir,
+                    "closed_trade_date": today_trade_date,
+                })
+                return  # 本輪直接結束，不再找新單
 
     df_dxy = None
     if cfg.USE_DXY_FILTER:
@@ -10546,7 +10589,9 @@ def run_gold_signal():
             "last_direction": signal.direction,
             "last_entry": signal.entry,
             "last_sl": signal.sl,
-            "last_tp": signal.tp,
+            "last_tp1": signal.tp1,
+            "last_tp2": signal.tp2,
+            "last_tp1_hit": False,
             "last_time_utc": now_utc.isoformat(),
             "trade_date": today_trade_date,
         })
