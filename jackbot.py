@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-""
-?憛??寥?????芸???剔頂蝯??游?????賣芋憛?""
+"""
+?憛??寥?????芸???剔頂蝯??游?????賣芋憛?"""
 
 import requests
 import json
@@ -963,7 +963,7 @@ def _fetch_usdt_premium() -> Optional[float]:
             usdc_usdt = float(data.get("price", 1.0))
             if usdc_usdt > 0:
                 premium_pct = (1.0 / usdc_usdt - 1.0) * 100.0
-                logger.info(f"[USDT皞Ｗ] USDCUSDT={usdc_usdt:.6f} ??皞{_pct:+.4f}%")
+                logger.info(f"[USDT皞Ｗ] USDCUSDT={usdc_usdt:.6f} ??皞{premium_pct:+.4f}%")
                 return round(premium_pct, 4)
     except Exception as e:
         logger.warning(f"[USDT皞Ｗ] ?亥岷憭望?: {e}")
@@ -979,7 +979,7 @@ def _make_fuel_bar(score: int, max_score: int = 5) -> str:
 
 def _fetch_smart_money_oi_split(symbol: str = "BTC") -> Dict[str, Any]:
     """?唳???OI ??嚗帘摰馳靽???撠平鞈?嚗s 撟?雿?霅?嚗?嗆?獢選???    ?寞?A嚗ggregated-stablecoin-history + aggregated-coin-margin-history嚗?蝎暹?嚗?    ?寞?B嚗ggregated-history 蝮賡?嚗??湛??⊥???雿撠??豢?嚗?    ? {"stable_chg": float, "coin_chg": float, "smart_money": bool/None}
-    ""
+    """
     empty = {"stable_chg": None, "coin_chg": None, "smart_money": None, "data_source": "none"}
     base = symbol.upper().replace("USDT", "")
     params = {"symbol": base, "interval": "15m", "limit": 4}
@@ -1071,13 +1071,13 @@ def buying_power_monitor():
     stable_chg = smart_money_data.get("stable_chg")
     coin_chg = smart_money_data.get("coin_chg")
     smart_money = smart_money_data.get("smart_money")
-    logger.info(f"[????] ?唳??㏕I??嚗帘摰{_chg} 撟?雿?{coin_chg} ?唳???{smart_money}")
+    logger.info(f"[????] ?唳??㏕I??嚗帘摰{stable_chg} 撟?雿?{coin_chg} ?唳???{smart_money}")
 
     # ?啣?嚗??潸痕憍?+ BTC ETF瘚?+ Coinbase皞Ｗ
     fg_data = fetch_fear_greed_index()
     etf_data = fetch_btc_etf_flow()
     cb_data = fetch_coinbase_premium()
-    logger.info(f"[????] ?鞎芸{_data.get('value')} ETF瘚?{etf_data.get('direction')} CB皞Ｗ={cb_data.get('premium')}")
+    logger.info(f"[????] ?鞎芸{fg_data.get('value')} ETF瘚?{etf_data.get('direction')} CB皞Ｗ={cb_data.get('premium')}")
 
     if not mcap_change:
         logger.warning("??????嚗瘜?敺??潭??頝喲??冽")
@@ -1087,6 +1087,7 @@ def buying_power_monitor():
     usdt_premium = _fetch_usdt_premium()
 
     mcap_1h = mcap_change.get("change_1h") or 0
+    mcap_15m = mcap_change.get("change_15m") or mcap_1h
     oi_15m_chg = (oi_change_15m.get("change_1h") or 0)
     oi_1h_chg = (oi_change_1h.get("change_1h") or 0)
 
@@ -1096,7 +1097,7 @@ def buying_power_monitor():
         logger.info(f"[????] USDT 皞Ｗ {usdt_premium:+.4f}% > 0.05%嚗?甈???蝝?")
 
     # 蝛?嚗?蝝 7 ?遛嚗??亥?蝬剖漲嚗?
-    fuel_score = _calc_fuel_score(mcap_1h, mcap_1h, oi_15m_chg, oi_1h_chg, usdt_premium, smart_money)
+    fuel_score = _calc_fuel_score(mcap_15m, mcap_1h, oi_15m_chg, oi_1h_chg, usdt_premium, smart_money)
     # ??蝬剖漲嚗??潸痕憍?+ ETF瘚?+ Coinbase皞Ｗ嚗?+1???擃??10 ??
     fg_val = fg_data.get("value")
     if fg_val is not None:
@@ -1241,8 +1242,8 @@ _cg_full_exchange_map: Dict[str, Set[str]] = {}
 
 
 def get_major_exchanges_for_coin(base: str, pool: Optional[List[str]] = None) -> List[str]:
-    ""
-    敺?_cg_full_exchange_map 敹怠??亥岷 pool ?批鈭之??舀閰脣馳蝔柴?    敹怠??芸遣蝡???靽??摰 pool嚗馳銝 map ??????    ""
+    """
+    敺?_cg_full_exchange_map 敹怠??亥岷 pool ?批鈭之??舀閰脣馳蝔柴?    敹怠??芸遣蝡???靽??摰 pool嚗馳銝 map ??????    """
     if pool is None:
         pool = ["Binance", "OKX", "Bybit"]
     if not _cg_full_exchange_map:
@@ -1321,8 +1322,8 @@ def _fetch_coinglass_24h_map() -> Dict[str, float]:
 
 
 def fetch_bingx_futures_24h_vol() -> Dict[str, float]:
-    ""
-    Plan B ?漱?澆??湛?BingX 瘞貊??? 24h quoteVolume嚗SDT嚗甈∪?敺?    ?桐? API call 瘨菔????BingX 銝?撟?車嚗??湔?垢暺? API Key??    ? {base_symbol: vol_usdt_24h}嚗?憒?{"BTC": 2.3e10, "ETH": 5e9}??    憭望???暺??喟征 dict嚗?敶梢銝餅?蝔?    ""
+    """
+    Plan B ?漱?澆??湛?BingX 瘞貊??? 24h quoteVolume嚗SDT嚗甈∪?敺?    ?桐? API call 瘨菔????BingX 銝?撟?車嚗??湔?垢暺? API Key??    ? {base_symbol: vol_usdt_24h}嚗?憒?{"BTC": 2.3e10, "ETH": 5e9}??    憭望???暺??喟征 dict嚗?敶梢銝餅?蝔?    """
     try:
         r = requests.get(
             "https://open-api.bingx.com/openApi/swap/v2/quote/ticker",
@@ -1365,9 +1366,9 @@ def fetch_bingx_futures_24h_vol() -> Dict[str, float]:
 
 
 def fetch_price_change_24h_coinglass_klines(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
-    ""
+    """
     CoinGlass 鈭斗?撖遏蝥踹???24h 瞍脰?撟?    ?辣: https://docs.coinglass.com/v4.0-zh/reference/price-ohlc-history
-    GET /api/futures/price/history嚗? 1h?25 ?對?擐 open???close 閮? 24h%??    ?菜平??冽迨?亙嚗oins-price-change ?航銝?剁?甇方?雿? fallback??    ""
+    GET /api/futures/price/history嚗? 1h?25 ?對?擐 open???close 閮? 24h%??    ?菜平??冽迨?亙嚗oins-price-change ?航銝?剁?甇方?雿? fallback??    """
     if not CG_API_KEY:
         return None
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
@@ -1501,7 +1502,7 @@ def fetch_oi_change_tf(
     symbol: str, interval: str = "1h", return_ts: bool = False
 ) -> "Optional[float] | tuple":
     """
-    閮??桐? symbol ???? OI 霈?%嚗??1h / 30m / 15m / 5m嚗?    return_ts=True ????(change_pct, candle_start_ts)嚗銝?    candle_start_ts ?箸?餈??孵???K蝺?韏瑕????喉?Unix 蝘???    ""
+    閮??桐? symbol ???? OI 霈?%嚗??1h / 30m / 15m / 5m嚗?    return_ts=True ????(change_pct, candle_start_ts)嚗銝?    candle_start_ts ?箸?餈??孵???K蝺?韏瑕????喉?Unix 蝘???    """
     global _coinglass_oi_rate_limiter, _coinglass_oi_first_failure_logged
 
     with _oi_rate_limit_lock:
@@ -2028,7 +2029,7 @@ def tp_plain_desc(tp_label: str, is_long: bool, fp_data_source: str = "") -> str
     elif "taker_concentration" in fp_data_source:
         src_note = "嚗蜓?都?箸??葉????"
     else:
-        src_note = ""
+        src_note = """
 
     if "?單郊???" in tp_label or "閮蝪輸??" in tp_label:
         return f"??撖??都?{_note}嚗?ㄐ鞈?憯?憭批?"
@@ -2103,7 +2104,7 @@ def fetch_coinglass_indicator(
 ) -> Optional[Union[float, Dict[str, Any]]]:
     """
     ? CoinGlass ?銵?璅?API嚗??ATR嚗像??撖行郭撟??OLL嚗??葆嚗?    - indicator_name: 'atr' | 'boll'
-    - ?嚗tr ?箸??唬?蝑?ATR ?詨?(float)嚗oll ?箏???API ?? (dict嚗 data/list)??    ""
+    - ?嚗tr ?箸??唬?蝑?ATR ?詨?(float)嚗oll ?箏???API ?? (dict嚗 data/list)??    """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     symbol_param = base + "USDT"
     path_map = {"atr": "avg-true-range", "boll": "boll"}
@@ -2163,9 +2164,9 @@ def fetch_coinglass_whale_index_history(
     exchange: str = "Binance",
     interval: str = "1d",
 ) -> Optional[Dict[str, Any]]:
-    ""
+    """
     CoinGlass V4 攳券??甇瑕?豢???    GET /api/futures/whale-index/history?exchange=Binance&symbol=BTCUSDT&interval=1d
-    ?摰 API ?? (??data/list)嚗仃????None??    ""
+    ?摰 API ?? (??data/list)嚗仃????None??    """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     symbol_param = base + "USDT"
     url = f"{CG_API_BASE}/api/futures/whale-index/history"
@@ -2187,9 +2188,9 @@ def fetch_coinglass_whale_index_history(
 
 
 def _whale_index_latest(symbol: str, interval: str = "1d") -> Optional[float]:
-    ""
+    """
     ??攳券??孵???嚗?閰?CoinGlass 攳券?? API嚗?豢???fallback 憭扳??蝛箸???    ??潛絞銝??0~100 璁艙嚗?50 ????50 ?征嚗?靘??Ｘ蕪蝬脖蝙?具?    ?辣: https://docs.coinglass.com/v4.0-zh/reference/斢賊掉?
-    ""
+    """
     data = fetch_coinglass_whale_index_history(symbol, interval=interval)
     if data:
         raw = data.get("data", data.get("list", []))
@@ -2234,8 +2235,8 @@ def _whale_index_latest(symbol: str, interval: str = "1d") -> Optional[float]:
 
 
 def _fetch_bingx_funding_rate(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
-    ""
-    ?湔敺?BingX API ??閰脣馳蝔株??祥??喳 preferred_symbol嚗???contracts嚗??芸?雿輻??    ""
+    """
+    ?湔敺?BingX API ??閰脣馳蝔株??祥??喳 preferred_symbol嚗???contracts嚗??芸?雿輻??    """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     try_symbols = [preferred_symbol] if preferred_symbol else []
     if preferred_symbol and "USDC" in preferred_symbol.upper():
@@ -2290,7 +2291,7 @@ def _fetch_bingx_current_price(symbol: str, preferred_symbol: Optional[str] = No
 
 def _fetch_bingx_ticker_snapshot(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    敺?BingX swap v2 ticker 銝甈∪?敺???啣 + 24h ?漱憿?USDT)??    ? {"price": float, "volume_usd": float or None}嚗仃????None??    ""
+    敺?BingX swap v2 ticker 銝甈∪?敺???啣 + 24h ?漱憿?USDT)??    ? {"price": float, "volume_usd": float or None}嚗仃????None??    """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     try_symbols = [preferred_symbol] if preferred_symbol else []
     try_symbols += [f"{clean}-USDT", f"1000{clean}-USDT"]
@@ -2352,9 +2353,9 @@ def _fetch_bingx_ticker_snapshot(symbol: str, preferred_symbol: Optional[str] = 
 
 
 def _fetch_funding_rate_map() -> Dict[str, float]:
-    ""
+    """
     銝甈∪?敺?CoinGlass ?券?鞈?鞎餌?嚗???symbol(base) -> 鞎餌???    ?寞?A嚗I??鞎餌?甇瑕嚗?蝎暹?撣??嚗??蜓???穿?
-    ?寞?B嚗xchange-list嚗??鞎餌?嚗? Binance ?芸?嚗?    ""
+    ?寞?B嚗xchange-list嚗??鞎餌?嚗? Binance ?芸?嚗?    """
     out: Dict[str, float] = {}
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
@@ -3167,8 +3168,8 @@ def _parse_kline_rows(raw: list) -> Tuple[list, list, list, list, list]:
 def _try_binance_futures_klines_direct(
     symbol_base: str, interval: str = "15m", limit: int = 60
 ) -> Optional[Dict[str, Any]]:
-    ""
-    ?湔??Binance ?疏?祇? K 蝺?API嚗? API Key嚗???撣?volume ????OHLCV??    閫?捱 CoinGlass price/history ?芸???OHLC ? volume 撠 VWAP ???????    ""
+    """
+    ?湔??Binance ?疏?祇? K 蝺?API嚗? API Key嚗???撣?volume ????OHLCV??    閫?捱 CoinGlass price/history ?芸???OHLC ? volume 撠 VWAP ???????    """
     clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").upper()
     for sym_pair in [f"{clean}USDT", f"1000{clean}USDT"]:
         try:
@@ -3213,8 +3214,8 @@ def _try_binance_futures_klines_direct(
 def _try_bybit_futures_klines_direct(
     symbol_base: str, interval: str = "15m", limit: int = 60
 ) -> Optional[Dict[str, Any]]:
-    ""
-    ?湔??Bybit V5 蝺扳偶蝥?K 蝺?API嚗? API Key嚗???撣?volume ????OHLCV??    閬? Bybit-only 撟?車嚗? XION, WHITEWHALE, PLAYSOUT 蝑???Binance 銝?撟????    Bybit interval ?澆?嚗?/3/5/15/30/60/120/240/D/W/M嚗??誑?詨?銵函內嚗?    瘜冽?嚗ybit list ?箸?啗?嚗???敺?蝞?璅?    ""
+    """
+    ?湔??Bybit V5 蝺扳偶蝥?K 蝺?API嚗? API Key嚗???撣?volume ????OHLCV??    閬? Bybit-only 撟?車嚗? XION, WHITEWHALE, PLAYSOUT 蝑???Binance 銝?撟????    Bybit interval ?澆?嚗?/3/5/15/30/60/120/240/D/W/M嚗??誑?詨?銵函內嚗?    瘜冽?嚗ybit list ?箸?啗?嚗???敺?蝞?璅?    """
     clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").upper()
     # Binance "15m" ??Bybit "15"嚗?1h" ??"60"嚗?4h" ??"240"
     _interval_map = {
@@ -3270,9 +3271,9 @@ def _try_bybit_futures_klines_direct(
 def _try_bingx_spot_klines_direct(
     symbol_base: str, interval: str = "15m", limit: int = 60
 ) -> Optional[Dict[str, Any]]:
-    ""
+    """
     BingX ?曇疏?祇? K 蝺??偷??嚗??箸?敺?fallback??    閬??芸 BingX 銝??隞之??芯??控撖典馳嚗?璅?葆 volume??    ?澆?嚗ts, open, high, low, close, volume, close_ts, quote_vol]
-    ""
+    """
     clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").upper()
     sym_pair = f"{clean}-USDT"
     try:
@@ -3314,10 +3315,10 @@ def _try_bingx_spot_klines_direct(
 
 
 def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 60) -> Optional[Dict[str, Any]]:
-    ""
+    """
     K 蝺?撅日?蝝??伐??芸???volume ????皞?嚗?      1. Binance ?疏?湧????Key嚗? volume嚗? 閬? Binance 銝??馳蝔?      2. Bybit 瘞貊??湧????Key嚗? volume嚗? ??閬? Bybit-only 撟?車嚗? XION, WHITEWHALE嚗?      3. CoinGlass 隞?? OKX/BingX/Bitget     ????volume嚗?閬??拚??琿?撟?車
       4. BingX ?曇疏?湧????Key嚗? volume嚗? ???蝯?fallback
-    ""
+    """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
 
     # ?? Step 1: Binance ?疏?湧????芸?嚗? volume嚗???????????????????????
@@ -3396,8 +3397,8 @@ def calculate_technicals(
     interval: str = "1h",
     limit: int = 48,
 ) -> Optional[Dict[str, Any]]:
-    ""
-    ?銵?璅?蝞???1H K 蝺?身嚗?葉?郭畾萇??伐???    interval="1h" limit=48 ???? 2 憭?1H ?嚗?蝞?RSI/ATR/EMA20/VWAP 蝑葉??璅?    ""
+    """
+    ?銵?璅?蝞???1H K 蝺?身嚗?葉?郭畾萇??伐???    interval="1h" limit=48 ???? 2 憭?1H ?嚗?蝞?RSI/ATR/EMA20/VWAP 蝑葉??璅?    """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     logger.info(f"[?銵?璅 {base}: {interval} K 蝺?蝞?銵?璅?")
     tech = _fetch_cg_klines_and_calc(symbol, interval=interval, limit=limit)
@@ -3511,11 +3512,11 @@ def _check_manipulation_risk(
     atr_val: Optional[float],
     category: str = "",
 ) -> str:
-    ""
+    """
     ???脰風嚗nti-Manipulation Gate嚗?
     ?振?冽?嚗 $50?祉???琿?撅勗祠撟??銝?楊憭批?嚗? 15m OI ?游? 5%??潭???2%嚗?    璈鈭箄孛?潭?哨?銝???15m ?蝡?貊?箄疏嚗蕭?脰◤憟撅梢?嚗?蝔晞?????
     ????????????????????????????????????????????????????????????????????????    ?? 憿?撌桃嚗??菔身閮?                                                 ??    ?? long_open / short_open  = ?蝒??摰寞?鋡怎?嚗?璇辣?典??剁?     ??    ?? long_close / short_close = ??賊?摨?嚗之??閮??祈澈嚗?     ??    ??   ??璇辣1嚗??剖之撠???隞?嚗?H OI??嚗????儔嚗歲??       ??    ??   ??璇辣2嚗?撟?之OI嚗?憟嚗??曉潭撖祈銝蔣?踵迤撣豢??            ??    ????????????????????????????????????????????????????????????????????????
-    ?撠???摮葡嚗?蝛?= 撠?嚗?蝛箏?銝?= ?曇???    ""
+    ?撠???摮葡嚗?蝛?= 撠?嚗?蝛箏?銝?= ?曇???    """
     oi30 = float(item.get("oiChange30m") or 0)
     vol_usd = (
         item.get("_volume_usd")
@@ -3594,7 +3595,7 @@ def _check_manipulation_risk(
 
 
 def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
-    ""
+    """
     MTF ?惜閮????剁??湔??v3 ??撖抒撩?踵翰嚗?
     ?情??蝣潛???蝢抬?
       ? long_open:   OI??+ Price????憭撱箏?      ? short_open:  OI??+ Price????蝛箸撱箏?      ? long_close:  OI??+ Price????憭撟喳?      ? short_cover: OI??+ Price????蝛箸??
@@ -3604,7 +3605,7 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
     ??隞乩???銝敺?return None嚗?      - Step 2 銵?嚗?0m 銝餃??孵???1H ?詨?
       - RSI ?/?嚗Ⅱ摰?蝣潭?隞嗅歇?? RSI 璆萇垢
       - ???嚗?H ?急挾?孵噩嚗???頛臭?憸券擃??嚗?      - 撘勗?荔??芣? 1H ??嚗隞???孵???
-    ""
+    """
     cat_1h = item.get("category") or ""
     # 璅???1H ???Ｙ???"short_close" ???_get_cat() ??"short_cover" ?臬?銝蝐Ⅳ???
     # 嚗I??+ Price??= 蝛箸??嚗?蝯曹?頧 short_cover 靘?蝥??撠?
@@ -3768,7 +3769,7 @@ def _classify_signal_and_tier(
       |OI 1H| >= 1.5%  銝? |Price 1H| >= 1.5%
 
     # 頞典瞈曄雯嚗?4H嚗?
-      憭閮?嚗ong_open / short_close嚗?price_24h > 0 隞?”憭扳??憸?      蝛粹閮?嚗hort_open / long_close嚗?price_24h < 0 隞?”憭扳??憸?      ?? ?◢嚗銵???閮?銝剜?瘜Ｘ挾?迂?雿?嚗?    ""
+      憭閮?嚗ong_open / short_close嚗?price_24h > 0 隞?”憭扳??憸?      蝛粹閮?嚗hort_open / long_close嚗?price_24h < 0 隞?”憭扳??憸?      ?? ?◢嚗銵???閮?銝剜?瘜Ｘ挾?迂?雿?嚗?    """
     oi = item.get("oiChange1h") or item.get("oiChange30m") or 0
     price_chg_1h_main = item.get("priceChange1h") or item.get("priceChange30m")
     if price_chg_1h_main is not None and not isinstance(price_chg_1h_main, (int, float)):
@@ -3869,7 +3870,7 @@ def _classify_signal_and_tier(
 
 
 def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
-    ""
+    """
     閮?閮?蝬?閰?嚗 / A / B / R嚗?    餈? (grade_str, score_int, brief_reason_str, already_moving_bool, motion_note_str)
 
     ?? R 蝝??芸??斗嚗??????????????????????????????????????????????????
@@ -3891,7 +3892,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
       S ??80  閮?璆萄撥?颱?撅文?荔???摰?嚗?蝣箄?
       A ??60  閮?撘瑯銝餉?璇辣撠?
       B < 60  閮?銝剔??餅??蝡?雓寞???
-    ""
+    """
     # ??????????????????????????????????????????????????????????????
     # 蝚砌?甇伐??斗?撌血 ??R 蝝?
     # ??????????????????????????????????????????????????????????????
@@ -4096,8 +4097,8 @@ def build_report_message_tiered(
     processed_count: int = 0,
     oi_success_count: int = 0,
 ) -> str:
-    ""
-    ????1H MTF ?惜瞍?閮??冽??    蝣箏?蝐Ⅳ嚗?撅文?荔?+ 瞏璈?嚗??Ｗ?頦???賊?摨????研?    ?銵?璅皞?1H K 蝺?銝剜?瘜Ｘ挾閬?嚗?    ""
+    """
+    ????1H MTF ?惜瞍?閮??冽??    蝣箏?蝐Ⅳ嚗?撅文?荔?+ 瞏璈?嚗??Ｗ?頦???賊?摨????研?    ?銵?璅皞?1H K 蝺?銝剜?瘜Ｘ挾閬?嚗?    """
     def fmt_pct(num):
         if num is None or (isinstance(num, float) and (num != num)):
             return "0.00%"
@@ -4117,12 +4118,12 @@ def build_report_message_tiered(
         ema20_touch_low: Optional[float] = None,   # ?餈?EMA20 ?萱雿?嚗?蝎暹?蝯?雿?
         ema20_touch_high: Optional[float] = None,  # ?餈?EMA20 ?萱擃?嚗?蝛箇?瑽?嚗?
         ):
-        ""
+        """
         SL ?賊??摩嚗?憭靘?嚗?          EMA20 ???游?蝯?雿??亦??箏 SL嚗??抵葉頛票餈?對?頛?嚗????          憒??芣??嗡葉銝????撠梁??瘝????2H 雿???
           ATR 雿蝺抵? pad嚗遣?? 0.5x嚗?蝛箏? 0.2x嚗?鞎澆?詨???瑽?憭??
         ?: (sl_price, tp1_price, tp2_price, sl_pct, warn_pct, sl_basis_label)
           sl_basis_label: 隤芣? SL 靘?嚗MA20 / 蝯?雿?/ 2H雿?/ ?∪皞?
-        ""
+        """
         if not price or price <= 0:
             return None, None, None, None, None, "??"
 
@@ -4686,13 +4687,13 @@ def build_report_message_tiered(
     return header + body, has_any, push_count, s_grade_msgs
 
 def process_single_symbol(coin: Dict) -> Optional[Dict]:
-    ""
+    """
     ???桀馳蝔殷?1H MTF 瞍? Stage 1嚗?H OI/Price 憭扳撅??嚗?    ?情??憿?頛荔?
       price??+ OI??= long_open  (銝餃?蝛扔撱箏???
       price??+ OI??= short_close (蝛箸鋡怨翰??)
       price??+ OI??= short_open (銝餃?蝛扔撱箇征??
       price??+ OI??= long_close  (憭??撟喳?
-    ""
+    """
     symbol = normalize_symbol(coin)
     if not symbol:
         return None
@@ -5166,7 +5167,7 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
 
 def fetch_position_change():
     """
-    ??H MTF ?惜瞍?蝑?葉?郭畾菜????蜓瘚???    瞍?嚗?H OI/Price 憭扳撅?? ??30m OI 蝣箄?撱嗥?????15m OI ?剜?蝯? ??5m OI 蝎暹??脣暺?    閮?嚗? 蝣箏?蝐Ⅳ嚗?撅文?荔?嚚??瞏璈?嚗??Ｗ?頦?/ ??賊?摨???    ""
+    ??H MTF ?惜瞍?蝑?葉?郭畾菜????蜓瘚???    瞍?嚗?H OI/Price 憭扳撅?? ??30m OI 蝣箄?撱嗥?????15m OI ?剜?蝯? ??5m OI 蝎暹??脣暺?    閮?嚗? 蝣箏?蝐Ⅳ嚗?撅文?荔?嚚??瞏璈?嚗??Ｗ?頦?/ ??賊?摨???    """
     global _coinglass_oi_first_failure_logged
     _coinglass_oi_first_failure_logged = False
 
@@ -5898,7 +5899,7 @@ def fetch_position_change():
     if _gist_data is not None:
         history = _gist_data.get("history") or []
         _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
-        logger.info(f"?瑕瑼歇霈??Gist): history {len(history)} {_HOURS}h ??{_in_window} 蝑?")
+        logger.info(f"?瑕瑼歇霈??Gist): history {len(history)} {COOLDOWN_HOURS}h ??{_in_window} 蝑?")
 
     try:
         with _sniper_file_lock():
@@ -5922,12 +5923,11 @@ def fetch_position_change():
 
     now_tw = datetime.fromtimestamp(now_ts, tz=TAIPEI_TZ)
     _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
-    logger.info(f"?瑕??? {len(history)} 蝑風?{_HOURS}h ??{_in_window} 蝑??馳????瑕嚗?")
+    logger.info(f"?瑕??? {len(history)} 蝑風?{COOLDOWN_HOURS}h ??{_in_window} 蝑??馳????瑕嚗?")
 
     # ?瑕??嚗?撟???孵???COOLDOWN_HOURS ?批歇?券????
     cooldown_symbol_dir_4h: Set[Tuple[str, str]] = set()
     last_round_by_sym: Dict[str, str] = {}
-    last_push_ts_by_sym_dir: Dict[Tuple[str, str], float] = {}
     for e in history:
         if not isinstance(e, dict) or not e.get("symbol") or not e.get("dir"):
             continue
@@ -5937,9 +5937,6 @@ def fetch_position_change():
             cooldown_symbol_dir_4h.add((s, d))
         if s not in last_round_by_sym:
             last_round_by_sym[s] = d
-        key = (s, d)
-        if key not in last_push_ts_by_sym_dir or (e.get("ts") or 0) > last_push_ts_by_sym_dir[key]:
-            last_push_ts_by_sym_dir[key] = float(e.get("ts") or 0)
     latest_signal_by_sym: Dict[str, Dict[str, Any]] = {}
 
     # ?? 暺??桐??蝺?enrichment ?歇??甈∴?甇方?蝣箔??⊥?蝬脖?擳?????????????????
@@ -5974,7 +5971,7 @@ def fetch_position_change():
 
     _skipped = len(all_top) - len(cooled_top)
     if _skipped > 0:
-        logger.info(f"?祈憚?瑕頝喲? {_skipped} 瑼??{_HOURS}h ?找??嚗?")
+        logger.info(f"?祈憚?瑕頝喲? {_skipped} 瑼??{COOLDOWN_HOURS}h ?找??嚗?")
 
     # ?? 憭??梯?撌脩宏?歹???fetch_exchange_oi_consensus API ?鞈???15m ??蝒銝泵嚗炊?文?嚗????
     # is_global_consensus 甈?靽?雿摰 False嚗s_premium 撌脖?靘陷甇斗?雿?
@@ -6023,7 +6020,6 @@ def fetch_position_change():
                         _risk_est = _atr_rt * 1.8   # ?隡啁?
                     if _risk_est > 0:
                         _tp1_est = (_live + _risk_est) if _is_long_rt else (_live - _risk_est)
-                        _r_tp1 = abs(_tp1_est - _live) / _risk_est  # ??銝?= 1.0
                         # 撖阡?銝◢?望??晞?脣?啣?憪?TP1 ?格??捱摰?
                         _orig_tp1_est = (_sig_price + _risk_est) if _is_long_rt else (_sig_price - _risk_est)
                         _rt_reward = (_orig_tp1_est - _live) if _is_long_rt else (_live - _orig_tp1_est)
@@ -6031,7 +6027,7 @@ def fetch_position_change():
                         if _rt_r_ratio < 0.8:
                             logger.info(
                                 f"[雿瘥歲??儭 {_sym_rt}: ?單? TP1 R={_rt_r_ratio:.2f} < 0.8"
-                                f"嚗??{_price:.6f} ?單? {_live:.6f}嚗?銵?撌脤?嚗???"
+                                f"嚗??{_sig_price:.6f} ?單? {_live:.6f}嚗?銵?撌脤?嚗???"
                             )
                             _drop_low_r.append(_x)
             except Exception as _e:
@@ -6421,7 +6417,7 @@ def get_effect_text(effect: str) -> str:
         'Major Impact': '璆萄之敶梢',
         '?拙?': '???拙?', 'Bullish': '???拙?',
         '?拍征': '???拍征', 'Bearish': '???拍征',
-        '銝剜?': '銝剜批蔣??, 'Neutral': '銝剜批蔣??
+        '銝剜?': '銝剜批蔣??',  'Neutral': '銝剜批蔣??',
     }
     
     for key, value in effect_map.items():
@@ -6541,7 +6537,7 @@ def format_economic_data_message(data: Dict) -> str:
     
     # ???扯?敶梢
     lines.append(f"{importance_badge}")
-    if effect_text and effect_text != '敺?撖?:'
+    if effect_text and effect_text != '敺?撖?:':
         lines.append(f"{effect_emoji} 撣敶{_text}")
     lines.append("")
     
@@ -6799,7 +6795,7 @@ def fetch_all_news():
         response = requests.get(url, params=params, headers=headers, timeout=10)
         news_list = response.json()
         for news in news_list[:5]:  # ?芸???璇?
-        title = translate_text(news.get('title', ''))
+            title = translate_text(news.get('title', ''))
             if title:
                 all_news_items.append({
                     'title': title,
@@ -6848,7 +6844,7 @@ def fetch_all_news():
     
     # ?芷＊蝷箸?憿?蝪∠?澆?
     for idx, item in enumerate(all_news_items[:8], 1):  # ?憭?璇?
-    lines.append(f"{idx}. {item['title']}")
+        lines.append(f"{idx}. {item['title']}")
         if item.get('url'):
             lines.append(f"   ?? [?亦?閰單?]({item['url']})")
         lines.append("")
@@ -7038,7 +7034,7 @@ def fetch_ahr999_index() -> Optional[float]:
 
 def get_rainbow_stage(price: Optional[float], levels: Optional[List[float]]) -> str:
     """
-    ?寞??嗅??寞?蔗?孵??寞?曉潘?????膩??    levels: ?曹??圈???潮?澆?銵剁??虜 9 ????    ""
+    ?寞??嗅??寞?蔗?孵??寞?曉潘?????膩??    levels: ?曹??圈???潮?澆?銵剁??虜 9 ????    """
     if price is None or not levels or len(levels) < 3:
         return "鞈?銝雲嚗?⊥??斗"
 
@@ -7299,7 +7295,7 @@ def run_long_term_once():
         "inline_keyboard": [
             [
                 {"text": "?? ?亦?瘥撟?蔗?孵?", "url": "https://www.coinglass.com/zh-TW/pro/i/bitcoin-rainbow-chart"},
-                {"text": "? ?亦? AHR999, "url": "https://www.coinglass.com/zh-TW/pro/i/ahr999""}
+                {"text": "? ?亦? AHR999", "url": "https://www.coinglass.com/zh-TW/pro/i/ahr999"}
             ]
         ]
     }
@@ -7318,9 +7314,9 @@ def get_liquidation_threshold(symbol: str, time_window: str = "1h") -> tuple:
     """?寞?撟?車?璆萇垢??瑼鳴?USD嚗?    餈? (1h?? 24h?? ??蝯?    瘜冽?嚗?撠??瑼餃歇憭批???嚗誑靘踵??憭扔蝡舐???隞?    """
     if symbol in ("BTC", "ETH"):
         return (100_000.0, 15_000_000.0)  # 1h: 10?穿?憭批???嚗? 24h: 1500??
-        if symbol in ("SOL", "XRP", "DOGE"):
+    elif symbol in ("SOL", "XRP", "DOGE"):
         return (50_000.0, 5_000_000.0)  # 1h: 5?穿?憭批???嚗? 24h: 500??
-        return (30_000.0, 3_000_000.0)  # 1h: 3?穿?憭批???嚗? 24h: 300??
+    return (30_000.0, 3_000_000.0)  # 1h: 3?穿?憭批???嚗? 24h: 300??
 
 def fetch_liquidation_data(symbol: str) -> Optional[List[Dict]]:
     """敺?CoinGlass ???桐?撟?車??蝞?蝮賣風?莎??寥脩?嚗溶?矽閰虫縑?荔?"""
@@ -7681,7 +7677,7 @@ def run_liquidity_radar_once():
     """銝餅?蝔?瘚??抒????瑁?銝甈∴??拙?????HTTP 閫貊嚗?    ?????Ⅱ隤蕪蝬莎?
       1. liq_coin_list ?翰?改???箸迤?函???撟?車嚗?馳頛芾岷嚗?      2. RSI 1m 璆萇垢???<20 頞都 / >80 頞眺嚗? ?瑚?/銝蔣蝺?敶Ｘ?
       3. 蝝舐?鞎餌?頛蝣箄?嚗征?剝???+ 憭??= ?征璈?憭改?
-    ""
+    """
     logger.info(f"???瑁?瘚??抒???銝?蝣箄?????嚗 {len(LIQ_SYMBOLS)} ?馳蝔?..")
 
     # ?芸???liq_coin_list 敹怎?曉?歇?函???撟?車
@@ -7801,7 +7797,7 @@ def run_liquidity_radar_once():
             event["rsi_1m"] = rsi_1m
             event["rsi_label"] = rsi_label
             event["pin_label"] = pin_label
-            event["confirm_reason"] = "??.join(confirm_reason) if confirm_reason else "璇辣?曇?"
+            event["confirm_reason"] = "??".join(confirm_reason) if confirm_reason else "璇辣?曇?"
             event["accum_fr_label"] = accum_fr_label_liq
             event["is_hot"] = is_hot_sym
             event["snap_total_usd"] = snap_data["total_usd"] if snap_data else 0
@@ -8093,9 +8089,9 @@ def fetch_cg_rsi_bulk(interval: str = "15m") -> Dict[str, Optional[float]]:
 
 
 def fetch_buy_ratio(symbol: str) -> Optional[float]:
-    ""
+    """
     餈撮閮??馳蝔桃? Buy Ratio嚗???瘛勗漲餈撮嚗ids / (bids + asks)嚗?    雿輻 /api/futures/orderbook/aggregated-ask-bids-history
-    ""
+    """
     data = _coinglass_simple_get(
         "/api/futures/orderbook/aggregated-ask-bids-history",
         params={"exchange_list": "Binance", "symbol": symbol, "interval": "h1"},
@@ -8277,7 +8273,7 @@ def _cvd_change_last2(symbol: str, interval: str = "1h") -> Optional[float]:
 def detect_cvd_divergence(symbol: str) -> Optional[str]:
     """瑼Ｘ葫 CVD ?嚗?瞍???嚗?    餈?: 'bullish' (?撞?), 'bearish' (???), None (?∟???
     
-    ?芸??嚗?    - ?游之瘥?蝒??20 ??K 蝺?蝝?24 撠??豢?嚗?    - 撠??嗅??寞????20 ??K 蝺?擃?暺?    - 撠??嗅? CVD ????潮?雿??? CVD ??    ""
+    ?芸??嚗?    - ?游之瘥?蝒??20 ??K 蝺?蝝?24 撠??豢?嚗?    - 撠??嗅??寞????20 ??K 蝺?擃?暺?    - 撠??嗅? CVD ????潮?雿??? CVD ??    """
     try:
         # ?脣??餈?24 撠???1h ?豢?
         logger.info(f"CVD ?瑼Ｘ葫 {symbol}: ??瑼Ｘ葫...")
@@ -8714,7 +8710,7 @@ def fetch_hyperliquid_whale_alert() -> List[Dict]:
 
 def fetch_hyperliquid_coin_position(symbol: str) -> Optional[Dict]:
     """???敺摰馳蝔桀 Hyperliquid ????撣?憭征?孵???獢踴?璅∴???    ?券??斗 HL 銝??祕???頛攳券???????    endpoint: /api/hyperliquid/position
-    ""
+    """
     base = symbol.replace("USDT", "").replace("-PERP", "").replace("PERP", "").upper()
     logger.debug(f"[HL? {base} endpoint={CG_EP['hl_position']}")
     try:
@@ -9094,7 +9090,7 @@ def build_hyperliquid_message() -> Optional[str]:
     # Whale Alert ?典?嚗蜓閬摰對?????????
     lines.append("? *撌券祠?單??郎 (Whale Alert)*嚗?")
     for alert in new_alerts[:5]:  # ?憭＊蝷?5 ??
-    symbol = alert.get('symbol') or alert.get('coin') or '?芰'
+        symbol = alert.get('symbol') or alert.get('coin') or '?芰'
         
         # ?脣?USD?孵潘??芸?雿輻 position_value_usd嚗?
         value = float(
@@ -9568,8 +9564,8 @@ def run_api_health_check(symbol: str = "BTC") -> None:
         ("撟?車???風??",     "liq_agg_history",      {"symbol": base, "interval": "15m", "limit": 4}, "?"),
         ("?單?????",         "liq_order",            {"symbol": base, "limit": 5}, "?"),
         ("撟?車??銵?",         "liq_coin_list",        {"timeType": "0"}, "?"),
-        ("?????M2,     "liq_agg_heatmap_m2,   {"symbol": base, "exchange": "Binance"}, "?"),
-        ("?????M1,     "liq_agg_heatmap_m1,   {"symbol": base, "exchange": "Binance"}, "?"),
+        ("?????M2",     "liq_agg_heatmap_m2",   {"symbol": base, "exchange": "Binance"}, "?"),
+        ("?????M1",     "liq_agg_heatmap_m1",   {"symbol": base, "exchange": "Binance"}, "?"),
         ("?????)",       "liq_agg_map",          {"symbol": base}, "?"),
         # ?? 閮蝪???
         ("??閮蝪踵楛摨行風??",   "ob_agg_ask_bids",      {"symbol": base, "interval": "15m", "limit": 3, "range": "5"}, "?"),
@@ -9614,7 +9610,7 @@ def run_api_health_check(symbol: str = "BTC") -> None:
             _respect_coinglass_rate_limit()
             r = requests.get(
                 f"{CG_API_BASE}{ep}",
-                headers={"CG-API-KEY": CG_API_KEY or ", "accept": "application/json"},
+                headers={"CG-API-KEY": CG_API_KEY or "", "accept": "application/json"},
                 params=params, timeout=10
             )
             status = r.status_code
@@ -9666,12 +9662,12 @@ def run_api_health_check(symbol: str = "BTC") -> None:
 # ==================== 鞈??蔭撌亙 ====================
 
 def run_reset_data() -> None:
-    ""
+    """
     皜???颯?剔??蜀???霈頂蝯勗?圈???    ?澆?孵?嚗ython jackbot.py reset_data
 
     皜蝭?嚗?      ??sniper_cooldown.json   - ?瑕甇瑕 + ?冽蝝???怠?餈質馱嚗?      ??performance_history.json - 瘥蝮暹?蝝舐?嚗???R ?潘?
       ??last_summary_date.json  - 瘥蝮暹?蝮賜??潮??
-      ??backup_state.json       - ????隞?    ""
+      ??backup_state.json       - ????隞?    """
     logger.info("=" * 60)
     logger.info("????蝵柴?憪??斗???餉?蝮暹?閮?...")
 
