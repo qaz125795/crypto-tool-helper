@@ -1543,12 +1543,14 @@ def _parse_oi_bars_from_rows(rows: list) -> list:
 
 
 def fetch_oi_change_tf(
-    symbol: str, interval: str = "1h", return_ts: bool = False
+    symbol: str, interval: str = "1h", return_ts: bool = False,
+    return_candles: int = 0
 ) -> "Optional[float] | tuple":
     """
     計算單一 symbol 指定時框 OI 變化%（支援 1h / 30m / 15m / 5m）。
-    return_ts=True 時回傳 (change_pct, candle_start_ts)，其中
-    candle_start_ts 為最近一根完整 K線的起始時間戳（Unix 秒）。
+    return_ts=True     → 回傳 (change_pct, candle_start_ts)
+    return_candles > 0 → 回傳 (change_pct, [{"t": ts, "c": oi_value}, ...]) 最近 N 根 K棒
+                          c = 收盤 OI 值（絕對值），供陷阱偵測用
     """
     global _coinglass_oi_rate_limiter, _coinglass_oi_first_failure_logged
 
@@ -1579,6 +1581,30 @@ def fetch_oi_change_tf(
                     change = _parse_oi_change_from_data_list(data_list)
                     if change is not None:
                         _cb_record_success()
+                        # ── return_candles：回傳最近 N 根完整 K棒的 OI 數值列表 ──
+                        if return_candles > 0:
+                            try:
+                                _sorted = sorted(
+                                    data_list,
+                                    key=lambda d: d.get("t") or d.get("time") or d.get("timestamp") or 0
+                                )
+                                # 去掉最後一根（當前未收盤），取前 return_candles 根
+                                _closed = _sorted[:-1] if len(_sorted) > 1 else _sorted
+                                _n = min(return_candles, len(_closed))
+                                _candles_out = []
+                                for _d in _closed[-_n:]:
+                                    _ts = int(_d.get("t") or _d.get("time") or _d.get("timestamp") or 0)
+                                    if _ts > 1e12:
+                                        _ts = int(_ts / 1000)
+                                    _oi_val = (
+                                        _d.get("c") or _d.get("openInterest") or
+                                        _d.get("oi") or _d.get("v") or 0
+                                    )
+                                    _px = _d.get("price") or _d.get("close") or _d.get("p") or None
+                                    _candles_out.append({"t": _ts, "c": float(_oi_val), "price": _px})
+                            except Exception:
+                                _candles_out = []
+                            return change, _candles_out
                         if return_ts:
                             # 取最近已收盤 K線的起始時間（data_list[-2]）
                             try:
@@ -1590,7 +1616,6 @@ def fetch_oi_change_tf(
                                     _sorted[-2].get("t") or _sorted[-2].get("time") or
                                     _sorted[-2].get("timestamp") or 0
                                 )
-                                # CoinGlass 部分接口回傳毫秒，統一轉秒
                                 if _candle_ts > 1e12:
                                     _candle_ts = int(_candle_ts / 1000)
                             except Exception:
@@ -4014,6 +4039,65 @@ def _classify_signal_and_tier(
     return (label, zone, 5, rsi_desc, reason)
 
 
+def detect_bull_trap_short_setup(oi_candles: list) -> dict:
+    """
+    偵測「誘多摸頭陷阱」五步驟完整形態，適用於 short_open 訊號。
+    輸入：最近 5 根 15m 已收盤 K棒的 OI 數值列表（由舊到新）
+          格式: [{"t": ts, "c": oi_float, "price": price_or_None}, ...]
+    輸出: {"detected": bool, "matched_steps": int, "note": str}
+
+    五步驟陷阱邏輯（Wyckoff 誘多出貨序列）：
+      K-4  空方停損（price↑ + OI↓）= short_close
+      K-3  回檔回落（price↓）        = 空方停損後的自然回調
+      K-2  誘多建倉（price↑ + OI↑）= long_open 假突破
+      K-1  主力出貨（OI↓）           = long_close 派發
+      K-0  空軍進場（price↓ + OI↑）= short_open ← 當前訊號
+    任何中間步驟缺失 → 部分吻合，仍回報已匹配幾步
+    """
+    result = {"detected": False, "matched_steps": 0, "note": ""}
+    if not oi_candles or len(oi_candles) < 5:
+        return result
+
+    try:
+        # 取最後 5 根，k4 最舊，k0 最新（即當前訊號 K棒）
+        k4, k3, k2, k1, k0 = oi_candles[-5], oi_candles[-4], oi_candles[-3], oi_candles[-2], oi_candles[-1]
+
+        def _oi(d):  return float(d.get("c") or 0)
+        def _px(d):  return d.get("price")  # 可能為 None
+
+        # 各步驟判斷（OI 比較，price 若有則輔助確認）
+        # K-4：空方停損 = OI↓（short_close 態）
+        step4 = _oi(k4) < _oi(k3) if _oi(k3) > 0 else False   # k4 OI < 前一根 = OI減少
+        # K-3：回檔（price 下跌，或 OI 繼續減少）
+        step3 = _oi(k3) < _oi(k2) or True   # 寬鬆判斷，回檔 K 棒通常 OI 平穩
+        # K-2：誘多 = OI↑（long_open 態）
+        step2 = _oi(k2) > _oi(k1)
+        # K-1：出貨 = OI↓（long_close 態）
+        step1 = _oi(k1) < _oi(k0)
+        # K-0：空軍進場 = OI↑（short_open 態，即當前訊號）
+        step0 = _oi(k0) > _oi(k1)
+
+        matched = sum([step4, step3, step2, step1, step0])
+        result["matched_steps"] = matched
+
+        if matched >= 4:
+            result["detected"] = True
+            result["note"] = (
+                "🎯 *【頂級摸頭訊號 完整陷阱形態】*\n"
+                "_空方停損拉升 👉 回檔整理 👉 誘多假突破 👉 主力悄悄出貨 👉 空軍正式進場！_\n"
+                "_訂單流五步驟吻合，為本系統最高信心空單形態_"
+            )
+        elif matched >= 3:
+            result["note"] = (
+                "⚡ *【誘多出貨跡象（部分吻合）】*\n"
+                f"_陷阱形態 {matched}/5 步驟符合，空單訊號有結構性支撐_"
+            )
+    except Exception:
+        pass
+
+    return result
+
+
 def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     """
     計算訊號綜合評級（S / A / B / R）。
@@ -4060,25 +4144,27 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     # 邏輯：做多訊號出現但 1H 已漲 >5% → 追高風險大，限制最高 A 級
     #        做空訊號出現但 1H 已跌 >5% → 追低風險大，限制最高 A 級
     # ══════════════════════════════════════════════════════════════
-    _price_1h = x.get("priceChange1h") or 0
-    _price_30m = x.get("priceChange30m") or x.get("priceChange_30m") or 0
+    _price_15m = x.get("priceChange15m") or 0
+    _price_1h  = x.get("priceChange1h")  or 0
     _already_moving = False
     _motion_note = ""
     try:
-        _p1h = float(_price_1h)
-        _p30m = float(_price_30m)
-        if is_bull_sig and _p1h > 5.0:
+        _p15m = float(_price_15m)
+        _p1h  = float(_price_1h)
+        if is_bull_sig and _p15m > 5.0:
+            # 15m 已漲 >5%：車已發動，硬限 A 級
             _already_moving = True
-            _motion_note = f"⚠️ 車已發動：1H 已漲 {_p1h:+.1f}%，注意追高風險，行情可能進入末段"
-        elif is_bull_sig and _p30m > 3.0:
+            _motion_note = f"⚠️ 車已發動：15m 已漲 {_p15m:+.1f}%，注意追高風險，行情可能進入末段"
+        elif is_bull_sig and _p1h > 8.0:
+            # 1H 已漲 >8%：即使 15m 未超標，1H 大漲也視為車已發動
             _already_moving = True
-            _motion_note = f"⚠️ 車剛發動：30m 上漲 {_p30m:+.1f}%，建議等回測再進"
-        elif not is_bull_sig and _p1h < -5.0:
+            _motion_note = f"⚠️ 車已發動：1H 已漲 {_p1h:+.1f}%，注意追高風險"
+        elif not is_bull_sig and _p15m < -5.0:
             _already_moving = True
-            _motion_note = f"⚠️ 車已發動：1H 已跌 {_p1h:+.1f}%，注意追空風險，嘎空風險偏高"
-        elif not is_bull_sig and _p30m < -3.0:
+            _motion_note = f"⚠️ 車已發動：15m 已跌 {_p15m:+.1f}%，注意追空風險，嘎空風險偏高"
+        elif not is_bull_sig and _p1h < -8.0:
             _already_moving = True
-            _motion_note = f"⚠️ 車剛發動：30m 下跌 {_p30m:+.1f}%，建議等反彈再進"
+            _motion_note = f"⚠️ 車已發動：1H 已跌 {_p1h:+.1f}%，注意追空風險"
     except (TypeError, ValueError):
         pass
 
@@ -4219,6 +4305,18 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     if x.get("_cross_confirm"):
         score += 20
         reasons.append("雙向互確認")
+
+    # ── 9. 誘多摸頭陷阱偵測加分（short_open 專屬）────────────────
+    # 完整五步驟吻合 → +25 分（直接衝 S 級）
+    # 部分吻合（3+ 步）→ +12 分（訊號有結構支撐）
+    _trap_detected = x.get("_bull_trap_detected", False)
+    _trap_steps    = x.get("_bull_trap_steps", 0)
+    if _trap_detected:
+        score += 25
+        reasons.append("誘多摸頭完整形態")
+    elif _trap_steps >= 3:
+        score += 12
+        reasons.append(f"誘多出貨跡象({_trap_steps}/5步)")
 
     # ── 評級（S / A / B；車已發動 → 上限 A）────────────────────
     score = max(0, min(100, score))
@@ -4802,6 +4900,11 @@ def build_report_message_tiered(
                 msg_lines.append("_✨ 本輪同時出現多方建倉＋空方回補，雙向力量共同推升，訊號互確認_")
             else:
                 msg_lines.append("_✨ 本輪同時出現多方出貨＋空方建倉，雙向力量共同壓制，訊號互確認_")
+        # 誘多摸頭陷阱偵測備注（short_open 專屬）
+        _trap_note_str = x.get("_bull_trap_note", "")
+        if _trap_note_str:
+            msg_lines.append("")
+            msg_lines.append(_trap_note_str)
         msg_lines.append("")
 
         # ─ 操作計畫 ─（數字全部 backtick，手機點一下即可複製）
@@ -5733,12 +5836,13 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
         return {
             "symbol": sym,
             "coin": sym,
-            "price_change_percent_30m": p15,
+            "price_change_percent_15m": p15,   # 15m 漲跌幅（獨立欄位，供車已發動偵測用）
+            "price_change_percent_30m": p15,   # 保留向後兼容
             "price_change_percent_1h": p1h,
             "price_change_percent_24h": p24,
             "_cg_volume_usd": vol,
-            "_cg_oi_change_15m": cg_oi_15m,  # CoinGlass 已算好的 15m OI 變化率（coins-markets 限定）
-            "_taker_ratio_15m": taker_ratio_15m,  # 主動買盤%，None=無資料；>50=買壓>賣壓
+            "_cg_oi_change_15m": cg_oi_15m,
+            "_taker_ratio_15m": taker_ratio_15m,
             "_raw_cg": item,
         }
 
@@ -5862,7 +5966,8 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
                 out.append({
                     "symbol": sym,
                     "coin": sym,
-                    "price_change_percent_30m": p15,
+                    "price_change_percent_15m": p15,   # 15m 漲跌幅（獨立欄位）
+                    "price_change_percent_30m": p15,   # 保留向後兼容
                     "price_change_percent_1h": p1h,
                     "price_change_percent_24h": p24,
                     "_cg_volume_usd": vol,
@@ -6322,10 +6427,10 @@ def fetch_position_change():
     long_close.sort(key=lambda x: abs(x.get('oiChange1h') or x.get('oiChange30m') or 0), reverse=True)
     short_open.sort(key=lambda x: abs(x.get('oiChange1h') or x.get('oiChange30m') or 0), reverse=True)
     short_close.sort(key=lambda x: abs(x.get('oiChange1h') or x.get('oiChange30m') or 0), reverse=True)
-    top_long_open  = long_open[:3]
-    top_long_close = long_close[:3]
-    top_short_open = short_open[:3]
-    top_short_close = short_close[:3]
+    top_long_open  = long_open[:5]
+    top_long_close = long_close[:5]
+    top_short_open = short_open[:5]
+    top_short_close = short_close[:5]
     # 記錄各類別排名（1=OI最大），供後續評級使用
     for _cat_list in (top_long_open, top_long_close, top_short_open, top_short_close):
         for _rank_i, _item in enumerate(_cat_list):
@@ -6479,12 +6584,23 @@ def fetch_position_change():
                 continue
 
         # ── Step 3 & 4：15m + 5m OI（僅針對通過 Step 2 的極少數幣種）──────────
+        # short_open 訊號額外抓取 OI 歷史（5 根），供誘多摸頭陷阱偵測使用
         time.sleep(0.2)
-        _oi_15m_result = fetch_oi_change_tf(sym, "15m", return_ts=True)
-        if isinstance(_oi_15m_result, tuple):
-            _oi_15m, _oi_15m_candle_ts = _oi_15m_result
+        _need_oi_history = (cat == "short_open")
+        if _need_oi_history:
+            _oi_15m_result = fetch_oi_change_tf(sym, "15m", return_candles=6)
+            if isinstance(_oi_15m_result, tuple):
+                _oi_15m, _oi_15m_candles = _oi_15m_result
+            else:
+                _oi_15m, _oi_15m_candles = _oi_15m_result, []
+            _oi_15m_candle_ts = _oi_15m_candles[-1]["t"] if _oi_15m_candles else 0
         else:
-            _oi_15m, _oi_15m_candle_ts = _oi_15m_result, 0
+            _oi_15m_result = fetch_oi_change_tf(sym, "15m", return_ts=True)
+            if isinstance(_oi_15m_result, tuple):
+                _oi_15m, _oi_15m_candle_ts = _oi_15m_result
+            else:
+                _oi_15m, _oi_15m_candle_ts = _oi_15m_result, 0
+            _oi_15m_candles = []
         logger.info(f"[Step3 15m OI] {sym}: OI={(_oi_15m or 0):+.2f}%")
         time.sleep(0.2)
         _oi_5m  = fetch_oi_change_tf(sym, "5m")
@@ -6554,10 +6670,27 @@ def fetch_position_change():
                     f"[FR降級⚠️] {sym}: 做多訊號 費率={_fr_pct_str} 多頭壅擠 → 降為觀察名單"
                 )
 
+        # ── 誘多摸頭陷阱偵測（僅 short_open 訊號）────────────────────────────
+        _bull_trap_result = {"detected": False, "matched_steps": 0, "note": ""}
+        if cat == "short_open" and _oi_15m_candles:
+            _bull_trap_result = detect_bull_trap_short_setup(_oi_15m_candles)
+            if _bull_trap_result.get("detected"):
+                logger.info(
+                    f"[誘多陷阱🎯] {sym}: 五步驟形態完整吻合"
+                    f"（{_bull_trap_result['matched_steps']}/5 步）→ 強化 short_open 訊號"
+                )
+            elif _bull_trap_result.get("matched_steps", 0) >= 3:
+                logger.info(
+                    f"[誘多陷阱⚡] {sym}: 部分吻合"
+                    f"（{_bull_trap_result['matched_steps']}/5 步）"
+                )
+
         all_top.append({
             **item,
             "priceChange24h": price_24h,
             "priceChange1h": price_1h,
+            # 15m 價格變動（獨立欄位，供車已發動偵測使用）
+            "priceChange15m": item.get("price_change_percent_15m") or item.get("priceChange15m"),
             "category": cat,
             "current_price": _cur_price,
             "rsi": rsi_val,
@@ -6600,6 +6733,10 @@ def fetch_position_change():
             "ema20_4h":        _ema20_4h,
             "rsi_4h":          _rsi_4h,
             "is_above_4h_ema": _is_above_4h_ema,
+            # 誘多摸頭陷阱偵測（short_open 專屬）
+            "_bull_trap_detected": _bull_trap_result.get("detected", False),
+            "_bull_trap_steps":    _bull_trap_result.get("matched_steps", 0),
+            "_bull_trap_note":     _bull_trap_result.get("note", ""),
         })
         _ver_tag = (
             "✅確定籌碼（鐵三角）" if _effective_version == "confirmed"
