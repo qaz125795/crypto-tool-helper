@@ -3604,6 +3604,7 @@ SYMBOL_BLACKLIST: set = {
     "CELR", "ATA", "ICX", "AGT", "ALU", "CAMP",  # 用戶手動加入黑名單（2026-03-02/03）
     "BOBA", "AIO", "BTR",  # 用戶手動加入黑名單（2026-03-03）
     "BSU", "AVL",  # 用戶手動加入黑名單（2026-03-04）
+    "GODS", "ASP", "VFY", "FHE",  # 用戶手動加入黑名單（2026-03-05）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
     "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
