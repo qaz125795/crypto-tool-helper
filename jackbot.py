@@ -3574,7 +3574,7 @@ MAIN_COINS = {"BTC", "ETH"}
 MTF_VOLUME_MIN_USD  = 7_000_000     # 7M USD（2026-03-03 調高，過濾低流動性山寨）
 
 # ── 1H OI 扳機門檻（Stage 1 主時框）──────────────────────────────────
-OI_THRESHOLD_1H    = 3.0            # 3.0%（2026-03-03 調高，降低訊號頻率）
+OI_THRESHOLD_1H    = 5.0            # 5.0%（2026-03-05 調高，降低訊號頻率）
 PRICE_THRESHOLD_1H = 1.5            # 1H 價格扳機門檻
 
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
@@ -4040,80 +4040,65 @@ def _classify_signal_and_tier(
     return (label, zone, 5, rsi_desc, reason)
 
 
-def detect_bull_trap_short_setup(oi_candles: list) -> dict:
+def detect_trap_setup(oi_candles: list, trap_type: str) -> dict:
     """
-    偵測「誘多摸頭陷阱」五步驟完整形態，適用於 short_open 訊號。
+    偵測「籌碼三步驟陷阱」——簡化版，不看價格回檔/誘多，只看 OI 變化。
 
-    輸入：最近 6 根 15m 已收盤 K棒的 OI 數值列表（由舊到新）
-          格式: [{"t": ts, "c": oi_float, "price": price_or_None}, ...]
-          需要 6 根是因為 K-4 的 OI↓ 要與前一根（K-5）比較
+    輸入：
+      oi_candles: 最近 4 根 15m 已收盤 K棒的 OI 數值列表（由舊到新）
+      trap_type: "short" = 摸頭（short_open 訊號） / "long" = 摸底（long_open 訊號）
     輸出: {"detected": bool, "matched_steps": int, "note": str}
 
-    五步驟陷阱邏輯（Wyckoff 誘多出貨序列）——時間由左到右：
-      K-5  基準根（用於確認 K-4 OI 是否下跌）
-      K-4  空方停損軋空（OI↓：短倉被強制平倉，OI 減少）= short_close
-      K-3  回檔整理（OI 平穩，price 小回）
-      K-2  誘多假突破（OI↑：散戶被騙，新多倉湧入）= long_open  ← 此時不追！
-      K-1  主力高位出貨（OI↓：主力多倉悄悄平掉）= long_close
-      K-0  空軍正式進場（OI↑：空方確認入場）= short_open ← 當前訊號，此時才做空
+    三步驟邏輯（OI 變化，由舊到新）：
+      摸頭：空平(OI↓) → 多平(OI↓) → 空開(OI↑) = 可判斷摸頭
+      摸底：多平(OI↓) → 空平(OI↓) → 多開(OI↑) = 可判斷摸底
 
-    比較邏輯：每根 K 棒的 OI「漲跌」= 與其「前一根」比較
-      K-4 OI↓ → k4 < k5
-      K-3 OI 平穩 → 寬鬆判斷（True）
-      K-2 OI↑ → k2 > k3  （k2 比 k3 「新」，k2 > k3 = OI 從 k3 到 k2 上升）
-      K-1 OI↓ → k1 < k2  （k1 比 k2 「新」，k1 < k2 = OI 從 k2 到 k1 下降）
-      K-0 OI↑ → k0 > k1  （k0 最新，k0 > k1 = OI 從 k1 到 k0 上升）
-    任何中間步驟缺失 → 部分吻合，仍回報已匹配幾步
+    只需 4 根 K 棒：k3, k2, k1, k0（k0 為當前訊號根）
+      step2: k2 < k3  → OI 第一根下跌（空平或多平）
+      step1: k1 < k2  → OI 第二根再跌（多平或空平）
+      step0: k0 > k1  → OI 第三根上升（空開或多開）← 當前訊號
+    3/3 吻合 = 完整形態
     """
     result = {"detected": False, "matched_steps": 0, "note": ""}
-    if not oi_candles or len(oi_candles) < 5:
+    if not oi_candles or len(oi_candles) < 4:
         return result
 
     try:
         def _oi(d):  return float(d.get("c") or 0)
 
-        # 取最後 6 根（k5 最舊為基準根，k0 最新為當前訊號根）
-        # 若只有 5 根，k5 設為 None，step4 寬鬆通過
-        k5 = oi_candles[-6] if len(oi_candles) >= 6 else None
-        k4, k3, k2, k1, k0 = (
-            oi_candles[-5], oi_candles[-4], oi_candles[-3],
-            oi_candles[-2], oi_candles[-1]
-        )
+        k3, k2, k1, k0 = oi_candles[-4], oi_candles[-3], oi_candles[-2], oi_candles[-1]
 
-        # ── 各步驟 OI 方向判斷（每根與前一根比較）──────────────────────
-        # K-4：空方停損 = OI↓（對比前一根 K-5）
-        step4 = (_oi(k4) < _oi(k5)) if (k5 and _oi(k5) > 0) else True   # 無 k5 時寬鬆通過
+        # 三步驟：OI↓ → OI↓ → OI↑
+        step2 = _oi(k2) < _oi(k3)   # 第一根跌
+        step1 = _oi(k1) < _oi(k2)   # 第二根再跌
+        step0 = _oi(k0) > _oi(k1)   # 第三根升（當前訊號）
 
-        # K-3：回檔整理 = OI 平穩（寬鬆，只要不是大幅增加即可）
-        step3 = True   # 回檔 K 棒 OI 通常橫盤，不嚴格要求
-
-        # K-2：誘多建倉 = OI↑（對比前一根 K-3）
-        # k2 比 k3 新，k2 > k3 = OI 從 k3 上升到 k2 = 新多倉湧入（誘多）
-        step2 = _oi(k2) > _oi(k3)
-
-        # K-1：主力出貨 = OI↓（對比前一根 K-2）
-        # k1 比 k2 新，k1 < k2 = OI 從 k2 下降到 k1 = 多倉被平掉（出貨）
-        step1 = _oi(k1) < _oi(k2)
-
-        # K-0：空軍進場 = OI↑（對比前一根 K-1，即當前訊號）
-        # k0 最新，k0 > k1 = OI 從 k1 上升到 k0 = 空倉湧入（空軍確認）
-        step0 = _oi(k0) > _oi(k1)
-
-        matched = sum([step4, step3, step2, step1, step0])
+        matched = sum([step2, step1, step0])
         result["matched_steps"] = matched
 
-        if matched >= 4:
+        if matched >= 3:
             result["detected"] = True
-            result["note"] = (
-                "🎯 *【頂級摸頭訊號 完整陷阱形態】*\n"
-                "_空方停損拉升 👉 回檔整理 👉 誘多假突破 👉 主力悄悄出貨 👉 空軍正式進場！_\n"
-                "_訂單流五步驟吻合，為本系統最高信心空單形態_"
-            )
-        elif matched >= 3:
-            result["note"] = (
-                "⚡ *【誘多出貨跡象（部分吻合）】*\n"
-                f"_陷阱形態 {matched}/5 步驟符合，空單訊號有結構性支撐_"
-            )
+            if trap_type == "short":
+                result["note"] = (
+                    "🎯 *【頂級摸頭訊號】*\n"
+                    "_空平 → 多平出貨 → 空開進場，籌碼三步驟吻合_"
+                )
+            else:
+                result["note"] = (
+                    "🎯 *【頂級摸底訊號】*\n"
+                    "_多平 → 空平回補 → 多開進場，籌碼三步驟吻合_"
+                )
+        elif matched >= 2:
+            if trap_type == "short":
+                result["note"] = (
+                    "⚡ *【摸頭跡象（部分吻合）】*\n"
+                    f"_籌碼形態 {matched}/3 步符合，空單有結構支撐_"
+                )
+            else:
+                result["note"] = (
+                    "⚡ *【摸底跡象（部分吻合）】*\n"
+                    f"_籌碼形態 {matched}/3 步符合，多單有結構支撐_"
+                )
     except Exception:
         pass
 
@@ -4328,17 +4313,17 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         score += 20
         reasons.append("雙向互確認")
 
-    # ── 9. 誘多摸頭陷阱偵測加分（short_open 專屬）────────────────
-    # 完整五步驟吻合 → +25 分（直接衝 S 級）
-    # 部分吻合（3+ 步）→ +12 分（訊號有結構支撐）
+    # ── 9. 籌碼三步驟陷阱偵測加分（short_open 摸頭 / long_open 摸底）────
+    # 完整三步驟吻合 → +25 分（直接衝 S 級）
+    # 部分吻合（2 步）→ +12 分（訊號有結構支撐）
     _trap_detected = x.get("_bull_trap_detected", False)
     _trap_steps    = x.get("_bull_trap_steps", 0)
     if _trap_detected:
         score += 25
-        reasons.append("誘多摸頭完整形態")
-    elif _trap_steps >= 3:
+        reasons.append("籌碼三步驟完整形態")
+    elif _trap_steps >= 2:
         score += 12
-        reasons.append(f"誘多出貨跡象({_trap_steps}/5步)")
+        reasons.append(f"籌碼陷阱跡象({_trap_steps}/3步)")
 
     # ── 評級（S / A / B；車已發動 → 上限 A）────────────────────
     score = max(0, min(100, score))
@@ -6606,9 +6591,9 @@ def fetch_position_change():
                 continue
 
         # ── Step 3 & 4：15m + 5m OI（僅針對通過 Step 2 的極少數幣種）──────────
-        # short_open 訊號額外抓取 OI 歷史（5 根），供誘多摸頭陷阱偵測使用
+        # short_open / long_open 訊號額外抓取 OI 歷史（4 根），供籌碼三步驟陷阱偵測使用
         time.sleep(0.2)
-        _need_oi_history = (cat == "short_open")
+        _need_oi_history = (cat in ("short_open", "long_open"))
         if _need_oi_history:
             _oi_15m_result = fetch_oi_change_tf(sym, "15m", return_candles=6)
             if isinstance(_oi_15m_result, tuple):
@@ -6692,19 +6677,21 @@ def fetch_position_change():
                     f"[FR降級⚠️] {sym}: 做多訊號 費率={_fr_pct_str} 多頭壅擠 → 降為觀察名單"
                 )
 
-        # ── 誘多摸頭陷阱偵測（僅 short_open 訊號）────────────────────────────
+        # ── 籌碼三步驟陷阱偵測（short_open 摸頭 / long_open 摸底）────────────
         _bull_trap_result = {"detected": False, "matched_steps": 0, "note": ""}
-        if cat == "short_open" and _oi_15m_candles:
-            _bull_trap_result = detect_bull_trap_short_setup(_oi_15m_candles)
+        if cat in ("short_open", "long_open") and _oi_15m_candles:
+            _trap_type = "short" if cat == "short_open" else "long"
+            _bull_trap_result = detect_trap_setup(_oi_15m_candles, _trap_type)
             if _bull_trap_result.get("detected"):
+                _label = "摸頭" if _trap_type == "short" else "摸底"
                 logger.info(
-                    f"[誘多陷阱🎯] {sym}: 五步驟形態完整吻合"
-                    f"（{_bull_trap_result['matched_steps']}/5 步）→ 強化 short_open 訊號"
+                    f"[籌碼陷阱🎯] {sym}: 三步驟形態完整吻合"
+                    f"（{_bull_trap_result['matched_steps']}/3 步）→ 強化 {_label} 訊號"
                 )
-            elif _bull_trap_result.get("matched_steps", 0) >= 3:
+            elif _bull_trap_result.get("matched_steps", 0) >= 2:
                 logger.info(
-                    f"[誘多陷阱⚡] {sym}: 部分吻合"
-                    f"（{_bull_trap_result['matched_steps']}/5 步）"
+                    f"[籌碼陷阱⚡] {sym}: 部分吻合"
+                    f"（{_bull_trap_result['matched_steps']}/3 步）"
                 )
 
         all_top.append({
