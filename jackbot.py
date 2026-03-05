@@ -3974,7 +3974,7 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
         )
         return {**base, "version": "tier2", "subtype": "弱共振",
                 "aligned_count": 2,
-                "reversal_hint": f"⚠️ {_t2_hint}，建議等待 15m 方向確認再進場"}
+                "reversal_hint": ""}
 
     # ══ D. 其他（大方向矛盾）→ 丟棄 ════════════════════════════════════════
     return None
@@ -4817,31 +4817,46 @@ def build_report_message_tiered(
         _now_ts = time.time()
 
         # ══════════════════════════════════════════════════════════
-        # ATR 風控計算（Google 建議純 ATR 公式：Risk = 1.5 × 1H_ATR）
-        # 做多：SL = 現價 - Risk | TP1 = 現價 + Risk×1.5 | TP2 = 現價 + Risk×3.0
-        # 做空：SL = 現價 + Risk | TP1 = 現價 - Risk×1.5 | TP2 = 現價 - Risk×3.0
+        # 進場價邏輯：現價優於主力均價 → 市價進場；否則 → 計畫委託掛單（主力均價）
+        # TP/SL 以進場價為基準計算，Risk = 1.8 × ATR
         # ══════════════════════════════════════════════════════════
         sl, tp1, tp2 = None, None, None
         _r1, _r2 = 1.5, 3.0
         sl_pct_val = None
-        if atr_val and atr_val > 0 and price and price > 0:
+        _entry_price = price
+        _entry_mode = "市價"  # 市價進場 or 掛單進場
+        if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
+            # 做多：現價 < 主力均價 = 成本比主力好 → 市價進場
+            # 做空：現價 > 主力均價 = 成本比主力好 → 市價進場
+            if is_bull_sig and price < vwap_2h_val:
+                _entry_price = price
+                _entry_mode = "市價"
+            elif not is_bull_sig and price > vwap_2h_val:
+                _entry_price = price
+                _entry_mode = "市價"
+            else:
+                # 掛單：主力均價 ±2.5%（做多掛 97.5% 等回調買入；做空掛 97.5% 等反彈賣出）
+                _vwap_f = float(vwap_2h_val)
+                _entry_price = _vwap_f * 0.975  # 主力均價 × 97.5%
+                _entry_mode = "掛單"
+
+        if atr_val and atr_val > 0 and _entry_price and _entry_price > 0:
             _risk = 1.8 * atr_val
             if is_bull_sig:
-                sl  = price - _risk
-                tp1 = price + _risk * 1.5
-                tp2 = price + _risk * 3.0
+                sl  = _entry_price - _risk
+                tp1 = _entry_price + _risk * 1.5
+                tp2 = _entry_price + _risk * 3.0
             else:
-                sl  = price + _risk
-                tp1 = price - _risk * 1.5
-                tp2 = price - _risk * 3.0
-            sl_pct_val = abs(price - sl) / price * 100
+                sl  = _entry_price + _risk
+                tp1 = _entry_price - _risk * 1.5
+                tp2 = _entry_price - _risk * 3.0
+            sl_pct_val = abs(_entry_price - sl) / _entry_price * 100
         else:
-            # 無 ATR 備援：以固定比例計算（1.5% = 1R）
-            _risk = price * 0.015 if price and price > 0 else None
+            _risk = _entry_price * 0.015 if _entry_price and _entry_price > 0 else None
             if _risk:
-                sl  = price - _risk if is_bull_sig else price + _risk
-                tp1 = price + _risk * 1.5 if is_bull_sig else price - _risk * 1.5
-                tp2 = price + _risk * 3.0 if is_bull_sig else price - _risk * 3.0
+                sl  = _entry_price - _risk if is_bull_sig else _entry_price + _risk
+                tp1 = _entry_price + _risk * 1.5 if is_bull_sig else _entry_price - _risk * 1.5
+                tp2 = _entry_price + _risk * 3.0 if is_bull_sig else _entry_price - _risk * 3.0
                 sl_pct_val = 1.5
 
         # ══════════════════════════════════════════════════════════
@@ -4894,7 +4909,7 @@ def build_report_message_tiered(
                     if _is_bull_cat:
                         return f"鐵三角成立但 {rsi_str} 已偏熱，單邊行情可輕倉，嚴控止損。"
                     return f"鐵三角成立但 {rsi_str} 已偏冷，反彈可輕倉，嚴控止損。"
-                return "1H/30m 同向但 15m 尚未確認，等待小週期方向收斂後再進場。"
+                return "籌碼方向確認中，嚴守止損。"
             return "籌碼方向確認中，嚴守止損。"
 
         _strategy_comment = _gen_comment(category, _sig_version, _sig_subtype, _reversal_hint, rsi_val)
@@ -5029,16 +5044,16 @@ def build_report_message_tiered(
         _sl_pct_str = f"  _{sl_pct_val:.1f}%_" if sl_pct_val is not None else ""
         msg_lines.append("🎯 *操作計畫：*")
 
-        # 主力均價（VWAP 2h）：告訴用戶主力的平均持倉成本在哪
+        # 主力均價（VWAP 2h）：告訴用戶主力的平均持倉成本在哪，並顯示現價與均價差距%
         if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
-            _vwap_vs = ""
-            if price > vwap_2h_val:
-                _vwap_vs = " _（現價高於均價，多方佔優）_" if is_bull_sig else " _（現價高於均價，空方逆風）_"
-            else:
-                _vwap_vs = " _（現價低於均價，空方佔優）_" if not is_bull_sig else " _（現價低於均價，多方逆風）_"
+            _vwap_pct = (float(price) - float(vwap_2h_val)) / float(vwap_2h_val) * 100
+            _vwap_vs = f" _（現價較均價 {_vwap_pct:+.1f}%）_"
             msg_lines.append(f"📐 主力均價：`{_fmt_price(vwap_2h_val)}`{_vwap_vs}")
 
-        msg_lines.append(f"💵 進場：`{_fmt_price(price)}`")
+        if _entry_mode == "市價":
+            msg_lines.append(f"💵 市價進場：`{_fmt_price(price)}`")
+        else:
+            msg_lines.append(f"💵 掛單進場：`{_fmt_price(_entry_price)}`")
         if sl is not None:
             msg_lines.append(f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -1.5R")
         else:
@@ -5048,7 +5063,7 @@ def build_report_message_tiered(
         if tp2 is not None:
             msg_lines.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +3.0R")
         if sl_pct_val is not None and sl_pct_val > 8.0:
-            msg_lines.append(f"_⚠️ 止損距離 {sl_pct_val:.1f}%，波動較大，請控制倉位_")
+            msg_lines.append(f"_止損距離 {sl_pct_val:.1f}%，務必遵守建議進場價_")
         msg_lines.append("")
 
         # ─ BTC 大盤提示（緊接操作計畫後，手機滑動自然看到）─
@@ -5077,7 +5092,27 @@ def build_report_message_tiered(
         messages_out.append(_msg_str)
         grade_per_msg.append(_grade)
         if _grade == "S":
-            s_grade_msgs.append(_msg_str)
+            # S 級速報：僅標的 + 操作計畫（簡短版）
+            _s_short: List[str] = []
+            _s_short.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}`")
+            _s_short.append("")
+            _s_short.append("🎯 *操作計畫：*")
+            if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
+                _vwap_pct_s = (float(price) - float(vwap_2h_val)) / float(vwap_2h_val) * 100
+                _s_short.append(f"📐 主力均價：`{_fmt_price(vwap_2h_val)}` _（現價較均價 {_vwap_pct_s:+.1f}%）_")
+            if _entry_mode == "市價":
+                _s_short.append(f"💵 市價進場：`{_fmt_price(price)}`")
+            else:
+                _s_short.append(f"💵 掛單進場：`{_fmt_price(_entry_price)}`")
+            if sl is not None:
+                _s_short.append(f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -1.5R")
+            else:
+                _s_short.append("🛡️ 止損：無法計算")
+            if tp1 is not None:
+                _s_short.append(f"💰 TP1：`{_fmt_price(tp1)}`  +1.5R")
+            if tp2 is not None:
+                _s_short.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +3.0R")
+            s_grade_msgs.append("\n".join(_s_short))
         push_count += 1
         has_any = True
         logger.info(
@@ -5135,7 +5170,8 @@ def build_report_message_tiered(
         f"{'─' * 20}\n"
     )
     sep = f"\n{'─' * 20}\n"
-    body = sep.join(messages_out) + correlation_warn
+    _footer = f"\n{'─' * 20}\n⚠️ _計畫委託若超過 8 小時以上請撤單，代表已失效_"
+    body = sep.join(messages_out) + correlation_warn + _footer
 
     # ── 以下為舊版渲染殘留（已棄用，直接 return 跳過）──────────────
     return header + body, has_any, push_count, s_grade_msgs
@@ -7150,11 +7186,12 @@ def fetch_position_change():
             # ── S 級速報：獨立推播（優先於主報表）────────────────────────
             if s_grade_msgs:
                 _s_sep = f"\n{'─' * 20}\n"
+                _s_footer = f"\n{'─' * 20}\n⚠️ _計畫委託若超過 8 小時以上請撤單，代表已失效_"
                 _s_header = (
                     f"🚨 *S 級速報*  本輪 {len(s_grade_msgs)} 個極強訊號\n"
                     f"{'─' * 20}\n"
                 )
-                _s_body = _s_sep.join(s_grade_msgs)
+                _s_body = _s_sep.join(s_grade_msgs) + _s_footer
                 send_telegram_message(
                     _s_header + _s_body,
                     TG_THREAD_IDS['position_change'],
