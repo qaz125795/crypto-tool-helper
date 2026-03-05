@@ -31,30 +31,46 @@ def format_signal_message(
     signal: SignalResult,
     data_cutoff_utc: Optional[datetime] = None,
 ) -> str:
-    """專業訊號格式：多空、進場、止損、止盈、趨勢強度、時間、圖表連結。可帶入數據截止時間。"""
-    side_emoji = "🟢" if signal.direction == "long" else "🔴"
-    side_text = "做多" if signal.direction == "long" else "做空"
-    time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    data_line = ""
+    """完整交易計畫格式：進場區 + SL + TP1 (1:1) + TP2 (1:2) + ATR 標示。"""
+    is_long     = signal.direction == "long"
+    side_emoji  = "🟢" if is_long else "🔴"
+    side_text   = "做多" if is_long else "做空"
+    arrow_sl    = "▼" if is_long else "▲"
+    arrow_tp    = "▲" if is_long else "▼"
+    sl_diff     = abs(signal.entry - signal.sl)
+    tp1_diff    = abs(signal.tp1 - signal.entry)
+    tp2_diff    = abs(signal.tp2 - signal.entry)
+    time_str    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    data_line   = ""
     if data_cutoff_utc is not None:
-        cutoff_str = data_cutoff_utc.strftime("%Y-%m-%d %H:00 UTC") if hasattr(data_cutoff_utc, "strftime") else str(data_cutoff_utc)
+        cutoff_str = (
+            data_cutoff_utc.strftime("%Y-%m-%d %H:00 UTC")
+            if hasattr(data_cutoff_utc, "strftime") else str(data_cutoff_utc)
+        )
         data_line = f"📅 依據 K 線至：{cutoff_str}\n"
+
     return (
-        f"{side_emoji} XAUUSD {side_text}\n"
+        f"{side_emoji} XAUUSD {side_text}  [{signal.source}]\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📌 參考進場區：{signal.entry:,.2f}\n"
-        f"🛑 參考防守點：{signal.sl:,.2f}  (ATR {signal.atr:.2f} × 1.5)\n"
-        f"🎯 參考停利點：{signal.tp:,.2f}  (R:R 1:{signal.rr_ratio:.0f})\n"
+        f"📐 波動參考 (ATR)：{signal.atr:.2f}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 趨勢強度：{signal.trend_strength}\n"
+        "📋 交易計畫\n"
+        f"🛑 防守點  (SL) ：{signal.sl:,.2f}  "
+        f"{arrow_sl} {sl_diff:.2f}  (-1.5 ATR)\n"
+        f"🥇 目標一 (TP1)：{signal.tp1:,.2f}  "
+        f"{arrow_tp} +{tp1_diff:.2f}  (+1.5 ATR | R:R 1:1)\n"
+        f"🏆 目標二 (TP2)：{signal.tp2:,.2f}  "
+        f"{arrow_tp} +{tp2_diff:.2f}  (+3.0 ATR | R:R 1:2)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 {signal.trend_strength}\n"
         f"⏰ 訊號時間：{time_str}\n"
         f"{data_line}"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "⚠️ 重要提醒\n"
-        "以上價格僅供參考，請務必自行開啟 BingX 走勢圖，\n"
-        "對照實際K線結構來確認你的防守點與停利點。\n"
-        "切勿直接照單全收輸入上方數字，\n"
-        "BingX報價與參考價可能存在價差，實際點位以圖表為準。\n"
+        "以上為系統計算的參考價格，請務必開啟 BingX 走勢圖，\n"
+        "對照實際K線結構確認防守點與目標位，\n"
+        "BingX報價與參考價可能有價差，請以圖表為準。\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "#XAUUSD #黃金 #訊號"
     )
@@ -65,22 +81,43 @@ def format_tp_sl_hit_message(
     direction: str,
     entry: float,
     sl: float,
-    tp: float,
+    tp1: float,
+    tp2: float,
 ) -> str:
-    """觸及止盈或止損時的推播文案。hit_type 為 'tp' 或 'sl'。"""
+    """
+    觸及目標/止損的推播文案。
+    hit_type: 'tp1' | 'tp2' | 'sl'
+    """
     side_emoji = "🟢" if direction == "long" else "🔴"
-    side_text = "多單" if direction == "long" else "空單"
-    if hit_type == "tp":
-        title = "🎯 觸及止盈"
-    else:
-        title = "🛑 觸及止損"
-    time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    side_text  = "多單" if direction == "long" else "空單"
+    time_str   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    if hit_type == "tp2":
+        title   = "🏆 目標二達成 (TP2)"
+        result  = "✅ 完整盈利出場"
+        pnl_pts = abs(tp2 - entry)
+        pnl_str = f"+{pnl_pts:.2f} pts (+3.0 ATR | R:R 1:2)"
+    elif hit_type == "tp1":
+        title   = "🥇 目標一達成 (TP1)"
+        result  = "✅ 部分獲利，可考慮移動止損至成本"
+        pnl_pts = abs(tp1 - entry)
+        pnl_str = f"+{pnl_pts:.2f} pts (+1.5 ATR | R:R 1:1)"
+    else:  # sl
+        title   = "🛑 止損觸及 (SL)"
+        result  = "❌ 本單出場"
+        pnl_pts = abs(entry - sl)
+        pnl_str = f"-{pnl_pts:.2f} pts (-1.5 ATR)"
+
     return (
-        f"{side_emoji} XAUUSD {side_text} {title}\n"
+        f"{side_emoji} XAUUSD {side_text}  {title}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📌 原參考進場：{entry:,.2f}\n"
-        f"🛑 參考防守點：{sl:,.2f}\n"
-        f"🎯 參考停利點：{tp:,.2f}\n"
+        f"🛑 防守點 (SL) ：{sl:,.2f}\n"
+        f"🥇 目標一 (TP1)：{tp1:,.2f}\n"
+        f"🏆 目標二 (TP2)：{tp2:,.2f}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 結果：{result}\n"
+        f"💰 損益：{pnl_str}\n"
         f"⏰ 時間：{time_str}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "提醒：請以 BingX 圖表實際點位為準。\n"

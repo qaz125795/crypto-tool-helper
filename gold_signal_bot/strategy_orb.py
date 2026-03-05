@@ -23,6 +23,31 @@ LONG_WICK_ATR_MULTIPLIER = 0.5
 # 顯著變動門檻
 MIN_CHANGE = 0.1
 
+# ── ORB 時段定義 ─────────────────────────────────────────────────────────────
+# 各主力時段的開盤 UTC 小時與顯示標籤，可透過 config 覆寫具體時間
+_ORB_SESSION_DEFAULTS: dict = {
+    "asia":   {"start_utc": 1,  "label": "亞洲盤"},
+    "london": {"start_utc": 7,  "label": "倫敦盤"},
+    "ny":     {"start_utc": 13, "label": "紐約盤"},
+}
+
+
+def _resolve_orb_session(config) -> Tuple[int, str]:
+    """
+    依 config.ORB_SESSION 決定 ORB 區間建立的起始時間 (UTC hour) 與顯示標籤。
+    config.LONDON_OPEN_UTC / NY_OPEN_UTC 可覆寫預設值（方便夏/冬令時調整）。
+    回傳 (range_start_utc: int, session_label: str)
+    """
+    key = getattr(config, "ORB_SESSION", "london").lower().strip()
+    if key == "london":
+        start = int(getattr(config, "LONDON_OPEN_UTC", 7))
+        return start, "倫敦盤"
+    if key == "ny":
+        start = int(getattr(config, "NY_OPEN_UTC", 13))
+        return start, "紐約盤"
+    # "asia" 或其他未知值 → 亞洲盤（維持原行為）
+    return int(getattr(config, "SESSION_START_HOUR_UTC", 1)), "亞洲盤"
+
 
 @dataclass
 class CandleInfo:
@@ -320,30 +345,45 @@ def compute_sl_tp(
     atr_value: float,
     atr_sl_mult: float = 1.5,
     min_rr: float = 2.0,
-) -> Tuple[float, float]:
-    """依 344/338：1.5x ATR 止損、最少 1:2 RR。"""
-    sl_dist = atr_value * atr_sl_mult
-    tp_dist = sl_dist * min_rr
+) -> Tuple[float, float, float]:
+    """
+    依 344/338：1.5x ATR 止損、1:1 與 1:2 雙目標。
+    回傳 (sl, tp1, tp2)：
+      sl   = entry ± (atr_sl_mult × ATR)         止損
+      tp1  = entry ± (atr_sl_mult × ATR)         目標一 R:R 1:1
+      tp2  = entry ± (atr_sl_mult × min_rr × ATR) 目標二 R:R 1:2
+    """
+    sl_dist  = atr_value * atr_sl_mult          # 1.5 ATR
+    tp1_dist = sl_dist                           # 1:1 → 同距離
+    tp2_dist = sl_dist * min_rr                  # 1:2 → 原 tp
     if direction == "long":
-        sl = entry - sl_dist
-        tp = entry + tp_dist
+        sl  = entry - sl_dist
+        tp1 = entry + tp1_dist
+        tp2 = entry + tp2_dist
     else:
-        sl = entry + sl_dist
-        tp = entry - tp_dist
-    return round(sl, 2), round(tp, 2)
+        sl  = entry + sl_dist
+        tp1 = entry - tp1_dist
+        tp2 = entry - tp2_dist
+    return round(sl, 2), round(tp1, 2), round(tp2, 2)
 
 
 @dataclass
 class SignalResult:
-    direction: str  # "long" | "short"
+    direction: str   # "long" | "short"
     entry: float
-    sl: float
-    tp: float
+    sl: float        # 止損：entry ± (1.5 × ATR)
+    tp1: float       # 目標一：entry ± (1.5 × ATR)，R:R 1:1
+    tp2: float       # 目標二：entry ± (3.0 × ATR)，R:R 1:2
     atr: float
     trend_strength: str
     rr_ratio: float
     source: str = "ORB+MA"
     raw_signal: int = 0
+
+    @property
+    def tp(self) -> float:
+        """向下相容：tp 指向 tp2（主目標）。"""
+        return self.tp2
 
 
 def compute_signal(
@@ -352,6 +392,12 @@ def compute_signal(
 ) -> Optional[SignalResult]:
     """
     主入口：ORB + MA 濾網 + ATR 風控，回傳可發 Telegram 的訊號結構。
+
+    ORB 時段由 config.ORB_SESSION 控制：
+      "asia"   → 亞洲盤 SESSION_START_HOUR_UTC (01:00 UTC)
+      "london" → 倫敦盤 LONDON_OPEN_UTC (07:00 UTC)  ← 預設
+      "ny"     → 紐約盤 NY_OPEN_UTC (13:00 UTC)
+    前 RANGE_LOCK_CANDLES 根 K 建立箱體，之後偵測收盤突破。
     """
     df_1h = add_indicators(
         df_1h,
@@ -360,94 +406,126 @@ def compute_signal(
         sma_fast=config.SMA_FAST,
         sma_slow=config.SMA_SLOW,
     )
-    # 調試用：記錄當日 K 線與關鍵價位，方便對照外部圖表
+
+    # ── 1. 解析 ORB 時段 ────────────────────────────────────────────────────
+    range_start_utc, session_label = _resolve_orb_session(config)
+    range_lock = int(getattr(config, "RANGE_LOCK_CANDLES", 4))
+    range_end_utc = range_start_utc + range_lock   # 箱體確立後的第一根偵測小時（參考用）
+
+    # ── 2. 確認 ORB 時段今日是否已開盤 ──────────────────────────────────────
+    # 以 df_1h 最後一根 K 的時間作為「現在」的代理
+    try:
+        last_ts = df_1h.index[-1]
+        last_ts_utc = last_ts.tz_convert("UTC") if getattr(last_ts, "tzinfo", None) else last_ts
+        today_orb_open = last_ts_utc.normalize().replace(
+            hour=range_start_utc, minute=0, second=0, microsecond=0
+        )
+        if last_ts_utc < today_orb_open:
+            logger.info(
+                "[ORB] %s 時段今日尚未開盤（需 %02d:00 UTC，最新K=%s UTC），跳過",
+                session_label, range_start_utc,
+                last_ts_utc.strftime("%H:%M"),
+            )
+            return None
+    except Exception as e:
+        logger.warning("[ORB] 時段開盤檢查失敗（繼續執行）: %s", e)
+
+    # ── 3. Debug：全日 K 線概況（以 SESSION_START_HOUR_UTC=1 為全日起點）──────
     try:
         day_df_dbg = get_trading_day_candles_1h(df_1h, config.SESSION_START_HOUR_UTC)
+        orb_df_dbg  = get_trading_day_candles_1h(df_1h, range_start_utc)
         if day_df_dbg is None or day_df_dbg.empty:
-            logger.info("[ORB-DEBUG] 當日K數=0（get_trading_day_candles_1h 為空）")
+            logger.info("[ORB-DEBUG] 當日K數=0")
         else:
-            first = day_df_dbg.iloc[0]
-            last = day_df_dbg.iloc[-1]
-            hi_today = float(day_df_dbg["High"].max())
-            lo_today = float(day_df_dbg["Low"].min())
-            close_last = float(last["Close"])
-            # 調試用 MA：與實際趨勢濾網一致，使用 SMA_40
-            ma_dbg = last.get("SMA_40") or last.get("MA") or last.get("SMA_100")
-            atr_dbg = last.get("ATR")
-            ma_dbg_val = float(ma_dbg) if ma_dbg is not None and not pd.isna(ma_dbg) else float("nan")
-            atr_dbg_val = float(atr_dbg) if atr_dbg is not None and not pd.isna(atr_dbg) else float("nan")
+            first_d = day_df_dbg.iloc[0]
+            last_d  = day_df_dbg.iloc[-1]
+            ma_dbg  = last_d.get("SMA_40") or last_d.get("MA") or last_d.get("SMA_100")
+            atr_dbg = last_d.get("ATR")
             logger.info(
-                "[ORB-DEBUG] 當日K數=%s 起點=%s 首根OHL=%.2f/%.2f/%.2f/%.2f 今日高=%.2f 低=%.2f 最新收盤=%.2f MA100=%.2f ATR=%.2f",
+                "[ORB-DEBUG] 全日K數=%d 起點=%s 今日高=%.2f 低=%.2f 收盤=%.2f SMA40=%.2f ATR=%.2f",
                 len(day_df_dbg),
-                day_df_dbg.index[0],
-                float(first["Open"]),
-                float(first["High"]),
-                float(first["Low"]),
-                float(first["Close"]),
-                hi_today,
-                lo_today,
-                close_last,
-                ma_dbg_val,
-                atr_dbg_val,
+                day_df_dbg.index[0].strftime("%H:%M UTC"),
+                float(day_df_dbg["High"].max()),
+                float(day_df_dbg["Low"].min()),
+                float(last_d["Close"]),
+                float(ma_dbg)  if ma_dbg  is not None and not pd.isna(ma_dbg)  else float("nan"),
+                float(atr_dbg) if atr_dbg is not None and not pd.isna(atr_dbg) else float("nan"),
+            )
+        if orb_df_dbg is not None and not orb_df_dbg.empty:
+            range_candles = orb_df_dbg.iloc[:range_lock]
+            box_high = float(range_candles["High"].max()) if not range_candles.empty else float("nan")
+            box_low  = float(range_candles["Low"].min())  if not range_candles.empty else float("nan")
+            logger.info(
+                "[ORB-DEBUG] %s 時段K數=%d 建立箱體根數=%d | 箱體 %.2f ~ %.2f | 偵測起點≈%02d:00 UTC",
+                session_label, len(orb_df_dbg), min(range_lock, len(range_candles)),
+                box_high, box_low, range_end_utc,
             )
     except Exception as e:
-        logger.warning("[ORB-DEBUG] 當日 K 線紀錄失敗: %s", e)
+        logger.warning("[ORB-DEBUG] K 線紀錄失敗: %s", e)
+
+    # ── 4. 執行 ORB 訊號計算（使用 ORB 時段起點） ────────────────────────────
     signal, range_high, range_low, orb_state = run_orb_signal(
         df_1h,
-        session_start_hour_utc=config.SESSION_START_HOUR_UTC,
+        session_start_hour_utc=range_start_utc,      # 倫敦/紐約/亞洲開盤時間
         candle_composition=config.CANDLE_COMPOSITION,
         trades_per_day=config.MAX_TRADES_PER_DAY,
-        range_lock_candles=getattr(config, "RANGE_LOCK_CANDLES", 0),
+        range_lock_candles=range_lock,
     )
     if signal == SIGNAL_NONE:
         logger.info(
-            "[ORB] 當日無突破訊號（區間內未達突破條件或已達每日次數上限）區間上=%.2f 區間下=%.2f",
+            "[ORB] %s 無突破訊號 | 箱體上=%.2f 下=%.2f",
+            session_label,
             range_high if range_high is not None else 0,
-            range_low if range_low is not None else 0,
+            range_low  if range_low  is not None else 0,
         )
         return None
 
-    last = df_1h.iloc[-1]
+    last  = df_1h.iloc[-1]
     close = float(last["Close"])
 
-    # ── 訊號有效性檢查：防止「歷史突破但當前已反轉」的假訊號 ──────────────────
-    # 多單：收盤若已跌回區間下緣以下，突破失效；空單：收盤若已漲回區間上緣以上，突破失效
+    # ── 5. 訊號有效性檢查：防止「歷史突破但當前已反轉」的假訊號 ──────────────
     body_high = orb_state.body_high
-    body_low = orb_state.body_low
+    body_low  = orb_state.body_low
     if signal == SIGNAL_LONG and body_low > 0 and close < body_low:
         logger.info(
-            "[ORB] 多單訊號已失效（當前收盤 %.2f 已跌破區間下緣 %.2f，突破反轉），跳過推播",
+            "[ORB] 多單訊號已失效（收盤 %.2f < 箱體下緣 %.2f，突破反轉），跳過",
             close, body_low,
         )
         return None
     if signal == SIGNAL_SHORT and body_high > 0 and close > body_high:
         logger.info(
-            "[ORB] 空單訊號已失效（當前收盤 %.2f 已漲過區間上緣 %.2f，突破反轉），跳過推播",
+            "[ORB] 空單訊號已失效（收盤 %.2f > 箱體上緣 %.2f，突破反轉），跳過",
             close, body_high,
         )
         return None
-    # 趨勢濾網使用較快的 SMA_40，必要時回退到原本 MA/SMA_100
-    ma = last.get("SMA_40") or last.get("MA") or last.get("SMA_100")
+
+    # ── 6. MA 趨勢濾網（SMA40）────────────────────────────────────────────
+    ma      = last.get("SMA_40") or last.get("MA") or last.get("SMA_100")
     atr_val = float(last["ATR"])
     if pd.isna(atr_val) or atr_val <= 0:
         logger.warning("[ORB] ATR 無效，跳過本輪")
         return None
 
-    # MA 趨勢濾網：多單僅在 close > SMA40、空單僅在 close < SMA40
     if signal == SIGNAL_LONG:
         if ma is not None and not pd.isna(ma) and close <= float(ma):
-            logger.info("[ORB] 有多單突破但 MA 濾網未過（收盤 %.2f <= SMA40 %.2f）", close, float(ma))
+            logger.info(
+                "[ORB] %s 多單突破，但 MA 濾網未過（收盤 %.2f <= SMA40 %.2f）",
+                session_label, close, float(ma),
+            )
             return None
-        direction = "long"
-        trend_strength = "多頭 (收盤 > SMA40)"
+        direction      = "long"
+        trend_strength = f"{session_label} 突破 | 多頭 (收盤 > SMA40)"
     else:
         if ma is not None and not pd.isna(ma) and close >= float(ma):
-            logger.info("[ORB] 有空單突破但 MA 濾網未過（收盤 %.2f >= SMA40 %.2f）", close, float(ma))
+            logger.info(
+                "[ORB] %s 空單突破，但 MA 濾網未過（收盤 %.2f >= SMA40 %.2f）",
+                session_label, close, float(ma),
+            )
             return None
-        direction = "short"
-        trend_strength = "空頭 (收盤 < SMA40)"
+        direction      = "short"
+        trend_strength = f"{session_label} 突破 | 空頭 (收盤 < SMA40)"
 
-    sl, tp = compute_sl_tp(
+    sl, tp1, tp2 = compute_sl_tp(
         direction,
         close,
         atr_val,
@@ -458,10 +536,11 @@ def compute_signal(
         direction=direction,
         entry=round(close, 2),
         sl=sl,
-        tp=tp,
+        tp1=tp1,
+        tp2=tp2,
         atr=round(atr_val, 2),
         trend_strength=trend_strength,
         rr_ratio=config.MIN_RR_RATIO,
-        source="ORB+MA",
+        source=f"{session_label} ORB+MA",
         raw_signal=signal,
     )

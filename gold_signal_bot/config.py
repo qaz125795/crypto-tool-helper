@@ -14,18 +14,28 @@ class Config:
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
 
-    # 數據源：yfinance | bingx（BingX 不需 API Key，公開行情）
-    # BingX 黃金永續介面: https://bingx.com/zh-tc/perpetual/GOLD(XAU)-USDT ，API 符號與連結一致
-    DATA_SOURCE: str = "yfinance"   # 設 GOLD_DATA_SOURCE=bingx 則用 BingX
-    SYMBOL_GOLD: str = "GC=F"       # yfinance: GC=F；bingx 時 GOLD(XAU)-USDT（可設 GOLD_SYMBOL 覆寫）
-    SYMBOL_DXY: str = "DX-Y.NYB"    # 美元指數（僅 yfinance）
+    # 數據源：黃金 K 線自動走備援鏈（Gate.io → Bybit → BingX → yfinance），無需手動設定
+    # SYMBOL_GOLD 僅作辨識用，實際來源由 fetch_gold_ohlc() 自動決定
+    DATA_SOURCE: str = "auto"        # 保留相容性，黃金一律走備援鏈
+    SYMBOL_GOLD: str = "XAU"         # 黃金識別符（fetch_ohlc 偵測到 XAU 即走備援鏈）
+    SYMBOL_DXY: str = "DX-Y.NYB"    # 美元指數（yfinance）
 
-    # ORB 參數 (GOLD_ORB)（已放寬：區間內 2 根 K 即確立，較易出訊號）
-    SESSION_START_HOUR_UTC: int = 1   # 交易日起始小時 (UTC)，XAUUSD 約 1:02 server
+    # ORB 參數 (GOLD_ORB)
+    SESSION_START_HOUR_UTC: int = 1   # 交易日起始小時 (UTC)，用於計算「今日日期」與全日 debug
     CANDLE_COMPOSITION: int = 2       # 區間內至少幾根 K 才視為「確立」（原 3，改 2 較寬鬆）
     MAX_TRADES_PER_DAY: int = 2       # 每日最多 1 多 1 空
-    # 區間凍結：開盤後前 N 根 K 確立 ORB 區間後凍結，不再擴張（0 = 不限制，維持原行為）
-    # 建議值 4：亞洲盤 4 小時確立區間（01:00~05:00 UTC），倫敦/紐約盤突破才出訊號
+
+    # ── ORB 時段選擇：決定用哪個盤口的 K 線建立突破箱體 ──────────────────────
+    # "asia"   → 01:00 UTC 亞洲盤（原行為）
+    # "london" → 07:00 UTC 倫敦盤（推薦：歐美主力，假突破率低）
+    # "ny"     → 13:00 UTC 紐約盤（波動最大，適合激進策略）
+    ORB_SESSION: str = "london"
+    LONDON_OPEN_UTC: int = 7          # 倫敦開盤時間 (UTC)，可微調（夏令 7、冬令 8）
+    NY_OPEN_UTC: int = 13             # 紐約開盤時間 (UTC)，可微調（夏令 13、冬令 14）
+
+    # 區間凍結：ORB 時段開盤後前 N 根 K 確立箱體後凍結，之後只偵測突破
+    # 倫敦：lock=4 → 07-10 UTC 建立區間，11 UTC 起偵測突破
+    # 紐約：lock=2 → 13-14 UTC 建立區間，15 UTC 起偵測突破（NY 盤較短，建議用 2）
     RANGE_LOCK_CANDLES: int = 4
 
     # 趨勢濾網 (GOLD_ORB MA100 + Gold-analysis SMA40/100)
@@ -51,12 +61,6 @@ class Config:
     def __post_init__(self):
         self.TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", self.TELEGRAM_BOT_TOKEN)
         self.TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", self.TELEGRAM_CHAT_ID)
-        if os.environ.get("GOLD_SYMBOL"):
-            self.SYMBOL_GOLD = os.environ.get("GOLD_SYMBOL", self.SYMBOL_GOLD)
-        if os.environ.get("GOLD_DATA_SOURCE", "").strip().lower() == "bingx":
-            self.DATA_SOURCE = "bingx"
-            if not os.environ.get("GOLD_SYMBOL"):
-                self.SYMBOL_GOLD = "GOLD(XAU)-USDT"  # 與網頁連結 https://bingx.com/zh-tc/perpetual/GOLD(XAU)-USDT 一致
 
 
 def get_config() -> Config:
