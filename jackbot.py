@@ -3667,6 +3667,7 @@ SYMBOL_BLACKLIST: set = {
     "BOBA", "AIO", "BTR",  # 用戶手動加入黑名單（2026-03-03）
     "BSU", "AVL",  # 用戶手動加入黑名單（2026-03-04）
     "GODS", "ASP", "VFY", "FHE",  # 用戶手動加入黑名單（2026-03-05）
+    "HOT",  # 用戶手動加入黑名單（2026-03-06）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
     "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
@@ -4826,18 +4827,18 @@ def build_report_message_tiered(
         _entry_price = price
         _entry_mode = "市價"  # 市價進場 or 掛單進場
         if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
-            # 做多：現價 < 主力均價 = 成本比主力好 → 市價進場
-            # 做空：現價 > 主力均價 = 成本比主力好 → 市價進場
-            if is_bull_sig and price < vwap_2h_val:
+            _vwap_f = float(vwap_2h_val)
+            # 做多：現價 ≤ 主力均價×102.5% = 在範圍內 → 市價進場
+            # 做空：現價 ≥ 主力均價×97.5%  = 在範圍內 → 市價進場
+            if is_bull_sig and price <= _vwap_f * 1.025:
                 _entry_price = price
                 _entry_mode = "市價"
-            elif not is_bull_sig and price > vwap_2h_val:
+            elif not is_bull_sig and price >= _vwap_f * 0.975:
                 _entry_price = price
                 _entry_mode = "市價"
             else:
-                # 掛單：主力均價 ±2.5%（做多掛 97.5% 等回調買入；做空掛 97.5% 等反彈賣出）
-                _vwap_f = float(vwap_2h_val)
-                _entry_price = _vwap_f * 0.975  # 主力均價 × 97.5%
+                # 掛單：主力均價 × 97.5%（等價格進入範圍）
+                _entry_price = _vwap_f * 0.975
                 _entry_mode = "掛單"
 
         if atr_val and atr_val > 0 and _entry_price and _entry_price > 0:
