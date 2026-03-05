@@ -3448,6 +3448,68 @@ def _try_bingx_spot_klines_direct(
     return None
 
 
+def _fetch_15m_klines_raw(symbol: str, limit: int = 6) -> Optional[list]:
+    """
+    輕量取得最近 N 根 15m K 線的 open/close，供陷阱偵測用。
+    回傳: [{"open": float, "close": float}, ...] 由舊到新，或 None
+    """
+    clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    for sym_pair in [f"{clean}USDT", f"1000{clean}USDT"]:
+        try:
+            r = requests.get(
+                "https://fapi.binance.com/fapi/v1/klines",
+                params={"symbol": sym_pair, "interval": "15m", "limit": limit},
+                timeout=5,
+            )
+            if r.status_code != 200:
+                continue
+            raw = r.json()
+            if not isinstance(raw, list) or len(raw) < 4:
+                continue
+            out = []
+            for bar in raw[-5:]:  # 取最後 5 根
+                try:
+                    o, c = float(bar[1]), float(bar[4])
+                    out.append({"open": o, "close": c})
+                except (IndexError, TypeError, ValueError):
+                    pass
+            if len(out) >= 4:
+                return out
+        except Exception:
+            pass
+    # Bybit fallback
+    _interval_map = {"15m": "15"}
+    bybit_interval = _interval_map.get("15m", "15")
+    for sym_pair in [f"{clean}USDT", f"1000{clean}USDT"]:
+        try:
+            r = requests.get(
+                "https://api.bybit.com/v5/market/kline",
+                params={"category": "linear", "symbol": sym_pair, "interval": bybit_interval, "limit": limit},
+                timeout=5,
+            )
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            if j.get("retCode") != 0:
+                continue
+            raw = j.get("result", {}).get("list", [])
+            if not isinstance(raw, list) or len(raw) < 4:
+                continue
+            raw = list(reversed(raw))[-5:]
+            out = []
+            for bar in raw:
+                try:
+                    o, c = float(bar[1]), float(bar[4])
+                    out.append({"open": o, "close": c})
+                except (IndexError, TypeError, ValueError):
+                    pass
+            if len(out) >= 4:
+                return out
+        except Exception:
+            pass
+    return None
+
+
 def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 60) -> Optional[Dict[str, Any]]:
     """
     K 線四層降級策略（優先有 volume 的直連來源）：
@@ -4040,24 +4102,24 @@ def _classify_signal_and_tier(
     return (label, zone, 5, rsi_desc, reason)
 
 
-def detect_trap_setup(oi_candles: list, trap_type: str) -> dict:
+def detect_trap_setup(oi_candles: list, trap_type: str, kline_candles: Optional[list] = None) -> dict:
     """
-    偵測「籌碼三步驟陷阱」——簡化版，不看價格回檔/誘多，只看 OI 變化。
+    偵測「3 步反轉陷阱」——OI + 價格雙重確認。
 
     輸入：
-      oi_candles: 最近 4 根 15m 已收盤 K棒的 OI 數值列表（由舊到新）
-      trap_type: "short" = 摸頭（short_open 訊號） / "long" = 摸底（long_open 訊號）
+      oi_candles: 最近 4 根 15m 已收盤 K棒的 OI 數值（由舊到新）
+      trap_type: "short" = 摸頭（short_open） / "long" = 摸底（long_open）
+      kline_candles: [{"open": float, "close": float}, ...] 由舊到新，至少 4 根；None 則僅用 OI
     輸出: {"detected": bool, "matched_steps": int, "note": str}
 
-    三步驟邏輯（OI 變化，由舊到新）：
-      摸頭：空平(OI↓) → 多平(OI↓) → 空開(OI↑) = 可判斷摸頭
-      摸底：多平(OI↓) → 空平(OI↓) → 多開(OI↑) = 可判斷摸底
-
-    只需 4 根 K 棒：k3, k2, k1, k0（k0 為當前訊號根）
-      step2: k2 < k3  → OI 第一根下跌（空平或多平）
-      step1: k1 < k2  → OI 第二根再跌（多平或空平）
-      step0: k0 > k1  → OI 第三根上升（空開或多開）← 當前訊號
-    3/3 吻合 = 完整形態
+    摸頭（short_open）：
+      Step 1 (K-2): 空方平倉 = OI↓ 且 價格上漲
+      Step 2 (K-1): 多方平倉 = OI↓ 且 價格下跌或停滯
+      Step 3 (K-0): short_open = OI↑ 且 價格下跌
+    摸底（long_open）：
+      Step 1 (K-2): 多方平倉 = OI↓ 且 價格下跌
+      Step 2 (K-1): 空方平倉 = OI↓ 且 價格上漲或停滯
+      Step 3 (K-0): long_open = OI↑ 且 價格上漲
     """
     result = {"detected": False, "matched_steps": 0, "note": ""}
     if not oi_candles or len(oi_candles) < 4:
@@ -4068,36 +4130,85 @@ def detect_trap_setup(oi_candles: list, trap_type: str) -> dict:
 
         k3, k2, k1, k0 = oi_candles[-4], oi_candles[-3], oi_candles[-2], oi_candles[-1]
 
-        # 三步驟：OI↓ → OI↓ → OI↑
-        step2 = _oi(k2) < _oi(k3)   # 第一根跌
-        step1 = _oi(k1) < _oi(k2)   # 第二根再跌
-        step0 = _oi(k0) > _oi(k1)   # 第三根升（當前訊號）
+        # 價格方向（有 kline 時使用；無則僅用 OI）
+        # idx 0=K-2, 1=K-1, 2=K-0 → kline_candles[-3], [-2], [-1]
+        def _price_up(idx: int) -> bool:
+            if not kline_candles or len(kline_candles) < 4 - idx:
+                return True  # 無資料時寬鬆通過
+            b = kline_candles[-(3 - idx)]
+            o, c = b.get("open"), b.get("close")
+            if o is None or c is None:
+                return True
+            return float(c) > float(o)
 
-        matched = sum([step2, step1, step0])
+        def _price_down(idx: int) -> bool:
+            if not kline_candles or len(kline_candles) < 4 - idx:
+                return True
+            b = kline_candles[-(3 - idx)]
+            o, c = b.get("open"), b.get("close")
+            if o is None or c is None:
+                return True
+            return float(c) < float(o)
+
+        def _price_down_or_flat(idx: int) -> bool:
+            if not kline_candles or len(kline_candles) < 4:
+                return True
+            b = kline_candles[-(3 - idx)]
+            o, c = b.get("open"), b.get("close")
+            if o is None or c is None:
+                return True
+            o, c = float(o), float(c)
+            if o <= 0:
+                return True
+            return c <= o or abs(c - o) / o < 0.003  # 0.3% 內視為停滯
+
+        def _price_up_or_flat(idx: int) -> bool:
+            if not kline_candles or len(kline_candles) < 4:
+                return True
+            b = kline_candles[-(3 - idx)]
+            o, c = b.get("open"), b.get("close")
+            if o is None or c is None:
+                return True
+            o, c = float(o), float(c)
+            if o <= 0:
+                return True
+            return c >= o or abs(c - o) / o < 0.003
+
+        # idx: 0=K-2, 1=K-1, 2=K-0（對應 kline_candles[-3], [-2], [-1]）
+        if trap_type == "short":
+            step1 = _oi(k2) < _oi(k3) and _price_up(0)  # K-2: OI↓ 且 價格上漲（空平）
+            step2 = _oi(k1) < _oi(k2) and _price_down_or_flat(1)  # K-1: OI↓ 且 價格跌或停滯（多平）
+            step3 = _oi(k0) > _oi(k1) and _price_down(2)  # K-0: OI↑ 且 價格下跌（空開）
+        else:
+            step1 = _oi(k2) < _oi(k3) and _price_down(0)  # K-2: OI↓ 且 價格下跌（多平）
+            step2 = _oi(k1) < _oi(k2) and _price_up_or_flat(1)  # K-1: OI↓ 且 價格漲或停滯（空平）
+            step3 = _oi(k0) > _oi(k1) and _price_up(2)  # K-0: OI↑ 且 價格上漲（多開）
+
+        matched = sum([step1, step2, step3])
         result["matched_steps"] = matched
 
         if matched >= 3:
             result["detected"] = True
             if trap_type == "short":
                 result["note"] = (
-                    "🎯 *【頂級摸頭訊號】*\n"
-                    "_空平 → 多平出貨 → 空開進場，籌碼三步驟吻合_"
+                    "🎯 *【頂級摸頭】完美符合：*\n"
+                    "_空平推升 👉 多平出貨 👉 空軍大舉進場！_"
                 )
             else:
                 result["note"] = (
-                    "🎯 *【頂級摸底訊號】*\n"
-                    "_多平 → 空平回補 → 多開進場，籌碼三步驟吻合_"
+                    "🎯 *【頂級摸底】完美符合：*\n"
+                    "_多軍斷頭 👉 空平回補 👉 主力進場抄底！_"
                 )
         elif matched >= 2:
             if trap_type == "short":
                 result["note"] = (
-                    "⚡ *【摸頭跡象（部分吻合）】*\n"
-                    f"_籌碼形態 {matched}/3 步符合，空單有結構支撐_"
+                    "⚠️ *【潛在摸頭】*\n"
+                    "_多平出貨後空軍進場，留意反轉。_"
                 )
             else:
                 result["note"] = (
-                    "⚡ *【摸底跡象（部分吻合）】*\n"
-                    f"_籌碼形態 {matched}/3 步符合，多單有結構支撐_"
+                    "⚠️ *【潛在摸底】*\n"
+                    "_空平回補後主力進場，留意反轉。_"
                 )
     except Exception:
         pass
@@ -6677,11 +6788,13 @@ def fetch_position_change():
                     f"[FR降級⚠️] {sym}: 做多訊號 費率={_fr_pct_str} 多頭壅擠 → 降為觀察名單"
                 )
 
-        # ── 籌碼三步驟陷阱偵測（short_open 摸頭 / long_open 摸底）────────────
+        # ── 3 步反轉陷阱偵測（short_open 摸頭 / long_open 摸底，OI+價格雙重確認）──
         _bull_trap_result = {"detected": False, "matched_steps": 0, "note": ""}
         if cat in ("short_open", "long_open") and _oi_15m_candles:
             _trap_type = "short" if cat == "short_open" else "long"
-            _bull_trap_result = detect_trap_setup(_oi_15m_candles, _trap_type)
+            time.sleep(0.15)
+            _kline_15m = _fetch_15m_klines_raw(sym, limit=6) if sym else None
+            _bull_trap_result = detect_trap_setup(_oi_15m_candles, _trap_type, _kline_15m)
             if _bull_trap_result.get("detected"):
                 _label = "摸頭" if _trap_type == "short" else "摸底"
                 logger.info(
