@@ -4220,7 +4220,7 @@ def detect_trap_setup(oi_candles: list, trap_type: str, kline_candles: Optional[
 
 def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     """
-    計算訊號綜合評級（S / A / B / R）。
+    計算訊號綜合評級（S / A / R；B 級不推播）。
     返回 (grade_str, score_int, brief_reason_str, already_moving_bool, motion_note_str)
 
     ── R 級（優先判斷）──────────────────────────────────────────────────
@@ -4241,10 +4241,10 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
       做多 + 1H 漲幅 > +5%：行情先行，限制最高 A 級，推播加警示
       做空 + 1H 跌幅 < −5%：行情先行，限制最高 A 級，推播加警示
 
-    ── 等級門檻（順勢訊號）─────────────────────────────────────────────
+    ── 等級門檻（順勢訊號，僅 S/A/R，無 B）────────────────────────────────
       S ≥ 80  訊號極強・三層共振＋情境完美＋互確認
       A ≥ 60  訊號強・主要條件對齊
-      B < 60  訊號中等・方向成立，謹慎操作
+      < 60    不推播（原 B 級已移除，提升效率）
     """
     # ══════════════════════════════════════════════════════════════
     # 第一步：判斷逆勢左側 → R 級
@@ -4452,7 +4452,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         grade_badge = "🥇 *A 級*"
         grade_desc = "訊號強"
     else:
-        grade = "B"
+        grade = "B"  # 不推播，build_report_message_tiered 會跳過
         grade_badge = "🥈 *B 級*"
         grade_desc = "訊號中等"
 
@@ -4806,6 +4806,11 @@ def build_report_message_tiered(
         if not price or not isinstance(price, (int, float)) or price <= 0:
             continue
 
+        # 提早評級：B 級不推播，直接跳過（節省 entry/SL/TP 計算與訊息組裝）
+        _grade, _grade_score, _grade_brief, _already_moving, _motion_note = _calc_signal_grade(x, is_bull_sig)
+        if _grade == "B":
+            continue
+
         oi30 = x.get("oiChange30m")
         p30 = x.get("priceChange30m")
         p1h = x.get("priceChange1h")
@@ -4981,12 +4986,7 @@ def build_report_message_tiered(
             _vol_line = ""  # 無成交值資料時不顯示此行，避免誤導
 
         # ══════════════════════════════════════════════════════════
-        # 訊號評級（S / A / B / R）
-        # ══════════════════════════════════════════════════════════
-        _grade, _grade_score, _grade_brief, _already_moving, _motion_note = _calc_signal_grade(x, is_bull_sig)
-
-        # ══════════════════════════════════════════════════════════
-        # 組裝電報訊息（手機優先，去括號，結構清晰）
+        # 組裝電報訊息（手機優先，去括號，結構清晰；B 級已於上方提早跳過）
         # ══════════════════════════════════════════════════════════
         msg_lines: List[str] = []
 
@@ -5155,13 +5155,13 @@ def build_report_message_tiered(
         )
 
     # ── 評級統計（S/A/B/R）──────────────────────────────────────────
-    _grade_counts = {"S": 0, "A": 0, "B": 0, "R": 0}
+    _grade_counts = {"S": 0, "A": 0, "R": 0}
     for _g in grade_per_msg:
         if _g in _grade_counts:
             _grade_counts[_g] += 1
 
     _grade_parts = []
-    for _g, _badge in [("S", "🏆S"), ("A", "🥇A"), ("B", "🥈B"), ("R", "⚡R")]:
+    for _g, _badge in [("S", "🏆S"), ("A", "🥇A"), ("R", "⚡R")]:
         if _grade_counts[_g] > 0:
             _grade_parts.append(f"{_badge}×{_grade_counts[_g]}")
     _grade_tag = "  ".join(_grade_parts) if _grade_parts else "─"
