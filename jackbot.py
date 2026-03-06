@@ -7140,31 +7140,40 @@ def fetch_position_change():
                             f"[即時報價🔄] {_sym_rt}: 觸發 {_sig_price:.6f} → 即時 {_live:.6f}"
                             f"（偏差 {_drift:.1%}）"
                         )
-                    # ── TP1 風報比篩選（基於即時價）──────────────────────────────────
-                    # 快速估算：SL 距離沿用訊號觸發點的結構（recent_2h_high/low + 0.5%），
-                    # 若即時 TP1 R 比 < 0.8 代表行情已大幅移動，不值得再推
+                    # ── TP1 風報比篩選（與推播訊息完全一致）────────────────────────────────────
+                    # TP1/SL 一律以「進場價」為基準（與 build_report_message_tiered 相同）：
+                    #   進場價 = 即時價（市價）或 掛單價（vwap×0.975/1.025），依 vwap 判斷
+                    #   TP1 = 進場價 + 1.5R，SL = 進場價 - R
+                    # 風報比檢查：假設使用者市價進場於即時價，計算「即時價→TP1」的剩餘 R 比。
+                    # 若 R < 0.8 或距 TP1 < 0.3%，代表行情已過、不推。
                     _is_long_rt = (_x.get("category") or "") in ("long_open", "short_close")
-                    _r2h_high = _x.get("recent_high_2h")
-                    _r2h_low = _x.get("recent_low_2h")
-                    if _is_long_rt and _r2h_low and _r2h_low > 0:
-                        _sl_est = _r2h_low * 0.995
-                        _risk_est = _live - _sl_est
-                    elif not _is_long_rt and _r2h_high and _r2h_high > 0:
-                        _sl_est = _r2h_high * 1.005
-                        _risk_est = _sl_est - _live
-                    else:
-                        _risk_est = _atr_rt * 1.8   # 備援估算
-                    if _risk_est > 0:
-                        _tp1_est = (_live + _risk_est) if _is_long_rt else (_live - _risk_est)
-                        _r_tp1 = abs(_tp1_est - _live) / _risk_est  # 理論上 = 1.0
-                        # 實際上風報比由「即時進場到原始 TP1 目標」決定
-                        _orig_tp1_est = (_sig_price + _risk_est) if _is_long_rt else (_sig_price - _risk_est)
-                        _rt_reward = (_orig_tp1_est - _live) if _is_long_rt else (_live - _orig_tp1_est)
+                    _vwap_2h = _x.get("vwap_2h")
+                    _risk = 1.8 * _atr_rt
+                    _entry_rt = _live  # 預設市價進場
+                    if _vwap_2h and isinstance(_vwap_2h, (int, float)) and _vwap_2h > 0:
+                        _vwap_f = float(_vwap_2h)
+                        if _is_long_rt and _live > _vwap_f * 1.025:
+                            _entry_rt = _vwap_f * 0.975  # 掛單進場
+                        elif not _is_long_rt and _live < _vwap_f * 0.975:
+                            _entry_rt = _vwap_f * 1.025  # 掛單進場
+                    if _risk > 0 and _entry_rt and _entry_rt > 0:
+                        if _is_long_rt:
+                            _actual_sl = _entry_rt - _risk
+                            _actual_tp1 = _entry_rt + _risk * 1.5
+                            _rt_reward = _actual_tp1 - _live
+                            _risk_est = _live - _actual_sl
+                        else:
+                            _actual_sl = _entry_rt + _risk
+                            _actual_tp1 = _entry_rt - _risk * 1.5
+                            _rt_reward = _live - _actual_tp1
+                            _risk_est = _actual_sl - _live
                         _rt_r_ratio = _rt_reward / _risk_est if _risk_est > 0 else 0
-                        if _rt_r_ratio < 0.8:
+                        # 額外：現價已接近 TP1（剩餘空間 < 0.3%）→ 直接捨棄
+                        _tp1_dist_pct = abs(_actual_tp1 - _live) / _live * 100 if _live > 0 else 0
+                        if _rt_r_ratio < 0.8 or _tp1_dist_pct < 0.3:
                             logger.info(
                                 f"[低R比跳過⚠️] {_sym_rt}: 即時 TP1 R={_rt_r_ratio:.2f} < 0.8"
-                                f"（訊號觸發 {_sig_price:.6f} 即時 {_live:.6f}），行情已過，不推"
+                                f" 或 距TP1僅{_tp1_dist_pct:.2f}%（訊號 {_sig_price:.6f} 即時 {_live:.6f}），行情已過，不推"
                             )
                             _drop_low_r.append(_x)
             except Exception as _e:
