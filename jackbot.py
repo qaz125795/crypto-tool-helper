@@ -1026,17 +1026,17 @@ def _fetch_smart_money_oi_split(symbol: str = "BTC") -> Dict[str, Any]:
         rows_s = j_s.get("data") or j_s.get("list") or [] if j_s else []
         stable_bars = _parse_oi_bars_from_rows(rows_s) if rows_s else None
         _n_stable = len(stable_bars) if stable_bars else 0
-        logger.debug("[SmartMoneyOI] stable OI bars: %d" % _n_stable)
+        logger.debug("[SmartMoneyOI] stable OI bars: " + str(_n_stable))
     except Exception as e_s:
-        logger.debug("[SmartMoneyOI] stable OI error: %s" % (e_s,))
+        logger.debug("[SmartMoneyOI] stable OI error: " + str(e_s))
     try:
         j_c = _cg_get(CG_EP["oi_agg_coin"], params)
         rows_c = j_c.get("data") or j_c.get("list") or [] if j_c else []
         coin_bars = _parse_oi_bars_from_rows(rows_c) if rows_c else None
         _n_coin = len(coin_bars) if coin_bars else 0
-        logger.debug("[SmartMoneyOI] coin OI bars: %d" % _n_coin)
+        logger.debug("[SmartMoneyOI] coin OI bars: " + str(_n_coin))
     except Exception as e_c:
-        logger.debug("[SmartMoneyOI] coin OI error: %s" % (e_c,))
+        logger.debug("[SmartMoneyOI] coin OI error: " + str(e_c))
 
     stable_chg = coin_chg = None
     if stable_bars and len(stable_bars) >= 2 and stable_bars[-2] != 0:
