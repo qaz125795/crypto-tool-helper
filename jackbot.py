@@ -1018,7 +1018,7 @@ def _fetch_smart_money_oi_split(symbol: str = "BTC") -> Dict[str, Any]:
     base = symbol.upper().replace("USDT", "")
     params = {"symbol": base, "interval": "15m", "limit": 4}
 
-    logger.debug(f"[聰明錢OI] 嘗試抓取穩定幣/幣本位OI分拆 symbol={base}")
+    logger.debug("[SmartMoneyOI] fetch stable/coin OI split symbol=%s" % base)
 
     stable_bars, coin_bars = None, None
     try:
@@ -1026,17 +1026,17 @@ def _fetch_smart_money_oi_split(symbol: str = "BTC") -> Dict[str, Any]:
         rows_s = j_s.get("data") or j_s.get("list") or [] if j_s else []
         stable_bars = _parse_oi_bars_from_rows(rows_s) if rows_s else None
         _n_stable = len(stable_bars) if stable_bars else 0
-        logger.debug("[聰明錢OI] 穩定幣OI: %d棒" % _n_stable)
+        logger.debug("[SmartMoneyOI] stable OI bars: %d" % _n_stable)
     except Exception as e_s:
-        logger.debug("[聰明錢OI] 穩定幣OI異常: %s" % (e_s,))
+        logger.debug("[SmartMoneyOI] stable OI error: %s" % (e_s,))
     try:
         j_c = _cg_get(CG_EP["oi_agg_coin"], params)
         rows_c = j_c.get("data") or j_c.get("list") or [] if j_c else []
         coin_bars = _parse_oi_bars_from_rows(rows_c) if rows_c else None
         _n_coin = len(coin_bars) if coin_bars else 0
-        logger.debug("[聰明錢OI] 幣本位OI: %d棒" % _n_coin)
+        logger.debug("[SmartMoneyOI] coin OI bars: %d" % _n_coin)
     except Exception as e_c:
-        logger.debug("[聰明錢OI] 幣本位OI異常: %s" % (e_c,))
+        logger.debug("[SmartMoneyOI] coin OI error: %s" % (e_c,))
 
     stable_chg = coin_chg = None
     if stable_bars and len(stable_bars) >= 2 and stable_bars[-2] != 0:
@@ -3859,7 +3859,10 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
       🟡 long_close:  OI↓ + Price↓ → 多方平倉
       🔵 short_cover: OI↓ + Price↑ → 空方回補
 
-    ★ 只允許兩種推播（其餘一律 return None，保護帳戶回撤）：
+    ★ 推播類型（優先順序）：
+      🔥 E. exhaustion_reversal (衰竭反轉)：動能衰竭後二次確認，勝率極高狙擊點
+         恐慌抄底：1H long_close + RSI<35 + 15m/5m short_cover 或 long_open → 做多
+         誘多摸頭：1H short_cover + RSI>65 + 15m/5m long_close 或 short_open → 做空
       ✅ A. confirmed (確定籌碼)：1H/30m/15m/5m 四層方向完全一致
                                    + RSI 未達追高/追空極端（做多≤75，做空≥25）
       🎯 B. pullback  (完美回踩)：1H/30m 同向 + 15m/5m 呈現短線反向平倉/開倉
@@ -3945,6 +3948,28 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
         "cat_30m": cat_30m, "cat_15m": cat_15m, "cat_5m": cat_5m,
         "step2_conflict": step2_conflict,
     }
+
+    # ══════════════════════════════════════════════════════════
+    # 優先：衰竭反轉（exhaustion_reversal）— 動能衰竭後的二次確認反轉，勝率極高
+    # 不與順勢突破衝突：此為逆勢抄底/摸頭，條件滿足時優先回傳
+    # ─────────────────────────────────────────────────────────
+    # 【恐慌抄底 Bottom】1H long_close（多頭爆倉）+ RSI<35 + 15m/5m 出現 short_cover 或 long_open
+    # 【誘多摸頭 Top】   1H short_cover（空軍被軋空）+ RSI>65 + 15m/5m 出現 long_close 或 short_open
+    # ══════════════════════════════════════════════════════════
+    small_confirm_bottom = any(
+        c in ("short_cover", "long_open") for c in [cat_15m, cat_5m] if c
+    )
+    small_confirm_top = any(
+        c in ("long_close", "short_open") for c in [cat_15m, cat_5m] if c
+    )
+    if cat_1h == "long_close" and rsi_f is not None and rsi_f < 35 and small_confirm_bottom:
+        return {**base, "version": "exhaustion_reversal", "subtype": "bottom",
+                "aligned_count": 2, "reversal_hint": "空方動能衰竭，出現獲利回補跡象",
+                "exhaustion_direction": "long"}
+    if cat_1h == "short_cover" and rsi_f is not None and rsi_f > 65 and small_confirm_top:
+        return {**base, "version": "exhaustion_reversal", "subtype": "top",
+                "aligned_count": 2, "reversal_hint": "多方動能衰竭，出現獲利回補跡象",
+                "exhaustion_direction": "short"}
 
     # ══════════════════════════════════════════════════════════
     # 三層決策樹 v4（鐵三角 + 5m 雜訊容忍 + Tier2 觀察名單）
@@ -4330,7 +4355,10 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     # ── 1. 訊號版本強度 ──────────────────────────────────────────
     version = x.get("signal_version") or "potential"
     subtype = x.get("signal_subtype") or ""
-    if version == "confirmed":
+    if version == "exhaustion_reversal":
+        score += 50
+        reasons.append("衰竭反轉")
+    elif version == "confirmed":
         score += 40
         reasons.append("三層共振")
     elif version == "tier2":
@@ -4834,12 +4862,22 @@ def build_report_message_tiered(
             continue
         seen_syms.add(sym)
         category = x.get("category", "")
-        title = _signal_title.get(category)
+        _sig_ver = x.get("signal_version") or "potential"
+        if _sig_ver == "exhaustion_reversal":
+            _ex_dir = x.get("_exhaustion_reversal_direction")
+            if _ex_dir == "long":
+                is_bull_sig = True
+                title = "🟢 【恐慌衰竭 (抄底做多)】"
+            else:
+                is_bull_sig = False
+                title = "🔴 【狂熱衰竭 (摸頭做空)】"
+        else:
+            title = _signal_title.get(category)
+            is_bull_sig = category in ("long_open", "short_close")
         if not title:
             continue
 
         sym_base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
-        is_bull_sig = category in ("long_open", "short_close")
         price = x.get("current_price")
         if not price or not isinstance(price, (int, float)) or price <= 0:
             continue
@@ -4873,7 +4911,16 @@ def build_report_message_tiered(
         _entry_mode = "市價"  # 市價進場 or 掛單進場
         _energy_exhausted = x.get("_energy_exhausted", False)
         ema20_val = x.get("ema20") or x.get("ema20_close")
-        if _energy_exhausted and ema20_val and isinstance(ema20_val, (int, float)) and ema20_val > 0:
+        _is_exhaustion_reversal = (_sig_ver == "exhaustion_reversal")
+        if _is_exhaustion_reversal:
+            # 衰竭反轉：強制限價掛單於 VWAP/EMA20（有 15m EMA20 則優先，此處以 VWAP/1H EMA20 為主）
+            _entry_price = price
+            if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
+                _entry_price = float(vwap_2h_val)
+            elif ema20_val and isinstance(ema20_val, (int, float)) and ema20_val > 0:
+                _entry_price = float(ema20_val)
+            _entry_mode = "掛單（限價於 VWAP/EMA20）"
+        elif _energy_exhausted and ema20_val and isinstance(ema20_val, (int, float)) and ema20_val > 0:
             # 動能透支/乖離過大：強制限價掛單於 EMA20，拒絕市價進場
             _entry_price = float(ema20_val)
             _entry_mode = "掛單（限價於 EMA20）"
@@ -4893,7 +4940,8 @@ def build_report_message_tiered(
                 _entry_mode = "掛單"
 
         if atr_val and atr_val > 0 and _entry_price and _entry_price > 0:
-            _risk = 1.8 * atr_val
+            # 衰竭反轉：止損適度放寬為 1.5×ATR；一般訊號 1.8×ATR
+            _risk = (1.5 * atr_val) if _is_exhaustion_reversal else (1.8 * atr_val)
             if is_bull_sig:
                 sl  = _entry_price - _risk
                 tp1 = _entry_price + _risk * 1.2
@@ -4919,10 +4967,15 @@ def build_report_message_tiered(
         _mtf_desc      = x.get("mtf_desc") or ""
         _reversal_hint = x.get("reversal_hint") or ""
 
-        # 標題標籤（三層訊號：confirmed / pullback / tier2）
+        # 標題標籤（exhaustion_reversal / confirmed / pullback / tier2）
         _dir_str   = "做多" if is_bull_sig else "做空"
         _dir_emoji = "🟢"   if is_bull_sig else "🔴"
-        if _sig_version == "confirmed":
+        if _sig_version == "exhaustion_reversal":
+            _type_str  = "衰竭反轉・抄底" if is_bull_sig else "衰竭反轉・摸頭"
+            _badge_emo = "🎯"
+            _ver_label = "🔥 *衰竭反轉*（動能衰竭後二次確認，限價掛單）"
+            sig_emoji  = "🔥"
+        elif _sig_version == "confirmed":
             _type_str  = "確定籌碼・右側突破"
             _badge_emo = "🚀"
             _ver_label = "✅ *確定籌碼*（鐵三角共振 1H/30m/15m 一致）"
@@ -4946,6 +4999,8 @@ def build_report_message_tiered(
             # short_close（原始值）與 short_cover（內部標準化值）語意相同：OI↓+Price↑ = 空方回補
             _is_bull_cat = cat in ("long_open", "short_cover", "short_close")
             _is_bear_cat = cat in ("short_open", "long_close")
+            if ver == "exhaustion_reversal":
+                return hint if hint else ("空方動能衰竭，出現獲利回補跡象，抄底做多。" if is_bull_sig else "多方動能衰竭，出現獲利回補跡象，摸頭做空。")
             if ver == "confirmed":
                 if cat == "long_open":                    return "主力三層共振建多倉，動能明確，右側追多機會！"
                 if cat == "short_open":                   return "主力三層共振建空倉，空頭動能確認，右側追空機會！"
@@ -5069,6 +5124,8 @@ def build_report_message_tiered(
 
         # ─ 策略短評 ─
         msg_lines.append(f"💡 {_strategy_comment}")
+        if _sig_version == "exhaustion_reversal":
+            msg_lines.append("_（空方/多方動能衰竭，出現獲利回補跡象，建議限價掛單）_")
         if _reversal_hint:
             msg_lines.append(f"_{_reversal_hint}_")
         # 車已發動警示（行情已先行，追高/追低風險）
@@ -6548,94 +6605,12 @@ def fetch_position_change():
         f"（達門檻 {in_four} / OI成功 {oi_success_count}）"
     )
 
-    # 動態 OI 門檻計算：以本輪四類樣本的 |OI 30m| 分佈計算平均與標準差，
-    # 4 星實際門檻 = max(固定 4 星門檻, mean + 1σ)
-    # 5 星實際門檻 = max(固定 5 星門檻, mean + 2σ)
-    global _dynamic_oi_mean_30m, _dynamic_oi_std_30m, _dynamic_oi_4star, _dynamic_oi_5star, _dynamic_oi_sample_size
-    oi_samples: List[float] = []
-    for _lst in (long_open, long_close, short_open, short_close):
-        for _x in _lst:
-            try:
-                v = float(_x.get("oiChange1h") or _x.get("oiChange30m") or 0.0)
-            except (TypeError, ValueError):
-                continue
-            if v == v:
-                oi_samples.append(abs(v))
-    _dynamic_oi_sample_size = len(oi_samples)
-    if _dynamic_oi_sample_size >= 10:
-        arr = np.array(oi_samples, dtype=float)
-        # 去極端值：截斷至 95th 百分位，防止單一異常幣（如 OI +621%）炸飛門檻
-        cap_95 = float(np.percentile(arr, 95))
-        arr_clean = np.clip(arr, 0, cap_95)
-        _dynamic_oi_mean_30m = float(arr_clean.mean())
-        _dynamic_oi_std_30m = float(arr_clean.std())
-        _dynamic_oi_4star = max(OI_FOR_4_STAR, _dynamic_oi_mean_30m + 1.0 * _dynamic_oi_std_30m)
-        _dynamic_oi_5star = max(OI_FOR_5_STAR, _dynamic_oi_mean_30m + 2.0 * _dynamic_oi_std_30m)
-        _outlier_count = int(np.sum(arr > cap_95))
-        logger.info(
-            f"【動態OI門檻】樣本 {_dynamic_oi_sample_size} 個（截斷 {_outlier_count} 個極端值≥{cap_95:.1f}%）"
-            f" | μ={_dynamic_oi_mean_30m:.2f}% σ={_dynamic_oi_std_30m:.2f}% "
-            f"→ 4★≥{_dynamic_oi_4star:.2f}% 5★≥{_dynamic_oi_5star:.2f}%"
-        )
-    else:
-        # 樣本數不足：補充 CoinGlass Top-20 OI 數據
-        _extra_samples: List[float] = []
-        try:
-            _respect_coinglass_rate_limit()
-            _top_resp = requests.get(
-                f"{CG_API_BASE}/api/futures/coins-markets",
-                headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
-                params={"limit": 20, "sort_by": "volUsd24h", "sort_order": "desc"},
-                timeout=10
-            )
-            if _top_resp.status_code == 200:
-                _top_data = _top_resp.json()
-                _top_list = _top_data.get("data") or []
-                if not isinstance(_top_list, list):
-                    _top_list = []
-                for _item in _top_list:
-                    for _k in ("oiChangePercent15m", "oiChange15m", "oi_change_15m",
-                               "oiChangePercent30m", "oiChange30m"):
-                        _v = _item.get(_k)
-                        if _v is not None:
-                            try:
-                                _extra_samples.append(abs(float(_v)))
-                            except (TypeError, ValueError):
-                                pass
-                            break
-                if _extra_samples:
-                    oi_samples.extend(_extra_samples)
-        except Exception as _e:
-            logger.warning(f"【動態OI門檻】Top-20 補充失敗: {_e}")
-
-        if len(oi_samples) >= 10:
-            arr = np.array(oi_samples, dtype=float)
-            cap_95 = float(np.percentile(arr, 95))
-            arr_clean = np.clip(arr, 0, cap_95)
-            _dynamic_oi_mean_30m = float(arr_clean.mean())
-            _dynamic_oi_std_30m = float(arr_clean.std())
-            _dynamic_oi_4star = max(OI_FOR_4_STAR, _dynamic_oi_mean_30m + 1.0 * _dynamic_oi_std_30m)
-            _dynamic_oi_5star = max(OI_FOR_5_STAR, _dynamic_oi_mean_30m + 2.0 * _dynamic_oi_std_30m)
-            _dynamic_oi_sample_size = len(oi_samples)
-            logger.info(
-                f"【動態OI門檻(補充後)】樣本 {_dynamic_oi_sample_size} 個 | μ={_dynamic_oi_mean_30m:.2f}% σ={_dynamic_oi_std_30m:.2f}% "
-                f"→ 4★≥{_dynamic_oi_4star:.2f}% 5★≥{_dynamic_oi_5star:.2f}%"
-            )
-        else:
-            _dynamic_oi_mean_30m = None
-            _dynamic_oi_std_30m = None
-            _dynamic_oi_4star = None
-            _dynamic_oi_5star = None
-            logger.info(
-                f"【動態OI門檻】樣本不足(共 {len(oi_samples)} 個)，沿用固定門檻 4★≥{OI_FOR_4_STAR}% 5★≥{OI_FOR_5_STAR}%"
-            )
-
-    # 只統計與計算 4 星以上：|OI| < 實際 4 星門檻 的不進 top、不跑後續運算
-    oi_threshold_4 = _dynamic_oi_4star if (_dynamic_oi_4star is not None and _dynamic_oi_sample_size >= 10) else OI_FOR_4_STAR
-    long_open = [x for x in long_open if abs(x.get('oiChange30m') or 0) >= oi_threshold_4]
-    long_close = [x for x in long_close if abs(x.get('oiChange30m') or 0) >= oi_threshold_4]
-    short_open = [x for x in short_open if abs(x.get('oiChange30m') or 0) >= oi_threshold_4]
-    short_close = [x for x in short_close if abs(x.get('oiChange30m') or 0) >= oi_threshold_4]
+    # 分層 OI 門檻：一律依幣種套用 4%（主流）/ 6%（高流動）/ 8%（小幣），無樣本 fallback
+    logger.info("【OI門檻】強制分層：主流 4% / 高流動 6% / 小幣 8%")
+    long_open = [x for x in long_open if abs(x.get('oiChange30m') or 0) >= _get_oi_threshold_for_item(x)]
+    long_close = [x for x in long_close if abs(x.get('oiChange30m') or 0) >= _get_oi_threshold_for_item(x)]
+    short_open = [x for x in short_open if abs(x.get('oiChange30m') or 0) >= _get_oi_threshold_for_item(x)]
+    short_close = [x for x in short_close if abs(x.get('oiChange30m') or 0) >= _get_oi_threshold_for_item(x)]
     # ── 按 1H OI 絕對值排名（取前3名，OI越大=主力動作越明確）────────────────
     # 目的：找「持倉變化最劇烈」的幣，不是隨機取樣
     long_open.sort(key=lambda x: abs(x.get('oiChange1h') or x.get('oiChange30m') or 0), reverse=True)
@@ -7003,9 +6978,12 @@ def fetch_position_change():
             "_bull_trap_note":     _bull_trap_result.get("note", ""),
             # 動能透支/乖離過大：強制限價掛單於 EMA20，拒絕市價進場
             "_energy_exhausted": _energy_exhausted,
+            # 衰竭反轉：抄底/摸頭方向（long/short），供推播覆寫 is_bull_sig 與標題
+            "_exhaustion_reversal_direction": _mtf_result.get("exhaustion_direction"),
         })
         _ver_tag = (
-            "✅確定籌碼（鐵三角）" if _effective_version == "confirmed"
+            "🔥衰竭反轉" if _effective_version == "exhaustion_reversal"
+            else "✅確定籌碼（鐵三角）" if _effective_version == "confirmed"
             else f"⚠️觀察名單({_fr_crowding_note or _mtf_result.get('subtype','')})" if _effective_version == "tier2"
             else f"🎯潛在機會({_mtf_result.get('subtype','')})"
         )
@@ -7338,10 +7316,6 @@ def fetch_position_change():
         try:
             pushed_symbols = sorted({_cooldown_symbol(x.get("symbol") or "") for x in cooled_top if x.get("symbol")}) if cooled_top else []
             pushed_list = ", ".join(pushed_symbols) if pushed_symbols else "無"
-            # 動態 OI 門檻（若本輪有計算則顯示，否則顯示固定門檻）
-            oi_4 = _dynamic_oi_4star if (_dynamic_oi_4star is not None and _dynamic_oi_sample_size >= 10) else OI_FOR_4_STAR
-            oi_5 = _dynamic_oi_5star if (_dynamic_oi_5star is not None and _dynamic_oi_sample_size >= 10) else OI_FOR_5_STAR
-
             summary_lines = [
                 "## 持倉變化篩選摘要",
                 "",
@@ -7350,7 +7324,7 @@ def fetch_position_change():
                 f"| 處理幣種總數 | {processed_count} |",
                 f"| OI 成功數 | {oi_success_count} |",
                 f"| OI 失敗數 | {oi_fail_count} |",
-                f"| 動態 OI 門檻 (4★/5★) | {oi_4:.2f}% / {oi_5:.2f}% |",
+                "| OI 門檻 | 分層：主流 4% / 高流動 6% / 小幣 8% |",
                 f"| 進入 TOP 候選數 | {len(all_top)} |",
                 f"| 最終推播標的數 | {len(cooled_top)} |",
                 f"| 推播標的列表 | {pushed_list} |",
