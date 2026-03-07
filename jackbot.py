@@ -3630,27 +3630,56 @@ FR_LONG_LIQUIDATION_BLOCK = 0.005  # +0.5%：多頭嚴重壅擠，爆倉風險�
 # ══════════════════════════════════════════════════════════════════════
 # 1H MTF 四層漏斗策略門檻（集中管理，調參只需改這裡）
 # ══════════════════════════════════════════════════════════════════════
-MAIN_COINS = {"BTC", "ETH"}
+MAIN_COINS = {"BTC", "ETH", "SOL"}  # 主流幣：1H OI > 4% 即達標
 
 # ── 流動性門檻（24h 成交值，低於此深度不足）──────────────────────────
-MTF_VOLUME_MIN_USD  = 7_000_000     # 7M USD（2026-03-03 調高，過濾低流動性山寨）
+MTF_VOLUME_MIN_USD  = 15_000_000    # 15M USD（2026-03-07 調高至 1500 萬，過濾低流動性/單一莊家畫門）
 
-# ── 1H OI 扳機門檻（Stage 1 主時框）──────────────────────────────────
-OI_THRESHOLD_1H    = 5.0            # 5.0%（2026-03-05 調高，降低訊號頻率）
-PRICE_THRESHOLD_1H = 1.5            # 1H 價格扳機門檻
+# ── 1H OI 扳機門檻（動態分層，依幣種流動性調整）────────────────────────
+# 主流幣（BTC/ETH/SOL）：4% | 高流動性山寨（24h 量>50M 或市值前50）：6% | 其他小幣：8%
+OI_THRESHOLD_MAIN   = 4.0           # 主流幣門檻
+OI_THRESHOLD_HIGH_LIQ = 6.0        # 高流動性山寨（24h 成交值 > 50M USD）
+OI_THRESHOLD_SMALL  = 8.0          # 其他小幣種
+HIGH_LIQ_VOLUME_USD = 50_000_000   # 24h 成交值 > 50M 視為高流動性
+OI_THRESHOLD_1H     = 5.0          # 向後相容預設值（實際由 _get_oi_threshold_for_item 動態決定）
+PRICE_THRESHOLD_1H  = 1.5           # 1H 價格扳機門檻
 
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
 MTF_RSI_OVERBOUGHT = 85             # 做多降級線（>85 降為 Tier2 觀察；單邊牛市容忍 RSI 鈍化）
 MTF_RSI_OVERSOLD   = 15             # 做空降級線（<15 降為 Tier2 觀察；單邊熊市容忍 RSI 鈍化）
 
 # ── 衍生/向後相容別名（供其他函數引用）──────────────────────────────
-OI_MAIN_COIN_MIN    = OI_THRESHOLD_1H
-OI_ALTCOIN_MIN      = OI_THRESHOLD_1H
+OI_MAIN_COIN_MIN    = OI_THRESHOLD_MAIN
+OI_ALTCOIN_MIN      = OI_THRESHOLD_HIGH_LIQ  # 預設用高流動性門檻，實際由動態函數決定
 OI_FOR_5_STAR       = OI_THRESHOLD_1H
 OI_FOR_4_STAR       = OI_THRESHOLD_1H
 OI_FOR_ELITE        = OI_THRESHOLD_1H
 OI_THRESHOLD_30M    = OI_THRESHOLD_1H
 PRICE_THRESHOLD_30M = PRICE_THRESHOLD_1H
+
+def _get_oi_threshold_for_item(item: Dict) -> float:
+    """
+    動態 OI 門檻：依幣種流動性分層。
+    - 主流幣 (BTC/ETH/SOL)：4%
+    - 高流動性山寨（24h 成交值 > 50M USD）：6%
+    - 其他小幣種：8%
+    """
+    sym = item.get("symbol") or item.get("coin") or ""
+    base = str(sym).replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+    if base in MAIN_COINS:
+        return OI_THRESHOLD_MAIN
+    vol = (
+        item.get("_volume_usd") or item.get("_cg_volume_usd") or
+        item.get("volume_usd") or item.get("volUsd24h") or 0
+    )
+    try:
+        vol_f = float(vol)
+        if vol_f >= HIGH_LIQ_VOLUME_USD:
+            return OI_THRESHOLD_HIGH_LIQ
+    except (TypeError, ValueError):
+        pass
+    return OI_THRESHOLD_SMALL
+
 
 # ── 黑名單：永久禁止推播的標的（可隨時新增/移除）────────────────────────────────
 # 原則：歷史表現差、流動性不足、長期被操控的幣種
@@ -3723,7 +3752,7 @@ def _check_manipulation_risk(
     tech: Optional[Dict],
     atr_val: Optional[float],
     category: str = "",
-) -> str:
+) -> Tuple[str, bool]:
     """
     反畫門防護（Anti-Manipulation Gate）。
 
@@ -3738,8 +3767,10 @@ def _check_manipulation_risk(
     │    → 條件2（薄幣大OI）仍套用，但閾值放寬至不影響正常摸頂底            │
     └─────────────────────────────────────────────────────────────────────┘
 
-    回傳封鎖原因字串（非空 = 封鎖），空字串 = 放行。
+    回傳 (block_reason, energy_exhausted)。
+    block_reason 非空 = 封鎖；energy_exhausted = True 時標記「動能透支」，強制限價掛單於 EMA20。
     """
+    energy_exhausted = False
     oi30 = float(item.get("oiChange30m") or 0)
     vol_usd = (
         item.get("_volume_usd")
@@ -3757,20 +3788,19 @@ def _check_manipulation_risk(
 
     abs_oi = abs(oi30)
 
-    # ── 條件 1：觸發蠟燭實體過大（順勢突破型才適用）────────────────────────
+    # ── 條件 1：蠟燭實體過大（順勢突破型才適用，門檻嚴格化為 1.5x ATR）────────────────
     # 摸頂底本身就是在大蠟燭出現後入場（大陽棒後做空、大陰棒後做多），
     # 所以逆勢型跳過此條件，只對 long_open / short_open 套用。
+    # 2026-03-07：body_atr >= 1.5 不封鎖，改為標記「動能透支」，強制限價掛單於 EMA20
     if not is_reversal and tech and atr_val and atr_val > 0:
         _ko = tech.get("last_kline_open_30m")
         _kc = tech.get("last_kline_close_30m")
         if _ko and _kc:
             candle_body = abs(float(_kc) - float(_ko))
             body_atr = candle_body / atr_val
-            if body_atr >= 2.5:
-                return (
-                    f"觸發K實體 {body_atr:.1f}x ATR，"
-                    f"單根蠟燭能量已耗盡（莊家畫門後通常下根即砸回）"
-                )
+            if body_atr >= 1.5:
+                energy_exhausted = True
+                # 不封鎖，僅標記動能透支，推播時強制限價掛單
 
     # ── 條件 2：薄流動性 + 大幅 OI 暴增（順勢 / 逆勢均套用，閾值不同）────
     # 逆勢型（摸頂底）放寬閾值：正常的踩踏/軋空 在小幣也可能有 4~5% OI，
@@ -3780,19 +3810,19 @@ def _check_manipulation_risk(
             return (
                 f"極薄幣劇烈OI：成交值 {vol_m:.1f}M 但 OI 波動 {abs_oi:.1f}%，"
                 f"單人資金即可偽造踩踏/軋空訊號"
-            )
+            ), False
     else:
         # 順勢突破型：較嚴格，少量資金即可偽造突破
         if 0 < vol_m < 3.0 and abs_oi >= 4.0:
             return (
                 f"薄幣大OI：成交值 {vol_m:.1f}M 但 OI 暴增 {abs_oi:.1f}%，"
                 f"少量資金即可偽造此突破訊號"
-            )
+            ), False
         if 0 < vol_m < 5.0 and abs_oi >= 7.0:
             return (
                 f"低流動性劇烈波動：成交值 {vol_m:.1f}M & OI {abs_oi:.1f}%，"
                 f"畫門風險極高"
-            )
+            ), False
 
     # ── 條件 3：1H OI 逆向 + 低流動性（順勢突破型才適用）──────────────────
     # 逆勢摸頂底訊號本來就預期 15m 和 1H OI 方向不一致（這是訊號本身的邏輯），
@@ -3812,9 +3842,9 @@ def _check_manipulation_risk(
             return (
                 f"1H OI逆向（{oi_1h_pct:+.2f}%）+ 成交值僅 {vol_m:.1f}M，"
                 f"15m 孤立操縱嫌疑高，1H 大週期未確認"
-            )
+            ), False
 
-    return ""  # 放行
+    return "", energy_exhausted  # 放行
 
 
 def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
@@ -4010,8 +4040,9 @@ def _classify_signal_and_tier(
     if price_chg_1h_main is not None and not isinstance(price_chg_1h_main, (int, float)):
         price_chg_1h_main = None
 
-    # 扳機條件：1H OI 絕對值 >= 門檻（純 OI 驅動，不用價格當門）
-    if abs(oi) < OI_THRESHOLD_1H:
+    # 扳機條件：1H OI 絕對值 >= 動態門檻（主流 4% / 高流動性山寨 6% / 小幣 8%）
+    oi_threshold = _get_oi_threshold_for_item(item)
+    if abs(oi) < oi_threshold:
         return None
 
     # 1H 趨勢濾網：多頭訊號需 1h > 0，空頭訊號需 1h < 0
@@ -4296,12 +4327,17 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
 
     # ── 1. 訊號版本強度 ──────────────────────────────────────────
     version = x.get("signal_version") or "potential"
+    subtype = x.get("signal_subtype") or ""
     if version == "confirmed":
         score += 40
         reasons.append("三層共振")
     elif version == "tier2":
         score += 20
         reasons.append("部分共振")
+    elif subtype == "pullback":
+        # 提高 pullback（完美回踩）權重，系統更傾向推播回踩訊號
+        score += 30
+        reasons.append("完美回踩")
     else:
         score += 10
         reasons.append("潛在訊號")
@@ -4825,14 +4861,21 @@ def build_report_message_tiered(
 
         # ══════════════════════════════════════════════════════════
         # 進場價邏輯：現價優於主力均價 → 市價進場；否則 → 計畫委託掛單（主力均價）
-        # TP/SL 以進場價為基準計算，Risk = 1.8 × ATR
+        # 動能透支時：強制限價掛單於 EMA20，拒絕市價進場
+        # TP/SL 以進場價為基準計算，Risk = 1.8 × ATR；TP1=1.2R、TP2=3.0R
         # ══════════════════════════════════════════════════════════
         sl, tp1, tp2 = None, None, None
-        _r1, _r2 = 1.5, 3.0
+        _r1, _r2 = 1.2, 3.0  # TP1 提早入袋 1.2R，TP2 維持 3.0R
         sl_pct_val = None
         _entry_price = price
         _entry_mode = "市價"  # 市價進場 or 掛單進場
-        if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
+        _energy_exhausted = x.get("_energy_exhausted", False)
+        ema20_val = x.get("ema20") or x.get("ema20_close")
+        if _energy_exhausted and ema20_val and isinstance(ema20_val, (int, float)) and ema20_val > 0:
+            # 動能透支/乖離過大：強制限價掛單於 EMA20，拒絕市價進場
+            _entry_price = float(ema20_val)
+            _entry_mode = "掛單（限價於 EMA20）"
+        elif vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
             _vwap_f = float(vwap_2h_val)
             # 做多：現價 ≤ 主力均價×102.5% = 在範圍內 → 市價進場
             # 做空：現價 ≥ 主力均價×97.5%  = 在範圍內 → 市價進場
@@ -4851,18 +4894,18 @@ def build_report_message_tiered(
             _risk = 1.8 * atr_val
             if is_bull_sig:
                 sl  = _entry_price - _risk
-                tp1 = _entry_price + _risk * 1.5
+                tp1 = _entry_price + _risk * 1.2
                 tp2 = _entry_price + _risk * 3.0
             else:
                 sl  = _entry_price + _risk
-                tp1 = _entry_price - _risk * 1.5
+                tp1 = _entry_price - _risk * 1.2
                 tp2 = _entry_price - _risk * 3.0
             sl_pct_val = abs(_entry_price - sl) / _entry_price * 100
         else:
             _risk = _entry_price * 0.015 if _entry_price and _entry_price > 0 else None
             if _risk:
                 sl  = _entry_price - _risk if is_bull_sig else _entry_price + _risk
-                tp1 = _entry_price + _risk * 1.5 if is_bull_sig else _entry_price - _risk * 1.5
+                tp1 = _entry_price + _risk * 1.2 if is_bull_sig else _entry_price - _risk * 1.2
                 tp2 = _entry_price + _risk * 3.0 if is_bull_sig else _entry_price - _risk * 3.0
                 sl_pct_val = 1.5
 
@@ -5029,6 +5072,9 @@ def build_report_message_tiered(
         # 車已發動警示（行情已先行，追高/追低風險）
         if _motion_note:
             msg_lines.append(f"_{_motion_note}_")
+        # 動能透支/乖離過大：強制限價掛單，拒絕市價進場
+        if x.get("_energy_exhausted"):
+            msg_lines.append("_⚠️ 動能透支/乖離過大：請限價掛單於 EMA20，拒絕市價進場_")
         # 跨類別互確認提示
         if x.get("_cross_confirm"):
             if is_bull_sig:
@@ -5061,7 +5107,10 @@ def build_report_message_tiered(
         else:
             msg_lines.append("🛡️ 止損：無法計算")
         if tp1 is not None:
-            msg_lines.append(f"💰 TP1：`{_fmt_price(tp1)}`  +1.5R")
+            msg_lines.append(
+                f"💰 TP1：`{_fmt_price(tp1)}`  +1.2R\n"
+                f"   _（觸發 TP1 請平倉一半，並將剩餘倉位止損推至保本價 Breakeven）_"
+            )
         if tp2 is not None:
             msg_lines.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +3.0R")
         if sl_pct_val is not None and sl_pct_val > 8.0:
@@ -5111,7 +5160,10 @@ def build_report_message_tiered(
             else:
                 _s_short.append("🛡️ 止損：無法計算")
             if tp1 is not None:
-                _s_short.append(f"💰 TP1：`{_fmt_price(tp1)}`  +1.5R")
+                _s_short.append(
+                    f"💰 TP1：`{_fmt_price(tp1)}`  +1.2R "
+                    f"_（觸發 TP1 平倉一半，止損推至保本 Breakeven）_"
+                )
             if tp2 is not None:
                 _s_short.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +3.0R")
             s_grade_msgs.append("\n".join(_s_short))
@@ -5125,7 +5177,7 @@ def build_report_message_tiered(
     if not has_any:
         no_sig_msg = (
             f"🔍 *傑克持倉異常狙擊鏡* 本輪無訊號\n"
-            f"🕐 {now_str}  條件：1H OI≥{OI_THRESHOLD_1H}% & 量≥{MTF_VOLUME_MIN_USD/1e6:.0f}M & MTF共振\n"
+            f"🕐 {now_str}  條件：1H OI≥動態門檻(主流4%/高流動6%/小幣8%) & 量≥{MTF_VOLUME_MIN_USD/1e6:.0f}M & MTF共振\n"
             f"繼續監控中..."
         )
         return no_sig_msg, False, 0
@@ -5823,6 +5875,7 @@ def process_single_symbol(coin: Dict) -> Optional[Dict]:
                 'priceChange24h': price_change_24h,
                 'price_change_percent_1h': price_change_1h,
                 '_cg_volume_usd': coin.get("_volume_usd") or coin.get("_cg_volume_usd"),
+                '_taker_ratio_15m': coin.get("_taker_ratio_15m"),  # CVD 假突破過濾用
                 '_scan_ts': time.time(),  # 1H OI 異動首次偵測時間
             }
         else:
@@ -6465,9 +6518,13 @@ def fetch_position_change():
                     'priceChange24h': price_change_24h,
                     'price_change_percent_1h': price_change_1h,
                     '_cg_volume_usd': result.get('_cg_volume_usd'),
+                    '_taker_ratio_15m': result.get('_taker_ratio_15m'),
                 }
                 base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-                oi_min = OI_MAIN_COIN_MIN if base in MAIN_COINS else OI_ALTCOIN_MIN
+                oi_min = OI_THRESHOLD_MAIN if base in MAIN_COINS else (
+                    OI_THRESHOLD_HIGH_LIQ if (result.get("_cg_volume_usd") or 0) >= HIGH_LIQ_VOLUME_USD
+                    else OI_THRESHOLD_SMALL
+                )
                 if abs(oi_change) >= oi_min:
                     if category == 'long_open':
                         long_open.append(item)
@@ -6670,7 +6727,7 @@ def fetch_position_change():
             price_chg_1h=price_1h,
         )
         if classified is None:
-            logger.debug(f"[MTF] 跳過 {sym}: OI<{OI_THRESHOLD_30M}% 或 Price<{PRICE_THRESHOLD_30M}%")
+            logger.debug(f"[MTF] 跳過 {sym}: OI<動態門檻 或 Price<{PRICE_THRESHOLD_30M}%")
             continue
         signal_label, zone, stars, rsi_desc, reason = classified
         rsi_val = tech.get("rsi") if tech else None
@@ -6678,7 +6735,9 @@ def fetch_position_change():
 
         # ── 反畫門防護（Anti-Manipulation Gate）────────────────────────────
         # 放在分類後（已知是真實訊號候選）、推播前，封鎖莊家假突破/畫門特徵
-        _manip_reason = _check_manipulation_risk(item, tech, atr_val, category=cat)
+        _manip_result = _check_manipulation_risk(item, tech, atr_val, category=cat)
+        _manip_reason = _manip_result[0] if isinstance(_manip_result, tuple) else _manip_result
+        _energy_exhausted_manip = _manip_result[1] if isinstance(_manip_result, tuple) else False
         if _manip_reason:
             logger.info(
                 f"[反畫門🚫] {sym}（{cat}）封鎖推播：{_manip_reason}"
@@ -6784,6 +6843,36 @@ def fetch_position_change():
             )
             continue
 
+        # ── CVD / Taker Ratio 一票否決（順勢突破型：防止莊家掛單牆假突破）────────
+        # Long：OI 大增但 CVD 負 / taker 賣壓主導 → 封鎖
+        # Short：OI 大增但 CVD 正 / taker 買壓主導 → 封鎖
+        if cat in ("long_open", "short_open"):
+            _cvd_1h = None
+            try:
+                time.sleep(0.15)
+                _cvd_1h = _cvd_change_last2(sym, "1h")
+            except Exception:
+                pass
+            _taker = item.get("_taker_ratio_15m")
+            try:
+                _taker = float(_taker) if _taker is not None else None
+            except (TypeError, ValueError):
+                _taker = None
+            if cat == "long_open":
+                if (_cvd_1h is not None and _cvd_1h < 0) or (_taker is not None and _taker < 45):
+                    logger.info(
+                        f"[CVD/Taker封鎖🚫] {sym}: 做多訊號但 CVD 1h={_cvd_1h} 或 taker買盤%={_taker}，"
+                        f"市價主動賣盤主導，莊家假突破嫌疑，封鎖"
+                    )
+                    continue
+            else:  # short_open
+                if (_cvd_1h is not None and _cvd_1h > 0) or (_taker is not None and _taker > 55):
+                    logger.info(
+                        f"[CVD/Taker封鎖🚫] {sym}: 做空訊號但 CVD 1h={_cvd_1h} 或 taker買盤%={_taker}，"
+                        f"市價主動買盤主導，莊家假突破嫌疑，封鎖"
+                    )
+                    continue
+
         # ── 資金費率多空壅擠過濾 ──────────────────────────────────────────────
         # 原理：費率偏負 = 空頭支付費率給多頭 = 空頭部位壅擠
         #       → 做空時風險高（嘎空）；做多時是順風（空頭補倉推升）
@@ -6845,6 +6934,19 @@ def fetch_position_change():
                     f"（{_bull_trap_result['matched_steps']}/3 步）"
                 )
 
+        # ── 動能透支/乖離過大：confirmed 訊號價格偏離 VWAP > 1% → 強制限價掛單 ─────
+        _energy_exhausted = _energy_exhausted_manip
+        if _effective_version == "confirmed" and not _energy_exhausted:
+            _vwap = tech.get("vwap_2h") if tech else None
+            if _vwap and _cur_price and float(_vwap) > 0:
+                _dev_pct = abs(float(_cur_price) - float(_vwap)) / float(_vwap) * 100
+                if _dev_pct > 1.0:
+                    _energy_exhausted = True
+                    logger.info(
+                        f"[動能透支⚠️] {sym}: confirmed 訊號價格偏離 VWAP {_dev_pct:.1f}% > 1%，"
+                        f"強制限價掛單於 EMA20"
+                    )
+
         all_top.append({
             **item,
             "priceChange24h": price_24h,
@@ -6897,6 +6999,8 @@ def fetch_position_change():
             "_bull_trap_detected": _bull_trap_result.get("detected", False),
             "_bull_trap_steps":    _bull_trap_result.get("matched_steps", 0),
             "_bull_trap_note":     _bull_trap_result.get("note", ""),
+            # 動能透支/乖離過大：強制限價掛單於 EMA20，拒絕市價進場
+            "_energy_exhausted": _energy_exhausted,
         })
         _ver_tag = (
             "✅確定籌碼（鐵三角）" if _effective_version == "confirmed"
@@ -6933,7 +7037,7 @@ def fetch_position_change():
         f"（✅確定籌碼 {_confirmed_cnt} | 🎯潛在機會 {_potential_cnt} | ⚠️觀察名單 {_tier2_cnt}）"
     )
     if len(all_top) == 0:
-        logger.info(f"本輪無符合條件訊號（1H OI≥{OI_THRESHOLD_1H}% & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
+        logger.info(f"本輪無符合條件訊號（1H OI≥動態門檻 & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
 
     # 冷卻規則：同一幣 2h 內同方向不重複推（1H 格局，冷卻時間對應拉長）
     COOLDOWN_HOURS = 4   # 同幣同方向 4h 冷卻（Google 建議：1H 波段策略最佳間隔）
@@ -7144,7 +7248,7 @@ def fetch_position_change():
                     # ── TP1 風報比篩選（與推播訊息完全一致）────────────────────────────────────
                     # TP1/SL 一律以「進場價」為基準（與 build_report_message_tiered 相同）：
                     #   進場價 = 即時價（市價）或 掛單價（vwap×0.975/1.025），依 vwap 判斷
-                    #   TP1 = 進場價 + 1.5R，SL = 進場價 - R
+                    #   TP1 = 進場價 + 1.2R，SL = 進場價 - R
                     # 風報比檢查：假設使用者市價進場於即時價，計算「即時價→TP1」的剩餘 R 比。
                     # 若 R < 0.8 或距 TP1 < 0.3%，代表行情已過、不推。
                     _is_long_rt = (_x.get("category") or "") in ("long_open", "short_close")
@@ -7160,12 +7264,12 @@ def fetch_position_change():
                     if _risk > 0 and _entry_rt and _entry_rt > 0:
                         if _is_long_rt:
                             _actual_sl = _entry_rt - _risk
-                            _actual_tp1 = _entry_rt + _risk * 1.5
+                            _actual_tp1 = _entry_rt + _risk * 1.2
                             _rt_reward = _actual_tp1 - _live
                             _risk_est = _live - _actual_sl
                         else:
                             _actual_sl = _entry_rt + _risk
-                            _actual_tp1 = _entry_rt - _risk * 1.5
+                            _actual_tp1 = _entry_rt - _risk * 1.2
                             _rt_reward = _live - _actual_tp1
                             _risk_est = _actual_sl - _live
                         _rt_r_ratio = _rt_reward / _risk_est if _risk_est > 0 else 0
