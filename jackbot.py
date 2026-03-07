@@ -1025,16 +1025,18 @@ def _fetch_smart_money_oi_split(symbol: str = "BTC") -> Dict[str, Any]:
         j_s = _cg_get(CG_EP["oi_agg_stable"], params)
         rows_s = j_s.get("data") or j_s.get("list") or [] if j_s else []
         stable_bars = _parse_oi_bars_from_rows(rows_s) if rows_s else None
-        logger.debug(f"[聰明錢OI] 穩定幣OI: {len(stable_bars) if stable_bars else 0}棒")
+        _n_stable = len(stable_bars) if stable_bars else 0
+        logger.debug("[聰明錢OI] 穩定幣OI: %d棒" % _n_stable)
     except Exception as e_s:
-        logger.debug(f"[聰明錢OI] 穩定幣OI異常: {e_s}")
+        logger.debug("[聰明錢OI] 穩定幣OI異常: %s" % (e_s,))
     try:
         j_c = _cg_get(CG_EP["oi_agg_coin"], params)
         rows_c = j_c.get("data") or j_c.get("list") or [] if j_c else []
         coin_bars = _parse_oi_bars_from_rows(rows_c) if rows_c else None
-        logger.debug(f"[聰明錢OI] 幣本位OI: {len(coin_bars) if coin_bars else 0}棒")
+        _n_coin = len(coin_bars) if coin_bars else 0
+        logger.debug("[聰明錢OI] 幣本位OI: %d棒" % _n_coin)
     except Exception as e_c:
-        logger.debug(f"[聰明錢OI] 幣本位OI異常: {e_c}")
+        logger.debug("[聰明錢OI] 幣本位OI異常: %s" % (e_c,))
 
     stable_chg = coin_chg = None
     if stable_bars and len(stable_bars) >= 2 and stable_bars[-2] != 0:
@@ -3633,7 +3635,7 @@ FR_LONG_LIQUIDATION_BLOCK = 0.005  # +0.5%：多頭嚴重壅擠，爆倉風險�
 MAIN_COINS = {"BTC", "ETH", "SOL"}  # 主流幣：1H OI > 4% 即達標
 
 # ── 流動性門檻（24h 成交值，低於此深度不足）──────────────────────────
-MTF_VOLUME_MIN_USD  = 15_000_000    # 15M USD（2026-03-07 調高至 1500 萬，過濾低流動性/單一莊家畫門）
+MTF_VOLUME_MIN_USD  = 9_990_000    # 999 萬 USD（過濾低流動性/單一莊家畫門）
 
 # ── 1H OI 扳機門檻（動態分層，依幣種流動性調整）────────────────────────
 # 主流幣（BTC/ETH/SOL）：4% | 高流動性山寨（24h 量>50M 或市值前50）：6% | 其他小幣：8%
