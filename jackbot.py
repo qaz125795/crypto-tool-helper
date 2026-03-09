@@ -287,9 +287,11 @@ _dynamic_oi_4star: Optional[float] = None
 _dynamic_oi_5star: Optional[float] = None
 _dynamic_oi_sample_size: int = 0
 
-# 大盤環境順勢濾網：掃描前取得 BTC 30m / 1H 漲跌幅，供訊號備註大盤狀態用
+# 大盤環境順勢濾網：掃描前取得 BTC / ETH 30m / 1H 漲跌幅，供訊號備註大盤狀態用
 _btc_30m_pct: Optional[float] = None
 _btc_1h_pct: Optional[float] = None   # BTC 1H 方向，配合 30m 判斷大盤強弱
+_eth_30m_pct: Optional[float] = None
+_eth_1h_pct: Optional[float] = None   # ETH 1H 方向，供山寨幣大盤參考
 
 # 緊急備援：GitHub Action timeout (SIGTERM) 前確保 sniper_cooldown.json 能寫回磁碟
 # fetch_position_change 執行時會持續更新此 dict，atexit/SIGTERM handler 讀取後寫入
@@ -3700,6 +3702,7 @@ SYMBOL_BLACKLIST: set = {
     "GODS", "ASP", "VFY", "FHE",  # 用戶手動加入黑名單（2026-03-05）
     "HOT",  # 用戶手動加入黑名單（2026-03-06）
     "BICO", "GIGA", "CLOUD", "JELLYJELLY",  # 用戶手動加入黑名單（2026-03-06）
+    "CVX", "L3", "DOGS", "ETHW", "1000QUBIC",  # 用戶手動加入黑名單（2026-03-07）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
     "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
@@ -4347,7 +4350,43 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         pass
 
     # ══════════════════════════════════════════════════════════════
-    # 第三步：順勢訊號評分（S / A / B）
+    # 第三步：大盤同向濾網（主流幣用 BTC，山寨優先參考 ETH）
+    # 目的：大盤明顯逆風時，即使單幣訊號強，也限制最高 A 級
+    # ══════════════════════════════════════════════════════════════
+    _macro_block_s = False
+    sym_raw = x.get("symbol") or ""
+    base = sym_raw.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    ref_1h = None
+    if base in ("BTC", "WBTC"):
+        ref_1h = _btc_1h_pct
+    elif base == "ETH":
+        ref_1h = _eth_1h_pct if _eth_1h_pct is not None else _btc_1h_pct
+    elif base in MAIN_COINS:
+        ref_1h = _btc_1h_pct
+    else:
+        # 山寨：優先參考 ETH，其次 BTC
+        ref_1h = _eth_1h_pct if _eth_1h_pct is not None else _btc_1h_pct
+
+    if ref_1h is not None:
+        try:
+            _ref_1h_val = float(ref_1h)
+            if is_bull_sig and _ref_1h_val < -0.5:
+                _macro_block_s = True
+                if _motion_note:
+                    _motion_note += f"  🌐 大盤偏弱 {_ref_1h_val:+.2f}%：限制最高 A 級"
+                else:
+                    _motion_note = f"🌐 大盤偏弱 {_ref_1h_val:+.2f}%：限制最高 A 級"
+            elif (not is_bull_sig) and _ref_1h_val > 0.5:
+                _macro_block_s = True
+                if _motion_note:
+                    _motion_note += f"  🌐 大盤偏強 {_ref_1h_val:+.2f}%：限制最高 A 級"
+                else:
+                    _motion_note = f"🌐 大盤偏強 {_ref_1h_val:+.2f}%：限制最高 A 級"
+        except (TypeError, ValueError):
+            pass
+
+    # ══════════════════════════════════════════════════════════════
+    # 第四步：順勢訊號評分（S / A / B）
     # ══════════════════════════════════════════════════════════════
     score = 0
     reasons = []
@@ -4504,10 +4543,10 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         score += 12
         reasons.append(f"籌碼陷阱跡象({_trap_steps}/3步)")
 
-    # ── 評級（S / A / B；車已發動 → 上限 A）────────────────────
+    # ── 評級（S / A / B；車已發動或大盤逆風 → 上限 A）────────────
     score = max(0, min(100, score))
-    if _already_moving:
-        score = min(score, 74)   # 車已發動：硬上限 74 分 = 最高 A 級
+    if _already_moving or _macro_block_s:
+        score = min(score, 74)   # 車已發動或大盤明顯逆風：硬上限 74 分 = 最高 A 級
 
     if score >= 80:
         grade = "S"
@@ -5176,15 +5215,24 @@ def build_report_message_tiered(
             msg_lines.append(f"_止損距離 {sl_pct_val:.1f}%，務必遵守建議進場價_")
         msg_lines.append("")
 
-        # ─ BTC 大盤提示（緊接操作計畫後，手機滑動自然看到）─
-        _btc_weak   = (_btc_30m_pct is not None and _btc_30m_pct < -0.3 and
-                       _btc_1h_pct  is not None and _btc_1h_pct  < 0)
-        _btc_strong = (_btc_30m_pct is not None and _btc_30m_pct > 0.3 and
-                       _btc_1h_pct  is not None and _btc_1h_pct  > 0)
-        if is_bull_sig and _btc_weak:
-            msg_lines.append(f"_🌐 BTC 偏弱 {_btc_1h_pct:+.2f}% — OI 訊號有效但快進快出_")
-        elif not is_bull_sig and _btc_strong:
-            msg_lines.append(f"_🌐 BTC 偏強 {_btc_1h_pct:+.2f}% — 逆勢空單風險較高，嚴守止損_")
+        # ─ 大盤提示（主流幣用 BTC，山寨優先參考 ETH）─
+        _ref_label = "BTC"
+        _ref_30m = _btc_30m_pct
+        _ref_1h = _btc_1h_pct
+
+        # 山寨與非 BTC：若有 ETH 大盤資料，優先使用 ETH
+        if sym_base not in ("BTC", "WBTC") and _eth_30m_pct is not None and _eth_1h_pct is not None:
+            _ref_label = "ETH"
+            _ref_30m = _eth_30m_pct
+            _ref_1h = _eth_1h_pct
+
+        if _ref_30m is not None and _ref_1h is not None:
+            _ref_weak = (_ref_30m < -0.3 and _ref_1h < 0)
+            _ref_strong = (_ref_30m > 0.3 and _ref_1h > 0)
+            if is_bull_sig and _ref_weak:
+                msg_lines.append(f"_🌐 {_ref_label} 偏弱 {_ref_1h:+.2f}% — OI 訊號有效但快進快出_")
+            elif not is_bull_sig and _ref_strong:
+                msg_lines.append(f"_🌐 {_ref_label} 偏強 {_ref_1h:+.2f}% — 逆勢空單風險較高，嚴守止損_")
 
         # ─ 儲存供後續使用 ─
         x["sl_price_str"]    = _fmt_price(sl)
@@ -6408,10 +6456,12 @@ def fetch_position_change():
         return
     logger.info(f"📊 [漏斗 1] CoinGlass 全網 {len(all_symbols_data)} 幣種")
 
-    # ── 單次迴圈完成兩件事：BTC大盤、24h快取 ─────────────────────────────────
-    global _btc_30m_pct, _btc_1h_pct
+    # ── 單次迴圈完成兩件事：BTC/ETH 大盤、24h快取 ──────────────────────────────
+    global _btc_30m_pct, _btc_1h_pct, _eth_30m_pct, _eth_1h_pct
     _btc_30m_pct = None
     _btc_1h_pct = None
+    _eth_30m_pct = None
+    _eth_1h_pct = None
     coinglass_24h_map: Dict[str, float] = {}
     active_symbols: List[Dict] = []
     for coin in all_symbols_data:
@@ -6427,6 +6477,16 @@ def fetch_position_change():
             except (TypeError, ValueError):
                 _btc_1h_pct = None
             logger.info(f"📊 [大盤濾網] BTC 30m {(_btc_30m_pct or 0):+.2f}%  1H {(_btc_1h_pct or 0):+.2f}%")
+
+        # ①-2 ETH 大盤環境（山寨幣主要參考）
+        if clean_sym == "ETH" and _eth_30m_pct is None:
+            _eth_30m_pct = extract_price_change_30m(coin)
+            _eth_1h_pct_raw = coin.get("price_change_percent_1h")
+            try:
+                _eth_1h_pct = float(_eth_1h_pct_raw) if _eth_1h_pct_raw is not None else None
+            except (TypeError, ValueError):
+                _eth_1h_pct = None
+            logger.info(f"📊 [大盤濾網] ETH 30m {(_eth_30m_pct or 0):+.2f}%  1H {(_eth_1h_pct or 0):+.2f}%")
 
         # ② 24h 漲跌幅快取
         pct24 = extract_price_change_24h(coin)
