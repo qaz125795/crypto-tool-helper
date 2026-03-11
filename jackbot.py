@@ -3703,6 +3703,7 @@ SYMBOL_BLACKLIST: set = {
     "HOT",  # 用戶手動加入黑名單（2026-03-06）
     "BICO", "GIGA", "CLOUD", "JELLYJELLY",  # 用戶手動加入黑名單（2026-03-06）
     "CVX", "L3", "DOGS", "ETHW", "1000QUBIC",  # 用戶手動加入黑名單（2026-03-07）
+    "JOE", "RONIN", "1000XEC", "XAUT",  # 用戶手動加入黑名單（2026-03-07）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
     "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
