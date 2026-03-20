@@ -3782,6 +3782,7 @@ SYMBOL_BLACKLIST: set = {
     "GODS", "ASP", "VFY", "FHE",  # 用戶手動加入黑名單（2026-03-05）
     "HOT",  # 用戶手動加入黑名單（2026-03-06）
     "WAXP",  # 用戶手動加入黑名單（waxp）
+    "NG",   # 用戶手動加入黑名單（流動性/表現問題）
     "BICO", "GIGA", "CLOUD", "JELLYJELLY",  # 用戶手動加入黑名單（2026-03-06）
     "CVX", "L3", "DOGS", "ETHW", "1000QUBIC",  # 用戶手動加入黑名單（2026-03-07）
     "JOE", "RONIN", "1000XEC", "XAUT",  # 用戶手動加入黑名單（2026-03-07）
@@ -6735,6 +6736,16 @@ def fetch_position_change():
         # 技術指標：CoinGlass K 線計算 RSI / ATR / 結構高低點
         # （_fetch_cg_klines_and_calc 內部已有 _respect_coinglass_rate_limit 限速，無需額外 sleep）
         tech = calculate_technicals(sym)
+        # K 線無效則立即結束本幣種 enrichment：不呼叫 OI 多週期 / CVD 背離，節省 API
+        if not tech:
+            logger.info(f"[K線無效⚠️] {sym}: 無法取得技術指標，跳過 enrichment（不呼叫 CVD/30m/15m/5m）")
+            continue
+        if tech.get("recent_high_2h") is None or tech.get("recent_low_2h") is None:
+            logger.info(
+                f"[K線無效⚠️] {sym}: 缺 2H 結構高低（recent_high_2h/recent_low_2h），"
+                f"跳過 enrichment（不呼叫 CVD/30m/15m/5m）"
+            )
+            continue
 
         # ── Plan C：K 線估算成交值（補充 CoinGlass + Binance 均無資料的幣種）──────
         if item.get("_vol_need_planc") and tech:
@@ -7349,29 +7360,64 @@ def fetch_position_change():
                     )
                     if _sl_i is None or _tp1_i is None:
                         continue
+
+                    # ── 限價掛單（動能透支）：進場被強制為 EMA20，單子尚未成交 → 不套用「即時已觸損/已達 TP1」──
+                    # 做多：現價 > 掛單價(EMA20)；做空：現價 < 掛單價。僅此種情況跳過觸損/達標檢查。
+                    _ee = bool(_x.get("_energy_exhausted"))
+                    _ema_lim = _ema_rt
+                    try:
+                        _ema_f = (
+                            float(_ema_lim)
+                            if _ema_lim is not None and isinstance(_ema_lim, (int, float)) and float(_ema_lim) > 0
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        _ema_f = None
+                    _is_limit_wait_energy = (
+                        _ee
+                        and _ema_f is not None
+                        and ((_is_long_rt and _live > _ema_f) or (not _is_long_rt and _live < _ema_f))
+                    )
+                    _limit_dev_pct = (
+                        abs(_live - _ema_f) / _ema_f if (_ema_f and _ema_f > 0) else 0.0
+                    )
                     _blocked = False
-                    if _is_long_rt:
-                        if _live <= _sl_i:
+                    if _is_limit_wait_energy:
+                        if _limit_dev_pct > 0.05:
                             logger.info(
-                                f"[已觸損跳過] {_sym_rt}: 即時 {_live:.6f} ≤ 結構SL {_sl_i:.6f}"
+                                f"[限價偏離過大跳過] {_sym_rt}: 動能透支限價於 EMA={_ema_f:.6f}，"
+                                f"即時 {_live:.6f} 偏離 {_limit_dev_pct:.1%} > 5%"
                             )
                             _blocked = True
-                        elif _live >= _tp1_i:
-                            logger.info(
-                                f"[已達標跳過] {_sym_rt}: 即時 {_live:.6f} ≥ TP1 {_tp1_i:.6f}"
+                        else:
+                            logger.debug(
+                                f"[即時RR略過] {_sym_rt}: 限價等待回踩 EMA（動能透支），"
+                                f"不檢查觸損/達標（偏離 {_limit_dev_pct:.2%}）"
                             )
-                            _blocked = True
                     else:
-                        if _live >= _sl_i:
-                            logger.info(
-                                f"[已觸損跳過] {_sym_rt}: 即時 {_live:.6f} ≥ 結構SL {_sl_i:.6f}"
-                            )
-                            _blocked = True
-                        elif _live <= _tp1_i:
-                            logger.info(
-                                f"[已達標跳過] {_sym_rt}: 即時 {_live:.6f} ≤ TP1 {_tp1_i:.6f}"
-                            )
-                            _blocked = True
+                        # 市價追入：嚴格檢查即時價是否已破結構 SL 或已過 TP1
+                        if _is_long_rt:
+                            if _live <= _sl_i:
+                                logger.info(
+                                    f"[已觸損跳過] {_sym_rt}: 即時 {_live:.6f} ≤ 結構SL {_sl_i:.6f}"
+                                )
+                                _blocked = True
+                            elif _live >= _tp1_i:
+                                logger.info(
+                                    f"[已達標跳過] {_sym_rt}: 即時 {_live:.6f} ≥ TP1 {_tp1_i:.6f}"
+                                )
+                                _blocked = True
+                        else:
+                            if _live >= _sl_i:
+                                logger.info(
+                                    f"[已觸損跳過] {_sym_rt}: 即時 {_live:.6f} ≥ 結構SL {_sl_i:.6f}"
+                                )
+                                _blocked = True
+                            elif _live <= _tp1_i:
+                                logger.info(
+                                    f"[已達標跳過] {_sym_rt}: 即時 {_live:.6f} ≤ TP1 {_tp1_i:.6f}"
+                                )
+                                _blocked = True
                     if _blocked:
                         _drop_low_r.append(_x)
             except Exception as _e:
