@@ -3640,12 +3640,13 @@ MAIN_COINS = {"BTC", "ETH", "SOL"}  # 主流幣：1H OI > 4% 即達標
 MTF_VOLUME_MIN_USD  = 9_990_000    # 999 萬 USD（過濾低流動性/單一莊家畫門）
 
 # ── 1H OI 扳機門檻（動態分層，依幣種流動性調整）────────────────────────
-# 主流幣（BTC/ETH/SOL）：4% | 高流動性山寨（24h 量>50M 或市值前50）：6% | 其他小幣：8%
-OI_THRESHOLD_MAIN   = 4.0           # 主流幣門檻
-OI_THRESHOLD_HIGH_LIQ = 6.0        # 高流動性山寨（24h 成交值 > 50M USD）
-OI_THRESHOLD_SMALL  = 8.0          # 其他小幣種
+# 主流幣：2.5% | 高流動性山寨（24h>50M）：4% | 其他小幣：5%
+# （略降門檻以保留早期建倉；過高易只剩「已噴出」的車尾訊號）
+OI_THRESHOLD_MAIN   = 2.5           # 主流幣門檻
+OI_THRESHOLD_HIGH_LIQ = 4.0        # 高流動性山寨（24h 成交值 > 50M USD）
+OI_THRESHOLD_SMALL  = 5.0          # 其他小幣種
 HIGH_LIQ_VOLUME_USD = 50_000_000   # 24h 成交值 > 50M 視為高流動性
-OI_THRESHOLD_1H     = 5.0          # 向後相容預設值（實際由 _get_oi_threshold_for_item 動態決定）
+OI_THRESHOLD_1H     = 4.0          # 向後相容預設值（實際由 _get_oi_threshold_for_item 動態決定）
 PRICE_THRESHOLD_1H  = 1.5           # 1H 價格扳機門檻
 
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
@@ -3664,9 +3665,9 @@ PRICE_THRESHOLD_30M = PRICE_THRESHOLD_1H
 def _get_oi_threshold_for_item(item: Dict) -> float:
     """
     動態 OI 門檻：依幣種流動性分層。
-    - 主流幣 (BTC/ETH/SOL)：4%
-    - 高流動性山寨（24h 成交值 > 50M USD）：6%
-    - 其他小幣種：8%
+    - 主流幣 (BTC/ETH/SOL)：2.5%
+    - 高流動性山寨（24h 成交值 > 50M USD）：4%
+    - 其他小幣種：5%
     """
     sym = item.get("symbol") or item.get("coin") or ""
     base = str(sym).replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
@@ -3912,6 +3913,8 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
     # ── Step 2 衝突判定 ────────────────────────────────────────────────────────
     is_1h_bull = cat_1h in ("long_open", "short_cover")
     is_1h_bear = cat_1h in ("short_open", "long_close")
+    # 僅攔「1H 多頭陣營 vs 30m 空方主動建倉」等硬對做；回調類 long_close / short_cover 不視為衝突。
+    # （與 _calc_signal_grade A 級門檻 ≥50 並用時，tier2 弱共振較不易被分數卡死。）
     step2_conflict = (
         (is_1h_bull and cat_30m == "short_open") or
         (is_1h_bear and cat_30m == "long_open")
@@ -4284,7 +4287,7 @@ def detect_trap_setup(oi_candles: list, trap_type: str, kline_candles: Optional[
 
 def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     """
-    計算訊號綜合評級（S / A / R；B 級不推播）。
+    計算訊號綜合評級（S / A / R；B 級不推播；順勢 A 級門檻為 score≥50）。
     返回 (grade_str, score_int, brief_reason_str, already_moving_bool, motion_note_str)
 
     ── R 級（優先判斷）──────────────────────────────────────────────────
@@ -4307,8 +4310,8 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
 
     ── 等級門檻（順勢訊號，僅 S/A/R，無 B）────────────────────────────────
       S ≥ 80  訊號極強・三層共振＋情境完美＋互確認
-      A ≥ 60  訊號強・主要條件對齊
-      < 60    不推播（原 B 級已移除，提升效率）
+      A ≥ 50  訊號可推播（避免 confirmed+3框=58 分仍被當 B 丟棄）
+      < 50    不推播（B 級）
     """
     # ══════════════════════════════════════════════════════════════
     # 第一步：硬過濾（勝率優先）→ 直接 B 級（不推播）
@@ -4492,6 +4495,30 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     else:
         score += 2
 
+    # ── 5b. CVD 1h / Taker 與建倉方向不一致（扣分，取代一票否決）────────
+    # 真盤中莊家常掛被動單接貨：市價賣出多 → CVD 負、Taker 賣壓高，仍可能是吸籌左側。
+    _cvd_1h_chg = x.get("_cvd_1h")
+    _taker_pct = x.get("_taker_ratio_15m")
+    if _taker_pct is not None:
+        try:
+            _taker_pct = float(_taker_pct)
+        except (TypeError, ValueError):
+            _taker_pct = None
+    if _cat == "long_open":
+        if _cvd_1h_chg is not None and _cvd_1h_chg < 0:
+            score -= 10
+            reasons.append("CVD1h負(可能限價吸籌)")
+        if _taker_pct is not None and _taker_pct < 45:
+            score -= 5
+            reasons.append("Taker賣壓主導")
+    elif _cat == "short_open":
+        if _cvd_1h_chg is not None and _cvd_1h_chg > 0:
+            score -= 10
+            reasons.append("CVD1h正(可能限價吸籌)")
+        if _taker_pct is not None and _taker_pct > 55:
+            score -= 5
+            reasons.append("Taker買壓主導")
+
     # ── 6. 趨勢情境評分（核心策略：找「布局中」而非「已發動」）──────
     # 策略邏輯：
     #   做多訊號 + 24h 下跌 → 在下跌段中建多倉 = 可能買在起漲點 → 加分
@@ -4584,7 +4611,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         grade = "S"
         grade_badge = "🏆 *S 級*"
         grade_desc = "訊號極強"
-    elif score >= 60:
+    elif score >= 50:
         grade = "A"
         grade_badge = "🥇 *A 級*"
         grade_desc = "訊號強"
@@ -6932,35 +6959,33 @@ def fetch_position_change():
             )
             continue
 
-        # ── CVD / Taker Ratio 一票否決（順勢突破型：防止莊家掛單牆假突破）────────
-        # Long：OI 大增但 CVD 負 / taker 賣壓主導 → 封鎖
-        # Short：OI 大增但 CVD 正 / taker 買壓主導 → 封鎖
+        # ── CVD / Taker（順勢突破型）：改為評分扣分，不再一票否決 ──────────────
+        # 理由：被動掛單接貨時 CVD/Taker 常與「主動建倉」反向，但仍可能是強支撐吸籌。
+        # 分數在 _calc_signal_grade「5b」扣減；此處僅抓取數值並寫入 item 供評分使用。
+        _cvd_1h = None
         if cat in ("long_open", "short_open"):
-            _cvd_1h = None
             try:
                 time.sleep(0.15)
                 _cvd_1h = _cvd_change_last2(sym, "1h")
             except Exception:
                 pass
-            _taker = item.get("_taker_ratio_15m")
+            _taker_chk = item.get("_taker_ratio_15m")
             try:
-                _taker = float(_taker) if _taker is not None else None
+                _taker_chk = float(_taker_chk) if _taker_chk is not None else None
             except (TypeError, ValueError):
-                _taker = None
+                _taker_chk = None
             if cat == "long_open":
-                if (_cvd_1h is not None and _cvd_1h < 0) or (_taker is not None and _taker < 45):
+                if (_cvd_1h is not None and _cvd_1h < 0) or (_taker_chk is not None and _taker_chk < 45):
                     logger.info(
-                        f"[CVD/Taker封鎖🚫] {sym}: 做多訊號但 CVD 1h={_cvd_1h} 或 taker買盤%={_taker}，"
-                        f"市價主動賣盤主導，莊家假突破嫌疑，封鎖"
+                        f"[CVD/Taker⚠️扣分] {sym}: 做多但 CVD1h={_cvd_1h} taker%={_taker_chk} "
+                        f"→ 不封鎖，改由綜合評分扣減（可能限價吸籌）"
                     )
-                    continue
             else:  # short_open
-                if (_cvd_1h is not None and _cvd_1h > 0) or (_taker is not None and _taker > 55):
+                if (_cvd_1h is not None and _cvd_1h > 0) or (_taker_chk is not None and _taker_chk > 55):
                     logger.info(
-                        f"[CVD/Taker封鎖🚫] {sym}: 做空訊號但 CVD 1h={_cvd_1h} 或 taker買盤%={_taker}，"
-                        f"市價主動買盤主導，莊家假突破嫌疑，封鎖"
+                        f"[CVD/Taker⚠️扣分] {sym}: 做空但 CVD1h={_cvd_1h} taker%={_taker_chk} "
+                        f"→ 不封鎖，改由綜合評分扣減"
                     )
-                    continue
 
         # ── 資金費率多空壅擠過濾 ──────────────────────────────────────────────
         # 原理：費率偏負 = 空頭支付費率給多頭 = 空頭部位壅擠
@@ -7068,6 +7093,8 @@ def fetch_position_change():
             "stable_oi_chg": _smart_money_pack.get("stable_chg"),
             "coin_oi_chg": _smart_money_pack.get("coin_chg"),
             "cvd_divergence": _cvd_div,
+            # 1h CVD 變化（僅 long_open/short_open 有值），供 _calc_signal_grade 5b 扣分
+            "_cvd_1h": _cvd_1h,
             "vwap_2h": tech.get("vwap_2h") if tech else None,
             # _scan_ts = 1H OI 首次偵測時間（process_single_symbol 打上），保留原始時間
             # 若 item 無此欄位（舊路徑），以當前時間補足
