@@ -3728,6 +3728,58 @@ def compute_structural_sl_tp(
     return sl, tp1, tp2, one_r, sl_pct
 
 
+def derive_limit_order_from_inputs(
+    category: str,
+    cur_price: Optional[float],
+    vwap_2h: Optional[float],
+    ema20: Optional[float],
+    signal_version: str,
+    energy_exhausted: bool,
+) -> Tuple[bool, Optional[float]]:
+    """
+    與 build_report_message_tiered 進場邏輯一致（順序相同）：
+      1) 衰竭反轉 → 限價於 VWAP，否則 EMA20
+      2) 動能透支 → 限價於 EMA20
+      3) VWAP：在帶內 → 市價；否則 掛單價 = VWAP×0.975（與現行程式相同）
+    回傳 (is_limit_order, limit_price)；市價進場為 (False, None)。
+    """
+    is_bull = category in ("long_open", "short_close")
+    try:
+        price = float(cur_price) if cur_price is not None else None
+    except (TypeError, ValueError):
+        price = None
+    if not price or price <= 0:
+        return False, None
+
+    sv = (signal_version or "").strip()
+    try:
+        vwap = float(vwap_2h) if vwap_2h is not None and float(vwap_2h) > 0 else None
+    except (TypeError, ValueError):
+        vwap = None
+    try:
+        ema = float(ema20) if ema20 is not None and float(ema20) > 0 else None
+    except (TypeError, ValueError):
+        ema = None
+
+    if sv == "exhaustion_reversal":
+        lp = vwap if vwap is not None else ema
+        if lp is not None:
+            return True, lp
+        return False, None
+
+    if energy_exhausted and ema is not None:
+        return True, ema
+
+    if vwap is not None:
+        if is_bull and price <= vwap * 1.025:
+            return False, None
+        if (not is_bull) and price >= vwap * 0.975:
+            return False, None
+        return True, vwap * 0.975
+
+    return False, None
+
+
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
 MTF_RSI_OVERBOUGHT = 85             # 做多降級線（>85 降為 Tier2 觀察；單邊牛市容忍 RSI 鈍化）
 MTF_RSI_OVERSOLD   = 15             # 做空降級線（<15 降為 Tier2 觀察；單邊熊市容忍 RSI 鈍化）
@@ -4968,7 +5020,16 @@ def build_report_message_tiered(
         _energy_exhausted = x.get("_energy_exhausted", False)
         ema20_val = x.get("ema20") or x.get("ema20_close")
         _is_exhaustion_reversal = (_sig_ver == "exhaustion_reversal")
-        if _is_exhaustion_reversal:
+        # 與 enrichment 的 derive_limit_order_from_inputs 一致：已寫入則優先採用（衰竭反轉／動能透支／純 VWAP 掛單）
+        if x.get("is_limit_order") and x.get("limit_price") is not None:
+            _entry_price = float(x["limit_price"])
+            if _is_exhaustion_reversal:
+                _entry_mode = "掛單（限價於 VWAP/EMA20）"
+            elif _energy_exhausted:
+                _entry_mode = "掛單（限價於 EMA20）"
+            else:
+                _entry_mode = "掛單"
+        elif _is_exhaustion_reversal:
             # 衰竭反轉：強制限價掛單於 VWAP/EMA20（有 15m EMA20 則優先，此處以 VWAP/1H EMA20 為主）
             _entry_price = price
             if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
@@ -7036,6 +7097,15 @@ def fetch_position_change():
                         f"強制限價掛單於 EMA20"
                     )
 
+        _io_flag, _lp_val = derive_limit_order_from_inputs(
+            cat,
+            _cur_price,
+            tech.get("vwap_2h") if tech else None,
+            tech.get("ema20_close") if tech else None,
+            _effective_version,
+            _energy_exhausted,
+        )
+
         all_top.append({
             **item,
             "priceChange24h": price_24h,
@@ -7097,6 +7167,9 @@ def fetch_position_change():
             "_bull_trap_note":     _bull_trap_result.get("note", ""),
             # 動能透支/乖離過大：強制限價掛單於 EMA20，拒絕市價進場
             "_energy_exhausted": _energy_exhausted,
+            # 限價單統一標記（與推播進場價、即時觸損/達標略過邏輯一致）
+            "is_limit_order": _io_flag,
+            "limit_price": _lp_val,
             # 衰竭反轉：抄底/摸頭方向（long/short），供推播覆寫 is_bull_sig 與標題
             "_exhaustion_reversal_direction": _mtf_result.get("exhaustion_direction"),
         })
@@ -7343,13 +7416,27 @@ def fetch_position_change():
                     _is_long_rt = (_x.get("category") or "") in ("long_open", "short_close")
                     _vwap_2h = _x.get("vwap_2h")
                     _ema_rt = _x.get("ema20") or _x.get("ema20_close")
-                    _entry_rt = _live
-                    if _vwap_2h and isinstance(_vwap_2h, (int, float)) and float(_vwap_2h) > 0:
-                        _vwap_f = float(_vwap_2h)
-                        if _is_long_rt and _live > _vwap_f * 1.025:
-                            _entry_rt = _vwap_f * 0.975
-                        elif not _is_long_rt and _live < _vwap_f * 0.975:
-                            _entry_rt = _vwap_f * 1.025
+                    _is_limit_rt = bool(_x.get("is_limit_order", False))
+                    _lp_rt = _x.get("limit_price")
+                    try:
+                        _lp_f = (
+                            float(_lp_rt)
+                            if _lp_rt is not None and isinstance(_lp_rt, (int, float)) and float(_lp_rt) > 0
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        _lp_f = None
+                    # 限價單：結構 SL/TP 以掛單價為進場（與推播一致）；市價則沿用即時價 + VWAP 帶修正
+                    if _is_limit_rt and _lp_f is not None:
+                        _entry_rt = _lp_f
+                    else:
+                        _entry_rt = _live
+                        if _vwap_2h and isinstance(_vwap_2h, (int, float)) and float(_vwap_2h) > 0:
+                            _vwap_f = float(_vwap_2h)
+                            if _is_long_rt and _live > _vwap_f * 1.025:
+                                _entry_rt = _vwap_f * 0.975
+                            elif not _is_long_rt and _live < _vwap_f * 0.975:
+                                _entry_rt = _vwap_f * 1.025
                     _sl_i, _tp1_i, _tp2_i, _one_ri, _slp_rt = compute_structural_sl_tp(
                         _entry_rt,
                         _is_long_rt,
@@ -7361,38 +7448,22 @@ def fetch_position_change():
                     if _sl_i is None or _tp1_i is None:
                         continue
 
-                    # ── 限價掛單（動能透支）：進場被強制為 EMA20，單子尚未成交 → 不套用「即時已觸損/已達 TP1」──
-                    # 做多：現價 > 掛單價(EMA20)；做空：現價 < 掛單價。僅此種情況跳過觸損/達標檢查。
-                    _ee = bool(_x.get("_energy_exhausted"))
-                    _ema_lim = _ema_rt
-                    try:
-                        _ema_f = (
-                            float(_ema_lim)
-                            if _ema_lim is not None and isinstance(_ema_lim, (int, float)) and float(_ema_lim) > 0
-                            else None
-                        )
-                    except (TypeError, ValueError):
-                        _ema_f = None
-                    _is_limit_wait_energy = (
-                        _ee
-                        and _ema_f is not None
-                        and ((_is_long_rt and _live > _ema_f) or (not _is_long_rt and _live < _ema_f))
-                    )
+                    # ── 限價掛單（統一）：偏離掛單價 ≤5% 視為尚未成交 → 略過即時觸損/達標；>5% 阻斷推播 ──
                     _limit_dev_pct = (
-                        abs(_live - _ema_f) / _ema_f if (_ema_f and _ema_f > 0) else 0.0
+                        abs(_live - _lp_f) / _lp_f if (_lp_f and _lp_f > 0) else 0.0
                     )
                     _blocked = False
-                    if _is_limit_wait_energy:
+                    if _is_limit_rt and _lp_f is not None:
                         if _limit_dev_pct > 0.05:
                             logger.info(
-                                f"[限價偏離過大跳過] {_sym_rt}: 動能透支限價於 EMA={_ema_f:.6f}，"
+                                f"[限價偏離過大跳過] {_sym_rt}: 限價掛單價={_lp_f:.6f}，"
                                 f"即時 {_live:.6f} 偏離 {_limit_dev_pct:.1%} > 5%"
                             )
                             _blocked = True
                         else:
                             logger.debug(
-                                f"[即時RR略過] {_sym_rt}: 限價等待回踩 EMA（動能透支），"
-                                f"不檢查觸損/達標（偏離 {_limit_dev_pct:.2%}）"
+                                f"[即時RR略過] {_sym_rt}: 限價單尚未成交（偏離掛單價 {_limit_dev_pct:.2%}），"
+                                f"不檢查觸損/達標"
                             )
                     else:
                         # 市價追入：嚴格檢查即時價是否已破結構 SL 或已過 TP1
