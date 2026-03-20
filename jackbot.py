@@ -3649,6 +3649,11 @@ HIGH_LIQ_VOLUME_USD = 50_000_000   # 24h 成交值 > 50M 視為高流動性
 OI_THRESHOLD_1H     = 4.0          # 向後相容預設值（實際由 _get_oi_threshold_for_item 動態決定）
 PRICE_THRESHOLD_1H  = 1.5           # 1H 價格扳機門檻
 
+# ── 風報比：1R = |進場價 − 止損價|；TP 為 1R 的倍數（與推播 R 標示一致）──────
+TP1_R_MULTIPLIER = 1.0   # TP1 至少 1:1（相對於 1R）
+TP2_R_MULTIPLIER = 3.0  # TP2 延伸目標（須 > TP1）
+SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
+
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
 MTF_RSI_OVERBOUGHT = 85             # 做多降級線（>85 降為 Tier2 觀察；單邊牛市容忍 RSI 鈍化）
 MTF_RSI_OVERSOLD   = 15             # 做空降級線（<15 降為 Tier2 觀察；單邊熊市容忍 RSI 鈍化）
@@ -4772,26 +4777,21 @@ def build_report_message_tiered(
                 sl_price = _max_sl_long
                 sl_label += " 淨空"
 
-        risk = (price - sl_price) if is_long else (sl_price - price)
-        if risk <= 0:
-            risk = price * (0.005 if is_squeeze else 0.015)
-
-        # 動態 TP 倍率：RSI 過熱/過冷時縮短目標，快速落袋
-        # 做多 RSI>75 = 超買追高，TP 保守；做多 RSI<40 = 低位多頭，空間充足
-        # 做空 RSI<25 = 超賣追空，TP 保守；做空 RSI>60 = 高位空頭，空間充足
+        # 1R = |進場價 − 止損價|（止損遠近即承擔風險）；TP 為 1R 的固定倍數，確保至少 1:1
+        one_r = abs(float(price) - float(sl_price))
+        if one_r <= 0:
+            one_r = float(price) * (0.005 if is_squeeze else 0.015)
         rsi_val_f = float(rsi) if rsi and isinstance(rsi, (int, float)) else None
         if is_squeeze:
-            r1, r2 = 1.0, 2.0
             tp_mode = "squeeze"
         elif rsi_val_f is not None and ((is_long and rsi_val_f >= 75) or (not is_long and rsi_val_f <= 25)):
-            r1, r2 = 1.0, 2.0   # RSI 過熱/過冷：縮短 TP，快速落袋
             tp_mode = "rsi_hot"
         else:
-            r1, r2 = 1.5, 3.0   # 正常趨勢：標準 TP
             tp_mode = "normal"
 
-        tp1_price = price + r1 * risk if is_long else price - r1 * risk
-        tp2_price = price + r2 * risk if is_long else price - r2 * risk
+        r1, r2 = TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
+        tp1_price = price + r1 * one_r if is_long else price - r1 * one_r
+        tp2_price = price + r2 * one_r if is_long else price - r2 * one_r
 
         sl_pct = abs(price - sl_price) / price * 100 if price > 0 else 0
         warn_pct = sl_pct if sl_pct > 8.0 else None
@@ -5000,10 +5000,10 @@ def build_report_message_tiered(
         # ══════════════════════════════════════════════════════════
         # 進場價邏輯：現價優於主力均價 → 市價進場；否則 → 計畫委託掛單（主力均價）
         # 動能透支時：強制限價掛單於 EMA20，拒絕市價進場
-        # TP/SL 以進場價為基準計算，Risk = 1.8 × ATR；TP1=1.2R、TP2=3.0R
+        # TP/SL：1R = |進場 − 止損|；TP1/TP2 = 進場 ± 1R×倍數（見檔首 TP1_R_MULTIPLIER / TP2_R_MULTIPLIER）
         # ══════════════════════════════════════════════════════════
         sl, tp1, tp2 = None, None, None
-        _r1, _r2 = 1.2, 3.0  # TP1 提早入袋 1.2R，TP2 維持 3.0R
+        _r1, _r2 = TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
         sl_pct_val = None
         _entry_price = price
         _entry_mode = "市價"  # 市價進場 or 掛單進場
@@ -5038,24 +5038,34 @@ def build_report_message_tiered(
                 _entry_mode = "掛單"
 
         if atr_val and atr_val > 0 and _entry_price and _entry_price > 0:
-            # 衰竭反轉：止損適度放寬為 1.5×ATR；一般訊號 1.8×ATR
+            # 先用 ATR 定出止損距離，再以「實際 |進場−止損|」為 1R 計算 TP（風報一致）
             _risk = (1.5 * atr_val) if _is_exhaustion_reversal else (1.8 * atr_val)
             if is_bull_sig:
-                sl  = _entry_price - _risk
-                tp1 = _entry_price + _risk * 1.2
-                tp2 = _entry_price + _risk * 3.0
+                sl = _entry_price - _risk
             else:
-                sl  = _entry_price + _risk
-                tp1 = _entry_price - _risk * 1.2
-                tp2 = _entry_price - _risk * 3.0
-            sl_pct_val = abs(_entry_price - sl) / _entry_price * 100
+                sl = _entry_price + _risk
+            one_r = abs(float(_entry_price) - float(sl))
+            if one_r <= 0:
+                one_r = float(_entry_price) * 0.015
+            if is_bull_sig:
+                tp1 = _entry_price + one_r * TP1_R_MULTIPLIER
+                tp2 = _entry_price + one_r * TP2_R_MULTIPLIER
+            else:
+                tp1 = _entry_price - one_r * TP1_R_MULTIPLIER
+                tp2 = _entry_price - one_r * TP2_R_MULTIPLIER
+            sl_pct_val = one_r / _entry_price * 100
         else:
             _risk = _entry_price * 0.015 if _entry_price and _entry_price > 0 else None
             if _risk:
-                sl  = _entry_price - _risk if is_bull_sig else _entry_price + _risk
-                tp1 = _entry_price + _risk * 1.2 if is_bull_sig else _entry_price - _risk * 1.2
-                tp2 = _entry_price + _risk * 3.0 if is_bull_sig else _entry_price - _risk * 3.0
-                sl_pct_val = 1.5
+                sl = _entry_price - _risk if is_bull_sig else _entry_price + _risk
+                one_r = abs(float(_entry_price) - float(sl))
+                if is_bull_sig:
+                    tp1 = _entry_price + one_r * TP1_R_MULTIPLIER
+                    tp2 = _entry_price + one_r * TP2_R_MULTIPLIER
+                else:
+                    tp1 = _entry_price - one_r * TP1_R_MULTIPLIER
+                    tp2 = _entry_price - one_r * TP2_R_MULTIPLIER
+                sl_pct_val = one_r / _entry_price * 100 if _entry_price else None
 
         # ══════════════════════════════════════════════════════════
         # 訊號版本 / 標籤 / 策略短評
@@ -5262,16 +5272,19 @@ def build_report_message_tiered(
         else:
             msg_lines.append(f"💵 掛單進場：`{_fmt_price(_entry_price)}`")
         if sl is not None:
-            msg_lines.append(f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -1.5R")
+            msg_lines.append(
+                f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -{SL_R_LABEL:.1f}R "
+                f"_（1R＝|進場−止損|）_"
+            )
         else:
             msg_lines.append("🛡️ 止損：無法計算")
         if tp1 is not None:
             msg_lines.append(
-                f"💰 TP1：`{_fmt_price(tp1)}`  +1.2R\n"
+                f"💰 TP1：`{_fmt_price(tp1)}`  +{TP1_R_MULTIPLIER:.1f}R\n"
                 f"   _（觸發 TP1 請平倉一半，並將剩餘倉位止損推至保本價 Breakeven）_"
             )
         if tp2 is not None:
-            msg_lines.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +3.0R")
+            msg_lines.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +{TP2_R_MULTIPLIER:.1f}R")
         if sl_pct_val is not None and sl_pct_val > 8.0:
             msg_lines.append(f"_止損距離 {sl_pct_val:.1f}%，務必遵守建議進場價_")
         msg_lines.append("")
@@ -5301,7 +5314,7 @@ def build_report_message_tiered(
         x["tp2_price_str"]   = _fmt_price(tp2)
         x["r_tp1"]           = _r1
         x["r_tp2"]           = _r2
-        x["sl_source"]       = "1.5×ATR動態風控"
+        x["sl_source"]       = f"ATR結構止損（1R=|進場−止損|, TP1={TP1_R_MULTIPLIER}R）"
         x["selected_for_push"] = True
         x["tier"]            = "train"
         x["stars"]           = 5
@@ -5324,16 +5337,18 @@ def build_report_message_tiered(
             else:
                 _s_short.append(f"💵 掛單進場：`{_fmt_price(_entry_price)}`")
             if sl is not None:
-                _s_short.append(f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -1.5R")
+                _s_short.append(
+                    f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -{SL_R_LABEL:.1f}R"
+                )
             else:
                 _s_short.append("🛡️ 止損：無法計算")
             if tp1 is not None:
                 _s_short.append(
-                    f"💰 TP1：`{_fmt_price(tp1)}`  +1.2R "
+                    f"💰 TP1：`{_fmt_price(tp1)}`  +{TP1_R_MULTIPLIER:.1f}R "
                     f"_（觸發 TP1 平倉一半，止損推至保本 Breakeven）_"
                 )
             if tp2 is not None:
-                _s_short.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +3.0R")
+                _s_short.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +{TP2_R_MULTIPLIER:.1f}R")
             s_grade_msgs.append("\n".join(_s_short))
         push_count += 1
         has_any = True
@@ -7369,12 +7384,7 @@ def fetch_position_change():
                             f"[即時報價🔄] {_sym_rt}: 觸發 {_sig_price:.6f} → 即時 {_live:.6f}"
                             f"（偏差 {_drift:.1%}）"
                         )
-                    # ── TP1 風報比篩選（與推播訊息完全一致）────────────────────────────────────
-                    # TP1/SL 一律以「進場價」為基準（與 build_report_message_tiered 相同）：
-                    #   進場價 = 即時價（市價）或 掛單價（vwap×0.975/1.025），依 vwap 判斷
-                    #   TP1 = 進場價 + 1.2R，SL = 進場價 - R
-                    # 風報比檢查：假設使用者市價進場於即時價，計算「即時價→TP1」的剩餘 R 比。
-                    # 若 R < 0.8 或距 TP1 < 0.3%，代表行情已過、不推。
+                    # ── TP1 風報比篩選（與推播一致：1R=|進場−止損|，TP1=進場±1R×TP1_R_MULTIPLIER）──
                     _is_long_rt = (_x.get("category") or "") in ("long_open", "short_close")
                     _vwap_2h = _x.get("vwap_2h")
                     _risk = 1.8 * _atr_rt
@@ -7388,12 +7398,14 @@ def fetch_position_change():
                     if _risk > 0 and _entry_rt and _entry_rt > 0:
                         if _is_long_rt:
                             _actual_sl = _entry_rt - _risk
-                            _actual_tp1 = _entry_rt + _risk * 1.2
+                            _one_r_rt = abs(_entry_rt - _actual_sl)
+                            _actual_tp1 = _entry_rt + _one_r_rt * TP1_R_MULTIPLIER
                             _rt_reward = _actual_tp1 - _live
                             _risk_est = _live - _actual_sl
                         else:
                             _actual_sl = _entry_rt + _risk
-                            _actual_tp1 = _entry_rt - _risk * 1.2
+                            _one_r_rt = abs(_actual_sl - _entry_rt)
+                            _actual_tp1 = _entry_rt - _one_r_rt * TP1_R_MULTIPLIER
                             _rt_reward = _live - _actual_tp1
                             _risk_est = _actual_sl - _live
                         _rt_r_ratio = _rt_reward / _risk_est if _risk_est > 0 else 0
@@ -9518,45 +9530,127 @@ def fetch_buy_ratio(symbol: str) -> Optional[float]:
     return bid_val / total * 100.0  # 轉成百分比
 
 
+def _normalize_coinglass_ts(ts) -> int:
+    """將 API 時間戳統一為「秒」級 Unix（抹平毫秒/字串差異）。"""
+    if ts is None:
+        return 0
+    try:
+        t = int(float(str(ts).strip()))
+    except (ValueError, TypeError):
+        return 0
+    if t > 10_000_000_000:  # 毫秒級（13 位）
+        t //= 1000
+    return t
+
+
+def _coinglass_binance_futures_symbol_alias(base: str) -> str:
+    """
+    CoinGlass / Binance 合約代碼與「基底幣簡稱」不一致時的映射（如 PEPE → 1000PEPE）。
+    CVD 與 K 線必須使用同一套代碼，否則會一邊有資料一邊 0 條。
+    """
+    b = (base or "").replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+    if not b:
+        return b
+    _aliases = {
+        "PEPE": "1000PEPE",
+        "SHIB": "1000SHIB",
+        "FLOKI": "1000FLOKI",
+        "BONK": "1000BONK",
+        "RATS": "1000RATS",
+        "SATS": "1000SATS",
+        "MOG": "1000MOG",
+        "LUNC": "1000LUNC",
+        "XEC": "1000XEC",
+        "X": "1000X",
+    }
+    return _aliases.get(b, b)
+
+
+def _coerce_positive_float(val) -> Optional[float]:
+    """API 常回傳字串數字；需轉 float 才能當價格用。"""
+    if val is None:
+        return None
+    try:
+        if isinstance(val, str):
+            v = float(val.strip())
+        elif isinstance(val, (int, float)):
+            v = float(val)
+        else:
+            return None
+        if v > 0 and v == v:
+            return v
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _extract_ohlc_high_low_close(item: Dict) -> tuple:
+    """
+    從 K 線 dict 取 high / low（相容小寫 key、字串數值）。
+    回傳 (high, low) 任一缺漏時可 fallback close。
+    """
+    if not isinstance(item, dict):
+        return None, None
+    for hk, lk, ck in (
+        ("high", "low", "close"),
+        ("High", "Low", "Close"),
+        ("h", "l", "c"),
+    ):
+        h = _coerce_positive_float(item.get(hk))
+        l = _coerce_positive_float(item.get(lk))
+        if h is not None and l is not None:
+            return h, l
+    c = _coerce_positive_float(
+        item.get("close") or item.get("Close") or item.get("c")
+        or item.get("markPrice") or item.get("mark_price") or item.get("price")
+    )
+    if c is not None:
+        return c, c
+    return None, None
+
+
 def fetch_price_history(symbol: str, interval: str = "1h") -> Optional[List[Dict]]:
     """獲取價格歷史數據（OHLC）
-    注意：CoinGlass API v4 可能沒有直接的 price/history 端點
-    這裡使用 OI history 端點，因為它通常包含 markPrice 等價格信息
+    使用 futures open-interest/history（通常含 time/open/high/low/close）。
+    若條數過少，會再試 Binance 合約別名（如 PEPEUSDT → 1000PEPEUSDT）。
     """
     url = f"{CG_API_BASE}/api/futures/open-interest/history"
-    params = {
-        "exchange": "Binance",
-        "symbol": symbol,
-        "interval": interval
-    }
     headers = {
         "CG-API-KEY": CG_API_KEY,
         "accept": "application/json"
     }
-    
-    try:
-        logger.debug(f"嘗試獲取價格歷史 {symbol}，使用 OI history 端點")
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        if response.status_code == 200:
+
+    def _fetch_one(sym: str) -> Optional[List[Dict]]:
+        params = {"exchange": "Binance", "symbol": sym, "interval": interval}
+        try:
+            response = requests.get(url, params=params, headers=headers, timeout=10)
+            if response.status_code != 200:
+                return None
             data = response.json()
-            if data.get('code') in ['0', 0, 200, '200']:
-                data_list = data.get('data', [])
-                if isinstance(data_list, list) and len(data_list) > 0:
-                    # 檢查數據結構，看是否有價格字段
-                    sample = data_list[0]
-                    sample_keys = list(sample.keys()) if isinstance(sample, dict) else []
-                    logger.debug(f"價格歷史數據樣本 {symbol}: 字段 {sample_keys[:15]}")
-                    logger.debug(f"價格歷史數據樣本 {symbol}: 內容 {json.dumps(sample, ensure_ascii=False)[:200]}")
-                    
-                    # 返回數據列表（即使沒有標準價格字段也返回，讓後續邏輯處理）
-                    logger.debug(f"從 OI 端點獲取到數據 {symbol}: {len(data_list)} 條")
-                    # 輸出數據樣本以便調試
-                    if isinstance(sample, dict):
-                        logger.debug(f"數據樣本字段: {list(sample.keys())[:20]}")
-                    return data_list
-        
-        logger.debug(f"無法從 OI 端點獲取價格數據 for {symbol} (狀態碼: {response.status_code})")
+            if data.get("code") not in ("0", 0, 200, "200"):
+                return None
+            data_list = data.get("data", [])
+            if isinstance(data_list, list) and len(data_list) > 0:
+                sample = data_list[0]
+                if isinstance(sample, dict):
+                    logger.debug(f"價格歷史 {sym}: 欄位 {list(sample.keys())[:15]} 共{len(data_list)}條")
+                return data_list
+        except Exception as e:
+            logger.debug(f"價格歷史請求失敗 {sym}: {e}")
         return None
+
+    try:
+        base = symbol.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+        alt_base = _coinglass_binance_futures_symbol_alias(base)
+        alt_sym = f"{alt_base}USDT" if alt_base else symbol
+
+        best = _fetch_one(symbol)
+        if (not best or len(best) < 5) and alt_sym != symbol:
+            alt_list = _fetch_one(alt_sym)
+            if alt_list and len(alt_list) > len(best or []):
+                logger.info(f"[價格歷史] {symbol} 條數不足，改用合約別名 {alt_sym}（{len(alt_list)} 條）")
+                best = alt_list
+        return best
     except Exception as e:
         logger.warning(f"獲取價格歷史失敗 {symbol}: {str(e)}")
         import traceback
@@ -9571,18 +9665,22 @@ def fetch_aggregated_cvd_history(symbol: str, interval: str = "1h") -> Optional[
     統一回傳標準化 list[dict]（含 time/cvd 欄位）。
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    base = _coinglass_binance_futures_symbol_alias(base)
     headers_cg = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
     def _parse_cvd_list(data_list: list) -> Optional[List[Dict]]:
         if not isinstance(data_list, list) or not data_list:
             return None
-        # 標準化欄位：統一為 {"time": ts, "cvd": value}
+        # 標準化欄位：統一為 {"time": 秒級 ts, "cvd": value}，與 K 線對齊用
         out = []
         for item in data_list:
             if not isinstance(item, dict):
                 continue
-            ts = (item.get("time") or item.get("timestamp") or item.get("t")
-                  or item.get("createTime") or 0)
+            ts_raw = (
+                item.get("time") or item.get("timestamp") or item.get("t")
+                or item.get("createTime") or 0
+            )
+            ts_sec = _normalize_coinglass_ts(ts_raw)
             cvd = None
             for k in ("cum_vol_delta", "cvd", "value", "cvdValue",
                       "cumulativeVolumeDelta", "volumeDelta", "netVolume"):
@@ -9591,9 +9689,14 @@ def fetch_aggregated_cvd_history(symbol: str, interval: str = "1h") -> Optional[
                         cvd = float(item[k])
                         break
                     except (TypeError, ValueError):
-                        pass
-            if cvd is not None:
-                out.append({"time": int(ts), "cvd": cvd, "_raw": item})
+                        if isinstance(item.get(k), str):
+                            try:
+                                cvd = float(str(item[k]).strip())
+                                break
+                            except (TypeError, ValueError):
+                                pass
+            if cvd is not None and ts_sec:
+                out.append({"time": ts_sec, "cvd": cvd, "_raw": item})
         return out if out else None
 
     # ── 優先：聚合 CVD（多所 aggregated）────────────────────────────────────
@@ -9671,212 +9774,173 @@ def _cvd_change_last2(symbol: str, interval: str = "1h") -> Optional[float]:
 
 
 def detect_cvd_divergence(symbol: str) -> Optional[str]:
-    """檢測 CVD 背離（看漲/看跌）
-    返回: 'bullish' (看漲背離), 'bearish' (看跌背離), None (無背離)
-    
-    優化版本：
-    - 擴大比較窗口到 20 根 K 線（約 24 小時數據）
-    - 對比當前價格與過去 20 根 K 線的高低點
-    - 對比當前 CVD 與對應價格高低點時的 CVD 值
+    """檢測 CVD 背離（看漲/看跌）。
+    - 價格 OHLC 支援字串數值、小寫 key（time/open/high/low/close）。
+    - 價格與 CVD 以「秒級時間戳」內連集對齊，避免索引錯位。
+    - PEPE 等合約自動映射為 1000PEPE，與 fetch_aggregated_cvd_history 一致。
+    返回: 'bullish' | 'bearish' | None
     """
     try:
-        # 獲取最近 24 小時的 1h 數據
-        logger.info(f"CVD 背離檢測 {symbol}: 開始檢測...")
-        price_data = fetch_price_history(symbol + "USDT", "1h")
-        base_symbol = symbol.replace("USDT", "")
-        cvd_data = fetch_aggregated_cvd_history(base_symbol, "1h")
-        
-        logger.info(f"CVD 背離檢測 {symbol}: 獲取到價格數據 {len(price_data) if price_data else 0} 條, CVD 數據 {len(cvd_data) if cvd_data else 0} 條")
-        
+        raw_base = (symbol or "").replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+        cg_base = _coinglass_binance_futures_symbol_alias(raw_base)
+        price_sym = f"{cg_base}USDT"
+
+        logger.info(f"CVD 背離檢測 {raw_base}: 開始（合約代碼={cg_base}）")
+        price_data = fetch_price_history(price_sym, "1h")
+        cvd_data = fetch_aggregated_cvd_history(cg_base, "1h")
+
+        logger.info(
+            f"CVD 背離檢測 {raw_base}: 價格 {len(price_data) if price_data else 0} 條, "
+            f"CVD {len(cvd_data) if cvd_data else 0} 條"
+        )
         if not price_data or not cvd_data:
-            logger.info(f"CVD 背離檢測 {symbol}: 數據不足（價格: {len(price_data) if price_data else 0}, CVD: {len(cvd_data) if cvd_data else 0}）")
             return None
-        
-        if len(price_data) < 20 or len(cvd_data) < 20:
-            logger.info(f"CVD 背離檢測 {symbol}: 數據點不足（需要至少 20 個，價格: {len(price_data)}, CVD: {len(cvd_data)}）")
-            return None
-        
-        # 定義排序鍵函數（處理 None 值）
-        def get_sort_key(x):
-            time_val = x.get('time') or x.get('timestamp') or x.get('t') or 0
-            if isinstance(time_val, str):
-                try:
-                    return int(time_val)
-                except:
-                    return 0
-            return int(time_val) if time_val else 0
-        
-        # 確保數據按時間排序
-        price_sorted = sorted(price_data, key=get_sort_key)
-        cvd_sorted = sorted(cvd_data, key=get_sort_key)
-        
-        # 取最近 20 根 K 線
-        p_slice = price_sorted[-20:]
-        c_slice = cvd_sorted[-20:]
-        
-        # 提取價格的輔助函數（嘗試多種字段）
-        def extract_price(item: Dict, field: str) -> Optional[float]:
-            """從數據項中提取價格字段"""
-            if not isinstance(item, dict):
-                return None
-            if field in item:
-                val = item[field]
-                if isinstance(val, (int, float)) and val > 0:
-                    return float(val)
-            return None
-        
-        # 提取當前 K 線的 high 和 low
-        curr_item = p_slice[-1]
-        curr_p_high = extract_price(curr_item, 'high') or extract_price(curr_item, 'markPrice') or extract_price(curr_item, 'mark_price') or extract_price(curr_item, 'close') or extract_price(curr_item, 'price') or extract_price(curr_item, 'value')
-        curr_p_low = extract_price(curr_item, 'low') or extract_price(curr_item, 'markPrice') or extract_price(curr_item, 'mark_price') or extract_price(curr_item, 'close') or extract_price(curr_item, 'price') or extract_price(curr_item, 'value')
-        
-        if not curr_p_high or not curr_p_low:
-            logger.info(f"CVD 背離檢測 {symbol}: 無法提取當前價格（high: {curr_p_high}, low: {curr_p_low}），數據樣本字段: {list(curr_item.keys())[:10]}")
-            return None
-        
-        # 提取當前 K 線的 CVD
-        curr_cvd_item = c_slice[-1]
-        curr_cvd = None
-        # 添加實際的字段名稱：cum_vol_delta（累計成交量差值）
-        for key in ['cum_vol_delta', 'cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta', 'agg_taker_buy_vol', 'agg_taker_sell_vol']:
-            if key in curr_cvd_item:
-                val = curr_cvd_item[key]
-                if isinstance(val, (int, float)) and val != 0:
-                    curr_cvd = float(val)
-                    logger.debug(f"CVD 背離檢測 {symbol}: 從字段 '{key}' 提取到當前 CVD: {curr_cvd}")
-                    break
-        
-        if curr_cvd is None:
-            logger.info(f"CVD 背離檢測 {symbol}: 無法提取當前 CVD 值，CVD 數據樣本字段: {list(curr_cvd_item.keys())[:10]}")
-            return None
-        
-        # 找到過去 19 根 K 線的最高/最低價
-        prev_prices_high = []
-        prev_prices_low = []
-        
-        # 輸出第一個過去 K 線的字段以便調試
-        if len(p_slice) > 1:
-            sample_prev_item = p_slice[0]
-            logger.debug(f"CVD 背離檢測 {symbol}: 過去 K 線樣本字段: {list(sample_prev_item.keys())[:15]}")
-        
-        for idx, item in enumerate(p_slice[:-1]):  # 過去 19 根
-            if not isinstance(item, dict):
+
+        price_by_t: Dict[int, Dict] = {}
+        for row in price_data:
+            if not isinstance(row, dict):
                 continue
-                
-            # 嘗試提取 high（優先使用 high，如果沒有則使用其他字段）
-            high = extract_price(item, 'high')
-            if not high:
-                # 如果沒有 high，嘗試使用其他價格字段
-                high = extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
-            
-            # 嘗試提取 low（優先使用 low，如果沒有則使用其他字段）
-            low = extract_price(item, 'low')
-            if not low:
-                # 如果沒有 low，嘗試使用其他價格字段
-                low = extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
-            
-            # 如果還是沒有，嘗試所有數值字段
-            if not high or not low:
-                for key, val in item.items():
-                    if isinstance(val, (int, float)) and val > 0:
-                        key_lower = key.lower()
-                        # 跳過明顯不是價格的字段
-                        if ('time' not in key_lower and 'timestamp' not in key_lower and 
-                            'volume' not in key_lower and 'openInterest' not in key_lower and
-                            'oi' not in key_lower and 'open_interest' not in key_lower and
-                            'funding' not in key_lower and 'rate' not in key_lower and
-                            'cvd' not in key_lower and 'delta' not in key_lower):
-                            if not high:
-                                high = float(val)
-                            if not low:
-                                low = float(val)
-                            if high and low:
-                                break
-            
-            if high:
-                prev_prices_high.append(high)
-            if low:
-                prev_prices_low.append(low)
-        
-        if not prev_prices_high or not prev_prices_low:
-            logger.info(f"CVD 背離檢測 {symbol}: 無法提取過去價格數據（high: {len(prev_prices_high)}, low: {len(prev_prices_low)}），當前 K 線字段: {list(p_slice[-1].keys())[:15] if p_slice else []}")
+            ts = _normalize_coinglass_ts(row.get("time") or row.get("timestamp") or row.get("t"))
+            if ts:
+                price_by_t[ts] = row
+
+        cvd_by_t: Dict[int, Dict] = {}
+        for row in cvd_data:
+            if not isinstance(row, dict):
+                continue
+            ts = _normalize_coinglass_ts(row.get("time"))
+            if ts:
+                cvd_by_t[ts] = row
+
+        common_ts = sorted(set(price_by_t.keys()) & set(cvd_by_t.keys()))
+        if len(common_ts) < 20:
+            logger.info(
+                f"CVD 背離檢測 {raw_base}: 時間對齊後僅 {len(common_ts)} 根（需≥20），"
+                f"price_ts={len(price_by_t)} cvd_ts={len(cvd_by_t)}"
+            )
             return None
-        
-        prev_p_high = max(prev_prices_high)
-        prev_p_low = min(prev_prices_low)
-        
-        # 獲取最高價與最低價對應的 CVD 值
-        # 找到最高價對應的索引（使用更寬鬆的匹配，找到最接近的值）
+
+        aligned_ts = common_ts[-20:]
+        p_slice = [price_by_t[t] for t in aligned_ts]
+        c_slice = [cvd_by_t[t] for t in aligned_ts]
+
+        def _cvd_from_row(row: Dict) -> Optional[float]:
+            if not isinstance(row, dict):
+                return None
+            v = row.get("cvd")
+            if v is not None:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    if isinstance(v, str):
+                        try:
+                            return float(v.strip())
+                        except ValueError:
+                            pass
+            raw = row.get("_raw")
+            if isinstance(raw, dict):
+                for k in (
+                    "cum_vol_delta", "cvd", "value", "cvdValue",
+                    "cumulativeVolumeDelta", "volumeDelta", "netVolume",
+                ):
+                    if raw.get(k) is not None:
+                        try:
+                            return float(raw[k])
+                        except (TypeError, ValueError):
+                            if isinstance(raw.get(k), str):
+                                try:
+                                    return float(str(raw[k]).strip())
+                                except ValueError:
+                                    pass
+            return None
+
+        curr_item = p_slice[-1]
+        curr_p_high, curr_p_low = _extract_ohlc_high_low_close(curr_item)
+        if curr_p_high is None or curr_p_low is None:
+            logger.info(
+                f"CVD 背離檢測 {raw_base}: 無法解析當前 OHLC，keys={list(curr_item.keys())[:12]}"
+            )
+            return None
+
+        curr_cvd = _cvd_from_row(c_slice[-1])
+        if curr_cvd is None:
+            logger.info(f"CVD 背離檢測 {raw_base}: 無法解析當前 CVD")
+            return None
+
+        prev_highs: List[float] = []
+        prev_lows: List[float] = []
+        for item in p_slice[:-1]:
+            h, l_ = _extract_ohlc_high_low_close(item)
+            if h is not None:
+                prev_highs.append(h)
+            if l_ is not None:
+                prev_lows.append(l_)
+
+        if not prev_highs or not prev_lows:
+            logger.info(f"CVD 背離檢測 {raw_base}: 過去區間 OHLC 為空（字串價格未解析？）")
+            return None
+
+        prev_p_high = max(prev_highs)
+        prev_p_low = min(prev_lows)
+
         high_idx = None
-        min_diff = float('inf')
+        best_d = float("inf")
         for idx, item in enumerate(p_slice[:-1]):
-            high = extract_price(item, 'high') or extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
-            if high:
-                diff = abs(high - prev_p_high)
-                if diff < min_diff:
-                    min_diff = diff
-                    high_idx = idx
-                    if diff < 0.01:  # 如果找到非常接近的值，直接使用
-                        break
-        
-        # 找到最低價對應的索引（使用更寬鬆的匹配，找到最接近的值）
+            h, _ = _extract_ohlc_high_low_close(item)
+            if h is None:
+                continue
+            d = abs(h - prev_p_high)
+            if d < best_d:
+                best_d = d
+                high_idx = idx
+                if d < 0.01:
+                    break
+
         low_idx = None
-        min_diff = float('inf')
+        best_d = float("inf")
         for idx, item in enumerate(p_slice[:-1]):
-            low = extract_price(item, 'low') or extract_price(item, 'markPrice') or extract_price(item, 'mark_price') or extract_price(item, 'close') or extract_price(item, 'price') or extract_price(item, 'value')
-            if low:
-                diff = abs(low - prev_p_low)
-                if diff < min_diff:
-                    min_diff = diff
-                    low_idx = idx
-                    if diff < 0.01:  # 如果找到非常接近的值，直接使用
-                        break
-        
+            _, l_ = _extract_ohlc_high_low_close(item)
+            if l_ is None:
+                continue
+            d = abs(l_ - prev_p_low)
+            if d < best_d:
+                best_d = d
+                low_idx = idx
+                if d < 0.01:
+                    break
+
         if high_idx is None or low_idx is None:
-            logger.info(f"CVD 背離檢測 {symbol}: 無法找到對應的價格索引（high_idx: {high_idx}, low_idx: {low_idx}, 過去最高價: {prev_p_high:.4f}, 過去最低價: {prev_p_low:.4f}）")
+            logger.info(f"CVD 背離檢測 {raw_base}: 無法對應過去高低索引")
             return None
-        
-        # 提取對應索引的 CVD 值
-        cvd_at_p_high = None
-        cvd_at_p_low = None
-        
-        if high_idx < len(c_slice[:-1]):
-            high_cvd_item = c_slice[high_idx]
-            # 添加實際的字段名稱：cum_vol_delta（累計成交量差值）
-            for key in ['cum_vol_delta', 'cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta', 'agg_taker_buy_vol', 'agg_taker_sell_vol']:
-                if key in high_cvd_item:
-                    val = high_cvd_item[key]
-                    if isinstance(val, (int, float)) and val != 0:
-                        cvd_at_p_high = float(val)
-                        break
-        
-        if low_idx < len(c_slice[:-1]):
-            low_cvd_item = c_slice[low_idx]
-            # 添加實際的字段名稱：cum_vol_delta（累計成交量差值）
-            for key in ['cum_vol_delta', 'cvd', 'value', 'close', 'cvdValue', 'cumulativeVolumeDelta', 'volumeDelta', 'agg_taker_buy_vol', 'agg_taker_sell_vol']:
-                if key in low_cvd_item:
-                    val = low_cvd_item[key]
-                    if isinstance(val, (int, float)) and val != 0:
-                        cvd_at_p_low = float(val)
-                        break
-        
+
+        cvd_at_p_high = _cvd_from_row(c_slice[high_idx])
+        cvd_at_p_low = _cvd_from_row(c_slice[low_idx])
         if cvd_at_p_high is None or cvd_at_p_low is None:
-            logger.info(f"CVD 背離檢測 {symbol}: 無法提取對應的 CVD 值（high_idx: {high_idx}, low_idx: {low_idx}, cvd_at_p_high: {cvd_at_p_high}, cvd_at_p_low: {cvd_at_p_low}）")
+            logger.info(
+                f"CVD 背離檢測 {raw_base}: 無法解析歷史 CVD（hi={high_idx} lo={low_idx}）"
+            )
             return None
-        
-        # 看跌背離：價格創高，但 CVD 低於當時高點的 CVD
+
         if curr_p_high > prev_p_high and curr_cvd < cvd_at_p_high:
-            logger.info(f"CVD 背離檢測 {symbol}: ✅ 看跌背離 (價格: {curr_p_high:.4f} > {prev_p_high:.4f}, CVD: {curr_cvd:.2f} < {cvd_at_p_high:.2f})")
-            return 'bearish'
-        
-        # 看漲背離：價格創低，但 CVD 高於當時低點的 CVD
+            logger.info(
+                f"CVD 背離檢測 {raw_base}: ✅ 看跌背離 "
+                f"(價 {curr_p_high:.4f}>{prev_p_high:.4f}, CVD {curr_cvd:.2f}<{cvd_at_p_high:.2f})"
+            )
+            return "bearish"
+
         if curr_p_low < prev_p_low and curr_cvd > cvd_at_p_low:
-            logger.info(f"CVD 背離檢測 {symbol}: ✅ 看漲背離 (價格: {curr_p_low:.4f} < {prev_p_low:.4f}, CVD: {curr_cvd:.2f} > {cvd_at_p_low:.2f})")
-            return 'bullish'
-        
-        logger.info(f"CVD 背離檢測 {symbol}: 無背離信號 (當前價格: {curr_p_high:.4f}/{curr_p_low:.4f}, 過去高低: {prev_p_high:.4f}/{prev_p_low:.4f}, 當前 CVD: {curr_cvd:.2f})")
+            logger.info(
+                f"CVD 背離檢測 {raw_base}: ✅ 看漲背離 "
+                f"(價 {curr_p_low:.4f}<{prev_p_low:.4f}, CVD {curr_cvd:.2f}>{cvd_at_p_low:.2f})"
+            )
+            return "bullish"
+
+        logger.info(
+            f"CVD 背離檢測 {raw_base}: 無背離 "
+            f"(價 {curr_p_high:.4f}/{curr_p_low:.4f} 過去 {prev_p_high:.4f}/{prev_p_low:.4f} CVD={curr_cvd:.2f})"
+        )
         return None
-        
+
     except Exception as e:
         logger.error(f"CVD 背離檢測出錯 {symbol}: {str(e)}")
         import traceback
