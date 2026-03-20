@@ -3653,6 +3653,80 @@ PRICE_THRESHOLD_1H  = 1.5           # 1H 價格扳機門檻
 TP1_R_MULTIPLIER = 1.0   # TP1 至少 1:1（相對於 1R）
 TP2_R_MULTIPLIER = 3.0  # TP2 延伸目標（須 > TP1）
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
+MIN_SL_PERCENT = 0.015  # 最小止損距離：one_r/進場 < 1.5% 時強制拉開（避免一碰就碎）
+
+
+def compute_structural_sl_tp(
+    entry: float,
+    is_long: bool,
+    vwap_2h: Optional[float],
+    ema20: Optional[float],
+    recent_low_2h: Optional[float],
+    recent_high_2h: Optional[float],
+) -> Tuple[Optional[float], Optional[float], Optional[float], float, float]:
+    """
+    以 K 線結構主力防守位定 SL，再套用最小距離保底，最後以 1R 映射 TP1/TP2。
+
+    做多：結構防守位 = min(2h低, EMA20, VWAP_2h)（略過 None）
+    做空：結構防守位 = max(2h高, EMA20, VWAP_2h)（略過 None）
+
+    one_r = |進場 − 結構 SL|；若 one_r/進場 < MIN_SL_PERCENT，強制 one_r = 進場×MIN_SL_PERCENT
+    並反推 SL（多：進場−one_r；空：進場+one_r）。
+
+    回傳 (sl, tp1, tp2, one_r, sl_pct)
+    """
+    if not entry or not isinstance(entry, (int, float)) or float(entry) <= 0:
+        return None, None, None, 0.0, 0.0
+    entry = float(entry)
+
+    def _num(v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return None
+        try:
+            x = float(v)
+            return x if x > 0 and x == x else None
+        except (TypeError, ValueError):
+            return None
+
+    vwap = _num(vwap_2h)
+    ema = _num(ema20)
+    lo2 = _num(recent_low_2h)
+    hi2 = _num(recent_high_2h)
+
+    if is_long:
+        cands = [v for v in (lo2, ema, vwap) if v is not None]
+        if cands:
+            structural_sl = min(cands)
+        else:
+            structural_sl = entry * (1.0 - MIN_SL_PERCENT)
+        if structural_sl >= entry:
+            structural_sl = entry * (1.0 - MIN_SL_PERCENT)
+        one_r = abs(entry - structural_sl)
+        if one_r / entry < MIN_SL_PERCENT:
+            one_r = entry * MIN_SL_PERCENT
+            structural_sl = entry - one_r
+        sl = structural_sl
+        tp1 = entry + one_r * TP1_R_MULTIPLIER
+        tp2 = entry + one_r * TP2_R_MULTIPLIER
+    else:
+        cands = [v for v in (hi2, ema, vwap) if v is not None]
+        if cands:
+            structural_sl = max(cands)
+        else:
+            structural_sl = entry * (1.0 + MIN_SL_PERCENT)
+        if structural_sl <= entry:
+            structural_sl = entry * (1.0 + MIN_SL_PERCENT)
+        one_r = abs(structural_sl - entry)
+        if one_r / entry < MIN_SL_PERCENT:
+            one_r = entry * MIN_SL_PERCENT
+            structural_sl = entry + one_r
+        sl = structural_sl
+        tp1 = entry - one_r * TP1_R_MULTIPLIER
+        tp2 = entry - one_r * TP2_R_MULTIPLIER
+
+    sl_pct = (one_r / entry * 100.0) if entry > 0 else 0.0
+    return sl, tp1, tp2, one_r, sl_pct
+
 
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
 MTF_RSI_OVERBOUGHT = 85             # 做多降級線（>85 降為 Tier2 觀察；單邊牛市容忍 RSI 鈍化）
@@ -4655,147 +4729,30 @@ def build_report_message_tiered(
         pre_breakout_high: Optional[float] = None,
         ema20: Optional[float] = None,
         rsi: Optional[float] = None,
-        ema20_touch_low: Optional[float] = None,   # 最近 EMA20 回踩低點（最精準結構位）
-        ema20_touch_high: Optional[float] = None,  # 最近 EMA20 回踩高點（做空結構位）
+        ema20_touch_low: Optional[float] = None,
+        ema20_touch_high: Optional[float] = None,
+        vwap_2h: Optional[float] = None,
     ):
         """
-        SL 選點邏輯（做多為例）：
-          EMA20 和突破前結構低分別算出候選 SL，取兩者中較貼近現價（較緊）的那個。
-          如果只有其中一個有效，就用那個。都沒有則退回 2H 低點。
-
-          ATR 作為緩衝 pad（建倉型 0.5x，軋空型 0.2x），貼在選定的結構點外側。
-
-        回傳: (sl_price, tp1_price, tp2_price, sl_pct, warn_pct, sl_basis_label)
-          sl_basis_label: 說明 SL 依據（EMA20 / 結構低 / 2H低 / 無基準）
+        與檔首 compute_structural_sl_tp 一致：2H 高低 + EMA20 + VWAP 結構防守、MIN_SL_PERCENT 保底、TP 倍率映射。
+        舊參數（ATR/軋空/回踩）保留簽名以相容，計算已不再使用。
         """
         if not price or price <= 0:
-            return None, None, None, None, None, "—"
-
-        is_squeeze = (signal_type == "squeeze")
-        atr_val = float(atr) if atr and isinstance(atr, (int, float)) and atr > 0 else None
-        atr_mult = 0.2 if is_squeeze else 0.5
-        pad = atr_mult * atr_val if atr_val else price * (0.005 if is_squeeze else 0.01)
-
-        def _valid_below(v):  # 對做多：有效的支撐點 = 在現價以下
-            return v and isinstance(v, (int, float)) and 0 < float(v) < price
-        def _valid_above(v):  # 對做空：有效的壓力點 = 在現價以上
-            return v and isinstance(v, (int, float)) and float(v) > price
-
-        # pad_tight：EMA20 回踩結構位用極小緩衝（只防插針，不擴大距離）
-        pad_tight = atr_val * 0.15 if atr_val else price * 0.003
-
-        candidates = []  # [(sl_price, label)]
-
-        if is_squeeze:
-            # ── 軋空 / 軋多（摸底/摸頭）─────────────────────────────────────────
-            # 邏輯：逼倉動能型訊號，EMA20 通常遠離現價且無防守意義。
-            # SL 以「動能起漲結構點」為基準：
-            #   軋空（做多）→ 軋空那根 K 之前的低點失守 = 動能消失 → 出場
-            #   軋多（做空）→ 軋多那根 K 之前的高點突破 = 動能消失 → 出場
-            if is_long:
-                if _valid_below(pre_breakout_low):
-                    candidates.append((float(pre_breakout_low) - pad, "軋空起漲低"))
-                if _valid_below(recent_low_2h):
-                    candidates.append((float(recent_low_2h) - pad, "2H低點"))
-            else:
-                if _valid_above(pre_breakout_high):
-                    candidates.append((float(pre_breakout_high) + pad, "軋多起漲高"))
-                if _valid_above(recent_high_2h):
-                    candidates.append((float(recent_high_2h) + pad, "2H高點"))
-        else:
-            # ── 建倉型（做多突破 / 做空突破）─────────────────────────────────────
-            # 邏輯：EMA20 是核心防守依據。
-            # 優先用「最近一次 EMA20 回踩的實際低點」（市場驗證過），
-            # 其次靜態 EMA20 位置，最後退回 2H 結構。
-            if is_long:
-                # 優先：EMA20 回踩低（市場驗證過的真實結構位）
-                if _valid_below(ema20_touch_low):
-                    candidates.append((float(ema20_touch_low) - pad_tight, "EMA20回踩低"))
-                # 次選：EMA20 靜態位置
-                if _valid_below(ema20):
-                    candidates.append((float(ema20) - pad, "EMA20防守"))
-                # 備援：突破前 3 根結構低
-                if _valid_below(pre_breakout_low):
-                    candidates.append((float(pre_breakout_low) - pad, "結構低防守"))
-                # 最終備援：2H 整體低點
-                if _valid_below(recent_low_2h):
-                    candidates.append((float(recent_low_2h) - pad, "2H低點"))
-            else:
-                # 優先：EMA20 回踩高（市場驗證過的真實結構位）
-                if _valid_above(ema20_touch_high):
-                    candidates.append((float(ema20_touch_high) + pad_tight, "EMA20回踩高"))
-                # 次選：EMA20 靜態位置
-                if _valid_above(ema20):
-                    candidates.append((float(ema20) + pad, "EMA20防守"))
-                # 備援：突破前 3 根結構高
-                if _valid_above(pre_breakout_high):
-                    candidates.append((float(pre_breakout_high) + pad, "結構高防守"))
-                # 最終備援：2H 整體高點
-                if _valid_above(recent_high_2h):
-                    candidates.append((float(recent_high_2h) + pad, "2H高點"))
-
-        if candidates:
-            if is_long:
-                # 做多取最高（最貼近現價 = 最緊的合理止損）
-                sl_price, sl_label = max(candidates, key=lambda c: c[0])
-            else:
-                # 做空取最低
-                sl_price, sl_label = min(candidates, key=lambda c: c[0])
-            # 確保 SL 方向正確（不能穿越現價）
-            if is_long and sl_price >= price:
-                sl_price = price * 0.97
-                sl_label = "備援3%"
-            elif not is_long and sl_price <= price:
-                sl_price = price * 1.03
-                sl_label = "備援3%"
-        else:
-            sl_price = price * 0.97 if is_long else price * 1.03
-            sl_label = "備援3%"
-
-        # ── SL 淨空保護（SL Clear Zone）──────────────────────────────────────────
-        # 核心原則：SL 必須「清越」近 2h 所有價格行為，否則訊號推出後立刻就能被雜訊觸及。
-        #   做空：sl > recent_2h_high + 0.5%（SL 必須站在 2h 最高點之上）
-        #   做多：sl < recent_2h_low  - 0.5%（SL 必須站在 2h 最低點之下）
-        # TP 會在下方自動以新 risk 重算，R 比例不變。
-        _sl_clear_buffer = 0.005  # 0.5%（足夠清越雜訊 + 滑價，同時不過度擴大停損）
-        if not is_long and recent_high_2h and recent_high_2h > 0:
-            _min_sl_short = recent_high_2h * (1.0 + _sl_clear_buffer)
-            if sl_price < _min_sl_short:
-                logger.debug(
-                    f"[SL淨空] 做空 SL {sl_price:.6f} 在 2h高點{recent_high_2h:.6f}之下，"
-                    f"調整至 {_min_sl_short:.6f}（+0.5% 淨空緩衝）"
-                )
-                sl_price = _min_sl_short
-                sl_label += " 淨空"
-        elif is_long and recent_low_2h and recent_low_2h > 0:
-            _max_sl_long = recent_low_2h * (1.0 - _sl_clear_buffer)
-            if sl_price > _max_sl_long:
-                logger.debug(
-                    f"[SL淨空] 做多 SL {sl_price:.6f} 在 2h低點{recent_low_2h:.6f}之上，"
-                    f"調整至 {_max_sl_long:.6f}（-0.5% 淨空緩衝）"
-                )
-                sl_price = _max_sl_long
-                sl_label += " 淨空"
-
-        # 1R = |進場價 − 止損價|（止損遠近即承擔風險）；TP 為 1R 的固定倍數，確保至少 1:1
-        one_r = abs(float(price) - float(sl_price))
-        if one_r <= 0:
-            one_r = float(price) * (0.005 if is_squeeze else 0.015)
+            return None, None, None, None, None, "—", "normal", TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
+        sl, tp1, tp2, _one_r, sl_pct = compute_structural_sl_tp(
+            float(price), is_long, vwap_2h, ema20, recent_low_2h, recent_high_2h
+        )
+        if sl is None:
+            return None, None, None, None, None, "—", "normal", TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
+        warn_pct = sl_pct if sl_pct > 8.0 else None
         rsi_val_f = float(rsi) if rsi and isinstance(rsi, (int, float)) else None
-        if is_squeeze:
+        if (signal_type or "") == "squeeze":
             tp_mode = "squeeze"
         elif rsi_val_f is not None and ((is_long and rsi_val_f >= 75) or (not is_long and rsi_val_f <= 25)):
             tp_mode = "rsi_hot"
         else:
             tp_mode = "normal"
-
-        r1, r2 = TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
-        tp1_price = price + r1 * one_r if is_long else price - r1 * one_r
-        tp2_price = price + r2 * one_r if is_long else price - r2 * one_r
-
-        sl_pct = abs(price - sl_price) / price * 100 if price > 0 else 0
-        warn_pct = sl_pct if sl_pct > 8.0 else None
-        return sl_price, tp1_price, tp2_price, sl_pct, warn_pct, sl_label, tp_mode, r1, r2
+        return sl, tp1, tp2, sl_pct, warn_pct, "結構防守(2H/EMA/VWAP)", tp_mode, TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
 
     def _is_bull(x: Dict) -> bool:
         cat = x.get("category", "")
@@ -5000,7 +4957,7 @@ def build_report_message_tiered(
         # ══════════════════════════════════════════════════════════
         # 進場價邏輯：現價優於主力均價 → 市價進場；否則 → 計畫委託掛單（主力均價）
         # 動能透支時：強制限價掛單於 EMA20，拒絕市價進場
-        # TP/SL：1R = |進場 − 止損|；TP1/TP2 = 進場 ± 1R×倍數（見檔首 TP1_R_MULTIPLIER / TP2_R_MULTIPLIER）
+        # TP/SL：結構防守位（2H 高/低 + EMA20 + VWAP）+ MIN_SL_PERCENT 保底 → 1R → TP1/TP2
         # ══════════════════════════════════════════════════════════
         sl, tp1, tp2 = None, None, None
         _r1, _r2 = TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
@@ -5037,35 +4994,24 @@ def build_report_message_tiered(
                 _entry_price = _vwap_f * 0.975
                 _entry_mode = "掛單"
 
-        if atr_val and atr_val > 0 and _entry_price and _entry_price > 0:
-            # 先用 ATR 定出止損距離，再以「實際 |進場−止損|」為 1R 計算 TP（風報一致）
-            _risk = (1.5 * atr_val) if _is_exhaustion_reversal else (1.8 * atr_val)
-            if is_bull_sig:
-                sl = _entry_price - _risk
-            else:
-                sl = _entry_price + _risk
-            one_r = abs(float(_entry_price) - float(sl))
-            if one_r <= 0:
-                one_r = float(_entry_price) * 0.015
-            if is_bull_sig:
-                tp1 = _entry_price + one_r * TP1_R_MULTIPLIER
-                tp2 = _entry_price + one_r * TP2_R_MULTIPLIER
-            else:
-                tp1 = _entry_price - one_r * TP1_R_MULTIPLIER
-                tp2 = _entry_price - one_r * TP2_R_MULTIPLIER
-            sl_pct_val = one_r / _entry_price * 100
-        else:
-            _risk = _entry_price * 0.015 if _entry_price and _entry_price > 0 else None
-            if _risk:
-                sl = _entry_price - _risk if is_bull_sig else _entry_price + _risk
-                one_r = abs(float(_entry_price) - float(sl))
-                if is_bull_sig:
-                    tp1 = _entry_price + one_r * TP1_R_MULTIPLIER
-                    tp2 = _entry_price + one_r * TP2_R_MULTIPLIER
-                else:
-                    tp1 = _entry_price - one_r * TP1_R_MULTIPLIER
-                    tp2 = _entry_price - one_r * TP2_R_MULTIPLIER
-                sl_pct_val = one_r / _entry_price * 100 if _entry_price else None
+        if _entry_price and _entry_price > 0:
+            _recent_lo = x.get("recent_low_2h")
+            _recent_hi = x.get("recent_high_2h")
+            sl, tp1, tp2, _one_r_u, sl_pct_val = compute_structural_sl_tp(
+                float(_entry_price),
+                is_bull_sig,
+                vwap_2h_val,
+                ema20_val,
+                _recent_lo,
+                _recent_hi,
+            )
+            if sl is None or tp1 is None:
+                logger.warning(f"[SL/TP] {sym_base} 結構計算失敗，跳過此訊號")
+                continue
+            logger.info(
+                f"[SL/TP結構計算] 幣種: {sym_base}, 方向: {'多' if is_bull_sig else '空'}, "
+                f"進場: {_entry_price}, 結構SL: {sl} (距離 {sl_pct_val:.2f}%), TP1: {tp1}"
+            )
 
         # ══════════════════════════════════════════════════════════
         # 訊號版本 / 標籤 / 策略短評
@@ -5314,7 +5260,10 @@ def build_report_message_tiered(
         x["tp2_price_str"]   = _fmt_price(tp2)
         x["r_tp1"]           = _r1
         x["r_tp2"]           = _r2
-        x["sl_source"]       = f"ATR結構止損（1R=|進場−止損|, TP1={TP1_R_MULTIPLIER}R）"
+        x["sl_source"]       = (
+            f"結構防守 min/max(2H,EMA20,VWAP)+保底{MIN_SL_PERCENT*100:.1f}% "
+            f"(TP1={TP1_R_MULTIPLIER}R)"
+        )
         x["selected_for_push"] = True
         x["tier"]            = "train"
         x["stars"]           = 5
@@ -7359,67 +7308,75 @@ def fetch_position_change():
             _item["is_global_consensus"] = False
             _item["volume_oi_warn"] = False
 
-    # ── 推播前即時報價快照（進場價與風報比必須基於即時價）──────────────────────────
-    # 使用者看到訊號後以「市價」下單，所以 SL/TP 必須從即時報價算起，而非 K 線收盤。
-    # 同時保留 signal_price（K 線觸發收盤）供訊息顯示「觸發點 vs 現價」。
-    # 規則：即時 TP1 R 比 < 0.8 代表行情已過、風報比不合，直接捨棄不推。
+    # ── 推播前即時報價快照 + 結構 SL 觸損／達標防護 ─────────────────────────────
+    # 與 build_report_message_tiered 相同：compute_structural_sl_tp；即時價已破 SL 或已過 TP1 → 不推。
     if cooled_top:
         _drop_low_r: List = []
         for _x in cooled_top:
             _sym_rt = _x.get("symbol") or ""
-            _sig_price = _x.get("current_price")   # K 線收盤（訊號觸發點）
-            _atr_rt = _x.get("atr")
-            _x["signal_price"] = _sig_price         # 永遠保留觸發點供顯示
-            if not _sig_price or not _atr_rt or _atr_rt <= 0:
+            _sig_price = _x.get("current_price")
+            _x["signal_price"] = _sig_price
+            if not _sig_price or not isinstance(_sig_price, (int, float)) or float(_sig_price) <= 0:
                 continue
             try:
                 _snap = _fetch_bingx_ticker_snapshot(_sym_rt)
                 if _snap and _snap.get("price") and float(_snap["price"]) > 0:
                     _live = float(_snap["price"])
-                    _drift = abs(_live - _sig_price) / _sig_price
-                    # 無論偏差大小都更新（即時價才是用戶實際進場價）
+                    _drift = abs(_live - float(_sig_price)) / float(_sig_price)
                     _x["current_price"] = _live
-                    if _drift >= 0.003:   # ≥0.3% 才 log，避免洗版
+                    if _drift >= 0.003:
                         logger.info(
                             f"[即時報價🔄] {_sym_rt}: 觸發 {_sig_price:.6f} → 即時 {_live:.6f}"
                             f"（偏差 {_drift:.1%}）"
                         )
-                    # ── TP1 風報比篩選（與推播一致：1R=|進場−止損|，TP1=進場±1R×TP1_R_MULTIPLIER）──
                     _is_long_rt = (_x.get("category") or "") in ("long_open", "short_close")
                     _vwap_2h = _x.get("vwap_2h")
-                    _risk = 1.8 * _atr_rt
-                    _entry_rt = _live  # 預設市價進場
-                    if _vwap_2h and isinstance(_vwap_2h, (int, float)) and _vwap_2h > 0:
+                    _ema_rt = _x.get("ema20") or _x.get("ema20_close")
+                    _entry_rt = _live
+                    if _vwap_2h and isinstance(_vwap_2h, (int, float)) and float(_vwap_2h) > 0:
                         _vwap_f = float(_vwap_2h)
                         if _is_long_rt and _live > _vwap_f * 1.025:
-                            _entry_rt = _vwap_f * 0.975  # 掛單進場
+                            _entry_rt = _vwap_f * 0.975
                         elif not _is_long_rt and _live < _vwap_f * 0.975:
-                            _entry_rt = _vwap_f * 1.025  # 掛單進場
-                    if _risk > 0 and _entry_rt and _entry_rt > 0:
-                        if _is_long_rt:
-                            _actual_sl = _entry_rt - _risk
-                            _one_r_rt = abs(_entry_rt - _actual_sl)
-                            _actual_tp1 = _entry_rt + _one_r_rt * TP1_R_MULTIPLIER
-                            _rt_reward = _actual_tp1 - _live
-                            _risk_est = _live - _actual_sl
-                        else:
-                            _actual_sl = _entry_rt + _risk
-                            _one_r_rt = abs(_actual_sl - _entry_rt)
-                            _actual_tp1 = _entry_rt - _one_r_rt * TP1_R_MULTIPLIER
-                            _rt_reward = _live - _actual_tp1
-                            _risk_est = _actual_sl - _live
-                        _rt_r_ratio = _rt_reward / _risk_est if _risk_est > 0 else 0
-                        # 額外：現價已接近 TP1（剩餘空間 < 0.3%）→ 直接捨棄
-                        _tp1_dist_pct = abs(_actual_tp1 - _live) / _live * 100 if _live > 0 else 0
-                        if _rt_r_ratio < 0.8 or _tp1_dist_pct < 0.3:
+                            _entry_rt = _vwap_f * 1.025
+                    _sl_i, _tp1_i, _tp2_i, _one_ri, _slp_rt = compute_structural_sl_tp(
+                        _entry_rt,
+                        _is_long_rt,
+                        _vwap_2h,
+                        _ema_rt,
+                        _x.get("recent_low_2h"),
+                        _x.get("recent_high_2h"),
+                    )
+                    if _sl_i is None or _tp1_i is None:
+                        continue
+                    _blocked = False
+                    if _is_long_rt:
+                        if _live <= _sl_i:
                             logger.info(
-                                f"[低R比跳過⚠️] {_sym_rt}: 即時 TP1 R={_rt_r_ratio:.2f} < 0.8"
-                                f" 或 距TP1僅{_tp1_dist_pct:.2f}%（訊號 {_sig_price:.6f} 即時 {_live:.6f}），行情已過，不推"
+                                f"[已觸損跳過] {_sym_rt}: 即時 {_live:.6f} ≤ 結構SL {_sl_i:.6f}"
                             )
-                            _drop_low_r.append(_x)
+                            _blocked = True
+                        elif _live >= _tp1_i:
+                            logger.info(
+                                f"[已達標跳過] {_sym_rt}: 即時 {_live:.6f} ≥ TP1 {_tp1_i:.6f}"
+                            )
+                            _blocked = True
+                    else:
+                        if _live >= _sl_i:
+                            logger.info(
+                                f"[已觸損跳過] {_sym_rt}: 即時 {_live:.6f} ≥ 結構SL {_sl_i:.6f}"
+                            )
+                            _blocked = True
+                        elif _live <= _tp1_i:
+                            logger.info(
+                                f"[已達標跳過] {_sym_rt}: 即時 {_live:.6f} ≤ TP1 {_tp1_i:.6f}"
+                            )
+                            _blocked = True
+                    if _blocked:
+                        _drop_low_r.append(_x)
             except Exception as _e:
                 logger.debug(f"[即時報價] {_sym_rt} 快照失敗，沿用 K 線價格: {_e}")
-        # 移除風報比過低的訊號
+        # 移除觸損／已達 TP1 的訊號
         for _drop in _drop_low_r:
             if _drop in cooled_top:
                 cooled_top.remove(_drop)
@@ -7452,7 +7409,10 @@ def fetch_position_change():
             # ── 主報表（含全部訊號）──────────────────────────────────────
             send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
         else:
-            logger.info(f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，但 RSI/風報比篩選後 0 筆可推播，不發送主報表")
+            logger.info(
+                f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，"
+                f"但即時觸損/達標或評級篩選後 0 筆可推播，不發送主報表"
+            )
     else:
         if len(all_top) == 0:
             logger.info(f"【未推播原因】本輪無達 OI 門檻之標的（四類皆 0 筆），不發送主報表")
