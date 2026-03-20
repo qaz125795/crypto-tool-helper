@@ -3701,6 +3701,7 @@ SYMBOL_BLACKLIST: set = {
     "BSU", "AVL",  # 用戶手動加入黑名單（2026-03-04）
     "GODS", "ASP", "VFY", "FHE",  # 用戶手動加入黑名單（2026-03-05）
     "HOT",  # 用戶手動加入黑名單（2026-03-06）
+    "WAXP",  # 用戶手動加入黑名單（waxp）
     "BICO", "GIGA", "CLOUD", "JELLYJELLY",  # 用戶手動加入黑名單（2026-03-06）
     "CVX", "L3", "DOGS", "ETHW", "1000QUBIC",  # 用戶手動加入黑名單（2026-03-07）
     "JOE", "RONIN", "1000XEC", "XAUT",  # 用戶手動加入黑名單（2026-03-07）
@@ -4310,7 +4311,30 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
       < 60    不推播（原 B 級已移除，提升效率）
     """
     # ══════════════════════════════════════════════════════════════
-    # 第一步：判斷逆勢左側 → R 級
+    # 第一步：硬過濾（勝率優先）→ 直接 B 級（不推播）
+    # ══════════════════════════════════════════════════════════════
+    _sym = str(x.get("symbol") or "").replace("USDT", "").replace("-", "").replace("_", "").upper()
+    _cat = x.get("category", "")
+
+    # 1) 聰明錢 OI 驗證：散戶槓桿主導 = 假突破高風險，直接淘汰
+    _smart_money = x.get("smart_money")
+    if _smart_money is False:
+        logger.info(f"[過濾] 散戶槓桿假突破 {(_sym or 'N/A')} ({_cat}) → 強制 B 級不推播")
+        return "B", 0, "🥈 *B 級* 散戶槓桿主導，假突破風險高（不推播）", False, ""
+
+    # 2) CVD 背離一票否決：方向相反 = 主力吸收/出貨，直接淘汰
+    _cvd_div = str(x.get("cvd_divergence") or "").lower().strip()
+    _is_bull_sig = _cat in ("long_open", "short_close")
+    _is_bear_sig = _cat in ("short_open", "long_close")
+    if (_is_bull_sig and _cvd_div == "bearish") or (_is_bear_sig and _cvd_div == "bullish"):
+        logger.info(
+            f"[過濾] CVD背離方向相反 {(_sym or 'N/A')} ({_cat}) cvd={_cvd_div} "
+            f"→ 強制 B 級不推播"
+        )
+        return "B", 0, "🥈 *B 級* CVD 背離方向相反（主力吸收/出貨，風險高）", False, ""
+
+    # ══════════════════════════════════════════════════════════════
+    # 第二步：判斷逆勢左側 → R 級
     # ══════════════════════════════════════════════════════════════
     is_above_4h = x.get("is_above_4h_ema")
     _is_counter_trend = (
@@ -4323,7 +4347,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         return "R", 0, brief, False, ""
 
     # ══════════════════════════════════════════════════════════════
-    # 第二步：車已發動偵測（行情已先行）
+    # 第三步：車已發動偵測（行情已先行）
     # 邏輯：做多訊號出現但 1H 已漲 >5% → 追高風險大，限制最高 A 級
     #        做空訊號出現但 1H 已跌 >5% → 追低風險大，限制最高 A 級
     # ══════════════════════════════════════════════════════════════
@@ -4352,7 +4376,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         pass
 
     # ══════════════════════════════════════════════════════════════
-    # 第三步：大盤同向濾網（主流幣用 BTC，山寨優先參考 ETH）
+    # 第四步：大盤同向濾網（主流幣用 BTC，山寨優先參考 ETH）
     # 目的：大盤明顯逆風時，即使單幣訊號強，也限制最高 A 級
     # ══════════════════════════════════════════════════════════════
     _macro_block_s = False
@@ -4388,7 +4412,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
             pass
 
     # ══════════════════════════════════════════════════════════════
-    # 第四步：順勢訊號評分（S / A / B）
+    # 第五步：順勢訊號評分（S / A / B）
     # ══════════════════════════════════════════════════════════════
     score = 0
     reasons = []
@@ -4533,7 +4557,13 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         score += 20
         reasons.append("雙向互確認")
 
-    # ── 9. 籌碼三步驟陷阱偵測加分（short_open 摸頭 / long_open 摸底）────
+    # ── 9. 聰明錢真實建倉加分 ─────────────────────────────────────
+    # 僅在 smart_money=True 時加分；None（無資料）保持中性
+    if _smart_money is True:
+        score += 15
+        reasons.append("🧠聰明錢真實建倉")
+
+    # ── 10. 籌碼三步驟陷阱偵測加分（short_open 摸頭 / long_open 摸底）───
     # 完整三步驟吻合 → +25 分（直接衝 S 級）
     # 部分吻合（2 步）→ +12 分（訊號有結構支撐）
     _trap_detected = x.get("_bull_trap_detected", False)
@@ -5141,6 +5171,8 @@ def build_report_message_tiered(
         # ─ 宏觀天候 · 費率 · 成交值（有資料才顯示成交值行）─
         msg_lines.append(_macro_line)
         msg_lines.append(_fr_line)
+        if x.get("smart_money") is True:
+            msg_lines.append("🧠 聰明錢真實建倉")
         if _vol_line:
             msg_lines.append(_vol_line)
         msg_lines.append("")
@@ -6746,6 +6778,24 @@ def fetch_position_change():
         _base_fr = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
         funding_rate = _cg_fr_map.get(_base_fr)
 
+        # ── 勝率強化防線 A：聰明錢 OI 驗證（API 失敗時中性放行）──────────────
+        _smart_money_pack = {"smart_money": None, "stable_chg": None, "coin_chg": None}
+        try:
+            _sm = _fetch_smart_money_oi_split(_base_fr)
+            if isinstance(_sm, dict):
+                _smart_money_pack["smart_money"] = _sm.get("smart_money")
+                _smart_money_pack["stable_chg"] = _sm.get("stable_chg")
+                _smart_money_pack["coin_chg"] = _sm.get("coin_chg")
+        except Exception as _e:
+            logger.debug(f"[SmartMoneyOI] {sym} 取得失敗（中性放行）: {_e}")
+
+        # ── 勝率強化防線 B：CVD 背離（API 失敗時中性放行）────────────────────
+        _cvd_div = None
+        try:
+            _cvd_div = detect_cvd_divergence(_base_fr)  # 回傳 bullish / bearish / None
+        except Exception as _e:
+            logger.debug(f"[CVD] {sym} 背離檢測失敗（中性放行）: {_e}")
+
         # 24h 漲跌幅
         clean_base = sym.replace("USDT", "").replace("-", "").upper()
         price_24h = item.get("priceChange24h") if isinstance(item.get("priceChange24h"), (int, float)) else None
@@ -7013,6 +7063,11 @@ def fetch_position_change():
             "rsi_desc": rsi_desc,
             "reason": reason,
             "funding_rate": funding_rate,
+            # 勝率強化欄位：smart money + CVD（grade 層做硬過濾與加分）
+            "smart_money": _smart_money_pack.get("smart_money"),
+            "stable_oi_chg": _smart_money_pack.get("stable_chg"),
+            "coin_oi_chg": _smart_money_pack.get("coin_chg"),
+            "cvd_divergence": _cvd_div,
             "vwap_2h": tech.get("vwap_2h") if tech else None,
             # _scan_ts = 1H OI 首次偵測時間（process_single_symbol 打上），保留原始時間
             # 若 item 無此欄位（舊路徑），以當前時間補足
