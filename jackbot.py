@@ -3640,13 +3640,12 @@ MAIN_COINS = {"BTC", "ETH", "SOL"}  # 主流幣：1H OI > 4% 即達標
 MTF_VOLUME_MIN_USD  = 9_990_000    # 999 萬 USD（過濾低流動性/單一莊家畫門）
 
 # ── 1H OI 扳機門檻（動態分層，依幣種流動性調整）────────────────────────
-# 主流幣：2.5% | 高流動性山寨（24h>50M）：4% | 其他小幣：5%
-# （略降門檻以保留早期建倉；過高易只剩「已噴出」的車尾訊號）
-OI_THRESHOLD_MAIN   = 2.5           # 主流幣門檻
-OI_THRESHOLD_HIGH_LIQ = 4.0        # 高流動性山寨（24h 成交值 > 50M USD）
-OI_THRESHOLD_SMALL  = 5.0          # 其他小幣種
+# 嚴格版：主流 4% | 高流動山寨 6% | 其他小幣 8%（減少雜訊）
+OI_THRESHOLD_MAIN   = 4.0           # 主流幣門檻
+OI_THRESHOLD_HIGH_LIQ = 6.0        # 高流動性山寨（24h 成交值 > 50M USD）
+OI_THRESHOLD_SMALL  = 8.0          # 其他小幣種
 HIGH_LIQ_VOLUME_USD = 50_000_000   # 24h 成交值 > 50M 視為高流動性
-OI_THRESHOLD_1H     = 4.0          # 向後相容預設值（實際由 _get_oi_threshold_for_item 動態決定）
+OI_THRESHOLD_1H     = 5.0          # 向後相容預設值（實際由 _get_oi_threshold_for_item 動態決定）
 PRICE_THRESHOLD_1H  = 1.5           # 1H 價格扳機門檻
 
 # ── 風報比：1R = |進場價 − 止損價|；TP 為 1R 的倍數（與推播 R 標示一致）──────
@@ -3795,10 +3794,10 @@ PRICE_THRESHOLD_30M = PRICE_THRESHOLD_1H
 
 def _get_oi_threshold_for_item(item: Dict) -> float:
     """
-    動態 OI 門檻：依幣種流動性分層。
-    - 主流幣 (BTC/ETH/SOL)：2.5%
-    - 高流動性山寨（24h 成交值 > 50M USD）：4%
-    - 其他小幣種：5%
+    動態 OI 門檻：依幣種流動性分層（嚴格版）。
+    - 主流幣 (BTC/ETH/SOL)：4%
+    - 高流動性山寨（24h 成交值 > 50M USD）：6%
+    - 其他小幣種：8%
     """
     sym = item.get("symbol") or item.get("coin") or ""
     base = str(sym).replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
@@ -4046,7 +4045,7 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
     is_1h_bull = cat_1h in ("long_open", "short_cover")
     is_1h_bear = cat_1h in ("short_open", "long_close")
     # 僅攔「1H 多頭陣營 vs 30m 空方主動建倉」等硬對做；回調類 long_close / short_cover 不視為衝突。
-    # （與 _calc_signal_grade A 級門檻 ≥50 並用時，tier2 弱共振較不易被分數卡死。）
+    # （與 _calc_signal_grade A 級門檻 ≥60 並用；低分雜訊已收緊。）
     step2_conflict = (
         (is_1h_bull and cat_30m == "short_open") or
         (is_1h_bear and cat_30m == "long_open")
@@ -4419,13 +4418,18 @@ def detect_trap_setup(oi_candles: list, trap_type: str, kline_candles: Optional[
 
 def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     """
-    計算訊號綜合評級（S / A / R；B 級不推播；順勢 A 級門檻為 score≥50）。
+    計算訊號綜合評級（S / A / R / B），含 4H 趨勢對齊 (Trend Alignment)。
     返回 (grade_str, score_int, brief_reason_str, already_moving_bool, motion_note_str)
 
-    ── R 級（優先判斷）──────────────────────────────────────────────────
-      R = 逆勢左側・摸頭摸底
-          做多但現價在 4H EMA20 下方 → 摸底
-          做空但現價在 4H EMA20 上方 → 摸頭
+    ── 4H 天候（is_above_4h_ema）────────────────────────────────────────
+      順勢：做多/偏多類 且 價在 4H EMA 上；做空/偏空類 且 價在 4H EMA 下
+      逆勢：與上相反（左側摸底/摸頭）
+
+    ── 分級（先算滿分流程分數，再依 4H 對齊分流）──────────────────────────
+      S：score ≥ 80 且 順應 4H
+      A：score ≥ 60 且 順應 4H（或 4H 未知但 score≥60：不視為逆勢，給 A）
+      R：score ≥ 60 且 明確違背 4H（逆勢左側，勝率較低、賠率思維，嚴控倉位）
+      B：score < 60 → 不推播
 
     ── 順勢訊號評分（滿分 100）─────────────────────────────────────────
       1. 訊號版本強度    (max 40) ── confirmed=40 / tier2=20 / potential=10
@@ -4435,15 +4439,9 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
       5. 1H OI 強度      (max 10) ── >8%=10 / 5-8%=7 / 3-5%=5 / <3%=2
       6. 趨勢情境        (−15~+15) ── 下跌段做多/上漲段做空=+15；上漲段做多/下跌段做空=−10
       7. 跨類別互確認    (max 20) ── 同輪出現互補訊號（嘎空+多開 / 出貨+空開）加分
+      8. 大盤敬畏：做多且 BTC 1H<0 或 做空且 BTC 1H>0 → 強制 −10
 
-    ── 車已發動偵測（1H 價格已大漲/大跌）───────────────────────────────
-      做多 + 1H 漲幅 > +5%：行情先行，限制最高 A 級，推播加警示
-      做空 + 1H 跌幅 < −5%：行情先行，限制最高 A 級，推播加警示
-
-    ── 等級門檻（順勢訊號，僅 S/A/R，無 B）────────────────────────────────
-      S ≥ 80  訊號極強・三層共振＋情境完美＋互確認
-      A ≥ 50  訊號可推播（避免 confirmed+3框=58 分仍被當 B 丟棄）
-      < 50    不推播（B 級）
+    ── 車已發動 / 大盤逆風：分數硬上限 74（最高 A）──────────────────────
     """
     # ══════════════════════════════════════════════════════════════
     # 第一步：硬過濾（勝率優先）→ 直接 B 級（不推播）
@@ -4469,17 +4467,17 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         return "B", 0, "🥈 *B 級* CVD 背離方向相反（主力吸收/出貨，風險高）", False, ""
 
     # ══════════════════════════════════════════════════════════════
-    # 第二步：判斷逆勢左側 → R 級
+    # 第二步：4H 趨勢對齊（供最後 S/A/R 分流；分數門檻與逆勢 R 一併判定）
     # ══════════════════════════════════════════════════════════════
     is_above_4h = x.get("is_above_4h_ema")
-    _is_counter_trend = (
-        (is_above_4h is True  and not is_bull_sig) or
-        (is_above_4h is False and     is_bull_sig)
+    _align_4h = (
+        (is_above_4h is True and is_bull_sig) or
+        (is_above_4h is False and (not is_bull_sig))
     )
-    if _is_counter_trend:
-        _dir_label = "摸頭・逆勢做空" if not is_bull_sig else "摸底・逆勢做多"
-        brief = f"⚡ *R 級* 逆勢左側（{_dir_label}，嚴控倉位）"
-        return "R", 0, brief, False, ""
+    _counter_4h = (
+        (is_above_4h is True and (not is_bull_sig)) or
+        (is_above_4h is False and is_bull_sig)
+    )
 
     # ══════════════════════════════════════════════════════════════
     # 第三步：車已發動偵測（行情已先行）
@@ -4734,23 +4732,54 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         score += 12
         reasons.append(f"籌碼陷阱跡象({_trap_steps}/3步)")
 
-    # ── 評級（S / A / B；車已發動或大盤逆風 → 上限 A）────────────
+    # ── 11. 大盤 (BTC) 敬畏：與訊號方向逆風時強制扣分 ─────────────────
+    try:
+        _btc_1h_pen = float(_btc_1h_pct) if _btc_1h_pct is not None else None
+    except (TypeError, ValueError):
+        _btc_1h_pen = None
+    if _btc_1h_pen is not None:
+        if is_bull_sig and _btc_1h_pen < 0:
+            score -= 10
+            reasons.append(f"BTC1H弱勢({_btc_1h_pen:+.2f}%)")
+        elif (not is_bull_sig) and _btc_1h_pen > 0:
+            score -= 10
+            reasons.append(f"BTC1H強勢({_btc_1h_pen:+.2f}%)")
+
+    # ── 評級（S / A / R / B；車已發動或大盤逆風 → 上限 A）────────────
     score = max(0, min(100, score))
     if _already_moving or _macro_block_s:
         score = min(score, 74)   # 車已發動或大盤明顯逆風：硬上限 74 分 = 最高 A 級
 
-    if score >= 80:
+    if score < 60:
+        grade = "B"
+        grade_badge = "🥈 *B 級*"
+        grade_desc = "訊號不足（不推播）"
+        brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
+        return grade, score, brief, _already_moving, _motion_note
+
+    # score ≥ 60：依 4H 順逆分流 S/A/R
+    _dir_label = "摸頭・逆勢做空" if not is_bull_sig else "摸底・逆勢做多"
+    if _counter_4h:
+        grade = "R"
+        brief = (
+            f"⚡ *R 級* 逆勢左側（{_dir_label}，嚴控倉位）"
+            f"（{'・'.join(reasons[:3])}）"
+        )
+        return grade, score, brief, _already_moving, _motion_note
+
+    if _align_4h and score >= 80:
         grade = "S"
         grade_badge = "🏆 *S 級*"
-        grade_desc = "訊號極強"
-    elif score >= 50:
+        grade_desc = "訊號極強・順勢"
+    elif _align_4h or (is_above_4h is None):
+        # 4H 順勢，或無 4H 資料（不視為逆勢）：60+ → A
+        grade = "A"
+        grade_badge = "🥇 *A 級*"
+        grade_desc = "訊號強" if _align_4h else "訊號強（4H未確認）"
+    else:
         grade = "A"
         grade_badge = "🥇 *A 級*"
         grade_desc = "訊號強"
-    else:
-        grade = "B"  # 不推播，build_report_message_tiered 會跳過
-        grade_badge = "🥈 *B 級*"
-        grade_desc = "訊號中等"
 
     brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
     return grade, score, brief, _already_moving, _motion_note
