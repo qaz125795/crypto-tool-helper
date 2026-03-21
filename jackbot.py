@@ -5021,6 +5021,10 @@ def build_report_message_tiered(
 
         # 提早評級：B 級不推播，直接跳過（節省 entry/SL/TP 計算與訊息組裝）
         _grade, _grade_score, _grade_brief, _already_moving, _motion_note = _calc_signal_grade(x, is_bull_sig)
+        try:
+            x["score"] = int(round(float(_grade_score)))
+        except (TypeError, ValueError):
+            x["score"] = 0
         if _grade == "B":
             continue
 
@@ -5237,7 +5241,11 @@ def build_report_message_tiered(
 
         # ─ 標題行 ─（顯示基礎幣名，無 USDT 後綴；_copy_sym 供操作計畫區使用）
         _copy_sym = sym if sym.endswith("USDT") else f"{sym_base}USDT"
-        msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` {_badge_emo}")
+        try:
+            _score = int(round(float(x.get("score", 0))))
+        except (TypeError, ValueError):
+            _score = 0
+        msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
         msg_lines.append(_grade_brief)
         msg_lines.append(_ver_label)
         msg_lines.append("")
@@ -5366,7 +5374,7 @@ def build_report_message_tiered(
         if _grade == "S":
             # S 級速報：僅標的 + 操作計畫（簡短版）
             _s_short: List[str] = []
-            _s_short.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}`")
+            _s_short.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分)")
             _s_short.append("")
             _s_short.append("🎯 *操作計畫：*")
             if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
