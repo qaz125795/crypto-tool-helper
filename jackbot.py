@@ -4427,9 +4427,9 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
 
     ── 分級（先算滿分流程分數，再依 4H 對齊分流）──────────────────────────
       S：score ≥ 80 且 順應 4H
-      A：score ≥ 60 且 順應 4H（或 4H 未知但 score≥60：不視為逆勢，給 A）
+      A：score ≥ 60 且 順應 4H
       R：score ≥ 60 且 明確違背 4H（逆勢左側，勝率較低、賠率思維，嚴控倉位）
-      B：score < 60 → 不推播
+      B：score < 60，或 4H 天候無法確認（is_above_4h_ema is None）→ 不推播
 
     ── 順勢訊號評分（滿分 100）─────────────────────────────────────────
       1. 訊號版本強度    (max 40) ── confirmed=40 / tier2=20 / potential=10
@@ -4767,19 +4767,28 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         )
         return grade, score, brief, _already_moving, _motion_note
 
+    # 4H 無法確認：不給 S/A/R，一律不推播（減少雜訊）
+    if is_above_4h is None:
+        grade = "B"
+        grade_badge = "🥈 *B 級*"
+        grade_desc = "4H天候未確認（不推播）"
+        brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
+        return grade, score, brief, _already_moving, _motion_note
+
     if _align_4h and score >= 80:
         grade = "S"
         grade_badge = "🏆 *S 級*"
         grade_desc = "訊號極強・順勢"
-    elif _align_4h or (is_above_4h is None):
-        # 4H 順勢，或無 4H 資料（不視為逆勢）：60+ → A
-        grade = "A"
-        grade_badge = "🥇 *A 級*"
-        grade_desc = "訊號強" if _align_4h else "訊號強（4H未確認）"
-    else:
+    elif _align_4h:
         grade = "A"
         grade_badge = "🥇 *A 級*"
         grade_desc = "訊號強"
+    else:
+        grade = "B"
+        grade_badge = "🥈 *B 級*"
+        grade_desc = "狀態異常（不推播）"
+        brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
+        return grade, score, brief, _already_moving, _motion_note
 
     brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
     return grade, score, brief, _already_moving, _motion_note
@@ -7238,18 +7247,33 @@ def fetch_position_change():
     for x in all_top:
         x["volume_usd"] = x.get("_volume_usd") or x.get("_cg_volume_usd") or 0
 
+    # 訊號版本門檻：僅保留「確定籌碼」與「衰竭反轉」（關閉 tier2、潛在/pullback 等）
+    _ALLOW_PUSH_SIGNAL_VERSIONS = frozenset({"confirmed", "exhaustion_reversal"})
+    _pre_ver_filt = len(all_top)
+    all_top = [
+        x for x in all_top
+        if (x.get("signal_version") or "") in _ALLOW_PUSH_SIGNAL_VERSIONS
+    ]
+    if _pre_ver_filt - len(all_top) > 0:
+        logger.info(
+            f"[版本門檻] 淘汰 {_pre_ver_filt - len(all_top)} 個非 confirmed/衰竭反轉，"
+            f"剩餘 {len(all_top)} 個"
+        )
+
     _confirmed_cnt = sum(1 for x in all_top if x.get("signal_version") == "confirmed")
+    _exhaust_cnt   = sum(1 for x in all_top if x.get("signal_version") == "exhaustion_reversal")
     _tier2_cnt     = sum(1 for x in all_top if x.get("signal_version") == "tier2")
-    _potential_cnt = len(all_top) - _confirmed_cnt - _tier2_cnt
     logger.info(
         f"[Enrichment 完成] {len(all_top)} 個訊號進入推播流程"
-        f"（✅確定籌碼 {_confirmed_cnt} | 🎯潛在機會 {_potential_cnt} | ⚠️觀察名單 {_tier2_cnt}）"
+        f"（✅確定籌碼 {_confirmed_cnt} | 🔥衰竭反轉 {_exhaust_cnt}"
+        f"{' | ⚠️觀察名單 ' + str(_tier2_cnt) if _tier2_cnt else ''}）"
     )
     if len(all_top) == 0:
         logger.info(f"本輪無符合條件訊號（1H OI≥動態門檻 & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
 
-    # 冷卻規則：同一幣 2h 內同方向不重複推（1H 格局，冷卻時間對應拉長）
-    COOLDOWN_HOURS = 4   # 同幣同方向 4h 冷卻（Google 建議：1H 波段策略最佳間隔）
+    # 冷卻規則：同幣同方向 N 小時內不重複推；同輪每方向最多 M 檔（強籌碼優先）
+    COOLDOWN_HOURS = 8   # 同幣同方向 8h 冷卻（拉長以降低重複推播）
+    MAX_SIGNALS_PER_DIRECTION_PER_ROUND = 2  # 本輪「多」「空」各最多保留檔數
     HISTORY_HOURS = 24   # 冷卻歷史保留 24h（每日自動清理）
 
     def _item_direction(x: Dict) -> str:
@@ -7421,6 +7445,31 @@ def fetch_position_change():
     _skipped = len(all_top) - len(cooled_top)
     if _skipped > 0:
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
+
+    # 同輪限額：每方向（多/空）最多 N 檔，依 |1H OI%| 大者優先保留
+    def _oi_abs_round_cap(xx: Dict) -> float:
+        try:
+            return abs(float(xx.get("oiChange1h") or 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    _by_dir_lists: Dict[str, List] = {"多": [], "空": []}
+    for _cx in cooled_top:
+        _dkey = _item_direction(_cx)
+        if _dkey in _by_dir_lists:
+            _by_dir_lists[_dkey].append(_cx)
+    _cooled_limited: List = []
+    for _dkey in ("多", "空"):
+        _lst = _by_dir_lists[_dkey]
+        _lst.sort(key=_oi_abs_round_cap, reverse=True)
+        _cooled_limited.extend(_lst[:MAX_SIGNALS_PER_DIRECTION_PER_ROUND])
+    _cap_removed = len(cooled_top) - len(_cooled_limited)
+    if _cap_removed > 0:
+        logger.info(
+            f"[同輪限額] 每方向最多 {MAX_SIGNALS_PER_DIRECTION_PER_ROUND} 檔（依|1H OI|），"
+            f"剔除 {_cap_removed} 檔，剩餘 {len(_cooled_limited)} 檔"
+        )
+    cooled_top = _cooled_limited
 
     # ── 多所共識已移除（原 fetch_exchange_oi_consensus API 回傳資料與 15m 時間窗口不符，誤判多）────
     # is_global_consensus 欄位保留但固定為 False，is_premium 已不依賴此欄位
