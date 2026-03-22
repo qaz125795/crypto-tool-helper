@@ -3653,6 +3653,8 @@ TP1_R_MULTIPLIER = 1.0   # TP1 至少 1:1（相對於 1R）
 TP2_R_MULTIPLIER = 3.0  # TP2 延伸目標（須 > TP1）
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
 MIN_SL_PERCENT = 0.015  # 最小止損距離：one_r/進場 < 1.5% 時強制拉開（避免一碰就碎）
+# 綜合評分低於此不分級推播（S / A / R 皆不推）
+MIN_SIGNAL_PUSH_SCORE = 70
 
 
 def compute_structural_sl_tp(
@@ -4045,7 +4047,7 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
     is_1h_bull = cat_1h in ("long_open", "short_cover")
     is_1h_bear = cat_1h in ("short_open", "long_close")
     # 僅攔「1H 多頭陣營 vs 30m 空方主動建倉」等硬對做；回調類 long_close / short_cover 不視為衝突。
-    # （與 _calc_signal_grade A 級門檻 ≥60 並用；低分雜訊已收緊。）
+    # （與 _calc_signal_grade 推播門檻 ≥MIN_SIGNAL_PUSH_SCORE 並用。）
     step2_conflict = (
         (is_1h_bull and cat_30m == "short_open") or
         (is_1h_bear and cat_30m == "long_open")
@@ -4428,8 +4430,8 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     ── 分級（先算滿分流程分數，再依 4H 對齊分流）──────────────────────────
       S：score ≥ 80 且 順應 4H
       A：score ≥ 60 且 順應 4H
-      R：score ≥ 60 且 明確違背 4H（逆勢左側，勝率較低、賠率思維，嚴控倉位）
-      B：score < 60，或 4H 天候無法確認（is_above_4h_ema is None）→ 不推播
+      R：score ≥ MIN_SIGNAL_PUSH_SCORE 且 明確違背 4H（逆勢左側）
+      B：score < MIN_SIGNAL_PUSH_SCORE，或 4H 天候無法確認 → 不推播
 
     ── 順勢訊號評分（滿分 100）─────────────────────────────────────────
       1. 訊號版本強度    (max 40) ── confirmed=40 / tier2=20 / potential=10
@@ -4750,14 +4752,14 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     if _already_moving or _macro_block_s:
         score = min(score, 74)   # 車已發動或大盤明顯逆風：硬上限 74 分 = 最高 A 級
 
-    if score < 60:
+    if score < MIN_SIGNAL_PUSH_SCORE:
         grade = "B"
         grade_badge = "🥈 *B 級*"
-        grade_desc = "訊號不足（不推播）"
+        grade_desc = f"訊號不足（<{MIN_SIGNAL_PUSH_SCORE}分不推播）"
         brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
         return grade, score, brief, _already_moving, _motion_note
 
-    # score ≥ 60：依 4H 順逆分流 S/A/R
+    # score ≥ MIN：依 4H 順逆分流 S/A/R
     _dir_label = "摸頭・逆勢做空" if not is_bull_sig else "摸底・逆勢做多"
     if _counter_4h:
         grade = "R"
@@ -4798,11 +4800,17 @@ def build_report_message_tiered(
     enriched_items: List[Dict],
     processed_count: int = 0,
     oi_success_count: int = 0,
+    *,
+    sa_conflict_history: Optional[List[Dict]] = None,
+    sa_conflict_max_age_sec: float = 0.0,
+    pipeline_now_ts: float = 0.0,
 ) -> str:
     """
     【傑克 1H MTF 四層漏斗訊號推播】
     確定籌碼（四層共振）+ 潛在機會（順勢回踩/逆勢摸頂底）雙版本。
     技術指標基準：1H K 線（中期波段視角）。
+
+    sa_conflict_history：冷卻檔 history（含 grade），用於阻擋「先 S/A 順勢後又反向 R」。
     """
     def fmt_pct(num):
         if num is None or (isinstance(num, float) and (num != num)):
@@ -5002,6 +5010,31 @@ def build_report_message_tiered(
         else:
             _xi["_cross_confirm"] = False
 
+    # 敘事防火牆：近 N 秒內曾對該幣推過 S/A「順勢」的方向集合（與冷卻檔 grade 欄配合）
+    def _hist_sym_norm(_s: str) -> str:
+        if not _s:
+            return ""
+        return str(_s).replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+
+    sa_hist_dirs: Dict[str, Set[str]] = {}
+    if sa_conflict_history and sa_conflict_max_age_sec > 0 and pipeline_now_ts > 0:
+        for _he in sa_conflict_history:
+            if not isinstance(_he, dict):
+                continue
+            _ts_e = float(_he.get("ts") or 0)
+            if pipeline_now_ts - _ts_e > sa_conflict_max_age_sec:
+                continue
+            _g_e = str(_he.get("grade") or "")
+            if _g_e not in ("S", "A"):
+                continue
+            _sn_e = _hist_sym_norm(str(_he.get("symbol") or ""))
+            _dr_e = str(_he.get("dir") or "")
+            if not _sn_e or _dr_e not in ("多", "空"):
+                continue
+            sa_hist_dirs.setdefault(_sn_e, set()).add(_dr_e)
+
+    trend_sa_dirs_this_run: Dict[str, Set[str]] = {}
+
     for x in enriched_items:
         sym = x.get("symbol", "")
         if not sym or sym in seen_syms:
@@ -5036,6 +5069,19 @@ def build_report_message_tiered(
             x["score"] = 0
         if _grade == "B":
             continue
+
+        # 曾推 S/A 順勢「空」後，時窗內不再推 R「多」（摸底）；反之亦然（摸頭 vs 順勢多）
+        if _grade == "R":
+            _cur_d = "多" if is_bull_sig else "空"
+            _opp = "空" if _cur_d == "多" else "多"
+            _hist_blk = _opp in sa_hist_dirs.get(sym_base, set())
+            _batch_blk = _opp in trend_sa_dirs_this_run.get(sym_base, set())
+            if _hist_blk or _batch_blk:
+                logger.info(
+                    f"[敘事防火牆] {sym_base}: 略過 R（{_cur_d}）— 已有 S/A 順勢{_opp}"
+                    f"（{'歷史' if _hist_blk else ''}{'+' if _hist_blk and _batch_blk else ''}{'本輪' if _batch_blk else ''}）"
+                )
+                continue
 
         oi30 = x.get("oiChange30m")
         p30 = x.get("priceChange30m")
@@ -5373,9 +5419,12 @@ def build_report_message_tiered(
             f"(TP1={TP1_R_MULTIPLIER}R)"
         )
         x["selected_for_push"] = True
+        x["_push_grade"] = _grade
         x["tier"]            = "train"
         x["stars"]           = 5
         x["dir"]             = "多" if is_bull_sig else "空"
+        if _grade in ("S", "A"):
+            trend_sa_dirs_this_run.setdefault(sym_base, set()).add(x["dir"])
 
         _msg_str = "\n".join(msg_lines)
         messages_out.append(_msg_str)
@@ -7275,6 +7324,8 @@ def fetch_position_change():
     COOLDOWN_HOURS = 8   # 同幣同方向 8h 冷卻（拉長以降低重複推播）
     MAX_SIGNALS_PER_DIRECTION_PER_ROUND = 2  # 本輪「多」「空」各最多保留檔數
     HISTORY_HOURS = 24   # 冷卻歷史保留 24h（每日自動清理）
+    # 順勢 S/A 推過後，此時間內不推「反向」R（避免先空後又 R 摸底等矛盾敘事）
+    TREND_VS_R_OPPOSITE_HOURS = 18
 
     def _item_direction(x: Dict) -> str:
         """只回傳 多/空。優先用 build_report 已設定的 dir 欄位，其次用 category，最後才解析 signal_label。"""
@@ -7587,7 +7638,14 @@ def fetch_position_change():
     # 僅在「實際有至少一則訊號」時才推主報表；無訊號或全被風報比篩掉 → 不推，安靜
     has_any = False
     if cooled_top:
-        msg, has_any, push_count, s_grade_msgs = build_report_message_tiered(cooled_top, processed_count, oi_success_count)
+        msg, has_any, push_count, s_grade_msgs = build_report_message_tiered(
+            cooled_top,
+            processed_count,
+            oi_success_count,
+            sa_conflict_history=history,
+            sa_conflict_max_age_sec=TREND_VS_R_OPPOSITE_HOURS * 3600,
+            pipeline_now_ts=now_ts,
+        )
         if has_any:
             logger.info(
                 f"【推播總結】本輪最終推播 {push_count} 檔"
@@ -7624,7 +7682,11 @@ def fetch_position_change():
 
     # 冷卻用：僅「本輪實際有推播」的標的才寫入 history（selected_for_push 在 build_report_message_tiered 內設定）
     pairs_this_run = [
-        (_cooldown_symbol(x.get("symbol")), _item_direction(x))
+        (
+            _cooldown_symbol(x.get("symbol")),
+            _item_direction(x),
+            str(x.get("_push_grade") or ""),
+        )
         for x in cooled_top
         if x.get("symbol") and x.get("selected_for_push")
     ]
@@ -7657,7 +7719,11 @@ def fetch_position_change():
     # 寫回冷卻狀態（只保留 history，移除倉位追蹤）
     try:
         SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        new_entries = [{"symbol": s, "dir": d, "ts": int(now_ts)} for (s, d) in pairs_this_run if s]
+        new_entries = [
+            {"symbol": s, "dir": d, "grade": g, "ts": int(now_ts)}
+            for (s, d, g) in pairs_this_run
+            if s
+        ]
         history = history + new_entries
         history = [e for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= history_sec]
         state = {"history": history}
