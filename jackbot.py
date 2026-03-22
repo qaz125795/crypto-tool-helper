@@ -7324,8 +7324,8 @@ def fetch_position_change():
     COOLDOWN_HOURS = 8   # 同幣同方向 8h 冷卻（拉長以降低重複推播）
     MAX_SIGNALS_PER_DIRECTION_PER_ROUND = 2  # 本輪「多」「空」各最多保留檔數
     HISTORY_HOURS = 24   # 冷卻歷史保留 24h（每日自動清理）
-    # 順勢 S/A 推過後，此時間內不推「反向」R（避免先空後又 R 摸底等矛盾敘事）
-    TREND_VS_R_OPPOSITE_HOURS = 18
+    # 順勢 S/A 推過後，此時間內不推「反向」R（S 為主、R 為輔；避免敘事打架）
+    TREND_VS_R_OPPOSITE_HOURS = 12
 
     def _item_direction(x: Dict) -> str:
         """只回傳 多/空。優先用 build_report 已設定的 dir 欄位，其次用 category，最後才解析 signal_label。"""
