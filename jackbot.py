@@ -5303,17 +5303,16 @@ def build_report_message_tiered(
         msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
         msg_lines.append(_grade_brief)
 
-        # ─ 核心交易計畫（3 行）─
+        # ─ 核心交易計畫（含 TP2，最多 4 行）─
         _entry_disp = _entry_price if _entry_mode != "市價" else price
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
         _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
-        msg_lines.append(
-            f"進場 `{_fmt_price(_entry_disp)}`｜止損 `{_sl_txt}`｜TP1 `{_tp1_txt}`"
-        )
+        _tp2_txt = _fmt_price(tp2) if tp2 is not None else None
+        msg_lines.append(f"進場 `{_fmt_price(_entry_disp)}`｜止損 `{_sl_txt}`｜TP1 `{_tp1_txt}`")
+        if _tp2_txt:
+            msg_lines.append(f"TP2 `{_tp2_txt}`  +`{TP2_R_MULTIPLIER:.1f}R`")
         _exec_mode = "限價" if _entry_mode != "市價" else "市價"
-        msg_lines.append(
-            f"RR 1:{TP1_R_MULTIPLIER:.1f}｜4H:{_macro_trend}｜進場:{_exec_mode}"
-        )
+        msg_lines.append(f"RR 1:`{TP1_R_MULTIPLIER:.1f}`｜4H:{_macro_trend}｜進場:{_exec_mode}")
         msg_lines.append(f"理由：{_strategy_comment}")
 
         # ─ 風險與環境（有觸發才顯示）─
