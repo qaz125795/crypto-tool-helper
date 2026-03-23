@@ -20,6 +20,7 @@ import random
 import contextlib
 import pandas as pd
 import numpy as np
+from kline_card_renderer import fetch_ohlc_5m, fetch_coinglass_oi_5m, render_kline_oi_card
 
 # 台灣台北時區（UTC+8）
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -490,6 +491,44 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
             return False
     except Exception as e:
         logger.error(f"發送 Telegram 訊息失敗: {str(e)}")
+        return False
+
+
+def send_telegram_photo(
+    photo_path: str,
+    caption: str,
+    thread_id: int,
+    parse_mode: str = "Markdown",
+    reply_markup: Optional[Dict] = None,
+) -> bool:
+    """發送圖片到 Telegram（sendPhoto；caption 可能超出上限時，外層可改用 sendMessage 備援）"""
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
+    payload = {
+        "chat_id": CHAT_ID,
+        "message_thread_id": thread_id,
+        "caption": caption,
+        "disable_web_page_preview": True,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    try:
+        with open(photo_path, "rb") as f:
+            files = {"photo": f}
+            resp = requests.post(url, data=payload, files=files, timeout=30)
+        if resp.status_code == 200:
+            result = resp.json()
+            if result.get("ok"):
+                logger.info("Telegram 圖片發送成功")
+                return True
+            logger.error(f"Telegram sendPhoto API 錯誤: {result}")
+            return False
+        logger.error(f"Telegram sendPhoto HTTP 錯誤: {resp.status_code} - {resp.text}")
+        return False
+    except Exception as e:
+        logger.error(f"發送 Telegram 圖片失敗: {str(e)}")
         return False
 
 
@@ -4804,7 +4843,7 @@ def build_report_message_tiered(
     sa_conflict_history: Optional[List[Dict]] = None,
     sa_conflict_max_age_sec: float = 0.0,
     pipeline_now_ts: float = 0.0,
-) -> str:
+) -> tuple:
     """
     【傑克 1H MTF 四層漏斗訊號推播】
     確定籌碼（四層共振）+ 潛在機會（順勢回踩/逆勢摸頂底）雙版本。
@@ -4990,6 +5029,7 @@ def build_report_message_tiered(
     messages_out: List[str] = []
     grade_per_msg: List[str] = []   # 與 messages_out 同步，記錄每則訊號的評級
     s_grade_msgs: List[str] = []    # S 級訊號獨立收集，供額外推播
+    cards_payload: List[Dict[str, Any]] = []  # 每檔一張圖所需資料
     push_count = 0
     has_any = False
     seen_syms: set = set()
@@ -5302,6 +5342,9 @@ def build_report_message_tiered(
             _score = 0
         msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
         msg_lines.append(_grade_brief)
+        # 冷卻視窗內「反向 S 信號」：允許推播，但提醒使用者時間線上發生過方向切換
+        if x.get("cooldown_reverse_recent") and _grade == "S":
+            msg_lines.append("🧠 冷卻期間反向出現 S：已允許推播（注意敘事切換）")
 
         # ─ 核心交易計畫（含 TP2，最多 4 行）─
         _entry_disp = _entry_price if _entry_mode != "市價" else price
@@ -5347,6 +5390,27 @@ def build_report_message_tiered(
 
         _msg_str = "\n".join(msg_lines)
         messages_out.append(_msg_str)
+        # K 線卡片：caption 用原推播訊息文字不變；圖上用同一套 SL/TP/進場/主力均價位
+        try:
+            _entry_val = float(price) if _entry_mode == "市價" else float(_entry_price)
+        except Exception:
+            _entry_val = None
+        try:
+            _vwap_val = float(vwap_2h_val) if vwap_2h_val is not None else None
+        except Exception:
+            _vwap_val = None
+        cards_payload.append(
+            {
+                "symbol_base": sym_base,
+                "caption": _msg_str,
+                "direction_is_long": is_bull_sig,
+                "sl": sl,
+                "tp1": tp1,
+                "tp2": tp2,
+                "entry": _entry_val,
+                "vwap": _vwap_val,
+            }
+        )
         grade_per_msg.append(_grade)
         push_count += 1
         has_any = True
@@ -5361,7 +5425,7 @@ def build_report_message_tiered(
             f"🕐 {now_str}  條件：1H OI≥動態門檻(主流4%/高流動6%/小幣8%) & 量≥{MTF_VOLUME_MIN_USD/1e6:.0f}M & MTF共振\n"
             f"繼續監控中..."
         )
-        return no_sig_msg, False, 0
+        return no_sig_msg, False, 0, [], []
 
     # 收集各訊號的 emoji，組成 header 彙總列
     pushed_items = [
@@ -5409,7 +5473,7 @@ def build_report_message_tiered(
     body = sep.join(messages_out) + correlation_warn + _footer
 
     # ── 以下為舊版渲染殘留（已棄用，直接 return 跳過）──────────────
-    return header + body, has_any, push_count, s_grade_msgs
+    return header + body, has_any, push_count, s_grade_msgs, cards_payload
 
     long_dip = [x for x in enriched_items if x.get("zone") == ZONE_DIP and _is_bull(x) and (x.get("stars") or 0) >= 4]
     long_break = [x for x in enriched_items if x.get("zone") == ZONE_BREAKOUT_LONG and _is_bull(x) and (x.get("stars") or 0) >= 4]
@@ -7372,6 +7436,9 @@ def fetch_position_change():
             continue
         sym_norm = _cooldown_symbol(sym)
         cur_dir = _item_direction(x)
+        # 冷卻視窗內是否剛推過「反向」：同標的、異方向（允許推播，但需要提醒）
+        _opp_dir = "空" if cur_dir == "多" else "多"
+        x["cooldown_reverse_recent"] = (sym_norm, _opp_dir) in cooldown_symbol_dir_4h
 
         # 同幣同方向：COOLDOWN_HOURS 內阻擋重推
         if (sym_norm, cur_dir) in cooldown_symbol_dir_4h:
@@ -7530,7 +7597,7 @@ def fetch_position_change():
     # 僅在「實際有至少一則訊號」時才推主報表；無訊號或全被風報比篩掉 → 不推，安靜
     has_any = False
     if cooled_top:
-        msg, has_any, push_count, s_grade_msgs = build_report_message_tiered(
+        msg, has_any, push_count, s_grade_msgs, cards_payload = build_report_message_tiered(
             cooled_top,
             processed_count,
             oi_success_count,
@@ -7544,8 +7611,77 @@ def fetch_position_change():
                 f"（冷卻後候選 {len(cooled_top)} 個，RSI+風報比篩選後實推 {push_count} 個）"
                 f"，處理幣種 {processed_count} 個，OI 成功 {oi_success_count} 個"
             )
-            # ── 主報表（含全部訊號）──────────────────────────────────────
-            send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
+            # ── 每檔訊號一張 K 線卡片（caption 用原推播訊息文字不變）────────────────────
+            card_dir = (DATA_DIR / "kline_cards").resolve()
+            card_dir.mkdir(parents=True, exist_ok=True)
+
+            _ohlc_cache: Dict[str, Optional[List[Dict]]] = {}
+            _oi_cache: Dict[str, Optional[List[Dict]]] = {}
+
+            sent_cnt = 0
+            for idx, payload in enumerate(cards_payload or []):
+                sym_b = payload.get("symbol_base") or ""
+                if not sym_b:
+                    continue
+                caption_txt = payload.get("caption") or ""
+                if not caption_txt:
+                    continue
+
+                if sym_b not in _ohlc_cache:
+                    _ohlc_cache[sym_b] = fetch_ohlc_5m(sym_b, limit=60)
+                ohlc = _ohlc_cache.get(sym_b)
+
+                if sym_b not in _oi_cache:
+                    _oi_cache[sym_b] = fetch_coinglass_oi_5m(sym_b, limit=60)
+                oi = _oi_cache.get(sym_b)
+
+                # 若 K 線資料不足，仍至少推文字（不影響原推播）
+                img_path = str(card_dir / f"{sym_b}_{int(now_ts)}_{idx}.png")
+                if ohlc and len(ohlc) >= 10:
+                    try:
+                        render_kline_oi_card(
+                            symbol_base=sym_b,
+                            direction_is_long=bool(payload.get("direction_is_long")),
+                            ohlc_5m=ohlc,
+                            oi_5m=oi,
+                            sl=float(payload.get("sl") or 0),
+                            tp1=float(payload.get("tp1") or 0),
+                            tp2=float(payload.get("tp2") or 0),
+                            entry=float(payload.get("entry") or 0),
+                            vwap=payload.get("vwap"),
+                            out_path=img_path,
+                            title_line=f"{sym_b} | 5m K 線 + OI",
+                        )
+                        ok = send_telegram_photo(
+                            img_path,
+                            caption_txt,
+                            TG_THREAD_IDS['position_change'],
+                            parse_mode="Markdown",
+                        )
+                        if ok:
+                            sent_cnt += 1
+                        else:
+                            # caption 可能超長/格式衝突：退回文字推播，確保內容不變
+                            send_telegram_message(
+                                caption_txt,
+                                TG_THREAD_IDS['position_change'],
+                                parse_mode="Markdown",
+                            )
+                    except Exception as e:
+                        logger.warning(f"[K線卡片渲染/推送失敗] {sym_b}: {e}；改推文字")
+                        send_telegram_message(
+                            caption_txt,
+                            TG_THREAD_IDS['position_change'],
+                            parse_mode="Markdown",
+                        )
+                else:
+                    send_telegram_message(
+                        caption_txt,
+                        TG_THREAD_IDS['position_change'],
+                        parse_mode="Markdown",
+                    )
+
+            logger.info(f"[推播] 本輪已送出 {sent_cnt}/{len(cards_payload or [])} 張 K 線卡片")
         else:
             logger.info(
                 f"【未推播原因】本輪 {len(cooled_top)} 筆通過冷卻，"
