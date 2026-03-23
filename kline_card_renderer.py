@@ -373,26 +373,41 @@ def render_kline_oi_card(
         txt_show = txt if len(txt) <= 18 else (txt[:16] + "..")
         draw.text((x0 + 6, y0 + 2), txt_show, fill=col, font=font_label)
 
+    def draw_label_box(y: int, col: Tuple[int, int, int], label: str, value: float):
+        """
+        只畫右側標籤框（不畫橫向水平線）。
+        用於 EMA20 曲線的最後一點標示，避免你說的「變水平線」問題。
+        """
+        box_w, box_h = 120, 18
+        x0 = width - pad_right - box_w
+        x1 = width - pad_right
+        y = max(plot_top_y0 + 2, min(plot_top_y1 - 2, y))
+        y0 = max(plot_top_y0 + 2, y - box_h // 2)
+        y1 = min(plot_top_y1 - 2, y0 + box_h)
+        draw.rectangle([x0, y0, x1, y1], fill=(0, 0, 0), outline=col, width=2)
+        txt = f"{label}:{value:.4f}"
+        txt_show = txt if len(txt) <= 18 else (txt[:16] + "..")
+        draw.text((x0 + 6, y0 + 2), txt_show, fill=col, font=font_label)
+
     if title_line:
         draw.text((pad_left, 4), title_line[:80], fill=text_col, font=font_title)
 
-    draw_hline(sl, sl_col, "止損")
+    draw_hline(sl, sl_col, "SL")
     draw_hline(tp1, tp1_col, "TP1")
     draw_hline(tp2, tp2_col, "TP2")
-    draw_hline(entry, entry_col, "進場")
+    draw_hline(entry, entry_col, "Entry")
     if vwap is not None:
-        draw_hline(float(vwap), vwap_col, "均價")
+        draw_hline(float(vwap), vwap_col, "VWAP")
 
-    # EMA20：顯示多條均線
-    if ema20 is not None and isinstance(ema20, (int, float)) and float(ema20) > 0:
-        draw_hline(float(ema20), ema20_col, "EMA20")
+    # EMA20 曲線：依 5m closes 即時計算「真正的 EMA 線」
+    # 注意：不要再用 draw_hline 這種水平線，否則會跟你說的不符。
 
     if direction_is_long:
         if ema20_touch_low is not None and isinstance(ema20_touch_low, (int, float)) and float(ema20_touch_low) > 0:
-            draw_hline(float(ema20_touch_low), ema20_touch_col, "EMA回踩低")
+            draw_hline(float(ema20_touch_low), ema20_touch_col, "EMA_touch_low")
     else:
         if ema20_touch_high is not None and isinstance(ema20_touch_high, (int, float)) and float(ema20_touch_high) > 0:
-            draw_hline(float(ema20_touch_high), ema20_touch_col, "EMA回踩高")
+            draw_hline(float(ema20_touch_high), ema20_touch_col, "EMA_touch_high")
 
     if ema20_4h is not None and isinstance(ema20_4h, (int, float)) and float(ema20_4h) > 0:
         draw_hline(float(ema20_4h), ema20_4h_col, "4H_EMA20")
@@ -432,10 +447,41 @@ def render_kline_oi_card(
             body_bot = body_top + 2
         draw.rectangle([x0, body_top, x1, body_bot], fill=col)
 
-    # OI bars
+    # EMA20 曲線（沿著 5m K 線走）
+    closes_5m = [float(k["c"]) for k in ohlc_use if k.get("c") is not None]
+    if len(closes_5m) >= 2:
+        period = 20
+        alpha = 2.0 / (period + 1.0)
+        ema_vals: List[float] = []
+        ema_prev: Optional[float] = None
+        for c in closes_5m:
+            if ema_prev is None:
+                ema_prev = c
+            else:
+                ema_prev = (c - ema_prev) * alpha + ema_prev
+            ema_vals.append(float(ema_prev))
+
+        # 用線條疊在蠟燭圖上
+        prev_x = None
+        prev_y = None
+        for i, ev in enumerate(ema_vals[-60:]):
+            x_center = pad_left + int(i * candle_slot + candle_slot / 2)
+            y_e = y_price(float(ev))
+            y_e = max(plot_top_y0, min(plot_top_y1 - 1, y_e))
+            if prev_x is not None and prev_y is not None:
+                draw.line([(prev_x, prev_y), (x_center, y_e)], fill=ema20_col, width=2)
+            prev_x, prev_y = x_center, y_e
+
+        # 標籤：只標最後一點（不再畫水平線）
+        if ema_vals:
+            last_y = y_price(float(ema_vals[-1]))
+            last_y = max(plot_top_y0, min(plot_top_y1 - 1, last_y))
+            draw_label_box(last_y, ema20_col, "EMA20", float(ema_vals[-1]))
+
+    # OI bars（改用顏色區分漲/跌，較好讀）
     if oi_5m:
         oi_use = oi_5m[-60:]
-        oi_vals_use = [b.get("v") for b in oi_use]
+        oi_vals_use = [_safe_float(b.get("v"), None) for b in oi_use]
     else:
         oi_use = []
         oi_vals_use = []
@@ -444,6 +490,9 @@ def render_kline_oi_card(
             c = float(k.get("c") or 0) or 0
             amp = abs(c - o) / o if o else 0.0
             oi_vals_use.append(max(0.0, amp * 1000.0))
+
+    # 需要篩掉 None，避免 float/scale 崩潰
+    oi_vals_use = [v for v in oi_vals_use if v is not None]
 
     for i, v in enumerate(oi_vals_use[-60:]):
         try:
@@ -456,7 +505,10 @@ def render_kline_oi_card(
         x1 = x_center + bar_w // 2
         yv = y_oi(v_f)
         yv = max(plot_bot_y0, min(plot_bot_y1 - 1, yv))
-        draw.rectangle([x0, yv, x1, plot_bot_y1 - 1], fill=oi_col)
+        # 與前一根相比：上升/下降上色
+        prev_v = float(oi_vals_use[i - 1]) if i - 1 >= 0 else v_f
+        bar_col = oi_col if v_f >= prev_v else (255, 150, 90)
+        draw.rectangle([x0, yv, x1, plot_bot_y1 - 1], fill=bar_col)
 
     img.save(out_path)
     return out_path
