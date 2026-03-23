@@ -5290,11 +5290,11 @@ def build_report_message_tiered(
             _vol_line = ""  # 無成交值資料時不顯示此行，避免誤導
 
         # ══════════════════════════════════════════════════════════
-        # 組裝電報訊息（手機優先，去括號，結構清晰；B 級已於上方提早跳過）
+        # 組裝電報訊息（平衡版：可讀性優先，保留關鍵決策資訊）
         # ══════════════════════════════════════════════════════════
         msg_lines: List[str] = []
 
-        # ─ 標題行 ─（顯示基礎幣名，無 USDT 後綴；_copy_sym 供操作計畫區使用）
+        # ─ 標題行 ─
         _copy_sym = sym if sym.endswith("USDT") else f"{sym_base}USDT"
         try:
             _score = int(round(float(x.get("score", 0))))
@@ -5302,111 +5302,31 @@ def build_report_message_tiered(
             _score = 0
         msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
         msg_lines.append(_grade_brief)
-        msg_lines.append(_ver_label)
-        msg_lines.append("")
 
-        # ─ 宏觀天候 · 費率 · 成交值（有資料才顯示成交值行）─
-        msg_lines.append(_macro_line)
-        msg_lines.append(_fr_line)
-        if x.get("smart_money") is True:
-            msg_lines.append("🧠 聰明錢真實建倉")
+        # ─ 核心交易計畫（3 行）─
+        _entry_disp = _entry_price if _entry_mode != "市價" else price
+        _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
+        _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
+        msg_lines.append(
+            f"進場 `{_fmt_price(_entry_disp)}`｜止損 `{_sl_txt}`｜TP1 `{_tp1_txt}`"
+        )
+        _exec_mode = "限價" if _entry_mode != "市價" else "市價"
+        msg_lines.append(
+            f"RR 1:{TP1_R_MULTIPLIER:.1f}｜4H:{_macro_trend}｜進場:{_exec_mode}"
+        )
+        msg_lines.append(f"理由：{_strategy_comment}")
+
+        # ─ 風險與環境（有觸發才顯示）─
+        if _motion_note:
+            msg_lines.append(f"⚠️ {_motion_note}")
+        if x.get("_energy_exhausted"):
+            msg_lines.append("⚠️ 動能透支：僅限價，勿追市價")
+        if funding_rate is not None and isinstance(funding_rate, (int, float)):
+            _fr_val = funding_rate * 100
+            _fr_str = f"{_fr_val:+.4f}".rstrip("0").rstrip(".")
+            msg_lines.append(f"費率 `{_fr_str}%`")
         if _vol_line:
             msg_lines.append(_vol_line)
-        msg_lines.append("")
-
-        # ─ 籌碼共振漏斗 ─
-        msg_lines.append("📊 *籌碼漏斗：*")
-        if _mtf_desc:
-            msg_lines.append(_mtf_desc)
-        else:
-            msg_lines.append("  ❓ 無 MTF 數據")
-        # 4H OI 累積提示
-        oi_4h_val = x.get("oi_change_4h_pct")
-        if isinstance(oi_4h_val, (int, float)):
-            _abs_4h = abs(oi_4h_val)
-            if _abs_4h >= 5.0:
-                msg_lines.append(f"_4H OI {oi_4h_val:+.1f}% ⚠️ 偏末段，縮短目標_")
-            elif _abs_4h >= 2.5:
-                msg_lines.append(f"_4H OI {oi_4h_val:+.1f}% 🟡 中段，謹慎_")
-            else:
-                msg_lines.append(f"_4H OI {oi_4h_val:+.1f}% 🟢 初期，空間充足_")
-        msg_lines.append("")
-
-        # ─ 策略短評 ─
-        msg_lines.append(f"💡 {_strategy_comment}")
-        if _sig_version == "exhaustion_reversal":
-            msg_lines.append("_（空方/多方動能衰竭，出現獲利回補跡象，建議限價掛單）_")
-        if _reversal_hint:
-            msg_lines.append(f"_{_reversal_hint}_")
-        # 車已發動警示（行情已先行，追高/追低風險）
-        if _motion_note:
-            msg_lines.append(f"_{_motion_note}_")
-        # 動能透支/乖離過大：強制限價掛單，拒絕市價進場
-        if x.get("_energy_exhausted"):
-            msg_lines.append("_⚠️ 動能透支/乖離過大：請限價掛單於 EMA20，拒絕市價進場_")
-        # 跨類別互確認提示
-        if x.get("_cross_confirm"):
-            if is_bull_sig:
-                msg_lines.append("_✨ 本輪同時出現多方建倉＋空方回補，雙向力量共同推升，訊號互確認_")
-            else:
-                msg_lines.append("_✨ 本輪同時出現多方出貨＋空方建倉，雙向力量共同壓制，訊號互確認_")
-        # 誘多摸頭陷阱偵測備注（short_open 專屬）
-        _trap_note_str = x.get("_bull_trap_note", "")
-        if _trap_note_str:
-            msg_lines.append("")
-            msg_lines.append(_trap_note_str)
-        msg_lines.append("")
-
-        # ─ 操作計畫 ─（數字全部 backtick，手機點一下即可複製）
-        _sl_pct_str = f"  _{sl_pct_val:.1f}%_" if sl_pct_val is not None else ""
-        msg_lines.append("🎯 *操作計畫：*")
-
-        # 主力均價（VWAP 2h）：告訴用戶主力的平均持倉成本在哪，並顯示現價與均價差距%
-        if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
-            _vwap_pct = (float(price) - float(vwap_2h_val)) / float(vwap_2h_val) * 100
-            _vwap_vs = f" _（現價較均價 {_vwap_pct:+.1f}%）_"
-            msg_lines.append(f"📐 主力均價：`{_fmt_price(vwap_2h_val)}`{_vwap_vs}")
-
-        if _entry_mode == "市價":
-            msg_lines.append(f"💵 市價進場：`{_fmt_price(price)}`")
-        else:
-            msg_lines.append(f"💵 掛單進場：`{_fmt_price(_entry_price)}`")
-        if sl is not None:
-            msg_lines.append(
-                f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -{SL_R_LABEL:.1f}R "
-                f"_（1R＝|進場−止損|）_"
-            )
-        else:
-            msg_lines.append("🛡️ 止損：無法計算")
-        if tp1 is not None:
-            msg_lines.append(
-                f"💰 TP1：`{_fmt_price(tp1)}`  +{TP1_R_MULTIPLIER:.1f}R\n"
-                f"   _（觸發 TP1 請平倉一半，並將剩餘倉位止損推至保本價 Breakeven）_"
-            )
-        if tp2 is not None:
-            msg_lines.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +{TP2_R_MULTIPLIER:.1f}R")
-        if sl_pct_val is not None and sl_pct_val > 8.0:
-            msg_lines.append(f"_止損距離 {sl_pct_val:.1f}%，務必遵守建議進場價_")
-        msg_lines.append("")
-
-        # ─ 大盤提示（主流幣用 BTC，山寨優先參考 ETH）─
-        _ref_label = "BTC"
-        _ref_30m = _btc_30m_pct
-        _ref_1h = _btc_1h_pct
-
-        # 山寨與非 BTC：若有 ETH 大盤資料，優先使用 ETH
-        if sym_base not in ("BTC", "WBTC") and _eth_30m_pct is not None and _eth_1h_pct is not None:
-            _ref_label = "ETH"
-            _ref_30m = _eth_30m_pct
-            _ref_1h = _eth_1h_pct
-
-        if _ref_30m is not None and _ref_1h is not None:
-            _ref_weak = (_ref_30m < -0.3 and _ref_1h < 0)
-            _ref_strong = (_ref_30m > 0.3 and _ref_1h > 0)
-            if is_bull_sig and _ref_weak:
-                msg_lines.append(f"_🌐 {_ref_label} 偏弱 {_ref_1h:+.2f}% — OI 訊號有效但快進快出_")
-            elif not is_bull_sig and _ref_strong:
-                msg_lines.append(f"_🌐 {_ref_label} 偏強 {_ref_1h:+.2f}% — 逆勢空單風險較高，嚴守止損_")
 
         # ─ 儲存供後續使用 ─
         x["sl_price_str"]    = _fmt_price(sl)
@@ -5429,33 +5349,6 @@ def build_report_message_tiered(
         _msg_str = "\n".join(msg_lines)
         messages_out.append(_msg_str)
         grade_per_msg.append(_grade)
-        if _grade == "S":
-            # S 級速報：僅標的 + 操作計畫（簡短版）
-            _s_short: List[str] = []
-            _s_short.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分)")
-            _s_short.append("")
-            _s_short.append("🎯 *操作計畫：*")
-            if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
-                _vwap_pct_s = (float(price) - float(vwap_2h_val)) / float(vwap_2h_val) * 100
-                _s_short.append(f"📐 主力均價：`{_fmt_price(vwap_2h_val)}` _（現價較均價 {_vwap_pct_s:+.1f}%）_")
-            if _entry_mode == "市價":
-                _s_short.append(f"💵 市價進場：`{_fmt_price(price)}`")
-            else:
-                _s_short.append(f"💵 掛單進場：`{_fmt_price(_entry_price)}`")
-            if sl is not None:
-                _s_short.append(
-                    f"🛡️ 止損：`{_fmt_price(sl)}`{_sl_pct_str}  -{SL_R_LABEL:.1f}R"
-                )
-            else:
-                _s_short.append("🛡️ 止損：無法計算")
-            if tp1 is not None:
-                _s_short.append(
-                    f"💰 TP1：`{_fmt_price(tp1)}`  +{TP1_R_MULTIPLIER:.1f}R "
-                    f"_（觸發 TP1 平倉一半，止損推至保本 Breakeven）_"
-                )
-            if tp2 is not None:
-                _s_short.append(f"🏆 TP2：`{_fmt_price(tp2)}`  +{TP2_R_MULTIPLIER:.1f}R")
-            s_grade_msgs.append("\n".join(_s_short))
         push_count += 1
         has_any = True
         logger.info(
@@ -7652,21 +7545,6 @@ def fetch_position_change():
                 f"（冷卻後候選 {len(cooled_top)} 個，RSI+風報比篩選後實推 {push_count} 個）"
                 f"，處理幣種 {processed_count} 個，OI 成功 {oi_success_count} 個"
             )
-            # ── S 級速報：獨立推播（優先於主報表）────────────────────────
-            if s_grade_msgs:
-                _s_sep = f"\n{'─' * 20}\n"
-                _s_footer = f"\n{'─' * 20}\n⚠️ _計畫委託若超過 8 小時以上請撤單，代表已失效_"
-                _s_header = (
-                    f"🚨 *S 級速報*  本輪 {len(s_grade_msgs)} 個極強訊號\n"
-                    f"{'─' * 20}\n"
-                )
-                _s_body = _s_sep.join(s_grade_msgs) + _s_footer
-                send_telegram_message(
-                    _s_header + _s_body,
-                    TG_THREAD_IDS['position_change'],
-                    parse_mode="Markdown"
-                )
-                logger.info(f"[S級速報] 已推播 {len(s_grade_msgs)} 個 S 級訊號（獨立訊息）")
             # ── 主報表（含全部訊號）──────────────────────────────────────
             send_telegram_message(msg, TG_THREAD_IDS['position_change'], parse_mode="Markdown")
         else:
