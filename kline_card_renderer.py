@@ -49,6 +49,22 @@ def _load_cjk_font(font_size: int) -> ImageFont.ImageFont:
     return font
 
 
+def _normalize_base_symbol(symbol_base: str) -> str:
+    """
+    把 1000/1000000 倍數前綴的 meme 幣統一轉回基礎代號，
+    例如：1000000CHEEMS -> CHEEMS
+    """
+    clean = (symbol_base or "").replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+    # 常見合約倍數前綴（只在「字母在後面」的情境才剝離，避免誤傷）
+    for prefix in ("1000000", "1000"):
+        if clean.startswith(prefix) and len(clean) > len(prefix):
+            tail = clean[len(prefix) :]
+            if any(ch.isalpha() for ch in tail):
+                clean = tail
+                break
+    return clean
+
+
 def _safe_float(x, default=None):
     try:
         if x is None:
@@ -59,8 +75,8 @@ def _safe_float(x, default=None):
 
 
 def _fetch_binance_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dict]]:
-    clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
-    candidates = [f"{clean}USDT", f"1000{clean}USDT"]
+    clean = _normalize_base_symbol(symbol_base)
+    candidates = [f"{clean}USDT", f"1000{clean}USDT", f"1000000{clean}USDT"]
     for sym_pair in candidates:
         try:
             r = requests.get(
@@ -99,10 +115,10 @@ def _fetch_binance_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[D
 
 
 def _fetch_bybit_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dict]]:
-    clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+    clean = _normalize_base_symbol(symbol_base)
     interval_map = {"5m": "5"}
     bybit_interval = interval_map.get("5m", "5")
-    for sym_pair in [f"{clean}USDT", f"1000{clean}USDT"]:
+    for sym_pair in [f"{clean}USDT", f"1000{clean}USDT", f"1000000{clean}USDT"]:
         try:
             r = requests.get(
                 "https://api.bybit.com/v5/market/kline",
@@ -148,7 +164,7 @@ def _fetch_bybit_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dic
 
 
 def _fetch_bingx_spot_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dict]]:
-    clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+    clean = _normalize_base_symbol(symbol_base)
     sym_pair = f"{clean}-USDT"
     try:
         r = requests.get(
@@ -208,7 +224,7 @@ def fetch_coinglass_oi_5m(symbol_base: str, limit: int = 60) -> Optional[List[Di
     if not cg_api_key:
         return None
     cg_api_base = "https://open-api-v4.coinglass.com"
-    base_symbol = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+    base_symbol = _normalize_base_symbol(symbol_base)
     url = f"{cg_api_base}/api/futures/open-interest/aggregated-history"
     headers = {"CG-API-KEY": cg_api_key, "accept": "application/json"}
     try:
@@ -277,10 +293,11 @@ def render_kline_oi_card(
     width, height = 980, 520
     pad_left, pad_right = 70, 20
     pad_top, pad_bottom = 18, 28
-    top_h = 320
+    # 放大 K 線區塊、縮小 OI 柱狀區塊（讓上半部更好看）
+    top_h = 380
     bot_h = height - pad_top - pad_bottom - top_h
-    if bot_h < 110:
-        bot_h = 120
+    if bot_h < 70:
+        bot_h = 90
         top_h = height - pad_top - pad_bottom - bot_h
 
     bg = (14, 18, 33)
@@ -362,32 +379,7 @@ def render_kline_oi_card(
         y = max(plot_top_y0, min(plot_top_y1 - 1, y))
         draw.line([(pad_left, y), (width - pad_right, y)], fill=col, width=2)
 
-        box_w, box_h = 120, 18
-        x0 = width - pad_right - box_w
-        x1 = width - pad_right
-        y0 = max(plot_top_y0 + 2, y - box_h // 2)
-        y1 = min(plot_top_y1 - 2, y0 + box_h)
-        draw.rectangle([x0, y0, x1, y1], fill=(0, 0, 0), outline=col, width=2)
-        txt = f"{label}:{price:.4f}"
-        # 中文字被截斷會顯示異常；太長就簡單省略
-        txt_show = txt if len(txt) <= 18 else (txt[:16] + "..")
-        draw.text((x0 + 6, y0 + 2), txt_show, fill=col, font=font_label)
-
-    def draw_label_box(y: int, col: Tuple[int, int, int], label: str, value: float):
-        """
-        只畫右側標籤框（不畫橫向水平線）。
-        用於 EMA20 曲線的最後一點標示，避免你說的「變水平線」問題。
-        """
-        box_w, box_h = 120, 18
-        x0 = width - pad_right - box_w
-        x1 = width - pad_right
-        y = max(plot_top_y0 + 2, min(plot_top_y1 - 2, y))
-        y0 = max(plot_top_y0 + 2, y - box_h // 2)
-        y1 = min(plot_top_y1 - 2, y0 + box_h)
-        draw.rectangle([x0, y0, x1, y1], fill=(0, 0, 0), outline=col, width=2)
-        txt = f"{label}:{value:.4f}"
-        txt_show = txt if len(txt) <= 18 else (txt[:16] + "..")
-        draw.text((x0 + 6, y0 + 2), txt_show, fill=col, font=font_label)
+    # draw_hline 已移除右側水平線標籤框；EMA 的價位直接以文字訊息呈現（更人性）
 
     if title_line:
         draw.text((pad_left, 4), title_line[:80], fill=text_col, font=font_title)
@@ -396,8 +388,7 @@ def render_kline_oi_card(
     draw_hline(tp1, tp1_col, "TP1")
     draw_hline(tp2, tp2_col, "TP2")
     draw_hline(entry, entry_col, "Entry")
-    if vwap is not None:
-        draw_hline(float(vwap), vwap_col, "VWAP")
+    # 依你要求：卡片不顯示 VWAP 線（避免亂碼/干擾）
 
     # EMA20 曲線：依 5m closes 即時計算「真正的 EMA 線」
     # 注意：不要再用 draw_hline 這種水平線，否則會跟你說的不符。
@@ -472,11 +463,7 @@ def render_kline_oi_card(
                 draw.line([(prev_x, prev_y), (x_center, y_e)], fill=ema20_col, width=2)
             prev_x, prev_y = x_center, y_e
 
-        # 標籤：只標最後一點（不再畫水平線）
-        if ema_vals:
-            last_y = y_price(float(ema_vals[-1]))
-            last_y = max(plot_top_y0, min(plot_top_y1 - 1, last_y))
-            draw_label_box(last_y, ema20_col, "EMA20", float(ema_vals[-1]))
+        # 不在右側標籤框顯示 EMA 價位（由電報文字提供）
 
     # OI bars（改用顏色區分漲/跌，較好讀）
     if oi_5m:
@@ -507,6 +494,7 @@ def render_kline_oi_card(
         yv = max(plot_bot_y0, min(plot_bot_y1 - 1, yv))
         # 與前一根相比：上升/下降上色
         prev_v = float(oi_vals_use[i - 1]) if i - 1 >= 0 else v_f
+        # 讓柱狀圖更乾淨：上升藍、下降橘
         bar_col = oi_col if v_f >= prev_v else (255, 150, 90)
         draw.rectangle([x0, yv, x1, plot_bot_y1 - 1], fill=bar_col)
 

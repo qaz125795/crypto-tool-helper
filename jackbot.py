@@ -5346,23 +5346,24 @@ def build_report_message_tiered(
         if x.get("cooldown_reverse_recent") and _grade == "S":
             msg_lines.append("🧠 冷卻期間反向出現 S：已允許推播（注意敘事切換）")
 
-        # ─ 核心交易計畫（含 TP2，最多 4 行）─
-        _entry_disp = _entry_price if _entry_mode != "市價" else price
+        # ─ 核心交易計畫（人性化、可快速掃讀）─
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
         _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
         _tp2_txt = _fmt_price(tp2) if tp2 is not None else None
-        msg_lines.append(f"進場 `{_fmt_price(_entry_disp)}`｜止損 `{_sl_txt}`｜TP1 `{_tp1_txt}`")
+        msg_lines.append(f"止損 `{_sl_txt}`｜TP1 `{_tp1_txt}`")
         if _tp2_txt:
-            msg_lines.append(f"TP2 `{_tp2_txt}`  +`{TP2_R_MULTIPLIER:.1f}R`")
+            # 你說 TP2 不要顯示 R 倍數
+            msg_lines.append(f"TP2 `{_tp2_txt}`")
         _exec_mode = "限價" if _entry_mode != "市價" else "市價"
-        msg_lines.append(f"RR 1:`{TP1_R_MULTIPLIER:.1f}`｜4H:{_macro_trend}｜進場:{_exec_mode}")
+        _energy_exh = bool(x.get("_energy_exhausted"))
+        # 你說「動能透支」太容易矛盾/重複：改成掛單方式說明
+        _exec_note = "（EMA20 限價、不追市價）" if _energy_exh else ""
+        msg_lines.append(f"4H:{_macro_trend}｜掛單:{_exec_mode}{_exec_note}")
         msg_lines.append(f"理由：{_strategy_comment}")
 
         # ─ 風險與環境（有觸發才顯示）─
         if _motion_note:
             msg_lines.append(f"⚠️ {_motion_note}")
-        if x.get("_energy_exhausted"):
-            msg_lines.append("⚠️ 動能透支：僅限價，勿追市價")
         if funding_rate is not None and isinstance(funding_rate, (int, float)):
             _fr_val = funding_rate * 100
             _fr_str = f"{_fr_val:+.4f}".rstrip("0").rstrip(".")
