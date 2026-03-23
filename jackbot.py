@@ -4666,9 +4666,11 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     else:
         score += 2
 
-    # ── 5b. CVD 1h / Taker 與建倉方向不一致（扣分，取代一票否決）────────
+    # ── 5b. CVD 1h / Taker：雙確認加分、反向扣分 ──────────────────────────
     # 真盤中莊家常掛被動單接貨：市價賣出多 → CVD 負、Taker 賣壓高，仍可能是吸籌左側。
     _cvd_1h_chg = x.get("_cvd_1h")
+    _cvd_confirmed = bool(x.get("_cvd_confirmed", False))
+    _cvd_conflict_strong = bool(x.get("_cvd_conflict_strong", False))
     _taker_pct = x.get("_taker_ratio_15m")
     if _taker_pct is not None:
         try:
@@ -4676,6 +4678,9 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         except (TypeError, ValueError):
             _taker_pct = None
     if _cat == "long_open":
+        if _cvd_confirmed:
+            score += 8
+            reasons.append("CVD/Taker同向")
         if _cvd_1h_chg is not None and _cvd_1h_chg < 0:
             score -= 10
             reasons.append("CVD1h負(可能限價吸籌)")
@@ -4683,12 +4688,18 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
             score -= 5
             reasons.append("Taker賣壓主導")
     elif _cat == "short_open":
+        if _cvd_confirmed:
+            score += 8
+            reasons.append("CVD/Taker同向")
         if _cvd_1h_chg is not None and _cvd_1h_chg > 0:
             score -= 10
             reasons.append("CVD1h正(可能限價吸籌)")
         if _taker_pct is not None and _taker_pct > 55:
             score -= 5
             reasons.append("Taker買壓主導")
+    if _cvd_conflict_strong:
+        score -= 12
+        reasons.append("CVD/Taker強衝突")
 
     # ── 6. 趨勢情境評分（核心策略：找「布局中」而非「已發動」）──────
     # 策略邏輯：
@@ -7051,10 +7062,12 @@ def fetch_position_change():
             )
             continue
 
-        # ── CVD / Taker（順勢突破型）：改為評分扣分，不再一票否決 ──────────────
-        # 理由：被動掛單接貨時 CVD/Taker 常與「主動建倉」反向，但仍可能是強支撐吸籌。
-        # 分數在 _calc_signal_grade「5b」扣減；此處僅抓取數值並寫入 item 供評分使用。
+        # ── CVD / Taker（順勢突破型）：加入「雙確認 / 強衝突」結構 ──────────────
+        # 參考實戰判斷：方向一致（CVD + Taker 同向）才算主動資金真突破；
+        # 若兩者同時反向，視為「強衝突」，先降級訊號版本以提高勝率。
         _cvd_1h = None
+        _cvd_conflict_strong = False
+        _cvd_confirmed = False
         if cat in ("long_open", "short_open"):
             try:
                 time.sleep(0.15)
@@ -7067,13 +7080,35 @@ def fetch_position_change():
             except (TypeError, ValueError):
                 _taker_chk = None
             if cat == "long_open":
-                if (_cvd_1h is not None and _cvd_1h < 0) or (_taker_chk is not None and _taker_chk < 45):
+                _cvd_support = (_cvd_1h is not None and _cvd_1h > 0)
+                _taker_support = (_taker_chk is not None and _taker_chk >= 52)
+                _cvd_opp = (_cvd_1h is not None and _cvd_1h < 0)
+                _taker_opp = (_taker_chk is not None and _taker_chk < 45)
+                _cvd_confirmed = bool(_cvd_support and _taker_support)
+                _cvd_conflict_strong = bool(_cvd_opp and _taker_opp)
+                if _cvd_conflict_strong:
+                    logger.info(
+                        f"[CVD/Taker強衝突🚫] {sym}: 做多但 CVD1h={_cvd_1h} taker%={_taker_chk} "
+                        f"→ 雙反向，降級為觀察名單以提高勝率"
+                    )
+                elif _cvd_opp or _taker_opp:
                     logger.info(
                         f"[CVD/Taker⚠️扣分] {sym}: 做多但 CVD1h={_cvd_1h} taker%={_taker_chk} "
                         f"→ 不封鎖，改由綜合評分扣減（可能限價吸籌）"
                     )
             else:  # short_open
-                if (_cvd_1h is not None and _cvd_1h > 0) or (_taker_chk is not None and _taker_chk > 55):
+                _cvd_support = (_cvd_1h is not None and _cvd_1h < 0)
+                _taker_support = (_taker_chk is not None and _taker_chk <= 48)
+                _cvd_opp = (_cvd_1h is not None and _cvd_1h > 0)
+                _taker_opp = (_taker_chk is not None and _taker_chk > 55)
+                _cvd_confirmed = bool(_cvd_support and _taker_support)
+                _cvd_conflict_strong = bool(_cvd_opp and _taker_opp)
+                if _cvd_conflict_strong:
+                    logger.info(
+                        f"[CVD/Taker強衝突🚫] {sym}: 做空但 CVD1h={_cvd_1h} taker%={_taker_chk} "
+                        f"→ 雙反向，降級為觀察名單以提高勝率"
+                    )
+                elif _cvd_opp or _taker_opp:
                     logger.info(
                         f"[CVD/Taker⚠️扣分] {sym}: 做空但 CVD1h={_cvd_1h} taker%={_taker_chk} "
                         f"→ 不封鎖，改由綜合評分扣減"
@@ -7086,6 +7121,11 @@ def fetch_position_change():
         #       → 做多時風險高（多頭爆倉拋售）；做空時是順風
         _effective_version = _mtf_result.get("version", "potential")
         _fr_crowding_note = ""
+        # CVD + Taker 強衝突：版本降級（後續版本門檻會濾掉），只保留更乾淨訊號
+        if _cvd_conflict_strong and _effective_version == "confirmed":
+            _effective_version = "tier2"
+            _fr_crowding_note = "CVD/Taker 強衝突（疑似被動吸收，先觀察）"
+
         if funding_rate is not None and isinstance(funding_rate, (int, float)):
             _fr_abs = abs(funding_rate)
             _is_short_sig = cat in ("long_close", "short_open")
@@ -7196,6 +7236,8 @@ def fetch_position_change():
             "cvd_divergence": _cvd_div,
             # 1h CVD 變化（僅 long_open/short_open 有值），供 _calc_signal_grade 5b 扣分
             "_cvd_1h": _cvd_1h,
+            "_cvd_confirmed": _cvd_confirmed,
+            "_cvd_conflict_strong": _cvd_conflict_strong,
             "vwap_2h": tech.get("vwap_2h") if tech else None,
             # _scan_ts = 1H OI 首次偵測時間（process_single_symbol 打上），保留原始時間
             # 若 item 無此欄位（舊路徑），以當前時間補足
