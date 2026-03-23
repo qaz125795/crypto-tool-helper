@@ -393,25 +393,14 @@ def render_kline_oi_card(
     if title_line:
         draw.text((pad_left, 4), title_line[:80], fill=text_col, font=font_title)
 
-    draw_hline(sl, sl_col, "SL")
-    draw_hline(tp1, tp1_col, "TP1")
-    draw_hline(tp2, tp2_col, "TP2")
-    draw_hline(entry, entry_col, "Entry")
+    # 依需求：卡片不顯示 TP/SL/Entry，只保留 VWAP + EMA20
     if vwap is not None:
         draw_hline(float(vwap), vwap_col, "VWAP")
 
     # EMA20 曲線：依 5m closes 即時計算「真正的 EMA 線」
     # 注意：不要再用 draw_hline 這種水平線，否則會跟你說的不符。
 
-    if direction_is_long:
-        if ema20_touch_low is not None and isinstance(ema20_touch_low, (int, float)) and float(ema20_touch_low) > 0:
-            draw_hline(float(ema20_touch_low), ema20_touch_col, "EMA_touch_low")
-    else:
-        if ema20_touch_high is not None and isinstance(ema20_touch_high, (int, float)) and float(ema20_touch_high) > 0:
-            draw_hline(float(ema20_touch_high), ema20_touch_col, "EMA_touch_high")
-
-    if ema20_4h is not None and isinstance(ema20_4h, (int, float)) and float(ema20_4h) > 0:
-        draw_hline(float(ema20_4h), ema20_4h_col, "4H_EMA20")
+    # 不顯示 EMA20 回踩點 / 4H EMA20 水平線，避免圖上元素過多
 
     # candles
     # 60 根：只取最後 60
