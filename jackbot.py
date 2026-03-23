@@ -5409,6 +5409,10 @@ def build_report_message_tiered(
                 "tp2": tp2,
                 "entry": _entry_val,
                 "vwap": _vwap_val,
+                "ema20": x.get("ema20"),
+                "ema20_touch_low": x.get("ema20_touch_low"),
+                "ema20_touch_high": x.get("ema20_touch_high"),
+                "ema20_4h": x.get("ema20_4h"),
             }
         )
         grade_per_msg.append(_grade)
@@ -7637,7 +7641,7 @@ def fetch_position_change():
 
                 # 若 K 線資料不足，仍至少推文字（不影響原推播）
                 img_path = str(card_dir / f"{sym_b}_{int(now_ts)}_{idx}.png")
-                if ohlc and len(ohlc) >= 5:
+                if ohlc and len(ohlc) >= 2:
                     try:
                         render_kline_oi_card(
                             symbol_base=sym_b,
@@ -7649,6 +7653,10 @@ def fetch_position_change():
                             tp2=float(payload.get("tp2") or 0),
                             entry=float(payload.get("entry") or 0),
                             vwap=payload.get("vwap"),
+                            ema20=payload.get("ema20"),
+                            ema20_touch_low=payload.get("ema20_touch_low"),
+                            ema20_touch_high=payload.get("ema20_touch_high"),
+                            ema20_4h=payload.get("ema20_4h"),
                             out_path=img_path,
                             title_line=f"{sym_b} | 5m K 線 + OI",
                         )

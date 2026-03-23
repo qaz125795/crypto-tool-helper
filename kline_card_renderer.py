@@ -3,7 +3,50 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 import requests
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
+
+
+_FONT_CACHE: Dict[int, ImageFont.ImageFont] = {}
+
+
+def _load_cjk_font(font_size: int) -> ImageFont.ImageFont:
+    """
+    PIL 預設字型常不支援中文，會導致圖片內文字顯示「怪怪的」。
+    這裡嘗試常見 CJK 字型；找不到就回退到 PIL 預設字型。
+    """
+    cached = _FONT_CACHE.get(font_size)
+    if cached is not None:
+        return cached
+
+    candidates = [
+        # Windows
+        r"C:\Windows\Fonts\msyh.ttc",          # 微軟正黑體
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        r"C:\Windows\Fonts\mingliu.ttc",        # 明體
+        r"C:\Windows\Fonts\simhei.ttf",        # 黑體(可能存在 ttf)
+        # Linux (GitHub Actions / 多數容器)
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        # macOS
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    ]
+
+    for p in candidates:
+        try:
+            if os.path.exists(p):
+                font = ImageFont.truetype(p, font_size)
+                _FONT_CACHE[font_size] = font
+                return font
+        except Exception:
+            continue
+
+    font = ImageFont.load_default()
+    _FONT_CACHE[font_size] = font
+    return font
 
 
 def _safe_float(x, default=None):
@@ -30,7 +73,7 @@ def _fetch_binance_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[D
             raw = r.json()
             # 5m K 線用於畫圖；少於一定數量就直接當作失敗，避免畫面空白或 scaler 崩潰。
             # 原本門檻是 10，實務上不少幣會抓不到滿 10 根而導致整張卡片跳過。
-            if not isinstance(raw, list) or len(raw) < 5:
+            if not isinstance(raw, list) or len(raw) < 2:
                 continue
             out = []
             for row in raw[-limit:]:
@@ -48,7 +91,7 @@ def _fetch_binance_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[D
                         "v": float(v) if v is not None else 0.0,
                     }
                 )
-            if len(out) >= 5:
+            if len(out) >= 2:
                 return out
         except Exception:
             continue
@@ -77,7 +120,7 @@ def _fetch_bybit_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dic
             if j.get("retCode") != 0:
                 continue
             raw = j.get("result", {}).get("list", [])
-            if not isinstance(raw, list) or len(raw) < 5:
+            if not isinstance(raw, list) or len(raw) < 2:
                 continue
             raw = list(reversed(raw))[-limit:]
             out = []
@@ -97,7 +140,7 @@ def _fetch_bybit_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dic
                         "v": float(bar[5]) if bar[5] is not None else 0.0,
                     }
                 )
-            if len(out) >= 5:
+            if len(out) >= 2:
                 return out
         except Exception:
             continue
@@ -117,7 +160,7 @@ def _fetch_bingx_spot_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[Lis
             return None
         j = r.json()
         raw = j.get("data") if isinstance(j, dict) else j
-        if not isinstance(raw, list) or len(raw) < 5:
+        if not isinstance(raw, list) or len(raw) < 2:
             return None
         out = []
         for row in raw[-limit:]:
@@ -136,7 +179,7 @@ def _fetch_bingx_spot_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[Lis
                     "v": float(row[5]) if row[5] is not None else 0.0,
                 }
             )
-        if len(out) >= 5:
+        if len(out) >= 2:
             return out
     except Exception:
         return None
@@ -222,10 +265,14 @@ def render_kline_oi_card(
     entry: float,
     vwap: Optional[float],
     out_path: str,
+    ema20: Optional[float] = None,
+    ema20_touch_low: Optional[float] = None,
+    ema20_touch_high: Optional[float] = None,
+    ema20_4h: Optional[float] = None,
     title_line: str = "",
 ) -> str:
     """
-    用 PIL 畫：上半 K線、下半 OI 柱狀；並疊加水平線（SL/TP1/TP2/進場/VWAP）。
+    用 PIL 畫：上半 K線、下半 OI 柱狀；並疊加水平線（SL/TP1/TP2/進場/VWAP/EMA20）。
     """
     width, height = 980, 520
     pad_left, pad_right = 70, 20
@@ -246,10 +293,15 @@ def render_kline_oi_card(
     entry_col = (255, 200, 0)
     vwap_col = (90, 200, 255)
     oi_col = (110, 190, 255)
+    ema20_col = (185, 105, 255)         # 紫：1H EMA20
+    ema20_4h_col = (255, 195, 90)      # 金黃：4H EMA20
+    ema20_touch_col = (0, 200, 255)    # 青：EMA20 回踩錨點
     text_col = (220, 230, 255)
 
     img = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(img)
+    font_title = _load_cjk_font(18)
+    font_label = _load_cjk_font(14)
 
     plot_w = width - pad_left - pad_right
     plot_top_y0 = pad_top
@@ -317,10 +369,12 @@ def render_kline_oi_card(
         y1 = min(plot_top_y1 - 2, y0 + box_h)
         draw.rectangle([x0, y0, x1, y1], fill=(0, 0, 0), outline=col, width=2)
         txt = f"{label}:{price:.4f}"
-        draw.text((x0 + 6, y0 + 2), txt[:20], fill=col)
+        # 中文字被截斷會顯示異常；太長就簡單省略
+        txt_show = txt if len(txt) <= 18 else (txt[:16] + "..")
+        draw.text((x0 + 6, y0 + 2), txt_show, fill=col, font=font_label)
 
     if title_line:
-        draw.text((pad_left, 4), title_line[:80], fill=text_col)
+        draw.text((pad_left, 4), title_line[:80], fill=text_col, font=font_title)
 
     draw_hline(sl, sl_col, "止損")
     draw_hline(tp1, tp1_col, "TP1")
@@ -328,6 +382,20 @@ def render_kline_oi_card(
     draw_hline(entry, entry_col, "進場")
     if vwap is not None:
         draw_hline(float(vwap), vwap_col, "均價")
+
+    # EMA20：顯示多條均線
+    if ema20 is not None and isinstance(ema20, (int, float)) and float(ema20) > 0:
+        draw_hline(float(ema20), ema20_col, "EMA20")
+
+    if direction_is_long:
+        if ema20_touch_low is not None and isinstance(ema20_touch_low, (int, float)) and float(ema20_touch_low) > 0:
+            draw_hline(float(ema20_touch_low), ema20_touch_col, "EMA回踩低")
+    else:
+        if ema20_touch_high is not None and isinstance(ema20_touch_high, (int, float)) and float(ema20_touch_high) > 0:
+            draw_hline(float(ema20_touch_high), ema20_touch_col, "EMA回踩高")
+
+    if ema20_4h is not None and isinstance(ema20_4h, (int, float)) and float(ema20_4h) > 0:
+        draw_hline(float(ema20_4h), ema20_4h_col, "4H_EMA20")
 
     # candles
     # 60 根：只取最後 60
