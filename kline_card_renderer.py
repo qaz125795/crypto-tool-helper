@@ -293,11 +293,11 @@ def render_kline_oi_card(
     width, height = 980, 520
     pad_left, pad_right = 70, 20
     pad_top, pad_bottom = 18, 28
-    # 放大 K 線區塊、縮小 OI 柱狀區塊（讓上半部更好看）
-    top_h = 380
+    # 放大 K 線區塊、縮小 OI 柱狀區塊（讓上半部更明顯）
+    top_h = 420
     bot_h = height - pad_top - pad_bottom - top_h
-    if bot_h < 70:
-        bot_h = 90
+    if bot_h < 55:
+        bot_h = 70
         top_h = height - pad_top - pad_bottom - bot_h
 
     bg = (14, 18, 33)
