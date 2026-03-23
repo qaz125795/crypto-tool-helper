@@ -7637,7 +7637,7 @@ def fetch_position_change():
 
                 # 若 K 線資料不足，仍至少推文字（不影響原推播）
                 img_path = str(card_dir / f"{sym_b}_{int(now_ts)}_{idx}.png")
-                if ohlc and len(ohlc) >= 10:
+                if ohlc and len(ohlc) >= 5:
                     try:
                         render_kline_oi_card(
                             symbol_base=sym_b,
@@ -7675,6 +7675,10 @@ def fetch_position_change():
                             parse_mode="Markdown",
                         )
                 else:
+                    logger.warning(
+                        f"[K線卡片跳過] {sym_b}: fetch_ohlc_5m 回傳不足 "
+                        f"(ohlc_len={len(ohlc) if ohlc else None})；改推文字"
+                    )
                     send_telegram_message(
                         caption_txt,
                         TG_THREAD_IDS['position_change'],
