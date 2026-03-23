@@ -379,7 +379,16 @@ def render_kline_oi_card(
         y = max(plot_top_y0, min(plot_top_y1 - 1, y))
         draw.line([(pad_left, y), (width - pad_right, y)], fill=col, width=2)
 
-    # draw_hline 已移除右側水平線標籤框；EMA 的價位直接以文字訊息呈現（更人性）
+        # 只對你指定需要的水平線標示價格：SL + VWAP
+        if label in ("SL", "VWAP"):
+            txt = f"{label}:{price:.4f}"
+            txt_show = txt if len(txt) <= 22 else (txt[:20] + "..")
+            # 右側小字標籤（不畫整塊框），避免你說的怪字/怪框
+            text_x = width - pad_right - 130
+            text_y = max(plot_top_y0 + 2, min(plot_top_y1 - 18, y - 7))
+            draw.text((text_x, text_y), txt_show, fill=col, font=font_label)
+
+    # draw_hline 會只在 SL + VWAP 顯示數值
 
     if title_line:
         draw.text((pad_left, 4), title_line[:80], fill=text_col, font=font_title)
@@ -388,7 +397,8 @@ def render_kline_oi_card(
     draw_hline(tp1, tp1_col, "TP1")
     draw_hline(tp2, tp2_col, "TP2")
     draw_hline(entry, entry_col, "Entry")
-    # 依你要求：卡片不顯示 VWAP 線（避免亂碼/干擾）
+    if vwap is not None:
+        draw_hline(float(vwap), vwap_col, "VWAP")
 
     # EMA20 曲線：依 5m closes 即時計算「真正的 EMA 線」
     # 注意：不要再用 draw_hline 這種水平線，否則會跟你說的不符。
