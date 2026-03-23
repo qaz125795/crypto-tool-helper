@@ -28,7 +28,9 @@ def _fetch_binance_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[D
             if r.status_code != 200:
                 continue
             raw = r.json()
-            if not isinstance(raw, list) or len(raw) < 10:
+            # 5m K 線用於畫圖；少於一定數量就直接當作失敗，避免畫面空白或 scaler 崩潰。
+            # 原本門檻是 10，實務上不少幣會抓不到滿 10 根而導致整張卡片跳過。
+            if not isinstance(raw, list) or len(raw) < 5:
                 continue
             out = []
             for row in raw[-limit:]:
@@ -46,7 +48,7 @@ def _fetch_binance_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[D
                         "v": float(v) if v is not None else 0.0,
                     }
                 )
-            if len(out) >= 10:
+            if len(out) >= 5:
                 return out
         except Exception:
             continue
@@ -75,7 +77,7 @@ def _fetch_bybit_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dic
             if j.get("retCode") != 0:
                 continue
             raw = j.get("result", {}).get("list", [])
-            if not isinstance(raw, list) or len(raw) < 10:
+            if not isinstance(raw, list) or len(raw) < 5:
                 continue
             raw = list(reversed(raw))[-limit:]
             out = []
@@ -95,7 +97,7 @@ def _fetch_bybit_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dic
                         "v": float(bar[5]) if bar[5] is not None else 0.0,
                     }
                 )
-            if len(out) >= 10:
+            if len(out) >= 5:
                 return out
         except Exception:
             continue
@@ -115,7 +117,7 @@ def _fetch_bingx_spot_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[Lis
             return None
         j = r.json()
         raw = j.get("data") if isinstance(j, dict) else j
-        if not isinstance(raw, list) or len(raw) < 10:
+        if not isinstance(raw, list) or len(raw) < 5:
             return None
         out = []
         for row in raw[-limit:]:
@@ -134,7 +136,7 @@ def _fetch_bingx_spot_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[Lis
                     "v": float(row[5]) if row[5] is not None else 0.0,
                 }
             )
-        if len(out) >= 10:
+        if len(out) >= 5:
             return out
     except Exception:
         return None
