@@ -5372,6 +5372,12 @@ def build_report_message_tiered(
             msg_lines.append(f"主力均價 `{_fmt_price(_vwap_show)}`（2h VWAP）")
 
         # ─ 核心交易計畫（人性化、可快速掃讀）─
+        _entry_now_txt = _fmt_price(price) if price is not None else "N/A"
+        _entry_plan_txt = _fmt_price(_entry_price) if _entry_price is not None else "N/A"
+        if _entry_mode == "市價":
+            msg_lines.append(f"進場（市價）`{_entry_now_txt}`")
+        else:
+            msg_lines.append(f"進場（限價）`{_entry_plan_txt}`")
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
         _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
         _tp2_txt = _fmt_price(tp2) if tp2 is not None else None
