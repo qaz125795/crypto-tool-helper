@@ -5357,6 +5357,20 @@ def build_report_message_tiered(
         if x.get("cooldown_reverse_recent") and _grade == "S":
             msg_lines.append("🧠 冷卻期間反向出現 S：已允許推播（注意敘事切換）")
 
+        # 主力均價（2h VWAP，與結構 SL/掛單邏輯一致）
+        try:
+            _vwap_show = (
+                float(vwap_2h_val)
+                if vwap_2h_val is not None
+                and isinstance(vwap_2h_val, (int, float))
+                and float(vwap_2h_val) > 0
+                else None
+            )
+        except (TypeError, ValueError):
+            _vwap_show = None
+        if _vwap_show is not None:
+            msg_lines.append(f"主力均價 `{_fmt_price(_vwap_show)}`（2h VWAP）")
+
         # ─ 核心交易計畫（人性化、可快速掃讀）─
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
         _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
