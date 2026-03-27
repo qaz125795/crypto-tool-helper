@@ -5377,7 +5377,15 @@ def build_report_message_tiered(
         if _entry_mode == "市價":
             msg_lines.append(f"進場（市價）`{_entry_now_txt}`")
         else:
-            msg_lines.append(f"進場（限價）`{_entry_plan_txt}`")
+            _dev_txt = "—"
+            try:
+                _p_now = float(price) if price is not None else None
+                _p_plan = float(_entry_price) if _entry_price is not None else None
+                if _p_now is not None and _p_plan is not None and _p_now > 0 and _p_plan > 0:
+                    _dev_txt = f"{abs(_p_now - _p_plan) / _p_plan:.1%}"
+            except (TypeError, ValueError):
+                _dev_txt = "—"
+            msg_lines.append(f"進場（限價）`{_entry_plan_txt}`｜現價`{_entry_now_txt}`（偏離{_dev_txt}）")
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
         _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
         _tp2_txt = _fmt_price(tp2) if tp2 is not None else None
@@ -7318,6 +7326,34 @@ def fetch_position_change():
     # 成交額同步（從 _cg_volume_usd 寫入供推播使用）
     for x in all_top:
         x["volume_usd"] = x.get("_volume_usd") or x.get("_cg_volume_usd") or 0
+
+    # 品質門撒③：OI 續航一致性（15m/5m 與訊號類型方向一致），降低假突破噪音
+    # - long_open / short_open 代表「建倉」：短週期 OI 應持續增加
+    # - long_close / short_close 代表「平倉」：短週期 OI 應持續下降
+    def _oi_flow_consistent(_x: Dict) -> bool:
+        _cat = (_x.get("category") or "").strip()
+        try:
+            _oi15 = float(_x.get("oiChange_15m") or 0.0)
+            _oi5 = float(_x.get("oiChange_5m") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        _is_open = _cat in ("long_open", "short_open")
+        _is_close = _cat in ("long_close", "short_close")
+        if not (_is_open or _is_close):
+            return False
+        # 持倉「建倉」要看得到持續加倉；「平倉」要看得到持續減倉
+        if _is_open:
+            return (_oi15 >= 0.12) and (_oi5 >= 0.05)
+        return (_oi15 <= -0.12) and (_oi5 <= -0.05)
+
+    _pre_oi_flow = len(all_top)
+    all_top = [x for x in all_top if _oi_flow_consistent(x)]
+    _drop_oi_flow = _pre_oi_flow - len(all_top)
+    if _drop_oi_flow > 0:
+        logger.info(
+            f"[品質門撒③ OI續航] 淘汰 {_drop_oi_flow} 個 15m/5m OI 與類型不一致訊號，"
+            f"剩餘 {len(all_top)} 個"
+        )
 
     # 訊號版本門檻：僅保留「確定籌碼」與「衰竭反轉」（關閉 tier2、潛在/pullback 等）
     _ALLOW_PUSH_SIGNAL_VERSIONS = frozenset({"confirmed", "exhaustion_reversal"})
