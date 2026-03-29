@@ -1,6 +1,6 @@
 # 持倉變化狙擊鏡：僅由「外部定時服務」觸發（workflow_dispatch）
-# 不使用 GitHub schedule，改由 cron-job.org 等每 30 分鐘打 API，避免漏跑
-name: 持倉變化篩選（30分鐘循環）
+# 不使用 GitHub schedule；可自訂 cron（例如每 5 分鐘）打 API，與程式內 5m/15m OI、5m K 線偵測對齊
+name: 持倉變化篩選（外部定時觸發）
 
 on:
   workflow_dispatch:

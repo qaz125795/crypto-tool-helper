@@ -5341,9 +5341,30 @@ def build_report_message_tiered(
             _vol_line = ""  # 無成交值資料時不顯示此行，避免誤導
 
         # ══════════════════════════════════════════════════════════
-        # 組裝電報訊息（平衡版：可讀性優先，保留關鍵決策資訊）
+        # 組裝電報訊息（新手友善：先「怎麼做」再「為什麼」）
         # ══════════════════════════════════════════════════════════
         msg_lines: List[str] = []
+
+        def _rel_dev_pct(a: Optional[float], b: Optional[float]) -> Optional[float]:
+            """|a-b|/b，用於現價 vs 掛單／主力均價。"""
+            try:
+                if a is None or b is None:
+                    return None
+                af, bf = float(a), float(b)
+                if bf <= 0:
+                    return None
+                return abs(af - bf) / bf
+            except (TypeError, ValueError):
+                return None
+
+        def _limit_dev_hint(pct: Optional[float]) -> str:
+            if pct is None:
+                return ""
+            if pct <= 0.02:
+                return " ✅偏離小（好接）"
+            if pct <= 0.05:
+                return " ⚠️略偏（確認價格再下）"
+            return " ⚠️偏離較大"
 
         # ─ 標題行 ─
         _copy_sym = sym if sym.endswith("USDT") else f"{sym_base}USDT"
@@ -5368,37 +5389,45 @@ def build_report_message_tiered(
             )
         except (TypeError, ValueError):
             _vwap_show = None
-        if _vwap_show is not None:
-            msg_lines.append(f"主力均價 `{_fmt_price(_vwap_show)}`（2h VWAP）")
 
-        # ─ 核心交易計畫（人性化、可快速掃讀）─
         _entry_now_txt = _fmt_price(price) if price is not None else "N/A"
         _entry_plan_txt = _fmt_price(_entry_price) if _entry_price is not None else "N/A"
-        if _entry_mode == "市價":
-            msg_lines.append(f"進場（市價）`{_entry_now_txt}`")
-        else:
-            _dev_txt = "—"
-            try:
-                _p_now = float(price) if price is not None else None
-                _p_plan = float(_entry_price) if _entry_price is not None else None
-                if _p_now is not None and _p_plan is not None and _p_now > 0 and _p_plan > 0:
-                    _dev_txt = f"{abs(_p_now - _p_plan) / _p_plan:.1%}"
-            except (TypeError, ValueError):
-                _dev_txt = "—"
-            msg_lines.append(f"進場（限價）`{_entry_plan_txt}`｜現價`{_entry_now_txt}`（偏離{_dev_txt}）")
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
         _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
         _tp2_txt = _fmt_price(tp2) if tp2 is not None else None
-        msg_lines.append(f"止損 `{_sl_txt}`｜TP1 `{_tp1_txt}`")
-        if _tp2_txt:
-            # 你說 TP2 不要顯示 R 倍數
-            msg_lines.append(f"TP2 `{_tp2_txt}`")
         _exec_mode = "限價" if _entry_mode != "市價" else "市價"
         _energy_exh = bool(x.get("_energy_exhausted"))
-        # 你說「動能透支」太容易矛盾/重複：改成掛單方式說明
         _exec_note = "（EMA20 限價、不追市價）" if _energy_exh else ""
-        msg_lines.append(f"4H:{_macro_trend}｜掛單:{_exec_mode}{_exec_note}")
-        msg_lines.append(f"理由：{_strategy_comment}")
+
+        msg_lines.append("*📌 怎麼跟單*")
+        if _entry_mode == "市價":
+            _vw_dev = _rel_dev_pct(float(price) if price is not None else None, _vwap_show)
+            _vw_dev_s = f"｜與主力均價差 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
+            msg_lines.append(f"• 進場：市價 ≈ `{_entry_now_txt}`{_vw_dev_s}")
+        else:
+            _p_now = float(price) if price is not None else None
+            _p_plan = float(_entry_price) if _entry_price is not None else None
+            _lim_pct = _rel_dev_pct(_p_now, _p_plan)
+            _lim_pct_s = f"{_lim_pct:.1%}" if _lim_pct is not None else "—"
+            _hint = _limit_dev_hint(_lim_pct)
+            msg_lines.append(
+                f"• 進場：限價掛單價 `{_entry_plan_txt}`｜現價 `{_entry_now_txt}`｜偏離 `{_lim_pct_s}`{_hint}"
+            )
+            msg_lines.append("  （限價＝等成交；勿用市價追價）")
+        msg_lines.append(f"• 止損：`{_sl_txt}`（到價認錯出場）")
+        msg_lines.append(f"• 目標：TP1 `{_tp1_txt}`" + (f" → TP2 `{_tp2_txt}`" if _tp2_txt else ""))
+
+        msg_lines.append("*🌍 環境與籌碼*")
+        if _vwap_show is not None:
+            msg_lines.append(f"• 主力均價（2h VWAP）：`{_fmt_price(_vwap_show)}`")
+        msg_lines.append(f"• 4H：{_macro_trend}｜下單方式：{_exec_mode}{_exec_note}")
+
+        msg_lines.append("*💡 策略說明*")
+        msg_lines.append(_strategy_comment)
+
+        msg_lines.append("*📎 附圖怎麼看*")
+        msg_lines.append("上排＝最近 60 根 5 分鐘K；紫線＝EMA20；淺藍線＝VWAP（主力均價）")
+        msg_lines.append("下排＝全網 OI 量柱（藍＝增／橘＝減，看籌碼是否在動）")
 
         # ─ 風險與環境（有觸發才顯示）─
         if _motion_note:
@@ -7757,7 +7786,7 @@ def fetch_position_change():
                             ema20_touch_high=payload.get("ema20_touch_high"),
                             ema20_4h=payload.get("ema20_4h"),
                             out_path=img_path,
-                            title_line=f"{sym_b} | 5m K 線 + OI",
+                            title_line=f"{sym_b} | 60根5分K(約5h) 紫=EMA20 淺藍=VWAP 下=OI",
                         )
                         ok = send_telegram_photo(
                             img_path,
