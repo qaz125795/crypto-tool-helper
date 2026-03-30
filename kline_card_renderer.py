@@ -275,10 +275,10 @@ def render_kline_oi_card(
     direction_is_long: bool,
     ohlc_5m: List[Dict],
     oi_5m: Optional[List[Dict]],
-    sl: float,
-    tp1: float,
-    tp2: float,
-    entry: float,
+    sl: Optional[float],
+    tp1: Optional[float],
+    tp2: Optional[float],
+    entry: Optional[float],
     vwap: Optional[float],
     out_path: str,
     ema20: Optional[float] = None,
@@ -338,9 +338,14 @@ def render_kline_oi_card(
     prices = []
     for k in ohlc_5m:
         prices.extend([k["h"], k["l"]])
-    prices.extend([sl, tp1, tp2, entry])
-    if vwap is not None:
-        prices.append(float(vwap))
+    # 只納入有效的輔助價位，避免 0/None 把刻度拉壞（K 線貼底）
+    for p in (sl, tp1, tp2, entry, vwap):
+        pf = _safe_float(p, None)
+        if pf is not None and pf > 0:
+            prices.append(float(pf))
+    if not prices:
+        # 理論上不會發生（OHLC 至少有 high/low），保底避免 min/max 崩潰
+        prices = [1.0, 1.0001]
     p_min, p_max = min(prices), max(prices)
     if p_max == p_min:
         p_max += 1e-9
@@ -374,7 +379,15 @@ def render_kline_oi_card(
         # bottom bar: y from bot_y0..bot_y1
         return plot_bot_y1 - int((v - o_min) / (o_max - o_min) * bot_h)
 
-    def draw_hline(price: float, col: Tuple[int, int, int], label: str):
+    def draw_hline(price: Optional[float], col: Tuple[int, int, int], label: str):
+        if price is None:
+            return
+        try:
+            price = float(price)
+        except Exception:
+            return
+        if price <= 0:
+            return
         y = y_price(price)
         y = max(plot_top_y0, min(plot_top_y1 - 1, y))
         draw.line([(pad_left, y), (width - pad_right, y)], fill=col, width=2)

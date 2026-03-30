@@ -7771,22 +7771,28 @@ def fetch_position_change():
                 img_path = str(card_dir / f"{sym_b}_{int(now_ts)}_{idx}.png")
                 if ohlc and len(ohlc) >= 2:
                     try:
+                        def _posf(v):
+                            try:
+                                vf = float(v)
+                                return vf if vf > 0 else None
+                            except Exception:
+                                return None
                         render_kline_oi_card(
                             symbol_base=sym_b,
                             direction_is_long=bool(payload.get("direction_is_long")),
                             ohlc_5m=ohlc,
                             oi_5m=oi,
-                            sl=float(payload.get("sl") or 0),
-                            tp1=float(payload.get("tp1") or 0),
-                            tp2=float(payload.get("tp2") or 0),
-                            entry=float(payload.get("entry") or 0),
-                            vwap=payload.get("vwap"),
+                            sl=_posf(payload.get("sl")),
+                            tp1=_posf(payload.get("tp1")),
+                            tp2=_posf(payload.get("tp2")),
+                            entry=_posf(payload.get("entry")),
+                            vwap=_posf(payload.get("vwap")),
                             ema20=payload.get("ema20"),
                             ema20_touch_low=payload.get("ema20_touch_low"),
                             ema20_touch_high=payload.get("ema20_touch_high"),
                             ema20_4h=payload.get("ema20_4h"),
                             out_path=img_path,
-                            title_line=f"{sym_b} | 60根5分K(約5h) 紫=EMA20 淺藍=VWAP 下=OI",
+                            title_line=f"{sym_b} | 60x5m(~5h) EMA20=purple VWAP=cyan OI=bars",
                         )
                         ok = send_telegram_photo(
                             img_path,
