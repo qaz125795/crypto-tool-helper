@@ -22,7 +22,7 @@ class Config:
 
     # ORB 參數 (GOLD_ORB)
     SESSION_START_HOUR_UTC: int = 1   # 交易日起始小時 (UTC)，用於計算「今日日期」與全日 debug
-    CANDLE_COMPOSITION: int = 2       # 區間內至少幾根 K 才視為「確立」（原 3，改 2 較寬鬆）
+    CANDLE_COMPOSITION: int = 3       # 區間內至少幾根 K 才視為「確立」（收緊以降低假突破）
     MAX_TRADES_PER_DAY: int = 2       # 每日最多 1 多 1 空
 
     # ── ORB 時段選擇：決定用哪個盤口的 K 線建立突破箱體 ──────────────────────
@@ -49,14 +49,25 @@ class Config:
     MIN_RR_RATIO: float = 2.0        # 最少 1:2
     RISK_PERCENT_PER_TRADE: float = 1.0
 
-    # 濾網開關（已關閉時段與 DXY，全天只看 ORB+MA）
-    USE_SESSION_FILTER: bool = False  # 關閉：全天 24h 都可出訊號
-    SESSION_START_UTC: int = 12      # 僅在 USE_SESSION_FILTER=True 時使用
-    SESSION_END_UTC: int = 22
-    USE_VOLATILITY_FILTER: bool = True  # BB 寬度 / ATR 過低不交易
-    VOLATILITY_ATR_PERCENT_MIN: float = 0.001  # ATR/Close 最低門檻
-    USE_DXY_FILTER: bool = False     # 關閉：不因美元指數擋單，只看黃金 ORB+MA
-    DXY_LOOKBACK: int = 5            # DXY 短期均線週期
+    # 突破強度：收盤需超過箱體實體邊至少「此倍數 × ATR」，過濾毛刺假突破
+    MIN_BREAKOUT_ATR_MULT: float = 0.12
+
+    # 濾網（偏勝率：流動主力時段 + 美元方向 + 波動/動能）
+    USE_SESSION_FILTER: bool = True   # 僅倫敦～紐約活躍時段（UTC）
+    SESSION_START_UTC: int = 7       # 倫敦開盤前後
+    SESSION_END_UTC: int = 22        # 紐約午後前
+    USE_VOLATILITY_FILTER: bool = True
+    VOLATILITY_ATR_PERCENT_MIN: float = 0.00125  # ATR/Close 略提高，盤整少做
+    USE_DXY_FILTER: bool = True      # 與 DXY 短期走勢負相關才出單
+    DXY_LOOKBACK: int = 5
+
+    # RSI：避免極端追高殺低
+    USE_RSI_FILTER: bool = True
+    RSI_LONG_MAX: float = 66.0      # 多單：RSI 不高於此（預設 14 週期）
+    RSI_SHORT_MIN: float = 34.0     # 空單：RSI 不低於此
+
+    # SMA40 / SMA100 排列：順勢突破（多：快線在上；空：快線在下）
+    USE_MA_STACK_FILTER: bool = True
 
     def __post_init__(self):
         self.TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", self.TELEGRAM_BOT_TOKEN)

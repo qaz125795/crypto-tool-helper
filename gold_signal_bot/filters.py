@@ -24,6 +24,27 @@ def is_in_session(
     return h >= start_utc or h < end_utc
 
 
+def rsi_ok(
+    direction: str,
+    df: pd.DataFrame,
+    long_max: float = 66.0,
+    short_min: float = 34.0,
+) -> bool:
+    """避免 RSI 極端區追價：做多不過熱、做空不過冷。"""
+    if df is None or df.empty or "RSI" not in df.columns:
+        return True
+    r = df.iloc[-1].get("RSI")
+    if r is None or pd.isna(r):
+        return True
+    try:
+        rv = float(r)
+    except (TypeError, ValueError):
+        return True
+    if direction == "long":
+        return rv <= long_max
+    return rv >= short_min
+
+
 def volatility_ok(
     df: pd.DataFrame,
     min_atr_pct: float = 0.001,
@@ -87,6 +108,15 @@ def apply_filters(
 
     if config.USE_VOLATILITY_FILTER and not volatility_ok(df_1h, config.VOLATILITY_ATR_PERCENT_MIN):
         return False, "波動率過低(盤整)，跳過交易"
+
+    if getattr(config, "USE_RSI_FILTER", False):
+        if not rsi_ok(
+            direction,
+            df_1h,
+            float(getattr(config, "RSI_LONG_MAX", 66.0)),
+            float(getattr(config, "RSI_SHORT_MIN", 34.0)),
+        ):
+            return False, "RSI 處於極端區，跳過追高/追低"
 
     if config.USE_DXY_FILTER and df_dxy is not None and not df_dxy.empty:
         if not dxy_aligned(direction, df_1h, df_dxy, config.DXY_LOOKBACK):

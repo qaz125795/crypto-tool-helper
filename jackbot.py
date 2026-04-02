@@ -11171,6 +11171,7 @@ def run_gold_signal():
         from datetime import datetime, timezone
         from config import get_config
         from data_provider import fetch_ohlc
+        from indicators import add_indicators
         from strategy_orb import compute_signal
         from filters import apply_filters
         from telegram_sender import format_signal_message, format_tp_sl_hit_message, get_gold_chart_keyboard
@@ -11195,6 +11196,14 @@ def run_gold_signal():
     if n_rows < 24:
         logger.warning("[黃金訊號] 黃金 1h 數據不足 24 根 (目前 %s 根)，本輪不推播", n_rows)
         return
+    # 先算 ATR/RSI 等，讓波動率與 RSI 濾網在 apply_filters 時有欄位可用
+    df_1h = add_indicators(
+        df_1h,
+        atr_period=cfg.ATR_PERIOD,
+        ma_period=cfg.MA_TREND_PERIOD,
+        sma_fast=cfg.SMA_FAST,
+        sma_slow=cfg.SMA_SLOW,
+    )
     logger.info("[黃金訊號] 黃金 1h 數據 OK，共 %s 根 | 時間範圍: %s ~ %s",
                 n_rows, df_1h.index.min() if hasattr(df_1h.index, 'min') and len(df_1h) else "N/A", df_1h.index.max() if hasattr(df_1h.index, 'max') and len(df_1h) else "N/A")
 

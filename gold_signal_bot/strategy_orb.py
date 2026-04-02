@@ -499,13 +499,34 @@ def compute_signal(
         )
         return None
 
-    # ── 6. MA 趨勢濾網（SMA40）────────────────────────────────────────────
-    ma      = last.get("SMA_40") or last.get("MA") or last.get("SMA_100")
+    # ── 5b. 突破強度：收盤需超過箱體實體邊至少 min_breakout × ATR（假突破過濾）
     atr_val = float(last["ATR"])
     if pd.isna(atr_val) or atr_val <= 0:
         logger.warning("[ORB] ATR 無效，跳過本輪")
         return None
+    _brk_mult = float(getattr(config, "MIN_BREAKOUT_ATR_MULT", 0.12))
+    _buf = max(atr_val * _brk_mult, 1e-9)
+    if signal == SIGNAL_LONG and body_high > 0:
+        if (close - body_high) < _buf:
+            logger.info(
+                "[ORB] 多單突破幅度不足（收盤-箱體上=%.3f < %.3f = %.2f×ATR），跳過",
+                close - body_high,
+                _buf,
+                _brk_mult,
+            )
+            return None
+    if signal == SIGNAL_SHORT and body_low > 0:
+        if (body_low - close) < _buf:
+            logger.info(
+                "[ORB] 空單突破幅度不足（箱體下-收盤=%.3f < %.3f = %.2f×ATR），跳過",
+                body_low - close,
+                _buf,
+                _brk_mult,
+            )
+            return None
 
+    # ── 6. MA 趨勢濾網（SMA40）────────────────────────────────────────────
+    ma      = last.get("SMA_40") or last.get("MA") or last.get("SMA_100")
     if signal == SIGNAL_LONG:
         if ma is not None and not pd.isna(ma) and close <= float(ma):
             logger.info(
@@ -524,6 +545,32 @@ def compute_signal(
             return None
         direction      = "short"
         trend_strength = f"{session_label} 突破 | 空頭 (收盤 < SMA40)"
+
+    # ── 6b. SMA40 / SMA100 排列：順勢突破（降低逆大週期均線硬追）
+    if getattr(config, "USE_MA_STACK_FILTER", True):
+        s40 = last.get("SMA_40")
+        s100 = last.get("SMA_100")
+        if (
+            s40 is not None
+            and s100 is not None
+            and not pd.isna(s40)
+            and not pd.isna(s100)
+        ):
+            f40, f100 = float(s40), float(s100)
+            if direction == "long" and f40 <= f100:
+                logger.info(
+                    "[ORB] 多單未過均線排列濾網（SMA40 %.2f ≤ SMA100 %.2f）",
+                    f40,
+                    f100,
+                )
+                return None
+            if direction == "short" and f40 >= f100:
+                logger.info(
+                    "[ORB] 空單未過均線排列濾網（SMA40 %.2f ≥ SMA100 %.2f）",
+                    f40,
+                    f100,
+                )
+                return None
 
     sl, tp1, tp2 = compute_sl_tp(
         direction,
