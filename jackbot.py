@@ -5439,6 +5439,25 @@ def build_report_message_tiered(
         if _vol_line:
             msg_lines.append(_vol_line)
 
+        # 雙核 AI 風控：機讀資料包（供外層審查服務解析，勿刪行首 [AI_DATA] 標記）
+        _fr_ai = (
+            round(float(funding_rate) * 100, 4)
+            if funding_rate is not None and isinstance(funding_rate, (int, float))
+            else 0
+        )
+        _rsi_ai = float(rsi_val) if rsi_val is not None and isinstance(rsi_val, (int, float)) else 50.0
+        ai_data = {
+            "sym": sym_base,
+            "dir": "long" if is_bull_sig else "short",
+            "ep": _entry_price,
+            "sl": sl,
+            "tp1": tp1,
+            "btc_1h": _btc_1h_pct if _btc_1h_pct is not None else 0,
+            "fr": _fr_ai,
+            "rsi": _rsi_ai,
+        }
+        msg_lines.append(f"\n`[AI_DATA] {json.dumps(ai_data, ensure_ascii=False)}`")
+
         # ─ 儲存供後續使用 ─
         x["sl_price_str"]    = _fmt_price(sl)
         x["tp1_price_str"]   = _fmt_price(tp1)
