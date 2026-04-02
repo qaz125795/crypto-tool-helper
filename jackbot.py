@@ -3782,6 +3782,7 @@ def derive_limit_order_from_inputs(
       2) 動能透支 → 限價於 EMA20
       3) VWAP：在帶內 → 市價；否則 掛單價 = VWAP×0.975（與現行程式相同）
     回傳 (is_limit_order, limit_price)；市價進場為 (False, None)。
+    推播策略：僅市價進場；若此函式回傳需限價（True, …）則該標的不推播。
     """
     is_bull = category in ("long_open", "short_close")
     try:
@@ -5147,53 +5148,29 @@ def build_report_message_tiered(
         _now_ts = time.time()
 
         # ══════════════════════════════════════════════════════════
-        # 進場價邏輯：現價優於主力均價 → 市價進場；否則 → 計畫委託掛單（主力均價）
-        # 動能透支時：強制限價掛單於 EMA20，拒絕市價進場
-        # TP/SL：結構防守位（2H 高/低 + EMA20 + VWAP）+ MIN_SL_PERCENT 保底 → 1R → TP1/TP2
+        # 進場：統一市價（現價）。若依 VWAP 帶／衰竭反轉／動能透支等判定「不適合市價」→ 不推播。
+        # TP/SL：以現價為進場，結構防守位（2H 高/低 + EMA20 + VWAP）+ MIN_SL_PERCENT 保底 → 1R → TP1/TP2
         # ══════════════════════════════════════════════════════════
         sl, tp1, tp2 = None, None, None
         _r1, _r2 = TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
         sl_pct_val = None
-        _entry_price = price
-        _entry_mode = "市價"  # 市價進場 or 掛單進場
-        _energy_exhausted = x.get("_energy_exhausted", False)
         ema20_val = x.get("ema20") or x.get("ema20_close")
-        _is_exhaustion_reversal = (_sig_ver == "exhaustion_reversal")
-        # 與 enrichment 的 derive_limit_order_from_inputs 一致：已寫入則優先採用（衰竭反轉／動能透支／純 VWAP 掛單）
-        if x.get("is_limit_order") and x.get("limit_price") is not None:
-            _entry_price = float(x["limit_price"])
-            if _is_exhaustion_reversal:
-                _entry_mode = "掛單（限價於 VWAP/EMA20）"
-            elif _energy_exhausted:
-                _entry_mode = "掛單（限價於 EMA20）"
-            else:
-                _entry_mode = "掛單"
-        elif _is_exhaustion_reversal:
-            # 衰竭反轉：強制限價掛單於 VWAP/EMA20（有 15m EMA20 則優先，此處以 VWAP/1H EMA20 為主）
-            _entry_price = price
-            if vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
-                _entry_price = float(vwap_2h_val)
-            elif ema20_val and isinstance(ema20_val, (int, float)) and ema20_val > 0:
-                _entry_price = float(ema20_val)
-            _entry_mode = "掛單（限價於 VWAP/EMA20）"
-        elif _energy_exhausted and ema20_val and isinstance(ema20_val, (int, float)) and ema20_val > 0:
-            # 動能透支/乖離過大：強制限價掛單於 EMA20，拒絕市價進場
-            _entry_price = float(ema20_val)
-            _entry_mode = "掛單（限價於 EMA20）"
-        elif vwap_2h_val and isinstance(vwap_2h_val, (int, float)) and vwap_2h_val > 0:
-            _vwap_f = float(vwap_2h_val)
-            # 做多：現價 ≤ 主力均價×102.5% = 在範圍內 → 市價進場
-            # 做空：現價 ≥ 主力均價×97.5%  = 在範圍內 → 市價進場
-            if is_bull_sig and price <= _vwap_f * 1.025:
-                _entry_price = price
-                _entry_mode = "市價"
-            elif not is_bull_sig and price >= _vwap_f * 0.975:
-                _entry_price = price
-                _entry_mode = "市價"
-            else:
-                # 掛單：主力均價 × 97.5%（等價格進入範圍）
-                _entry_price = _vwap_f * 0.975
-                _entry_mode = "掛單"
+        _need_limit, _lp_hint = derive_limit_order_from_inputs(
+            category,
+            float(price),
+            vwap_2h_val,
+            ema20_val,
+            _sig_ver,
+            bool(x.get("_energy_exhausted")),
+        )
+        if _need_limit:
+            logger.info(
+                f"[僅市價推播] {sym_base}: 不適合市價進場（原需限價 lp≈{_lp_hint}），略過"
+            )
+            continue
+
+        _entry_price = float(price)
+        _entry_mode = "市價"
 
         if _entry_price and _entry_price > 0:
             _recent_lo = x.get("recent_low_2h")
@@ -5228,7 +5205,7 @@ def build_report_message_tiered(
         if _sig_version == "exhaustion_reversal":
             _type_str  = "衰竭反轉・抄底" if is_bull_sig else "衰竭反轉・摸頭"
             _badge_emo = "🎯"
-            _ver_label = "🔥 *衰竭反轉*（動能衰竭後二次確認，限價掛單）"
+            _ver_label = "🔥 *衰竭反轉*（動能衰竭後二次確認；僅市價帶內才推播）"
             sig_emoji  = "🔥"
         elif _sig_version == "confirmed":
             _type_str  = "確定籌碼・右側突破"
@@ -5346,7 +5323,7 @@ def build_report_message_tiered(
         msg_lines: List[str] = []
 
         def _rel_dev_pct(a: Optional[float], b: Optional[float]) -> Optional[float]:
-            """|a-b|/b，用於現價 vs 掛單／主力均價。"""
+            """|a-b|/b，用於現價 vs 主力均價。"""
             try:
                 if a is None or b is None:
                     return None
@@ -5356,15 +5333,6 @@ def build_report_message_tiered(
                 return abs(af - bf) / bf
             except (TypeError, ValueError):
                 return None
-
-        def _limit_dev_hint(pct: Optional[float]) -> str:
-            if pct is None:
-                return ""
-            if pct <= 0.02:
-                return " ✅偏離小（好接）"
-            if pct <= 0.05:
-                return " ⚠️略偏（確認價格再下）"
-            return " ⚠️偏離較大"
 
         # ─ 標題行 ─
         _copy_sym = sym if sym.endswith("USDT") else f"{sym_base}USDT"
@@ -5391,29 +5359,16 @@ def build_report_message_tiered(
             _vwap_show = None
 
         _entry_now_txt = _fmt_price(price) if price is not None else "N/A"
-        _entry_plan_txt = _fmt_price(_entry_price) if _entry_price is not None else "N/A"
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
         _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
         _tp2_txt = _fmt_price(tp2) if tp2 is not None else None
-        _exec_mode = "限價" if _entry_mode != "市價" else "市價"
-        _energy_exh = bool(x.get("_energy_exhausted"))
-        _exec_note = "（EMA20 限價、不追市價）" if _energy_exh else ""
+        _exec_mode = "市價"
+        _exec_note = ""
 
         msg_lines.append("*📌 怎麼跟單*")
-        if _entry_mode == "市價":
-            _vw_dev = _rel_dev_pct(float(price) if price is not None else None, _vwap_show)
-            _vw_dev_s = f"｜與主力均價差 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
-            msg_lines.append(f"• 進場：市價 ≈ `{_entry_now_txt}`{_vw_dev_s}")
-        else:
-            _p_now = float(price) if price is not None else None
-            _p_plan = float(_entry_price) if _entry_price is not None else None
-            _lim_pct = _rel_dev_pct(_p_now, _p_plan)
-            _lim_pct_s = f"{_lim_pct:.1%}" if _lim_pct is not None else "—"
-            _hint = _limit_dev_hint(_lim_pct)
-            msg_lines.append(
-                f"• 進場：限價掛單價 `{_entry_plan_txt}`｜現價 `{_entry_now_txt}`｜偏離 `{_lim_pct_s}`{_hint}"
-            )
-            msg_lines.append("  （限價＝等成交；勿用市價追價）")
+        _vw_dev = _rel_dev_pct(float(price) if price is not None else None, _vwap_show)
+        _vw_dev_s = f"｜與主力均價差 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
+        msg_lines.append(f"• 進場：市價 ≈ `{_entry_now_txt}`{_vw_dev_s}")
         msg_lines.append(f"• 止損：`{_sl_txt}`（到價認錯出場）")
         msg_lines.append(f"• 目標：TP1 `{_tp1_txt}`" + (f" → TP2 `{_tp2_txt}`" if _tp2_txt else ""))
 
@@ -5426,7 +5381,7 @@ def build_report_message_tiered(
         msg_lines.append(_strategy_comment)
 
         msg_lines.append("*📎 附圖怎麼看*")
-        msg_lines.append("上排＝最近 60 根 5 分鐘K；紫線＝EMA20；淺藍線＝VWAP（主力均價）")
+        msg_lines.append("上排＝最近 60 根 5 分鐘K；淺灰線＝收盤走勢；紫線＝EMA20；淺藍＝VWAP")
         msg_lines.append("下排＝全網 OI 量柱（藍＝增／橘＝減，看籌碼是否在動）")
 
         # ─ 風險與環境（有觸發才顯示）─
@@ -5480,7 +5435,7 @@ def build_report_message_tiered(
         messages_out.append(_msg_str)
         # K 線卡片：caption 用原推播訊息文字不變；圖上用同一套 SL/TP/進場/主力均價位
         try:
-            _entry_val = float(price) if _entry_mode == "市價" else float(_entry_price)
+            _entry_val = float(price)
         except Exception:
             _entry_val = None
         try:
@@ -7663,27 +7618,8 @@ def fetch_position_change():
                     _is_long_rt = (_x.get("category") or "") in ("long_open", "short_close")
                     _vwap_2h = _x.get("vwap_2h")
                     _ema_rt = _x.get("ema20") or _x.get("ema20_close")
-                    _is_limit_rt = bool(_x.get("is_limit_order", False))
-                    _lp_rt = _x.get("limit_price")
-                    try:
-                        _lp_f = (
-                            float(_lp_rt)
-                            if _lp_rt is not None and isinstance(_lp_rt, (int, float)) and float(_lp_rt) > 0
-                            else None
-                        )
-                    except (TypeError, ValueError):
-                        _lp_f = None
-                    # 限價單：結構 SL/TP 以掛單價為進場（與推播一致）；市價則沿用即時價 + VWAP 帶修正
-                    if _is_limit_rt and _lp_f is not None:
-                        _entry_rt = _lp_f
-                    else:
-                        _entry_rt = _live
-                        if _vwap_2h and isinstance(_vwap_2h, (int, float)) and float(_vwap_2h) > 0:
-                            _vwap_f = float(_vwap_2h)
-                            if _is_long_rt and _live > _vwap_f * 1.025:
-                                _entry_rt = _vwap_f * 0.975
-                            elif not _is_long_rt and _live < _vwap_f * 0.975:
-                                _entry_rt = _vwap_f * 1.025
+                    # 與推播一致：僅市價進場，結構 SL/TP 一律以即時價為進場基準
+                    _entry_rt = _live
                     _sl_i, _tp1_i, _tp2_i, _one_ri, _slp_rt = compute_structural_sl_tp(
                         _entry_rt,
                         _is_long_rt,
@@ -7695,47 +7631,29 @@ def fetch_position_change():
                     if _sl_i is None or _tp1_i is None:
                         continue
 
-                    # ── 限價掛單（統一）：偏離掛單價 ≤5% 視為尚未成交 → 略過即時觸損/達標；>5% 阻斷推播 ──
-                    _limit_dev_pct = (
-                        abs(_live - _lp_f) / _lp_f if (_lp_f and _lp_f > 0) else 0.0
-                    )
                     _blocked = False
-                    if _is_limit_rt and _lp_f is not None:
-                        if _limit_dev_pct > 0.05:
+                    if _is_long_rt:
+                        if _live <= _sl_i:
                             logger.info(
-                                f"[限價偏離過大跳過] {_sym_rt}: 限價掛單價={_lp_f:.6f}，"
-                                f"即時 {_live:.6f} 偏離 {_limit_dev_pct:.1%} > 5%"
+                                f"[已觸損跳過] {_sym_rt}: 即時 {_live:.6f} ≤ 結構SL {_sl_i:.6f}"
                             )
                             _blocked = True
-                        else:
-                            logger.debug(
-                                f"[即時RR略過] {_sym_rt}: 限價單尚未成交（偏離掛單價 {_limit_dev_pct:.2%}），"
-                                f"不檢查觸損/達標"
+                        elif _live >= _tp1_i:
+                            logger.info(
+                                f"[已達標跳過] {_sym_rt}: 即時 {_live:.6f} ≥ TP1 {_tp1_i:.6f}"
                             )
+                            _blocked = True
                     else:
-                        # 市價追入：嚴格檢查即時價是否已破結構 SL 或已過 TP1
-                        if _is_long_rt:
-                            if _live <= _sl_i:
-                                logger.info(
-                                    f"[已觸損跳過] {_sym_rt}: 即時 {_live:.6f} ≤ 結構SL {_sl_i:.6f}"
-                                )
-                                _blocked = True
-                            elif _live >= _tp1_i:
-                                logger.info(
-                                    f"[已達標跳過] {_sym_rt}: 即時 {_live:.6f} ≥ TP1 {_tp1_i:.6f}"
-                                )
-                                _blocked = True
-                        else:
-                            if _live >= _sl_i:
-                                logger.info(
-                                    f"[已觸損跳過] {_sym_rt}: 即時 {_live:.6f} ≥ 結構SL {_sl_i:.6f}"
-                                )
-                                _blocked = True
-                            elif _live <= _tp1_i:
-                                logger.info(
-                                    f"[已達標跳過] {_sym_rt}: 即時 {_live:.6f} ≤ TP1 {_tp1_i:.6f}"
-                                )
-                                _blocked = True
+                        if _live >= _sl_i:
+                            logger.info(
+                                f"[已觸損跳過] {_sym_rt}: 即時 {_live:.6f} ≥ 結構SL {_sl_i:.6f}"
+                            )
+                            _blocked = True
+                        elif _live <= _tp1_i:
+                            logger.info(
+                                f"[已達標跳過] {_sym_rt}: 即時 {_live:.6f} ≤ TP1 {_tp1_i:.6f}"
+                            )
+                            _blocked = True
                     if _blocked:
                         _drop_low_r.append(_x)
             except Exception as _e:

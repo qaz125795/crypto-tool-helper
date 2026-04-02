@@ -334,21 +334,40 @@ def render_kline_oi_card(
         y = plot_bot_y0 + int(bot_h * i / 3)
         draw.line([(pad_left, y), (width - pad_right, y)], fill=grid, width=1)
 
-    # scale
-    prices = []
-    for k in ohlc_5m:
-        prices.extend([k["h"], k["l"]])
-    # 只納入有效的輔助價位，避免 0/None 把刻度拉壞（K 線貼底）
+    ohlc_use = ohlc_5m[-60:] if ohlc_5m else []
+    candle_slot = plot_w / 60.0
+    candle_w = max(2, int(candle_slot * 0.55))
+
+    def _winsor_lo_hi(vals: List[float], trim_ratio: float = 0.03) -> Tuple[float, float]:
+        s = sorted(v for v in vals if v == v and v > 0)
+        if not s:
+            return 1.0, 1.0001
+        if len(s) < 5:
+            return s[0], s[-1]
+        k = max(1, int(len(s) * trim_ratio))
+        return float(s[k]), float(s[len(s) - 1 - k])
+
+    # 價格縮放：先以 K 線高低 winsor 去極端影線，再「有條件」納入 SL/TP/VWAP（避免離譜價位壓扁蠟燭）
+    hl_flat: List[float] = []
+    for k in ohlc_use:
+        try:
+            hl_flat.extend([float(k["h"]), float(k["l"])])
+        except (TypeError, ValueError, KeyError):
+            continue
+    if len(hl_flat) < 2:
+        hl_flat = [1.0, 1.0001]
+    p_lo_w, p_hi_w = _winsor_lo_hi(hl_flat)
+    mid_c = (p_lo_w + p_hi_w) / 2.0
+    span_c = max(p_hi_w - p_lo_w, mid_c * 1e-9)
+
+    p_min, p_max = p_lo_w, p_hi_w
     for p in (sl, tp1, tp2, entry, vwap):
         pf = _safe_float(p, None)
-        if pf is not None and pf > 0:
-            prices.append(float(pf))
-    if not prices:
-        # 理論上不會發生（OHLC 至少有 high/low），保底避免 min/max 崩潰
-        prices = [1.0, 1.0001]
-    p_min, p_max = min(prices), max(prices)
-    if p_max == p_min:
-        p_max += 1e-9
+        if pf is not None and pf > 0 and abs(pf - mid_c) <= span_c * 4.5:
+            p_min = min(p_min, pf)
+            p_max = max(p_max, pf)
+    if p_max <= p_min:
+        p_max = p_min + 1e-9
     margin = (p_max - p_min) * 0.05
     p_min -= margin
     p_max += margin
@@ -406,21 +425,11 @@ def render_kline_oi_card(
     if title_line:
         draw.text((pad_left, 4), title_line[:80], fill=text_col, font=font_title)
 
-    # 依需求：卡片不顯示 TP/SL/Entry，只保留 VWAP + EMA20
+    # 依需求：卡片不顯示 TP/SL/Entry 水平線，只保留 VWAP + EMA；VWAP 若遠離 K 線主體仍會畫在邊緣（y 已 clamp）
     if vwap is not None:
         draw_hline(float(vwap), vwap_col, "VWAP")
 
-    # EMA20 曲線：依 5m closes 即時計算「真正的 EMA 線」
-    # 注意：不要再用 draw_hline 這種水平線，否則會跟你說的不符。
-
-    # 不顯示 EMA20 回踩點 / 4H EMA20 水平線，避免圖上元素過多
-
     # candles
-    # 60 根：只取最後 60
-    ohlc_use = ohlc_5m[-60:]
-    candle_slot = plot_w / 60.0
-    candle_w = max(2, int(candle_slot * 0.55))
-
     for i, k in enumerate(ohlc_use):
         x_center = pad_left + int(i * candle_slot + candle_slot / 2)
         x0 = x_center - candle_w // 2
@@ -449,6 +458,20 @@ def render_kline_oi_card(
         if body_bot - body_top < 2:
             body_bot = body_top + 2
         draw.rectangle([x0, body_top, x1, body_bot], fill=col)
+
+    # 收盤價走勢線（細線）：蠟燭異常時仍可讀趨勢
+    close_line_col = (200, 215, 245)
+    _px, _py = None, None
+    for i, k in enumerate(ohlc_use):
+        try:
+            cf = float(k["c"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        x_center = pad_left + int(i * candle_slot + candle_slot / 2)
+        y_c = max(plot_top_y0, min(plot_top_y1 - 1, y_price(cf)))
+        if _px is not None and _py is not None:
+            draw.line([(_px, _py), (x_center, y_c)], fill=close_line_col, width=1)
+        _px, _py = x_center, y_c
 
     # EMA20 曲線（沿著 5m K 線走）
     closes_5m = [float(k["c"]) for k in ohlc_use if k.get("c") is not None]
