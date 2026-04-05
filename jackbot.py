@@ -5372,29 +5372,62 @@ def build_report_message_tiered(
         msg_lines.append(f"• 止損：`{_sl_txt}`（到價認錯出場）")
         msg_lines.append(f"• 目標：TP1 `{_tp1_txt}`" + (f" → TP2 `{_tp2_txt}`" if _tp2_txt else ""))
 
-        msg_lines.append("*🌍 環境與籌碼*")
+        msg_lines.append("*🌍 環境與籌碼（白話）*")
         if _vwap_show is not None:
-            msg_lines.append(f"• 主力均價（2h VWAP）：`{_fmt_price(_vwap_show)}`")
-        msg_lines.append(f"• 4H：{_macro_trend}｜下單方式：{_exec_mode}{_exec_note}")
+            msg_lines.append(
+                f"• 主力這兩小時的平均成本參考（2h VWAP）：`{_fmt_price(_vwap_show)}`"
+            )
+        msg_lines.append(
+            f"• 較大週期：{_macro_trend}（{_macro_ema_txt}）"
+            f"{_rsi_4h_str if _rsi_4h_str else ''}｜本訊號進場：{_exec_mode}"
+        )
+        msg_lines.append(_fr_line)
+        try:
+            _btc_pen = float(_btc_1h_pct) if _btc_1h_pct is not None else None
+        except (TypeError, ValueError):
+            _btc_pen = None
+        if _btc_pen is not None:
+            if _btc_pen > 0.12:
+                _btc_txt = f"大盤 BTC 近 1 小時上漲約 {_btc_pen:+.2f}%——整體偏多一點。"
+            elif _btc_pen < -0.12:
+                _btc_txt = f"大盤 BTC 近 1 小時下跌約 {_btc_pen:+.2f}%——整體偏空一點。"
+            else:
+                _btc_txt = f"大盤 BTC 近 1 小時變化約 {_btc_pen:+.2f}%——大致橫向整理。"
+            msg_lines.append(_btc_txt)
+        if rsi_val is not None and isinstance(rsi_val, (int, float)):
+            try:
+                _rv = float(rsi_val)
+            except (TypeError, ValueError):
+                _rv = None
+            if _rv is not None:
+                if _rv >= 72:
+                    _rsi_txt = (
+                        f"短線熱度偏高（RSI 約 {_rv:.0f}）——像「跑太久需要喘口氣」，"
+                        "追價要自己多留意。"
+                    )
+                elif _rv <= 28:
+                    _rsi_txt = (
+                        f"短線賣壓釋放較多（RSI 約 {_rv:.0f}）——像「跌深喘口氣」，"
+                        "是否反轉仍要看價格結構。"
+                    )
+                else:
+                    _rsi_txt = f"短線情緒指標 RSI 約 {_rv:.0f}——不算極端冷熱。"
+                msg_lines.append(_rsi_txt)
 
         msg_lines.append("*💡 策略說明*")
         msg_lines.append(_strategy_comment)
 
         msg_lines.append("*📎 附圖怎麼看*")
-        msg_lines.append("上排＝最近 60 根 5 分鐘K；淺灰線＝收盤走勢；紫線＝EMA20；淺藍＝VWAP")
-        msg_lines.append("下排＝全網 OI 量柱（藍＝增／橘＝減，看籌碼是否在動）")
+        msg_lines.append("上排＝最近約 5 小時的 5 分鐘 K 線；淺灰線＝收盤價走勢；紫線＝EMA20；淺藍＝主力均價線。")
+        msg_lines.append("下排＝全網未平倉量柱狀圖（藍＝變多／橘＝變少，看籌碼有沒有在動）。")
 
         # ─ 風險與環境（有觸發才顯示）─
         if _motion_note:
             msg_lines.append(f"⚠️ {_motion_note}")
-        if funding_rate is not None and isinstance(funding_rate, (int, float)):
-            _fr_val = funding_rate * 100
-            _fr_str = f"{_fr_val:+.4f}".rstrip("0").rstrip(".")
-            msg_lines.append(f"費率 `{_fr_str}%`")
         if _vol_line:
             msg_lines.append(_vol_line)
 
-        # 機讀資料包（供外層審查／AI 解析，勿刪行首 [AI_DATA] 標記）
+        # 機讀資料：不貼在 Telegram（避免群組出現 JSON）；寫入 log + item 供後台／審計讀取
         _fr_ai = (
             round(float(funding_rate) * 100, 4)
             if funding_rate is not None and isinstance(funding_rate, (int, float))
@@ -5411,12 +5444,12 @@ def build_report_message_tiered(
             "fr": _fr_ai,
             "rsi": _rsi_ai,
         }
-        msg_lines.append(f"\n`[AI_DATA] {json.dumps(ai_data, ensure_ascii=False)}`")
-        # 給二次審視 AI 的說明：僅客觀品質與大環境，不提供倉位／槓桿／資金配置
+        x["_sniper_ai_payload"] = ai_data
+        logger.info("[SNIPER_AI_PAYLOAD] %s", json.dumps(ai_data, ensure_ascii=False))
+
         msg_lines.append(
-            "\n`[AI_PROMPT] 請勿建議倉位比例、槓桿、資金配置或下單手數；"
-            "僅客觀回覆兩點：①此訊號是否屬優質機會（籌碼／結構／敘述一致性）；"
-            "②大環境（如 BTC 方向與波動、相關敘述）是否適合考慮開倉——以「可／否」＋簡短理由即可。`"
+            "💬 若要請群組科普機器人幫忙看這則訊號，可轉傳並 @ 它——"
+            "請它只從「數據與大環境」白話解讀，不問具體點位、倉位或槓桿（與群組機器人規則一致）。"
         )
 
         # ─ 儲存供後續使用 ─
