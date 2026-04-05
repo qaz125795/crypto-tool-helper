@@ -5394,7 +5394,7 @@ def build_report_message_tiered(
         if _vol_line:
             msg_lines.append(_vol_line)
 
-        # 雙核 AI 風控：機讀資料包（供外層審查服務解析，勿刪行首 [AI_DATA] 標記）
+        # 機讀資料包（供外層審查／AI 解析，勿刪行首 [AI_DATA] 標記）
         _fr_ai = (
             round(float(funding_rate) * 100, 4)
             if funding_rate is not None and isinstance(funding_rate, (int, float))
@@ -5412,6 +5412,12 @@ def build_report_message_tiered(
             "rsi": _rsi_ai,
         }
         msg_lines.append(f"\n`[AI_DATA] {json.dumps(ai_data, ensure_ascii=False)}`")
+        # 給二次審視 AI 的說明：僅客觀品質與大環境，不提供倉位／槓桿／資金配置
+        msg_lines.append(
+            "\n`[AI_PROMPT] 請勿建議倉位比例、槓桿、資金配置或下單手數；"
+            "僅客觀回覆兩點：①此訊號是否屬優質機會（籌碼／結構／敘述一致性）；"
+            "②大環境（如 BTC 方向與波動、相關敘述）是否適合考慮開倉——以「可／否」＋簡短理由即可。`"
+        )
 
         # ─ 儲存供後續使用 ─
         x["sl_price_str"]    = _fmt_price(sl)
@@ -5489,13 +5495,13 @@ def build_report_message_tiered(
         correlation_warn = (
             f"\n{'─' * 20}\n"
             f"⚠️ *相關性警示：本輪 {bull_count} 個多單同時出現*\n"
-            f"BTC 若急跌可能同步觸損，請控制總倉位，勿全倉押入"
+            f"BTC 若急跌時，同向標的常一併承壓，請留意大環境相關性風險。"
         )
     elif bear_count >= 3:
         correlation_warn = (
             f"\n{'─' * 20}\n"
             f"⚠️ *相關性警示：本輪 {bear_count} 個空單同時出現*\n"
-            f"BTC 若急漲可能同步觸損，請控制總倉位，勿全倉押入"
+            f"BTC 若急漲時，同向標的常一併承壓，請留意大環境相關性風險。"
         )
 
     # ── 評級統計（S/A/B/R）──────────────────────────────────────────
