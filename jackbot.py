@@ -9237,10 +9237,11 @@ def process_liquidation_data(symbol: str, data_array: List[Dict]) -> Optional[Di
 
 
 def format_liquidity_consolidated_message(events: List[Dict]) -> str:
-    """【主力清算·撿屍雷達】別人恐懼我貪婪，帶血籌碼最香。"""
+    """【主力清算·撿屍雷達】多空結構參考（非投資建議、非跟單）。"""
     now_str = datetime.now(TAIPEI_TZ).strftime("%H:%M")
     lines = []
     lines.append("🩸 *【主力清算 · 撿屍雷達】*")
+    lines.append("_多空結構參考｜非投資建議、非跟單、不提供開倉／加倉指令_")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     total_vol = sum(e.get("totalVolUsd1h", 0) for e in events)
     lines.append(f"☠️ 過去1小時，這些幣種爆倉 *${total_vol / 10000:.0f}萬*")
@@ -9260,14 +9261,14 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
 
         if "多" in side:
             icon = "🟢"
-            title = "多軍陣亡 → 帶血籌碼出現"
-            advice = "👉 分批佈局做多，止損設最低點下方 1%"
-            entry_action = "抄底進場區"
+            title = "結構上：多側爆倉較重（價格下殺時多單被清算）"
+            ref_note = "📎 解讀：短線情緒偏恐慌／籌碼出清，僅作多空情緒參考，請自行判斷。"
+            entry_action = "價格參考區間（對照用）"
         else:
             icon = "🔴"
-            title = "空軍陣亡 → 軋空行情起爆"
-            advice = "👉 回測確認不破位後，考慮追空或等待反轉"
-            entry_action = "摸頂進場區"
+            title = "結構上：空側爆倉較重（價格上沖時空單被清算）"
+            ref_note = "📎 解讀：短線情緒偏擁擠／軋空力道，僅作多空情緒參考，請自行判斷。"
+            entry_action = "價格參考區間（對照用）"
 
         lines.append(f"{icon} *{sym}* 💥 爆倉 *${amt:.1f}萬*")
         lines.append(f"💀 {title}")
@@ -9276,15 +9277,17 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
         if pin_lbl:
             lines.append(f"  {pin_lbl}")
         if confirm:
-            lines.append(f"✅ 確認信號：{confirm}")
-        # 建議進場區間
+            lines.append(f"✅ 技術面輔助：{confirm}")
         if entry_low and entry_high and cur_price:
-            lines.append(f"🎯 *{entry_action}*：`${entry_low}` ~ `${entry_high}`（現價 `${cur_price:.4f}`）")
-        lines.append(f"💡 策略：{advice}")
+            lines.append(
+                f"🎯 *{entry_action}*：`${entry_low}` ~ `${entry_high}`（現價 `${cur_price:.4f}`）"
+            )
+        lines.append(ref_note)
         lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"⏰ {now_str} | 別人恐懼我貪婪，帶血籌碼最香。")
+    lines.append(f"⏰ {now_str} | 數據來自 CoinGlass／交易所公開行情；附圖為 Binance 歷史清算柱狀參考。")
+    lines.append("_本訊息僅供教育與市場結構討論，不構成任何買賣建議。_")
     return "\n".join(lines)
 
 
@@ -9585,6 +9588,38 @@ def run_liquidity_radar_once():
         "inline_keyboard": [[{"text": "💀 查看詳細爆倉數據", "url": "https://www.coinglass.com/zh-TW/LiquidationData"}]]
     }
     send_telegram_message(msg, thread_id, parse_mode="Markdown", reply_markup=keyboard)
+
+    # 附圖：Binance 公開清算快照總覽（改編 liquidations-chart；資料非 CoinGlass 即時 API）
+    if os.getenv("LIQ_CHART_DISABLED", "").strip().lower() not in ("1", "true", "yes"):
+        try:
+            from liquidations_chart import generate_liquidation_chart_png
+
+            chart_path = generate_liquidation_chart_png(
+                base_dir=DATA_DIR / "liquidations_chart_data",
+                coin="BTCUSDT",
+                market="um",
+                lookback_days=int(os.getenv("LIQ_CHART_LOOKBACK_DAYS", "180")),
+                max_sync_days=int(os.getenv("LIQ_CHART_MAX_SYNC_DAYS", "14")),
+            )
+            if chart_path and chart_path.is_file():
+                cap = (
+                    "📊 *BTC 總清算圖*（Binance 歷史快照，近 "
+                    f"{os.getenv('LIQ_CHART_LOOKBACK_DAYS', '180')} 日；"
+                    "風格參考 Coinglass 總清算圖）\n"
+                    "_非投資建議，僅供多空結構參考_"
+                )
+                send_telegram_photo(
+                    str(chart_path),
+                    caption=cap,
+                    thread_id=thread_id,
+                    parse_mode="Markdown",
+                    reply_markup=None,
+                )
+            else:
+                logger.info("[撿屍雷達] 清算圖未產生（資料不足或繪圖失敗），僅推送文字")
+        except Exception as _chart_e:
+            logger.warning(f"[撿屍雷達] 附圖略過: {_chart_e}")
+
     logger.info(f"流動性獵取雷達完成，推送 {len(events)} 個幣種（雙重確認通過）")
 
 

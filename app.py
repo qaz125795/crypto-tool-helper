@@ -5,6 +5,7 @@ Zeabur 部署入口文件
 使用 Flask 作為 web server，支持 HTTP 觸發和定時任務
 """
 
+from functools import wraps
 from flask import Flask, request, jsonify
 import os
 import sys
@@ -12,6 +13,30 @@ from pathlib import Path
 
 # 將當前目錄加入路徑
 sys.path.insert(0, str(Path(__file__).parent))
+
+
+def _cron_secret_ok() -> bool:
+    """Zeabur／外部 Cron 觸發時建議設定 CRON_SECRET；未設定則維持舊行為（公開端點）。"""
+    secret = os.environ.get("CRON_SECRET", "").strip()
+    if not secret:
+        return True
+    auth = request.headers.get("Authorization", "")
+    if auth == f"Bearer {secret}":
+        return True
+    if request.args.get("token") == secret:
+        return True
+    return False
+
+
+def require_cron_secret(f):
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        if not _cron_secret_ok():
+            return jsonify({"status": "error", "message": "unauthorized"}), 401
+        return f(*args, **kwargs)
+
+    return wrapped
+
 
 from jackbot import (
     fetch_sector_ranking,
@@ -36,6 +61,7 @@ def health_check():
         'message': '區塊鏈船長—傑克：自動化推播系統運行中',
         'endpoints': {
             '/': '健康檢查',
+            'note': '若設定環境變數 CRON_SECRET，除 / 外之任務端點需 Authorization: Bearer <CRON_SECRET> 或 ?token=<CRON_SECRET>',
             '/sector_ranking': '主流板塊排行榜推播',
             '/whale_position': '巨鯨持倉動向',
             '/position_change': '持倉變化篩選',
@@ -51,6 +77,7 @@ def health_check():
     }), 200
 
 @app.route('/sector_ranking', methods=['GET', 'POST'])
+@require_cron_secret
 def run_sector_ranking():
     """執行主流板塊排行榜推播"""
     try:
@@ -60,6 +87,7 @@ def run_sector_ranking():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/whale_position', methods=['GET', 'POST'])
+@require_cron_secret
 def run_whale_position():
     """執行巨鯨持倉動向"""
     try:
@@ -69,6 +97,7 @@ def run_whale_position():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/position_change', methods=['GET', 'POST'])
+@require_cron_secret
 def run_position_change():
     """執行持倉變化篩選"""
     try:
@@ -78,6 +107,7 @@ def run_position_change():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/economic_data', methods=['GET', 'POST'])
+@require_cron_secret
 def run_economic_data():
     """執行重要經濟數據推播"""
     try:
@@ -87,6 +117,7 @@ def run_economic_data():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/news', methods=['GET', 'POST'])
+@require_cron_secret
 def run_news():
     """執行新聞快訊推播"""
     try:
@@ -96,6 +127,7 @@ def run_news():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/funding_rate', methods=['GET', 'POST'])
+@require_cron_secret
 def run_funding_rate():
     """執行資金費率排行榜"""
     try:
@@ -106,6 +138,7 @@ def run_funding_rate():
 
 
 @app.route('/liquidity_radar', methods=['GET', 'POST'])
+@require_cron_secret
 def run_liquidity_radar():
     """執行流動性獵取雷達"""
     try:
@@ -116,6 +149,7 @@ def run_liquidity_radar():
 
 
 @app.route('/altseason_radar', methods=['GET', 'POST'])
+@require_cron_secret
 def run_altseason_radar():
     """執行山寨爆發雷達"""
     try:
@@ -125,6 +159,7 @@ def run_altseason_radar():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/hyperliquid', methods=['GET', 'POST'])
+@require_cron_secret
 def run_hyperliquid():
     """執行 Hyperliquid 聰明錢監控"""
     try:
@@ -134,6 +169,7 @@ def run_hyperliquid():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/long_term_index', methods=['GET', 'POST'])
+@require_cron_secret
 def run_long_term_index():
     """執行長線牛熊導航儀"""
     try:
@@ -143,6 +179,7 @@ def run_long_term_index():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/run/<task>', methods=['GET', 'POST'])
+@require_cron_secret
 def run_task(task):
     """通用任務執行端點"""
     task_map = {
