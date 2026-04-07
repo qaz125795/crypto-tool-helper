@@ -9062,16 +9062,42 @@ LIQ_EXCHANGE_LIST = "Binance"
 LIQ_REQUEST_DELAY = 1.2  # 秒
 
 
+def _liq_threshold_usd_from_env(prefix: str, default_1h: float, default_24h: float) -> tuple:
+    """以環境變數覆寫門檻（USD），例如 LIQ_BTC_1H、LIQ_BTC_24H。"""
+    def _f(name: str, default: float) -> float:
+        raw = os.getenv(name)
+        if raw is None or str(raw).strip() == "":
+            return default
+        try:
+            return float(str(raw).strip().replace("_", ""))
+        except ValueError:
+            return default
+
+    return (
+        _f(f"{prefix}_1H", default_1h),
+        _f(f"{prefix}_24H", default_24h),
+    )
+
+
 def get_liquidation_threshold(symbol: str, time_window: str = "1h") -> tuple:
-    """根據幣種回傳極端爆倉門檻（USD）
-    返回 (1h阈值, 24h阈值) 的元組
-    注意：1小時門檻已大幅降低，以便捕捉更多極端爆倉事件
+    """根據幣種回傳極端爆倉門檻（USD）(1h, 24h)。
+
+    **觸發條件只看 1h 合計是否 ≥ 1h 門檻**；24h 僅供日誌對照。
+    BTC／ETH／SOL 使用不同預設；可用環境變數覆寫：
+    ``LIQ_BTC_1H``、``LIQ_BTC_24H``、``LIQ_ETH_1H``、``LIQ_ETH_24H``、``LIQ_SOL_1H``、``LIQ_SOL_24H``（單位：美元）。
     """
-    if symbol in ("BTC", "ETH"):
-        return (100_000.0, 15_000_000.0)  # 1h: 10萬（大幅降低）, 24h: 1500萬
-    if symbol in ("SOL", "XRP", "DOGE"):
-        return (50_000.0, 5_000_000.0)  # 1h: 5萬（大幅降低）, 24h: 500萬
-    return (30_000.0, 3_000_000.0)  # 1h: 3萬（大幅降低）, 24h: 300萬
+    base = symbol.replace("USDT", "").replace("-", "").upper()
+
+    # 預設（較舊版調低；三幣種分開）
+    if base == "BTC":
+        return _liq_threshold_usd_from_env("LIQ_BTC", 35_000.0, 8_000_000.0)
+    if base == "ETH":
+        return _liq_threshold_usd_from_env("LIQ_ETH", 8_000.0, 5_000_000.0)
+    if base == "SOL":
+        return _liq_threshold_usd_from_env("LIQ_SOL", 15_000.0, 2_500_000.0)
+    if base in ("XRP", "DOGE"):
+        return (25_000.0, 3_000_000.0)
+    return (20_000.0, 2_000_000.0)
 
 
 def fetch_liquidation_data(symbol: str) -> Optional[List[Dict]]:
