@@ -11496,13 +11496,18 @@ def build_hyperliquid_message() -> Optional[str]:
 
 
 def run_hyperliquid_monitor_once():
-    """執行一次大佬錢包動向追蹤（Discord 專用，不影響既有 TG 訊號）。"""
+    """執行一次大佬錢包動向追蹤（走既有 TG+DC 同步推播流程）。"""
     logger.info("開始執行大佬錢包動向追蹤（Hyperliquid + Etherscan）...")
-    sent = run_whale_wallet_tracker_once(DATA_DIR)
-    if sent <= 0:
-        logger.info("本次無新事件或未設定 Discord webhook，未發送推播")
+    messages = run_whale_wallet_tracker_once(DATA_DIR)
+    if not messages:
+        logger.info("本次無新事件，未發送推播")
         return
-    logger.info("大佬錢包動向追蹤推播完成，已發送 %s 則", sent)
+    thread_id = TG_THREAD_IDS.get("hyperliquid", 252)
+    sent_ok = 0
+    for msg in messages[:20]:
+        if send_telegram_message(msg, thread_id, parse_mode="Markdown"):
+            sent_ok += 1
+    logger.info("大佬錢包動向追蹤推播完成，已發送 %s/%s 則", sent_ok, min(len(messages), 20))
 
 
 def run_gold_signal():

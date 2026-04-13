@@ -4,7 +4,7 @@
 大佬錢包動向追蹤（Hyperliquid + Etherscan）
 - 追蹤指定地址的 HL 合約開/平倉
 - 追蹤鏈上現貨大額轉帳（> 100k USD）
-- 僅推播 Discord（Webhook），不影響既有 Telegram 訊號流程
+- 產出 Markdown 訊息，由 jackbot 既有 TG/DC 發送流程送出
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import requests
 
@@ -41,6 +41,24 @@ WHALE_PROFILES: Dict[str, Dict[str, str]] = {
         "intro": "幣圈教父級人物，擅長宏觀敘事與趨勢佈局。",
         "pros": "中長線動作常是行情主題前哨。",
         "cons": "頻率較低，且可能帶節奏，需注意成本與滑點。",
+    },
+    "0xd8da6bf26964af9d7eed9e03e53415d37aa96045": {
+        "name": "Vitalik Buterin (V 神)",
+        "intro": "以太坊核心人物，平常少做高頻交易，但每次鏈上動作都很有市場影響力。",
+        "pros": "大額轉帳常帶動市場情緒，屬於高敏感風向指標。",
+        "cons": "未必是交易行為，可能是捐贈或內部調度，容易被過度解讀。",
+    },
+    "0x3ddfa8ec3052539b6c9549f12cea2c295cff5296": {
+        "name": "Justin Sun (孫宇晨)",
+        "intro": "高頻資金調度代表人物，常見巨額穩定幣與主流幣轉移。",
+        "pros": "大額轉入轉出通常領先市場波動，具風險預警價值。",
+        "cons": "錢包眾多且策略複雜，單一地址不代表完整持倉意圖。",
+    },
+    "0x8c11d3ce408c089bb48bed807eb888b58380c548": {
+        "name": "Christian2022.eth (Nd4 相關)",
+        "intro": "巨鯨基金相關地址，常在高波動時做大額倉位與保證金調整。",
+        "pros": "補保證金與倉位異動對市場轉折有參考價值。",
+        "cons": "部分操作偏風控性質，不一定代表主觀方向押注。",
     },
 }
 
@@ -326,9 +344,9 @@ def _fmt_usd(v: float) -> str:
     return f"${v:,.0f}"
 
 
-def _build_embed(event: Dict[str, Any]) -> Dict[str, Any]:
+def _build_markdown_message(event: Dict[str, Any]) -> str:
     p = event["profile"]
-    title = "🐋 大佬錢包動向追蹤"
+    title = "🐋 *鏈上巨鯨動向*"
     if event["type"] == "hl_open":
         action_line = f"🚀 合約開倉：`{event['coin']}` {event['side']}"
         detail_line = (
@@ -336,76 +354,40 @@ def _build_embed(event: Dict[str, Any]) -> Dict[str, Any]:
             f"槓桿：{float(event.get('leverage') or 0):.1f}x | "
             f"均價：{float(event.get('entry') or 0):,.4f}"
         )
-        color = 0x2ECC71
     elif event["type"] == "hl_close":
         action_line = f"🧹 合約平倉：`{event['coin']}` 原 {event['side']}"
         detail_line = (
             f"原名目價值：{_fmt_usd(float(event.get('notional') or 0))} | "
             f"參考均價：{float(event.get('entry') or 0):,.4f}"
         )
-        color = 0xE67E22
     else:
         action_line = f"💸 大額現貨{event['direction']}：`{event['symbol']}`"
         detail_line = (
             f"數量：{float(event.get('amount') or 0):,.4f} | "
             f"估值：{_fmt_usd(float(event.get('usd') or 0))}"
         )
-        color = 0x3498DB
 
-    desc = (
-        f"**{p['name']}**\n"
-        f"🧾 介紹：{p['intro']}\n"
-        f"✅ 優點：{p['pros']}\n"
-        f"⚠️ 缺點：{p['cons']}\n\n"
-        f"{action_line}\n"
-        f"{detail_line}\n"
-        f"地址：`{event['address'][:6]}...{event['address'][-4:]}`"
-    )
+    lines = [
+        title,
+        f"👤 *{p['name']}*",
+        f"🧾 介紹：{p['intro']}",
+        f"✅ 優點：{p['pros']}",
+        f"⚠️ 缺點：{p['cons']}",
+        "",
+        action_line,
+        detail_line,
+        f"地址：`{event['address'][:6]}...{event['address'][-4:]}`",
+    ]
     if event.get("hash"):
-        desc += f"\nTx: [`{str(event['hash'])[:10]}...`](https://etherscan.io/tx/{event['hash']})"
-
-    return {
-        "title": title,
-        "description": desc,
-        "color": color,
-        "timestamp": event["time"],
-        "footer": {"text": "區塊鏈船長｜僅供風險觀察，非投資建議"},
-    }
+        lines.append(f"Tx: https://etherscan.io/tx/{event['hash']}")
+    lines.append("")
+    lines.append("⚠️ 僅供風險觀察，非投資建議")
+    return "\n".join(lines)
 
 
-def _send_discord_webhook(events: List[Dict[str, Any]]) -> int:
-    webhook = os.getenv("WHALE_DC_WEBHOOK_URL", "").strip()
-    if not webhook:
-        logger.warning("[WhaleTracker] 未設定 WHALE_DC_WEBHOOK_URL，略過 Discord 推播")
-        return 0
-
-    thread_id = os.getenv("WHALE_DC_THREAD_ID", "").strip()
-    url = webhook
-    if thread_id:
-        sep = "&" if "?" in webhook else "?"
-        url = f"{webhook}{sep}thread_id={thread_id}"
-
-    sent = 0
-    for e in events:
-        payload = {
-            "username": "區塊鏈船長・大佬雷達",
-            "content": "⚡ 有大佬動作，注意風險別無腦追！",
-            "embeds": [_build_embed(e)],
-        }
-        try:
-            resp = requests.post(url, json=payload, timeout=12)
-            if 200 <= resp.status_code < 300:
-                sent += 1
-            else:
-                logger.error("[WhaleTracker] Discord webhook error %s %s", resp.status_code, resp.text[:200])
-        except Exception as ex:
-            logger.error("[WhaleTracker] Discord push failed: %s", ex)
-    return sent
-
-
-def run_whale_wallet_tracker_once(data_dir: Path) -> int:
+def run_whale_wallet_tracker_once(data_dir: Path) -> List[str]:
     """
-    回傳本輪成功推播事件數。
+    回傳本輪可推播的 Markdown 訊息列表。
     """
     state_path = data_dir / "whale_tracker_state.json"
     state = _load_state(state_path)
@@ -430,9 +412,9 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> int:
         logger.info("[WhaleTracker] 本輪無新事件")
         state["hl_positions"] = new_hl_state
         _save_state(state_path, state)
-        return 0
+        return []
 
-    sent_count = _send_discord_webhook(events)
+    messages = [_build_markdown_message(e) for e in events]
     for e in events:
         if e["type"] in ("hl_open", "hl_close"):
             sent_event_ids.add(e["id"])
@@ -443,5 +425,5 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> int:
     state["sent_event_ids"] = list(sent_event_ids)[-3000:]
     state["sent_transfer_ids"] = list(sent_transfer_ids)[-3000:]
     _save_state(state_path, state)
-    logger.info("[WhaleTracker] 本輪事件=%s，成功推播=%s", len(events), sent_count)
-    return sent_count
+    logger.info("[WhaleTracker] 本輪事件=%s，待發送訊息=%s", len(events), len(messages))
+    return messages

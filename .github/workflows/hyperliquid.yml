@@ -44,9 +44,14 @@ jobs:
 
       - name: Run whale wallet tracker task
         env:
-          # Discord Webhook（新大佬追蹤專用）
-          WHALE_DC_WEBHOOK_URL: ${{ secrets.WHALE_DC_WEBHOOK_URL }}
-          WHALE_DC_THREAD_ID: ${{ secrets.WHALE_DC_THREAD_ID }}
+          # 走既有 TG + DC 同步發送流程（由 jackbot.send_telegram_message 處理）
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
+          TG_THREAD_HYPERLIQUID: ${{ secrets.TG_THREAD_HYPERLIQUID }}
+          DC_TOKEN: ${{ secrets.DC_TOKEN }}
+          DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
+          DC_THREAD_IDShyperliquid: ${{ secrets.DC_THREAD_IDShyperliquid }}
           # 鏈上掃描參數
           ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
           WHALE_SPOT_MIN_USD: ${{ secrets.WHALE_SPOT_MIN_USD }}
