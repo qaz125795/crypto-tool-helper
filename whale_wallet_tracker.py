@@ -138,8 +138,24 @@ def _fetch_hl_positions(address: str) -> Dict[str, Dict[str, float]]:
             lev = float(pos.get("leverage", {}).get("value") or 0)
         except Exception:
             lev = 0.0
+        liq_price = None
+        for k in ("liquidationPx", "liquidation_price", "liqPx", "liq_price"):
+            v = pos.get(k)
+            if v is None:
+                continue
+            try:
+                liq_price = float(v)
+                break
+            except Exception:
+                continue
         notional = abs(size) * entry if entry > 0 else 0.0
-        out[coin] = {"size": size, "entry": entry, "leverage": lev, "notional": notional}
+        out[coin] = {
+            "size": size,
+            "entry": entry,
+            "leverage": lev,
+            "notional": notional,
+            "liq_price": liq_price,
+        }
     return out
 
 
@@ -172,6 +188,7 @@ def _detect_hl_events(
                     "entry": cur["entry"],
                     "leverage": cur["leverage"],
                     "notional": cur["notional"],
+                    "liq_price": cur.get("liq_price"),
                 }
             )
 
@@ -194,6 +211,7 @@ def _detect_hl_events(
                     "entry": old["entry"],
                     "leverage": old.get("leverage", 0.0),
                     "notional": old.get("notional", 0.0),
+                    "liq_price": old.get("liq_price"),
                 }
             )
     return events
@@ -404,6 +422,9 @@ def _build_markdown_message(event: Dict[str, Any]) -> str:
         detail_line,
         f"地址：`{event['address'][:6]}...{event['address'][-4:]}`",
     ]
+    liq = event.get("liq_price")
+    if isinstance(liq, (int, float)) and liq > 0:
+        lines.append(f"💥 暴倉價：`{liq:,.4f}`")
     if event.get("hash"):
         lines.append(f"Tx: https://etherscan.io/tx/{event['hash']}")
     lines.append("")
