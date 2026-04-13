@@ -211,6 +211,7 @@ TREE_API_KEY = os.getenv('TREE_API_KEY')
 # Telegram 配置
 TG_TOKEN = os.getenv('TG_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
+DC_TOKEN = os.getenv('DC_TOKEN')
 
 # Telegram Thread IDs (從環境變量讀取 JSON，或使用預設值)
 thread_ids_str = os.environ.get('TG_THREAD_IDS', '')
@@ -245,6 +246,44 @@ else:
         'hyperliquid': int(os.environ.get('TG_THREAD_HYPERLIQUID', 252)),
         'gold_signal': int(os.environ.get('TG_THREAD_GOLD_SIGNAL') or 254),
     }
+
+# Discord Thread/Channel IDs（可選）
+# 建議使用 JSON 一次設定，例如：
+# DC_THREAD_IDS='{"liquidity_radar":1493134385346777170,"news":1493134289456599060}'
+dc_thread_ids_str = os.environ.get('DC_THREAD_IDS', '')
+if dc_thread_ids_str:
+    try:
+        DC_THREAD_IDS = json.loads(dc_thread_ids_str)
+    except Exception:
+        DC_THREAD_IDS = {}
+else:
+    DC_THREAD_IDS = {}
+
+# 兼容單獨環境變數（Zeabur 常用）
+# 支援兩種命名：
+# 1) DC_THREAD_IDS_<key>      e.g. DC_THREAD_IDS_LIQUIDITY_RADAR
+# 2) DC_THREAD_IDS<key>       e.g. DC_THREAD_IDSliquidity_radar
+for _k in (
+    "sector_ranking",
+    "buying_power_monitor",
+    "position_change",
+    "economic_data",
+    "news",
+    "funding_rate",
+    "long_term_index",
+    "liquidity_radar",
+    "altseason_radar",
+    "hyperliquid",
+    "gold_signal",
+):
+    if _k in DC_THREAD_IDS and str(DC_THREAD_IDS.get(_k)).strip():
+        continue
+    _env1 = f"DC_THREAD_IDS_{_k.upper()}"
+    _env2 = f"DC_THREAD_IDS{_k}"
+    _raw = os.getenv(_env1) or os.getenv(_env2) or ""
+    _raw = str(_raw).strip()
+    if _raw:
+        DC_THREAD_IDS[_k] = _raw
 
 # 其他配置
 EXCHANGE = "Binance"
@@ -476,22 +515,48 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
+    tg_ok = False
     try:
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code == 200:
             result = response.json()
             if result.get("ok"):
                 logger.info("Telegram 訊息發送成功")
-                return True
+                tg_ok = True
             else:
                 logger.error(f"Telegram API 錯誤: {result}")
-                return False
         else:
             logger.error(f"Telegram HTTP 錯誤: {response.status_code} - {response.text}")
-            return False
     except Exception as e:
         logger.error(f"發送 Telegram 訊息失敗: {str(e)}")
-        return False
+
+    # Discord 同步推播（不影響 Telegram 結果）
+    dc_ok = False
+    try:
+        dc_channel_id = _resolve_dc_channel_id(thread_id)
+        if DC_TOKEN and dc_channel_id:
+            dc_url = f"https://discord.com/api/v10/channels/{dc_channel_id}/messages"
+            dc_headers = {
+                "Authorization": f"Bot {DC_TOKEN}",
+                "Content-Type": "application/json",
+            }
+            dc_payload = {
+                "content": _convert_text_for_discord(text),
+            }
+            components = _convert_reply_markup_to_discord_components(reply_markup)
+            if components:
+                dc_payload["components"] = components
+
+            dc_resp = requests.post(dc_url, headers=dc_headers, json=dc_payload, timeout=10)
+            if 200 <= dc_resp.status_code < 300:
+                dc_ok = True
+                logger.info("Discord 訊息發送成功")
+            else:
+                logger.error(f"Discord sendMessage HTTP 錯誤: {dc_resp.status_code} - {dc_resp.text}")
+    except Exception as e:
+        logger.error(f"發送 Discord 訊息失敗: {str(e)}")
+
+    return tg_ok or dc_ok
 
 
 def send_telegram_photo(
@@ -514,6 +579,7 @@ def send_telegram_photo(
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
+    tg_ok = False
     try:
         with open(photo_path, "rb") as f:
             files = {"photo": f}
@@ -522,14 +588,103 @@ def send_telegram_photo(
             result = resp.json()
             if result.get("ok"):
                 logger.info("Telegram 圖片發送成功")
-                return True
+                tg_ok = True
             logger.error(f"Telegram sendPhoto API 錯誤: {result}")
-            return False
-        logger.error(f"Telegram sendPhoto HTTP 錯誤: {resp.status_code} - {resp.text}")
-        return False
+        else:
+            logger.error(f"Telegram sendPhoto HTTP 錯誤: {resp.status_code} - {resp.text}")
     except Exception as e:
         logger.error(f"發送 Telegram 圖片失敗: {str(e)}")
-        return False
+
+    # Discord 同步推播（圖片 + 文字；不影響 Telegram 結果）
+    dc_ok = False
+    try:
+        dc_channel_id = _resolve_dc_channel_id(thread_id)
+        if DC_TOKEN and dc_channel_id:
+            dc_url = f"https://discord.com/api/v10/channels/{dc_channel_id}/messages"
+            dc_headers = {
+                "Authorization": f"Bot {DC_TOKEN}",
+            }
+            dc_payload = {
+                "content": _convert_text_for_discord(caption or ""),
+            }
+            components = _convert_reply_markup_to_discord_components(reply_markup)
+            if components:
+                dc_payload["components"] = components
+
+            with open(photo_path, "rb") as f:
+                files = {
+                    "files[0]": (Path(photo_path).name, f, "application/octet-stream"),
+                    "payload_json": (None, json.dumps(dc_payload, ensure_ascii=False)),
+                }
+                dc_resp = requests.post(dc_url, headers=dc_headers, files=files, timeout=30)
+            if 200 <= dc_resp.status_code < 300:
+                dc_ok = True
+                logger.info("Discord 圖片發送成功")
+            else:
+                logger.error(f"Discord sendPhoto HTTP 錯誤: {dc_resp.status_code} - {dc_resp.text}")
+    except Exception as e:
+        logger.error(f"發送 Discord 圖片失敗: {str(e)}")
+
+    return tg_ok or dc_ok
+
+
+def _resolve_dc_channel_id(thread_id: int) -> Optional[int]:
+    """將 Telegram thread_id 對應到 Discord channel_id。"""
+    try:
+        for key, tg_tid in TG_THREAD_IDS.items():
+            if int(tg_tid) == int(thread_id):
+                raw = DC_THREAD_IDS.get(key)
+                if raw is None or str(raw).strip() == "":
+                    return None
+                return int(raw)
+    except Exception:
+        return None
+    return None
+
+
+def _convert_text_for_discord(text: str) -> str:
+    """Discord 不吃 Telegram Markdown；按需求把單星號改雙星號。"""
+    if not text:
+        return ""
+    return text.replace("*", "**")
+
+
+def _convert_reply_markup_to_discord_components(reply_markup: Optional[Dict]) -> List[Dict]:
+    """將 Telegram inline_keyboard 轉為 Discord link buttons。"""
+    if not isinstance(reply_markup, dict):
+        return []
+    rows = reply_markup.get("inline_keyboard")
+    if not isinstance(rows, list):
+        return []
+
+    components: List[Dict] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        btns: List[Dict] = []
+        for btn in row:
+            if not isinstance(btn, dict):
+                continue
+            label = str(btn.get("text") or "").strip()
+            url = str(btn.get("url") or "").strip()
+            if not label or not url:
+                continue
+            btns.append({
+                "type": 2,      # button
+                "style": 5,     # LINK
+                "label": label[:80],
+                "url": url,
+            })
+            if len(btns) >= 5:
+                break
+        if btns:
+            components.append({
+                "type": 1,      # action row
+                "components": btns,
+            })
+        if len(components) >= 5:
+            break
+    return components
 
 
 def load_json_file(filepath: Path, default: Any = None) -> Any:
