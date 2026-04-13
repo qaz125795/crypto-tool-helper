@@ -26,7 +26,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data
-          key: data-hyperliquid-${{ runner.os }}
+          # 每輪使用 run_id 產生新 key，確保本輪更新後會回存；
+          # restore-keys 取前綴，下一輪可拿到最近一次狀態，避免重複推播。
+          key: data-hyperliquid-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            data-hyperliquid-${{ runner.os }}-
 
       - name: Ensure data directory exists
         run: mkdir -p data
