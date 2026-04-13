@@ -4747,8 +4747,8 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         pass
 
     # ══════════════════════════════════════════════════════════════
-    # 第四步：大盤同向濾網（主流幣用 BTC，山寨優先參考 ETH）
-    # 目的：大盤明顯逆風時，即使單幣訊號強，也限制最高 A 級
+    # 第四步：大盤方向提示（僅提示，不作為硬過濾）
+    # 目的：保留 BTC/ETH 作為閱讀輔助，不再限制山寨訊號評級上限
     # ══════════════════════════════════════════════════════════════
     _macro_block_s = False
     sym_raw = x.get("symbol") or ""
@@ -4768,17 +4768,15 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         try:
             _ref_1h_val = float(ref_1h)
             if is_bull_sig and _ref_1h_val < -0.5:
-                _macro_block_s = True
                 if _motion_note:
-                    _motion_note += f"  🌐 大盤偏弱 {_ref_1h_val:+.2f}%：限制最高 A 級"
+                    _motion_note += f"  🌐 大盤偏弱 {_ref_1h_val:+.2f}%：僅作參考"
                 else:
-                    _motion_note = f"🌐 大盤偏弱 {_ref_1h_val:+.2f}%：限制最高 A 級"
+                    _motion_note = f"🌐 大盤偏弱 {_ref_1h_val:+.2f}%：僅作參考"
             elif (not is_bull_sig) and _ref_1h_val > 0.5:
-                _macro_block_s = True
                 if _motion_note:
-                    _motion_note += f"  🌐 大盤偏強 {_ref_1h_val:+.2f}%：限制最高 A 級"
+                    _motion_note += f"  🌐 大盤偏強 {_ref_1h_val:+.2f}%：僅作參考"
                 else:
-                    _motion_note = f"🌐 大盤偏強 {_ref_1h_val:+.2f}%：限制最高 A 級"
+                    _motion_note = f"🌐 大盤偏強 {_ref_1h_val:+.2f}%：僅作參考"
         except (TypeError, ValueError):
             pass
 
@@ -4981,23 +4979,10 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         score += 12
         reasons.append(f"籌碼陷阱跡象({_trap_steps}/3步)")
 
-    # ── 11. 大盤 (BTC) 敬畏：與訊號方向逆風時強制扣分 ─────────────────
-    try:
-        _btc_1h_pen = float(_btc_1h_pct) if _btc_1h_pct is not None else None
-    except (TypeError, ValueError):
-        _btc_1h_pen = None
-    if _btc_1h_pen is not None:
-        if is_bull_sig and _btc_1h_pen < 0:
-            score -= 10
-            reasons.append(f"BTC1H弱勢({_btc_1h_pen:+.2f}%)")
-        elif (not is_bull_sig) and _btc_1h_pen > 0:
-            score -= 10
-            reasons.append(f"BTC1H強勢({_btc_1h_pen:+.2f}%)")
-
-    # ── 評級（S / A / R / B；車已發動或大盤逆風 → 上限 A）────────────
+    # ── 評級（S / A / R / B；僅「車已發動」限制上限）────────────
     score = max(0, min(100, score))
-    if _already_moving or _macro_block_s:
-        score = min(score, 74)   # 車已發動或大盤明顯逆風：硬上限 74 分 = 最高 A 級
+    if _already_moving:
+        score = min(score, 74)   # 車已發動：硬上限 74 分 = 最高 A 級
 
     if score < MIN_SIGNAL_PUSH_SCORE:
         grade = "B"
