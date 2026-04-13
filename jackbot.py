@@ -553,6 +553,10 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
                 logger.info("Discord 訊息發送成功")
             else:
                 logger.error(f"Discord sendMessage HTTP 錯誤: {dc_resp.status_code} - {dc_resp.text}")
+        elif not DC_TOKEN:
+            logger.info("Discord 略過：未設定 DC_TOKEN")
+        else:
+            logger.info(f"Discord 略過：找不到 thread_id={thread_id} 對應的 DC 頻道 ID")
     except Exception as e:
         logger.error(f"發送 Discord 訊息失敗: {str(e)}")
 
@@ -622,6 +626,10 @@ def send_telegram_photo(
                 logger.info("Discord 圖片發送成功")
             else:
                 logger.error(f"Discord sendPhoto HTTP 錯誤: {dc_resp.status_code} - {dc_resp.text}")
+        elif not DC_TOKEN:
+            logger.info("Discord 圖片略過：未設定 DC_TOKEN")
+        else:
+            logger.info(f"Discord 圖片略過：找不到 thread_id={thread_id} 對應的 DC 頻道 ID")
     except Exception as e:
         logger.error(f"發送 Discord 圖片失敗: {str(e)}")
 
