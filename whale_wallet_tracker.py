@@ -67,6 +67,32 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "")
+    if raw is None:
+        return default
+    s = str(raw).strip()
+    if not s:
+        return default
+    try:
+        return float(s)
+    except Exception:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "")
+    if raw is None:
+        return default
+    s = str(raw).strip()
+    if not s:
+        return default
+    try:
+        return int(float(s))
+    except Exception:
+        return default
+
+
 def _load_state(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {"hl_positions": {}, "sent_event_ids": [], "sent_transfer_ids": []}
@@ -395,8 +421,8 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> List[str]:
     sent_transfer_ids = set(state.get("sent_transfer_ids") or [])
     old_hl = state.get("hl_positions") or {}
 
-    min_usd = float(os.getenv("WHALE_SPOT_MIN_USD", "100000"))
-    lookback_sec = int(os.getenv("WHALE_LOOKBACK_SECONDS", "1800"))
+    min_usd = _env_float("WHALE_SPOT_MIN_USD", 100000.0)
+    lookback_sec = _env_int("WHALE_LOOKBACK_SECONDS", 1800)
 
     events: List[Dict[str, Any]] = []
     new_hl_state: Dict[str, Dict[str, Dict[str, float]]] = {}
