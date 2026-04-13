@@ -331,6 +331,7 @@ _dynamic_oi_sample_size: int = 0
 # 大盤環境順勢濾網：掃描前取得 BTC / ETH 30m / 1H 漲跌幅，供訊號備註大盤狀態用
 _btc_30m_pct: Optional[float] = None
 _btc_1h_pct: Optional[float] = None   # BTC 1H 方向，配合 30m 判斷大盤強弱
+_btc_oi_1h_pct: Optional[float] = None  # BTC 1H OI 變化（僅供信心加分與推播輔助）
 _eth_30m_pct: Optional[float] = None
 _eth_1h_pct: Optional[float] = None   # ETH 1H 方向，供山寨幣大盤參考
 
@@ -2426,6 +2427,28 @@ def extract_price_change_24h(coin: Dict) -> Optional[float]:
                 parsed = float(change)
                 if parsed == parsed:
                     return parsed
+            except ValueError:
+                pass
+    return None
+
+
+def extract_oi_change_1h(coin: Dict) -> Optional[float]:
+    """提取 1H OI 變化%，優先讀 coins-markets 常見欄位。"""
+    for key in (
+        "open_interest_change_percent_1h",
+        "openInterestChangePercent1h",
+        "oi_change_percent_1h",
+        "oiChangePercent1h",
+        "oiChange1h",
+    ):
+        v = coin.get(key)
+        if isinstance(v, (int, float)) and v == v:
+            return float(v)
+        if isinstance(v, str) and v.strip():
+            try:
+                p = float(v.strip())
+                if p == p:
+                    return p
             except ValueError:
                 pass
     return None
@@ -4994,6 +5017,19 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         score += 12
         reasons.append(f"籌碼陷阱跡象({_trap_steps}/3步)")
 
+    # ── 11. BTC OI 1H 信心加分（僅作輔助，不作硬過濾）───────────────
+    try:
+        _btc_oi_ref = float(_btc_oi_1h_pct) if _btc_oi_1h_pct is not None else None
+    except (TypeError, ValueError):
+        _btc_oi_ref = None
+    if _btc_oi_ref is not None:
+        if abs(_btc_oi_ref) >= 1.5:
+            score += 5
+            reasons.append(f"BTC_OI活躍({_btc_oi_ref:+.2f}%)")
+        elif abs(_btc_oi_ref) >= 0.8:
+            score += 2
+            reasons.append(f"BTC_OI輔助({_btc_oi_ref:+.2f}%)")
+
     # ── 評級（S / A / R / B；僅「車已發動」限制上限）────────────
     score = max(0, min(100, score))
     if _already_moving:
@@ -5610,6 +5646,17 @@ def build_report_message_tiered(
             else:
                 _btc_txt = f"大盤 BTC 近 1 小時變化約 {_btc_pen:+.2f}%——大致橫向整理。"
             msg_lines.append(_btc_txt)
+        try:
+            _btc_oi_txt_v = float(_btc_oi_1h_pct) if _btc_oi_1h_pct is not None else None
+        except (TypeError, ValueError):
+            _btc_oi_txt_v = None
+        if _btc_oi_txt_v is not None:
+            if _btc_oi_txt_v >= 1.5:
+                msg_lines.append(f"BTC OI 近 1 小時 `{_btc_oi_txt_v:+.2f}%`：主力倉位擴張，市場參與度升高。")
+            elif _btc_oi_txt_v <= -1.5:
+                msg_lines.append(f"BTC OI 近 1 小時 `{_btc_oi_txt_v:+.2f}%`：去槓桿明顯，短線波動風險提升。")
+            else:
+                msg_lines.append(f"BTC OI 近 1 小時 `{_btc_oi_txt_v:+.2f}%`：倉位變化中性，僅作信心輔助。")
         if rsi_val is not None and isinstance(rsi_val, (int, float)):
             try:
                 _rv = float(rsi_val)
@@ -5653,6 +5700,7 @@ def build_report_message_tiered(
             "sl": sl,
             "tp1": tp1,
             "btc_1h": _btc_1h_pct if _btc_1h_pct is not None else 0,
+            "btc_oi_1h": _btc_oi_1h_pct if _btc_oi_1h_pct is not None else 0,
             "fr": _fr_ai,
             "rsi": _rsi_ai,
         }
@@ -6888,9 +6936,10 @@ def fetch_position_change():
     logger.info(f"📊 [漏斗 1] CoinGlass 全網 {len(all_symbols_data)} 幣種")
 
     # ── 單次迴圈完成兩件事：BTC/ETH 大盤、24h快取 ──────────────────────────────
-    global _btc_30m_pct, _btc_1h_pct, _eth_30m_pct, _eth_1h_pct
+    global _btc_30m_pct, _btc_1h_pct, _btc_oi_1h_pct, _eth_30m_pct, _eth_1h_pct
     _btc_30m_pct = None
     _btc_1h_pct = None
+    _btc_oi_1h_pct = None
     _eth_30m_pct = None
     _eth_1h_pct = None
     coinglass_24h_map: Dict[str, float] = {}
@@ -6907,7 +6956,11 @@ def fetch_position_change():
                 _btc_1h_pct = float(_btc_1h_pct_raw) if _btc_1h_pct_raw is not None else None
             except (TypeError, ValueError):
                 _btc_1h_pct = None
-            logger.info(f"📊 [大盤濾網] BTC 30m {(_btc_30m_pct or 0):+.2f}%  1H {(_btc_1h_pct or 0):+.2f}%")
+            _btc_oi_1h_pct = extract_oi_change_1h(coin)
+            logger.info(
+                f"📊 [大盤參考] BTC 價格30m {(_btc_30m_pct or 0):+.2f}%  1H {(_btc_1h_pct or 0):+.2f}%"
+                f" | BTC OI 1H {(_btc_oi_1h_pct or 0):+.2f}%"
+            )
 
         # ①-2 ETH 大盤環境（山寨幣主要參考）
         if clean_sym == "ETH" and _eth_30m_pct is None:
