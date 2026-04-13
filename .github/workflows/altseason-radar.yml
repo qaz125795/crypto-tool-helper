@@ -41,6 +41,9 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_ALTSEASON_RADAR: ${{ secrets.TG_THREAD_ALTSEASON_RADAR }}
+          DC_TOKEN: ${{ secrets.DC_TOKEN }}
+          DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
+          DC_THREAD_IDSaltseason_radar: ${{ secrets.DC_THREAD_IDSaltseason_radar }}
         run: |
           timeout 600 python jackbot.py altseason_radar || exit 0
           echo "任務執行完成"

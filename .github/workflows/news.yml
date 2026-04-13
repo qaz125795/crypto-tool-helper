@@ -47,6 +47,9 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_NEWS: ${{ secrets.TG_THREAD_NEWS }}
+          DC_TOKEN: ${{ secrets.DC_TOKEN }}
+          DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
+          DC_THREAD_IDSnews: ${{ secrets.DC_THREAD_IDSnews }}
         run: |
           timeout 480 python jackbot.py news || exit 0
           echo "任務執行完成"

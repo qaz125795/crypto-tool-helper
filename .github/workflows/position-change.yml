@@ -55,6 +55,9 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_POSITION_CHANGE: ${{ secrets.TG_THREAD_POSITION_CHANGE }}
+          DC_TOKEN: ${{ secrets.DC_TOKEN }}
+          DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
+          DC_THREAD_IDSposition_change: ${{ secrets.DC_THREAD_IDSposition_change }}
         run: |
           echo "=============================================="
           echo " 持倉變化篩選 Action 開始（log 即時輸出）"

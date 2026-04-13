@@ -69,6 +69,9 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_GOLD_SIGNAL: ${{ secrets.TG_THREAD_GOLD_SIGNAL }}
+          DC_TOKEN: ${{ secrets.DC_TOKEN }}
+          DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
+          DC_THREAD_IDSgold_signal: ${{ secrets.DC_THREAD_IDSgold_signal }}
         run: |
           timeout 300 python jackbot.py gold_signal || exit 0
           echo "黃金訊號任務完成"

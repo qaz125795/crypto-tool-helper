@@ -41,8 +41,14 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_LIQUIDITY_RADAR: ${{ secrets.TG_THREAD_LIQUIDITY_RADAR }}
+          DC_TOKEN: ${{ secrets.DC_TOKEN }}
+          DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
+          DC_THREAD_IDSliquidity_radar: ${{ secrets.DC_THREAD_IDSliquidity_radar }}
+          # 清算柱狀圖：限制每次同步天數，避免 Actions 首次下載過久
+          LIQ_CHART_MAX_SYNC_DAYS: "10"
+          LIQ_CHART_LOOKBACK_DAYS: "180"
         run: |
-          # 設置超時保護
+          # 設置超時保護（含 matplotlib 繪圖與 Binance 快照下載）
           timeout 600 python jackbot.py liquidity_radar || exit 0
           echo "任務執行完成"
 
