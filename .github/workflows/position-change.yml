@@ -3,6 +3,9 @@
 name: 持倉變化篩選（外部定時觸發）
 
 on:
+  schedule:
+    # 每 5 分鐘執行一次（UTC）
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -58,6 +61,12 @@ jobs:
           DC_TOKEN: ${{ secrets.DC_TOKEN }}
           DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
           DC_THREAD_IDSposition_change: ${{ secrets.DC_THREAD_IDSposition_change }}
+          # 短打模式（可在 Actions Secrets 覆寫）
+          SNIPER_FAST_MODE: ${{ secrets.SNIPER_FAST_MODE }}
+          SNIPER_TP1_R: ${{ secrets.SNIPER_TP1_R }}
+          SNIPER_TP2_R: ${{ secrets.SNIPER_TP2_R }}
+          SNIPER_MIN_SL_PCT: ${{ secrets.SNIPER_MIN_SL_PCT }}
+          SNIPER_COOLDOWN_HOURS: ${{ secrets.SNIPER_COOLDOWN_HOURS }}
         run: |
           echo "=============================================="
           echo " 持倉變化篩選 Action 開始（log 即時輸出）"

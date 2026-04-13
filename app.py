@@ -58,7 +58,7 @@ def health_check():
     """健康檢查端點"""
     return jsonify({
         'status': 'ok',
-        'message': '區塊鏈船長—傑克：自動化推播系統運行中',
+        'message': '區塊鏈船長：自動化推播系統運行中',
         'endpoints': {
             '/': '健康檢查',
             'note': '若設定環境變數 CRON_SECRET，除 / 外之任務端點需 Authorization: Bearer <CRON_SECRET> 或 ?token=<CRON_SECRET>',

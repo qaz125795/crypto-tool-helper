@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-區塊鏈船長—傑克：自動化推播系統
+區塊鏈船長：自動化推播系統
 整合所有功能模塊
 """
 
@@ -310,7 +310,7 @@ _coinglass_api_counter: Dict[str, Any] = {"window_start": 0.0, "count": 0}
 _coinglass_api_counter_lock = threading.Lock()
 _COINGLASS_MAX_CALLS_PER_MINUTE = 250
 
-# BingX 技術指標失敗次數（每輪用於判斷是否啟用 CoinGlass Plan B）
+# Gate 技術指標失敗次數（每輪用於判斷是否啟用 CoinGlass Plan B）
 # 加鎖確保 ThreadPoolExecutor 並發環境下計數正確
 _bingx_tech_fail_count: int = 0
 _bingx_tech_fail_lock = threading.Lock()
@@ -893,7 +893,7 @@ def send_ranking_to_tg(ranking: List[Dict]):
             prefix = "📈" if ch > 0 else "📉"
         message += f"{medal} {prefix} *{sector['displayName']}* `{sign}{change_str}%`\n"
 
-    message += "\n💡 _由傑克 AI 每四小時自動監控資金流向_"
+    message += "\n💡 _由 AI 每四小時自動監控資金流向_"
 
     keyboard = {
         "inline_keyboard": [
@@ -1563,39 +1563,68 @@ def _fetch_coinglass_24h_map() -> Dict[str, float]:
         return {}
 
 
+def _to_gate_contract(symbol: str) -> str:
+    clean = str(symbol).replace("USDT", "").replace("-", "").replace("_", "").upper()
+    return f"{clean}_USDT"
+
+
+def fetch_gate_usdt_contract_bases() -> Set[str]:
+    """
+    取得 Gate USDT 永續可交易標的（base 集合）。
+    用於最終推播前白名單，避免用戶在 Gate 下單時遇到不可交易或流動性極差標的。
+    """
+    out: Set[str] = set()
+    try:
+        r = requests.get("https://api.gateio.ws/api/v4/futures/usdt/contracts", timeout=15)
+        if r.status_code != 200:
+            logger.warning(f"[Gate合約白名單] HTTP {r.status_code}，略過 Gate 白名單過濾")
+            return out
+        rows = r.json()
+        if not isinstance(rows, list):
+            return out
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "")
+            status = str(row.get("status") or "").lower()
+            if not name.endswith("_USDT"):
+                continue
+            if status and status not in ("trading", "tradable", "online"):
+                continue
+            base = name[:-5].upper()
+            if base:
+                out.add(base)
+        logger.info(f"[Gate合約白名單✅] 取得 {len(out)} 個 USDT 永續標的")
+    except Exception as e:
+        logger.warning(f"[Gate合約白名單] 讀取失敗: {e}")
+    return out
+
+
 def fetch_bingx_futures_24h_vol() -> Dict[str, float]:
     """
-    Plan B 成交值備援：BingX 永續合約 24h quoteVolume（USDT）批次取得。
-    單一 API call 涵蓋所有 BingX 上市幣種，市場數據端點無需 API Key。
+    Plan B 成交值備援：Gate 永續合約 24h quoteVolume（USDT）批次取得。
+    單一 API call 涵蓋 Gate 上市幣種，市場數據端點無需 API Key。
     回傳 {base_symbol: vol_usdt_24h}，例如 {"BTC": 2.3e10, "ETH": 5e9}。
     失敗時靜默回傳空 dict，不影響主流程。
     """
     try:
-        r = requests.get(
-            "https://open-api.bingx.com/openApi/swap/v2/quote/ticker",
-            timeout=10
-        )
+        r = requests.get("https://api.gateio.ws/api/v4/futures/usdt/tickers", timeout=10)
         if r.status_code != 200:
-            logger.warning(f"[備援B-BingX] HTTP {r.status_code}，跳過")
+            logger.warning(f"[備援B-Gate] HTTP {r.status_code}，跳過")
             return {}
-        j = r.json()
-        # BingX 回傳格式：{"code": 0, "data": [...]} 或直接 list
-        data = j.get("data") if isinstance(j, dict) else j
+        data = r.json()
         if not isinstance(data, list):
             return {}
         result: Dict[str, float] = {}
         for item in data:
-            sym = item.get("symbol", "")           # 格式："BTC-USDT"
-            if not sym.endswith("-USDT"):
+            sym = str(item.get("contract") or "")
+            if not sym.endswith("_USDT"):
                 continue
-            base = sym[:-5]                         # "BTC-USDT" → "BTC"
-            # 處理 1000xxx / 1000000xxx 命名（BingX 用全稱，CoinGlass 用縮寫）
-            # 例：BingX "1000PEPE" → CoinGlass "1KPEPE"（但此處保留 BingX 原名供對照）
+            base = sym[:-5]
             try:
-                vol = float(item.get("quoteVolume") or 0)
+                vol = float(item.get("volume_24h_quote") or item.get("volume_24h_usd") or 0)
                 if vol > 0:
                     result[base] = vol
-                    # 同時建立縮寫別名：1000xxx → 1Kxxx；1000000xxx → 1Mxxx
                     if base.startswith("1000000"):
                         result.setdefault("1M" + base[7:], vol)
                     elif base.startswith("10000"):
@@ -1604,10 +1633,10 @@ def fetch_bingx_futures_24h_vol() -> Dict[str, float]:
                         result.setdefault("1K" + base[4:], vol)
             except (TypeError, ValueError):
                 pass
-        logger.info(f"[備援B-BingX✅] 取得 {len(result)} 幣種 24h USDT 成交值")
+        logger.info(f"[備援B-Gate✅] 取得 {len(result)} 幣種 24h USDT 成交值")
         return result
     except Exception as e:
-        logger.warning(f"[備援B-BingX] 失敗: {type(e).__name__}: {e}")
+        logger.warning(f"[備援B-Gate] 失敗: {type(e).__name__}: {e}")
         return {}
 
 
@@ -1656,28 +1685,25 @@ def fetch_price_change_24h_coinglass_klines(symbol: str, preferred_symbol: Optio
 
 
 def fetch_price_change_24h_bingx(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
-    """BingX 24h 漲跌幅：用 1h K 線取 24h 前開盤與最新收盤計算（CoinGlass 無資料時 fallback）。"""
+    """Gate 24h 漲跌幅：用 1h K 線取 24h 前開盤與最新收盤計算（CoinGlass 無資料時 fallback）。"""
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-    for sym_fmt in ([preferred_symbol] if preferred_symbol else []) + [f"{clean}-USDT", f"1000{clean}-USDT"]:
+    for sym_fmt in ([preferred_symbol] if preferred_symbol else []) + [f"{clean}_USDT", f"1000{clean}_USDT"]:
         if not sym_fmt:
             continue
         try:
             r = requests.get(
-                "https://open-api.bingx.com/openApi/swap/v3/quote/klines",
-                params={"symbol": sym_fmt, "interval": "1h", "limit": 25},
+                "https://api.gateio.ws/api/v4/futures/usdt/candlesticks",
+                params={"contract": sym_fmt, "interval": "1h", "limit": 25},
                 timeout=5
             )
             time.sleep(0.08)
             if r.status_code != 200:
                 continue
-            j = r.json()
-            if j.get("code") != 0:
-                continue
-            data = j.get("data", [])
+            data = r.json()
             if not isinstance(data, list) or len(data) < 2:
                 continue
-            first_open = float(data[0].get("open") or 0)
-            last_close = float(data[-1].get("close") or 0)
+            first_open = float(data[0].get("o") or data[0].get("open") or 0)
+            last_close = float(data[-1].get("c") or data[-1].get("close") or 0)
             if first_open == 0:
                 continue
             return ((last_close - first_open) / first_open) * 100
@@ -2410,7 +2436,7 @@ def fetch_coinglass_indicator(
     if indicator_name.lower() == "atr":
         tries = [("Binance", symbol_param)]
     else:
-        tries = [("Binance", symbol_param), ("BingX", symbol_param), ("BingX", base)]
+        tries = [("Binance", symbol_param), ("Gate", symbol_param), ("Gate", base)]
     for exchange, sym in tries:
         params = {"exchange": exchange, "symbol": sym, "interval": interval}
         try:
@@ -2534,47 +2560,48 @@ def _whale_index_latest(symbol: str, interval: str = "1d") -> Optional[float]:
 
 def _fetch_bingx_funding_rate(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
     """
-    直接從 BingX API 取得該幣種資金費率。若傳入 preferred_symbol（來自 contracts），優先使用。
+    直接從 Gate API 取得該幣種資金費率。若傳入 preferred_symbol（來自 contracts），優先使用。
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     try_symbols = [preferred_symbol] if preferred_symbol else []
     if preferred_symbol and "USDC" in preferred_symbol.upper():
         try_symbols.append(preferred_symbol.upper().replace("-USDC", "-USDT"))
-    try_symbols += [f"{clean}-USDT", f"1000{clean}-USDT"]
+    try_symbols += [f"{clean}_USDT", f"1000{clean}_USDT"]
     try_symbols = list(dict.fromkeys(try_symbols))  # 去重且保留順序
-    base_url = "https://open-api.bingx.com"
+    base_url = "https://api.gateio.ws/api/v4"
     for sym_param in try_symbols:
         try:
-            r = requests.get(f"{base_url}/openApi/swap/v2/quote/premiumIndex", params={"symbol": sym_param}, timeout=5)
+            r = requests.get(f"{base_url}/futures/usdt/tickers", params={"contract": sym_param}, timeout=5)
             time.sleep(0.1)
             if r.status_code != 200:
                 continue
             j = r.json()
-            if j.get("code") != 0:
+            if not isinstance(j, list) or not j:
                 continue
-            data = j.get("data")
+            data = j[0]
             if isinstance(data, dict):
-                rate = data.get("lastFundingRate") or data.get("fundingRate") or data.get("nextFundingRate")
+                rate = data.get("funding_rate")
                 if rate is not None:
                     return float(rate)
-            if isinstance(data, (int, float)):
+            if isinstance(data, (int, float, str)):
                 return float(data)
         except Exception:
             continue
     for sym_param in try_symbols:
         try:
-            r = requests.get(f"{base_url}/openApi/swap/v2/quote/fundingRate", params={"symbol": sym_param, "limit": 2}, timeout=5)
+            r = requests.get(
+                f"{base_url}/futures/usdt/funding_rate",
+                params={"contract": sym_param, "limit": 2},
+                timeout=5,
+            )
             time.sleep(0.1)
             if r.status_code != 200:
                 continue
-            j = r.json()
-            if j.get("code") != 0:
-                continue
-            data = j.get("data", [])
+            data = r.json()
             if isinstance(data, list) and data:
                 last = data[0] if data else {}
                 if isinstance(last, dict):
-                    rate = last.get("fundingRate")
+                    rate = last.get("r")
                     if rate is not None:
                         return float(rate)
         except Exception:
@@ -2583,43 +2610,43 @@ def _fetch_bingx_funding_rate(symbol: str, preferred_symbol: Optional[str] = Non
 
 
 def _fetch_bingx_current_price(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[float]:
-    """從 BingX swap ticker 取得即時最新價（相容舊呼叫，只回傳價格）。"""
+    """從 Gate futures ticker 取得即時最新價（相容舊呼叫，只回傳價格）。"""
     snap = _fetch_bingx_ticker_snapshot(symbol, preferred_symbol)
     return snap.get("price") if snap else None
 
 
 def _fetch_bingx_ticker_snapshot(symbol: str, preferred_symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    從 BingX swap v2 ticker 一次取得：最新價 + 24h 成交額(USDT)。
+    從 Gate futures ticker 一次取得：最新價 + 24h 成交額(USDT)。
     回傳 {"price": float, "volume_usd": float or None}，失敗回傳 None。
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     try_symbols = [preferred_symbol] if preferred_symbol else []
-    try_symbols += [f"{clean}-USDT", f"1000{clean}-USDT"]
+    try_symbols += [f"{clean}_USDT", f"1000{clean}_USDT"]
     try_symbols = list(dict.fromkeys([s for s in try_symbols if s]))
-    base_url = "https://open-api.bingx.com"
+    base_url = "https://api.gateio.ws/api/v4"
     for sym_param in try_symbols:
         try:
             r = requests.get(
-                f"{base_url}/openApi/swap/v2/quote/ticker",
-                params={"symbol": sym_param},
+                f"{base_url}/futures/usdt/tickers",
+                params={"contract": sym_param},
                 timeout=5
             )
             time.sleep(0.08)
             if r.status_code != 200:
                 continue
             j = r.json()
-            if j.get("code") != 0:
+            if not isinstance(j, list) or not j:
                 continue
-            data = j.get("data")
+            data = j[0]
             if not isinstance(data, dict):
                 continue
-            price = data.get("lastPrice") or data.get("price") or data.get("last")
+            price = data.get("last") or data.get("mark_price") or data.get("index_price")
             if price is None:
                 continue
             price_f = float(price)
             volume_usd = None
-            qv = data.get("quoteVolume") or data.get("volume") or data.get("turnover")
+            qv = data.get("volume_24h_quote") or data.get("volume_24h_usd") or data.get("volume_24h")
             if qv is not None:
                 try:
                     volume_usd = float(qv)
@@ -2628,18 +2655,18 @@ def _fetch_bingx_ticker_snapshot(symbol: str, preferred_symbol: Optional[str] = 
             # 若成交額為 0 或缺失，用原始 symbol 再試一次（避免 1000PEPE 等誤判）
             raw_sym = symbol.strip()
             if (volume_usd is None or volume_usd == 0) and raw_sym and raw_sym not in try_symbols:
-                try_sym = raw_sym if ("-" in raw_sym or "USDT" in raw_sym.upper()) else f"{raw_sym}-USDT"
+                try_sym = raw_sym if ("_" in raw_sym or "USDT" in raw_sym.upper()) else f"{raw_sym}_USDT"
                 try:
                     time.sleep(0.08)
                     r2 = requests.get(
-                        f"{base_url}/openApi/swap/v2/quote/ticker",
-                        params={"symbol": try_sym},
+                        f"{base_url}/futures/usdt/tickers",
+                        params={"contract": try_sym},
                         timeout=5
                     )
                     if r2.status_code == 200:
                         j2 = r2.json()
-                        if j2.get("code") == 0 and isinstance(j2.get("data"), dict):
-                            qv2 = j2["data"].get("quoteVolume") or j2["data"].get("volume") or j2["data"].get("turnover")
+                        if isinstance(j2, list) and j2 and isinstance(j2[0], dict):
+                            qv2 = j2[0].get("volume_24h_quote") or j2[0].get("volume_24h_usd") or j2[0].get("volume_24h")
                             if qv2 is not None:
                                 try:
                                     volume_usd = float(qv2)
@@ -2737,8 +2764,8 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
             base = str(base).strip().upper()
 
             rate_found: Optional[float] = None
-            # 交易所優先順序：Binance > Bybit > OKX > BingX > Bitget（量大流動性佳的排前）
-            _EXCHANGE_PRIORITY = ["Binance", "Bybit", "OKX", "BingX", "Bitget"]
+            # 交易所優先順序：Binance > Bybit > OKX > Gate > Bitget（量大流動性佳的排前）
+            _EXCHANGE_PRIORITY = ["Binance", "Bybit", "OKX", "Gate", "Bitget"]
 
             def _parse_rate_from_list(ex_list: list, priority: list) -> Optional[float]:
                 """從 exchange list 中按優先順序找第一個有效費率。
@@ -2778,7 +2805,7 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
                 out[base] = rate_found
 
         if out:
-            logger.info(f"[資金費率✅] 成功解析 {len(out)} 幣種（CoinGlass exchange-list，Binance>Bybit>OKX>BingX>Bitget 優先）")
+            logger.info(f"[資金費率✅] 成功解析 {len(out)} 幣種（CoinGlass exchange-list，Binance>Bybit>OKX>Gate>Bitget 優先）")
         elif lst:
             _sample = list(lst[0].keys()) if lst and isinstance(lst[0], dict) else "n/a"
             logger.warning(f"[資金費率⚠️] 解析 0 筆，首筆結構 keys={_sample}")
@@ -3610,47 +3637,52 @@ def _try_bingx_spot_klines_direct(
     symbol_base: str, interval: str = "15m", limit: int = 60
 ) -> Optional[Dict[str, Any]]:
     """
-    BingX 現貨公開 K 線（免簽名），作為最後 fallback。
-    覆蓋只在 BingX 上線、其他大所未上的山寨幣，同樣帶 volume。
-    格式：[ts, open, high, low, close, volume, close_ts, quote_vol]
+    Gate 永續 K 線（免簽名），作為最後 fallback。
+    覆蓋只在 Gate 上線、其他大所未上的山寨幣，同樣帶 volume。
     """
     clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").upper()
-    sym_pair = f"{clean}-USDT"
+    sym_pair = f"{clean}_USDT"
     try:
         r = requests.get(
-            "https://open-api.bingx.com/openApi/spot/v2/market/kline",
-            params={"symbol": sym_pair, "interval": interval, "limit": limit},
+            "https://api.gateio.ws/api/v4/futures/usdt/candlesticks",
+            params={"contract": sym_pair, "interval": interval, "limit": limit},
             timeout=5,
         )
         if r.status_code != 200:
             return None
-        j = r.json()
-        raw = j.get("data") if isinstance(j, dict) else j
+        raw = r.json()
         if not isinstance(raw, list) or len(raw) < 20:
             return None
         opens, highs, lows, closes, volumes = [], [], [], [], []
         for bar in raw:
             try:
-                opens.append(float(bar[1]))
-                highs.append(float(bar[2]))
-                lows.append(float(bar[3]))
-                closes.append(float(bar[4]))
-                volumes.append(float(bar[5]))
-            except (IndexError, TypeError, ValueError):
+                if isinstance(bar, dict):
+                    opens.append(float(bar.get("o") or 0))
+                    highs.append(float(bar.get("h") or 0))
+                    lows.append(float(bar.get("l") or 0))
+                    closes.append(float(bar.get("c") or 0))
+                    volumes.append(float(bar.get("v") or 0))
+                elif isinstance(bar, (list, tuple)) and len(bar) >= 6:
+                    opens.append(float(bar[1]))
+                    highs.append(float(bar[2]))
+                    lows.append(float(bar[3]))
+                    closes.append(float(bar[4]))
+                    volumes.append(float(bar[5]))
+            except (IndexError, TypeError, ValueError, AttributeError):
                 pass
         if len(closes) < 20:
             return None
         result = _calc_indicators_from_ohlcv(
-            opens, highs, lows, closes, volumes, clean, "BingX-Spot", sym_pair
+            opens, highs, lows, closes, volumes, clean, "Gate-Futures", sym_pair
         )
         if result:
-            result["source"] = "BingX-Spot"
+            result["source"] = "Gate-Futures"
             logger.info(
-                f"[BingX-Spot✅] {clean}: {sym_pair} {interval} {len(closes)} 根（含 volume）"
+                f"[Gate-Futures✅] {clean}: {sym_pair} {interval} {len(closes)} 根（含 volume）"
             )
             return result
     except Exception as e:
-        logger.debug(f"[BingX-Spot] {clean}/{sym_pair} 異常: {e}")
+        logger.debug(f"[Gate-Futures] {clean}/{sym_pair} 異常: {e}")
     return None
 
 
@@ -3721,8 +3753,8 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
     K 線四層降級策略（優先有 volume 的直連來源）：
       1. Binance 期貨直連（免 Key，有 volume）→ 覆蓋 Binance 上所有幣種
       2. Bybit 永續直連（免 Key，有 volume）  → 覆蓋 Bybit-only 幣種（如 XION, WHITEWHALE）
-      3. CoinGlass 代理 OKX/BingX/Bitget     → 無 volume，但覆蓋剩餘冷門幣種
-      4. BingX 現貨直連（免 Key，有 volume）  → 最終 fallback
+      3. CoinGlass 代理 OKX/Gate/Bitget      → 無 volume，但覆蓋剩餘冷門幣種
+      4. Gate 永續直連（免 Key，有 volume）   → 最終 fallback
     """
     clean = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
 
@@ -3739,7 +3771,7 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
     # ── Step 3: CoinGlass 代理（覆蓋剩餘幣種，無 volume）──────────────────
     # 保留 Bybit 作為 CoinGlass 代理備援，防止 Bybit 直連偶爾超時/失敗時完全無資料
     try_pairs = [f"{clean}USDT", f"1000{clean}USDT"]
-    exchanges_to_try = ["OKX", "Bybit", "BingX", "Bitget"]
+    exchanges_to_try = ["OKX", "Bybit", "Gate", "Bitget"]
     headers_cg = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
 
     for exchange in exchanges_to_try:
@@ -3783,14 +3815,14 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
                 logger.debug(f"[CG K線] {clean}/{exchange}/{sym_pair} 異常: {e}")
                 continue
 
-    # ── Step 4: BingX 現貨直連（最終 fallback，有 volume）────────────────
+    # ── Step 4: Gate 永續直連（最終 fallback，有 volume）────────────────
     _bingx = _try_bingx_spot_klines_direct(clean, interval, limit)
     if _bingx:
         return _bingx
 
     logger.warning(
         f"[CG K線] {clean}: 所有來源均無法取得足夠 K 線"
-        f"（Binance直連 + Bybit直連 + CoinGlass/{exchanges_to_try} + BingX現貨）"
+        f"（Binance直連 + Bybit直連 + CoinGlass/{exchanges_to_try} + Gate永續）"
         f" → 可能為 Hyperliquid/Gate.io 專屬幣種"
     )
     return None
@@ -3839,7 +3871,7 @@ FR_LONG_LIQUIDATION_BLOCK = 0.005  # +0.5%：多頭嚴重壅擠，爆倉風險�
 MAIN_COINS = {"BTC", "ETH", "SOL"}  # 主流幣：1H OI > 4% 即達標
 
 # ── 流動性門檻（24h 成交值，低於此深度不足）──────────────────────────
-MTF_VOLUME_MIN_USD  = 9_990_000    # 999 萬 USD（過濾低流動性/單一莊家畫門）
+MTF_VOLUME_MIN_USD  = 25_000_000   # 2500 萬 USD（高滑點風險過濾，面向大規模跟單）
 
 # ── 1H OI 扳機門檻（動態分層，依幣種流動性調整）────────────────────────
 # 嚴格版：主流 4% | 高流動山寨 6% | 其他小幣 8%（減少雜訊）
@@ -3851,12 +3883,30 @@ OI_THRESHOLD_1H     = 5.0          # 向後相容預設值（實際由 _get_oi_t
 PRICE_THRESHOLD_1H  = 1.5           # 1H 價格扳機門檻
 
 # ── 風報比：1R = |進場價 − 止損價|；TP 為 1R 的倍數（與推播 R 標示一致）──────
-TP1_R_MULTIPLIER = 1.0   # TP1 至少 1:1（相對於 1R）
-TP2_R_MULTIPLIER = 3.0  # TP2 延伸目標（須 > TP1）
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(str(raw).strip())
+    except ValueError:
+        return default
+
+
+SNIPER_FAST_MODE = os.getenv("SNIPER_FAST_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+_default_tp1 = 0.6 if SNIPER_FAST_MODE else 1.0
+_default_tp2 = 1.2 if SNIPER_FAST_MODE else 3.0
+_default_min_sl = 0.008 if SNIPER_FAST_MODE else 0.015
+
+TP1_R_MULTIPLIER = _env_float("SNIPER_TP1_R", _default_tp1)   # 快進快出建議 0.5~0.8
+TP2_R_MULTIPLIER = _env_float("SNIPER_TP2_R", _default_tp2)   # 快進快出建議 1.0~1.5
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
-MIN_SL_PERCENT = 0.015  # 最小止損距離：one_r/進場 < 1.5% 時強制拉開（避免一碰就碎）
+MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
-MIN_SIGNAL_PUSH_SCORE = 70
+MIN_SIGNAL_PUSH_SCORE = 78
+# 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
+MAX_ESTIMATED_HOLD_HOURS = _env_float("SNIPER_MAX_HOLD_HOURS", 8.0)
+MIN_1H_MOMENTUM_PCT = _env_float("SNIPER_MIN_1H_MOMENTUM_PCT", 1.0)  # 低於此視為慢盤
 
 
 def compute_structural_sl_tp(
@@ -4024,32 +4074,14 @@ def _get_oi_threshold_for_item(item: Dict) -> float:
 # ── 黑名單：永久禁止推播的標的（可隨時新增/移除）────────────────────────────────
 # 原則：歷史表現差、流動性不足、長期被操控的幣種
 SYMBOL_BLACKLIST: set = {
-    # ── 已知問題幣（操縱/流動性/無意義/極小市值）──
-    "BULLA", "FIO", "ORBS", "NEIROCTO", "DENT",
-    "RTX", "IKA", "POND", "1000NEIROCTO",
-    "ULTIMA", "REAL", "CRCLX", "TFUEL",
-    "WHITEWHALE", "PYR",
-    "MANYU",      # 極小市值 meme 幣，價格 ~7e-9 USD，無交易意義
-    "CITY",       # 用戶手動加入黑名單
-    "REQ", "STEEM", "ROAM",  # 用戶手動加入黑名單（2026-03-02）
-    "CELR", "ATA", "ICX", "AGT", "ALU", "CAMP",  # 用戶手動加入黑名單（2026-03-02/03）
-    "BOBA", "AIO", "BTR",  # 用戶手動加入黑名單（2026-03-03）
-    "BSU", "AVL",  # 用戶手動加入黑名單（2026-03-04）
-    "GODS", "ASP", "VFY", "FHE",  # 用戶手動加入黑名單（2026-03-05）
-    "HOT",  # 用戶手動加入黑名單（2026-03-06）
-    "WAXP",  # 用戶手動加入黑名單（waxp）
-    "NG",   # 用戶手動加入黑名單（流動性/表現問題）
-    "BICO", "GIGA", "CLOUD", "JELLYJELLY",  # 用戶手動加入黑名單（2026-03-06）
-    "CVX", "L3", "DOGS", "ETHW", "1000QUBIC",  # 用戶手動加入黑名單（2026-03-07）
-    "JOE", "RONIN", "1000XEC", "XAUT",  # 用戶手動加入黑名單（2026-03-07）
-    "BTT", "BDXN", "LIGHT", "SC", "DEXE", "XVG", "RDNT", "BAND", "0GN", "GTC", "G", "BAN", "BNT",  # 用戶手動加入黑名單
+    # 保留封鎖：美股代幣／代幣化股票／傳統商品與指數（非純加密幣）
     "MASTOCK",    # 代幣化股票，OI 數據異常（曾觸發 621% 極端值）
     "PLTRSTOCK",  # Palantir 代幣化股票（STOCK 後綴格式）
     # ── 其他非加密貨幣期貨 ──
     "XTI",        # WTI 原油期貨（XTI/USD）
     "XBR",        # Brent 原油期貨
     "KO",         # Coca-Cola 股票
-    # ── 代幣化股票（Bybit/BingX/Bitget 合約，非加密貨幣）──
+    # ── 代幣化股票（Bybit/Gate/Bitget 合約，非加密貨幣）──
     # Bybit 以不帶 STOCK 後綴的格式上架，需明確列出
     "TSLAX", "TSLA",
     "NVDAX", "NVDA",
@@ -4083,7 +4115,7 @@ SYMBOL_BLACKLIST: set = {
     "VIX", "VIXINDEX",
     "DXY", "SPX", "NDX", "ES",
     "US2000", "US30", "US500", "NAS100",  # 美股指數
-    # ── 亞洲股票指數期貨（BingX/Bitget 有交易）──
+    # ── 亞洲股票指數期貨 ──
     "HK50", "HKTECH",                     # 恒生指數 / 恒生科技
     "JP225", "NIKKEI", "NIKKEI225",       # 日經指數
     "CN50", "CHINA50", "CSI300",          # 中國A50 / 滬深300
@@ -5020,7 +5052,7 @@ def build_report_message_tiered(
     pipeline_now_ts: float = 0.0,
 ) -> tuple:
     """
-    【傑克 1H MTF 四層漏斗訊號推播】
+    【1H MTF 四層漏斗訊號推播】
     確定籌碼（四層共振）+ 潛在機會（順勢回踩/逆勢摸頂底）雙版本。
     技術指標基準：1H K 線（中期波段視角）。
 
@@ -5528,14 +5560,32 @@ def build_report_message_tiered(
         _exec_mode = "市價"
         _exec_note = ""
 
-        msg_lines.append("*📌 怎麼跟單*")
+        # ── 持倉時間過濾（維持 TP1=1:1，但淘汰慢訊號）──────────────────────
+        try:
+            _tp1_dist_pct = abs(float(tp1) - float(_entry_price)) / float(_entry_price) * 100 if (tp1 and _entry_price) else None
+            _pc1h = x.get("priceChange1h")
+            _mom_1h = abs(float(_pc1h)) if _pc1h is not None else 0.0
+            if _mom_1h < MIN_1H_MOMENTUM_PCT:
+                logger.info(f"[時間過濾⏱️] {sym_base}: 1H動能 {_mom_1h:.2f}% < {MIN_1H_MOMENTUM_PCT:.2f}%，略過慢盤訊號")
+                continue
+            if _tp1_dist_pct is not None:
+                _est_hold_h = _tp1_dist_pct / max(_mom_1h, 0.05)
+                if _est_hold_h > MAX_ESTIMATED_HOLD_HOURS:
+                    logger.info(
+                        f"[時間過濾⏱️] {sym_base}: 預估到TP1約 {_est_hold_h:.1f}h > {MAX_ESTIMATED_HOLD_HOURS:.1f}h，略過"
+                    )
+                    continue
+        except Exception:
+            pass
+
+        msg_lines.append("*📌 跟單*")
         _vw_dev = _rel_dev_pct(float(price) if price is not None else None, _vwap_show)
         _vw_dev_s = f"｜與主力均價差 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
         msg_lines.append(f"• 進場：市價 ≈ `{_entry_now_txt}`{_vw_dev_s}")
         msg_lines.append(f"• 止損：`{_sl_txt}`（到價認錯出場）")
         msg_lines.append(f"• 目標：TP1 `{_tp1_txt}`" + (f" → TP2 `{_tp2_txt}`" if _tp2_txt else ""))
 
-        msg_lines.append("*🌍 環境與籌碼（白話）*")
+        msg_lines.append("*🌍 環境與籌碼*")
         if _vwap_show is not None:
             msg_lines.append(
                 f"• 主力這兩小時的平均成本參考（2h VWAP）：`{_fmt_price(_vwap_show)}`"
@@ -5580,10 +5630,6 @@ def build_report_message_tiered(
         msg_lines.append("*💡 策略說明*")
         msg_lines.append(_strategy_comment)
 
-        msg_lines.append("*📎 附圖怎麼看*")
-        msg_lines.append("上排＝最近約 5 小時的 5 分鐘 K 線；淺灰線＝收盤價走勢；紫線＝EMA20；淺藍＝主力均價線。")
-        msg_lines.append("下排＝全網未平倉量柱狀圖（藍＝變多／橘＝變少，看籌碼有沒有在動）。")
-
         # ─ 風險與環境（有觸發才顯示）─
         if _motion_note:
             msg_lines.append(f"⚠️ {_motion_note}")
@@ -5609,11 +5655,6 @@ def build_report_message_tiered(
         }
         x["_sniper_ai_payload"] = ai_data
         logger.info("[SNIPER_AI_PAYLOAD] %s", json.dumps(ai_data, ensure_ascii=False))
-
-        msg_lines.append(
-            "💬 若要請群組科普機器人幫忙看這則訊號，可轉傳並 @ 它——"
-            "請它只從「數據與大環境」白話解讀，不問具體點位、倉位或槓桿（與群組機器人規則一致）。"
-        )
 
         # ─ 儲存供後續使用 ─
         x["sl_price_str"]    = _fmt_price(sl)
@@ -5670,7 +5711,7 @@ def build_report_message_tiered(
 
     if not has_any:
         no_sig_msg = (
-            f"🔍 *傑克持倉異常狙擊鏡* 本輪無訊號\n"
+            f"🔍 *持倉異常狙擊鏡* 本輪無訊號\n"
             f"🕐 {now_str}  條件：1H OI≥動態門檻(主流4%/高流動6%/小幣8%) & 量≥{MTF_VOLUME_MIN_USD/1e6:.0f}M & MTF共振\n"
             f"繼續監控中..."
         )
@@ -5713,7 +5754,7 @@ def build_report_message_tiered(
     _grade_tag = "  ".join(_grade_parts) if _grade_parts else "─"
 
     header = (
-        f"🔍 *傑克持倉異常狙擊鏡*  本輪 {push_count} 個訊號\n"
+        f"🔍 *持倉異常狙擊鏡*  本輪 {push_count} 個訊號\n"
         f"🕐 {now_str} 台北  |  {_grade_tag}\n"
         f"{'─' * 20}\n"
     )
@@ -5773,7 +5814,7 @@ def build_report_message_tiered(
     consensus_badge = f" [{' | '.join(badges)}]" if badges else ""
 
     lines = []
-    lines.append(f"🎯 *{stats_str}｜傑克持倉狙擊鏡*{consensus_badge}")
+    lines.append(f"🎯 *{stats_str}｜持倉狙擊鏡*{consensus_badge}")
     lines.append(f"⚡ *15M 閃電監控* | 🕐 {datetime.now(TAIPEI_TZ).strftime('%m/%d %H:%M')} (台灣)")
     lines.append("━━━━━━━━━━━━━━")
 
@@ -5872,7 +5913,7 @@ def build_report_message_tiered(
                         pos_rec = "試單 2.5%"
                 strength = f"{tier_emoji} {strength}"
 
-                # 計算 SL/TP（OI 起漲點結構防守：BingX K 線為主）
+                # 計算 SL/TP（OI 起漲點結構防守：Gate K 線為主）
                 cvd_div = "CVD背離" in (x.get("reason") or "")
                 tech_exhausted = bool(x.get("energy_exhausted"))
                 sl_val, tp1_val, tp2_val, r_tp1, r_tp2, tp1_label, tp2_label, sl_capped, energy_exhausted, tp1_real_str, tp1_real_note, tp1_atr_str, tp1_atr_note = calc_sl_tp(
@@ -5949,11 +5990,11 @@ def build_report_message_tiered(
                 data_src_warn = bool(x.get("data_source_warning"))
                 if data_src_warn:
                     logger.warning(
-                        f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈={tp1_val}{cap_note} | 數據源={source} (數據源偏差預警：BingX 多次失敗改用 CoinGlass)"
+                        f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈={tp1_val}{cap_note} | 數據源={source} (數據源偏差預警：Gate 多次失敗改用 CoinGlass)"
                     )
                 else:
                     logger.info(
-                        f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈={tp1_val}{cap_note} | 數據源={source or 'BingX'}"
+                        f"[推播] {sym} 現價={price_str} ATR={atr_for_log} 止損={sl_val} 止盈={tp1_val}{cap_note} | 數據源={source or 'Gate'}"
                     )
 
                 # 1. Header: 標的＋換方向＋波動提示（精簡，不顯示數據來源與分級標籤）
@@ -6683,7 +6724,7 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
     # ── Step 0：交易對白名單（最先執行，作為合約幣種過濾閘門）────────────────
     # 只取 Binance / Bybit / OKX 三大純加密交易所的永續合約基礎資產。
     # 這三所絕對不上代幣化股票 / 股指 / 商品期貨，因此可當做「加密貨幣白名單」。
-    # BingX/Bitget 有 PLTR、GME、HK50 等代幣化商品，故意排除在外。
+    # Gate/Bitget 有 PLTR、GME、HK50 等代幣化商品，故意排除在外。
     _supported_whitelist: set = set()
 
     def _fetch_supported_whitelist() -> set:
@@ -6882,11 +6923,23 @@ def fetch_position_change():
 
         active_symbols.append(coin)
 
+    # Gate 可交易白名單：僅保留 Gate USDT 永續存在的標的（降低用戶下單滑點/不可交易風險）
+    gate_bases = fetch_gate_usdt_contract_bases()
+    if gate_bases:
+        _before_gate = len(active_symbols)
+        active_symbols = [
+            c for c in active_symbols
+            if str((normalize_symbol(c) or "")).replace("USDT", "").replace("-", "").replace("_", "").upper() in gate_bases
+        ]
+        logger.info(
+            f"[Gate白名單] 保留 {len(active_symbols)}/{_before_gate} 個可交易標的（Gate USDT 永續）"
+        )
+
     if not coinglass_24h_map:
         coinglass_24h_map = _fetch_coinglass_24h_map()
 
     # ════════════════════════════════════════════════════════
-    # Plan B：BingX 永續合約 24h USDT 成交值（備援，用於 CoinGlass 無資料的幣種）
+    # Plan B：Gate 永續合約 24h USDT 成交值（備援，用於 CoinGlass 無資料的幣種）
     # 單一 API call，失敗時靜默回傳空 dict 不影響主流程
     # ════════════════════════════════════════════════════════
     _binance_vol_map: Dict[str, float] = fetch_bingx_futures_24h_vol()
@@ -6902,7 +6955,7 @@ def fetch_position_change():
 
     active_above_volume: List[Dict[str, Any]] = []
     vol_cg = 0         # Plan A (CoinGlass) 有資料且 ≥ MTF_VOLUME_MIN_USD
-    vol_binance = 0    # Plan B (BingX備援) 補救且 ≥ MTF_VOLUME_MIN_USD
+    vol_binance = 0    # Plan B (Gate備援) 補救且 ≥ MTF_VOLUME_MIN_USD
     vol_no_data = 0    # A+B 均無資料 → 放行等 Plan C
     vol_below = 0      # 確認不足門檻 → 過濾
 
@@ -6922,7 +6975,7 @@ def fetch_position_change():
             b_vol = _binance_vol_map.get(base_key, 0.0)
             if b_vol > 0:
                 combined_vol = b_vol
-                _vol_source = "BingX"
+                _vol_source = "Gate"
 
         coin["_volume_usd"] = combined_vol
         coin["_cg_volume_usd"] = combined_vol
@@ -6944,7 +6997,7 @@ def fetch_position_change():
 
     logger.info(
         f"📊 [漏斗 4] 成交值篩選 ≥{MTF_VOLUME_MIN_USD/1e6:.1f}M: 通過 {len(active_above_volume)} 個"
-        f"（CoinGlass: {vol_cg} | BingX備援: {vol_binance} | 待K線估算: {vol_no_data} | 淘汰[確認<{MTF_VOLUME_MIN_USD/1e6:.1f}M]: {vol_below}）"
+        f"（CoinGlass: {vol_cg} | Gate備援: {vol_binance} | 待K線估算: {vol_no_data} | 淘汰[確認<{MTF_VOLUME_MIN_USD/1e6:.1f}M]: {vol_below}）"
     )
 
     # ── Step 5：排序 + 限制數量（前 50 固定，其餘隨機保多樣性）─────────────────
@@ -7128,7 +7181,7 @@ def fetch_position_change():
         _ema20_4h = _tech_4h.get("ema20_close") if _tech_4h else None
         _rsi_4h   = _tech_4h.get("rsi")        if _tech_4h else None
         # 判斷現價是否站上 4H EMA20（順/逆勢天候）
-        # CoinGlass 有 price 的幣優先用 CoinGlass；BingX-only 幣（price=None）
+        # CoinGlass 有 price 的幣優先用 CoinGlass；Gate-only 幣（price=None）
         # 用 1H K線收盤（tech.current_price）作備援，確保 4H EMA 比對不失效
         _cur_price_prelim = item.get("price") or (tech.get("current_price") if tech else None)
         _is_above_4h_ema  = (
@@ -7137,7 +7190,7 @@ def fetch_position_change():
             else None
         )
 
-        # 資金費率：CoinGlass 批次表（純 CoinGlass 模式，不再呼叫 BingX）
+        # 資金費率：CoinGlass 批次表（純 CoinGlass 模式，不再呼叫 Gate fallback）
         _base_fr = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
         funding_rate = _cg_fr_map.get(_base_fr)
 
@@ -7196,7 +7249,7 @@ def fetch_position_change():
             )
             continue
 
-        # ── K 線新鮮度驗證（防止 BingX/Bybit 回傳舊蠟燭導致進場價嚴重偏差）──────────
+        # ── K 線新鮮度驗證（防止 Gate/Bybit 回傳舊蠟燭導致進場價嚴重偏差）──────────
         # 若 K 線最新收盤與 CoinGlass 即時現價偏差 > 3%，代表 K 線已過期（例如幣種剛暴噴
         # 但 API 仍回傳噴前的收盤），整組技術指標全部失效，直接跳過此訊號。
         _cg_price = item.get("price")  # CoinGlass 即時現價（掃描週期取得，較即時）
@@ -7519,7 +7572,7 @@ def fetch_position_change():
     if skipped_no_kline > 0:
         logger.info(f"[品質門撒①] 淘汰 {skipped_no_kline} 個 ATR=None（K線無數據小幣），剩餘 {len(all_top)} 個訊號")
 
-    # 品質門撒②：成交值仍未確認（三路均無資料：CoinGlass / BingX / K線估算全失敗）
+    # 品質門撒②：成交值仍未確認（三路均無資料：CoinGlass / Gate / K線估算全失敗）
     # 這些幣是在漏斗4以「待K線估算」名義放行的，但 Plan C 也沒估出來
     # → 無法確認流動性達標，不推播，避免推出「成交值 無數據」的訊號
     pre_vol = len(all_top)
@@ -7548,8 +7601,8 @@ def fetch_position_change():
             return False
         # 持倉「建倉」要看得到持續加倉；「平倉」要看得到持續減倉
         if _is_open:
-            return (_oi15 >= 0.12) and (_oi5 >= 0.05)
-        return (_oi15 <= -0.12) and (_oi5 <= -0.05)
+            return (_oi15 >= 0.20) and (_oi5 >= 0.10)
+        return (_oi15 <= -0.20) and (_oi5 <= -0.10)
 
     _pre_oi_flow = len(all_top)
     all_top = [x for x in all_top if _oi_flow_consistent(x)]
@@ -7585,7 +7638,7 @@ def fetch_position_change():
         logger.info(f"本輪無符合條件訊號（1H OI≥動態門檻 & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
 
     # 冷卻規則：同幣同方向 N 小時內不重複推；同輪每方向最多 M 檔（強籌碼優先）
-    COOLDOWN_HOURS = 8   # 同幣同方向 8h 冷卻（拉長以降低重複推播）
+    COOLDOWN_HOURS = int(os.getenv("SNIPER_COOLDOWN_HOURS", "2" if SNIPER_FAST_MODE else "8"))   # 快進快出建議 1~3h
     MAX_SIGNALS_PER_DIRECTION_PER_ROUND = 2  # 本輪「多」「空」各最多保留檔數
     HISTORY_HOURS = 24   # 冷卻歷史保留 24h（每日自動清理）
     # 順勢 S/A 推過後，此時間內不推「反向」R（S 為主、R 為輔；避免敘事打架）
@@ -9167,7 +9220,7 @@ def build_long_term_message() -> Optional[str]:
     lines.append(f"💰 *AHR999 指數：{ahr:.2f}*")
     lines.append(f"🌡️ *貪婪恐懼指數：{fg}*" if fg is not None else "🌡️ *貪婪恐懼指數：—*")
     lines.append("")
-    lines.append("🧠 *傑克船長碎碎念*：")
+    lines.append("🧠 *盤面碎碎念*：")
     lines.append(f"👉 {action}")
     if fg is not None and fg < 20:
         lines.append("👉 現在市場極度恐懼，但這通常是富人變更有錢的時候。")
@@ -9483,7 +9536,7 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
 def _fetch_liq_radar_analysis_1m(symbol: str) -> Dict:
     """為撿屍雷達抓取 1m K 線，計算 RSI 與長下影線（針形態）。
     優先使用 CoinGlass /api/futures/price/history（interval=1m）；
-    失敗時備援 BingX 1m K 線。
+    失敗時備援 Gate 1m K 線。
     返回：{"rsi": float|None, "has_pin": bool, "lower_shadow_ratio": float,
            "cur_price": float|None, "entry_zone_low": float|None, "entry_zone_high": float|None}
     """
@@ -9515,32 +9568,31 @@ def _fetch_liq_radar_analysis_1m(symbol: str) -> Dict:
     except Exception as e:
         logger.debug(f"[撿屍雷達-CG] {clean} 1m K線異常: {e}")
 
-    # ── 備援：BingX 1m K 線 ───────────────────────────────────────────────
+    # ── 備援：Gate 1m K 線 ───────────────────────────────────────────────
     if len(closes) < 16:
         try:
-            bingx_sym = f"{clean}-USDT"
+            gate_contract = f"{clean}_USDT"
             r2 = requests.get(
-                "https://open-api.bingx.com/openApi/swap/v3/quote/klines",
-                params={"symbol": bingx_sym, "interval": "1m", "limit": 50},
+                "https://api.gateio.ws/api/v4/futures/usdt/candlesticks",
+                params={"contract": gate_contract, "interval": "1m", "limit": 50},
                 timeout=8,
             )
             if r2.status_code == 200:
-                raw2 = r2.json()
-                candles = raw2.get("data") or raw2.get("result") or (raw2 if isinstance(raw2, list) else [])
+                candles = r2.json()
                 if isinstance(candles, list) and len(candles) >= 16:
                     for c in candles:
                         if isinstance(c, dict):
-                            opens.append(float(c.get("open") or c.get("o") or 0))
-                            highs.append(float(c.get("high") or c.get("h") or 0))
-                            lows.append(float(c.get("low") or c.get("l") or 0))
-                            closes.append(float(c.get("close") or c.get("c") or 0))
+                            opens.append(float(c.get("o") or c.get("open") or 0))
+                            highs.append(float(c.get("h") or c.get("high") or 0))
+                            lows.append(float(c.get("l") or c.get("low") or 0))
+                            closes.append(float(c.get("c") or c.get("close") or 0))
                         elif isinstance(c, (list, tuple)) and len(c) >= 5:
                             opens.append(float(c[1]))
                             highs.append(float(c[2]))
                             lows.append(float(c[3]))
                             closes.append(float(c[4]))
         except Exception as e:
-            logger.debug(f"[撿屍雷達-BX] {clean} 1m K線異常: {e}")
+            logger.debug(f"[撿屍雷達-Gate] {clean} 1m K線異常: {e}")
 
     if len(closes) < 15:
         return result
@@ -9623,6 +9675,50 @@ def _fetch_liq_coin_list_snapshot() -> Dict[str, Dict]:
     except Exception as e:
         logger.debug(f"[爆倉快照] 異常: {e}")
     return out
+
+
+def _render_liquidity_event_fallback_chart(events: List[Dict], out_path: Path) -> Optional[Path]:
+    """主圖失敗時，用本輪事件渲染簡易長/短清算柱狀圖，確保推播有圖。"""
+    try:
+        from PIL import Image, ImageDraw
+
+        symbols = [str(e.get("symbol") or "") for e in events[:6]]
+        if not symbols:
+            return None
+        long_vals = [float(e.get("buyVolUsd1h") or 0) for e in events[:6]]
+        short_vals = [float(e.get("sellVolUsd1h") or 0) for e in events[:6]]
+        max_v = max(long_vals + short_vals + [1.0])
+
+        w, h = 1100, 640
+        img = Image.new("RGB", (w, h), "#0d1117")
+        draw = ImageDraw.Draw(img)
+        draw.text((24, 20), "Liquidity Radar 1H (Fallback)", fill="#ffffff")
+        draw.text((24, 48), "Long=Green, Short=Red  (unit: USD)", fill="#b9c0c8")
+
+        base_y = h - 90
+        left = 60
+        col_w = 150
+        bar_w = 48
+        scale = 420.0 / max_v
+
+        for i, sym in enumerate(symbols):
+            x0 = left + i * col_w
+            l_h = int(long_vals[i] * scale)
+            s_h = int(short_vals[i] * scale)
+            draw.rectangle((x0, base_y - l_h, x0 + bar_w, base_y), fill="#45bf87")
+            draw.rectangle((x0 + bar_w + 8, base_y - s_h, x0 + bar_w * 2 + 8, base_y), fill="#d9024b")
+            draw.text((x0, base_y + 10), sym, fill="#ffffff")
+            draw.text((x0, base_y - l_h - 18), f"{long_vals[i]/1e4:.1f}萬", fill="#45bf87")
+            draw.text((x0 + bar_w + 8, base_y - s_h - 18), f"{short_vals[i]/1e4:.1f}萬", fill="#d9024b")
+
+        draw.line((40, base_y, w - 40, base_y), fill="#6f7781", width=1)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(str(out_path), format="PNG")
+        if out_path.is_file():
+            return out_path
+    except Exception as e:
+        logger.warning(f"[撿屍雷達] fallback 圖失敗: {e}")
+    return None
 
 
 def run_liquidity_radar_once():
@@ -9805,7 +9901,20 @@ def run_liquidity_radar_once():
                     reply_markup=None,
                 )
             else:
-                logger.info("[撿屍雷達] 清算圖未產生（資料不足或繪圖失敗），僅推送文字")
+                fallback_path = _render_liquidity_event_fallback_chart(
+                    events,
+                    DATA_DIR / "liquidations_chart_data" / "output" / "liquidity_radar_fallback.png",
+                )
+                if fallback_path and fallback_path.is_file():
+                    send_telegram_photo(
+                        str(fallback_path),
+                        caption="📊 *主力清算雷達圖（Fallback）*\n_非投資建議，僅供多空結構參考_",
+                        thread_id=thread_id,
+                        parse_mode="Markdown",
+                        reply_markup=None,
+                    )
+                else:
+                    logger.info("[撿屍雷達] 清算圖未產生（主圖與 fallback 皆失敗），僅推送文字")
         except Exception as _chart_e:
             logger.warning(f"[撿屍雷達] 附圖略過: {_chart_e}")
 
