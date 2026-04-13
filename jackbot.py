@@ -20,7 +20,12 @@ import random
 import contextlib
 import pandas as pd
 import numpy as np
-from kline_card_renderer import fetch_ohlc_5m, fetch_coinglass_oi_5m, render_kline_oi_card
+from kline_card_renderer import (
+    fetch_ohlc_5m,
+    fetch_coinglass_oi_5m,
+    render_kline_oi_card,
+    _load_cjk_font,
+)
 from whale_wallet_tracker import run_whale_wallet_tracker_once
 
 # 台灣台北時區（UTC+8）
@@ -9739,40 +9744,117 @@ def _fetch_liq_coin_list_snapshot() -> Dict[str, Dict]:
 
 
 def _render_liquidity_event_fallback_chart(events: List[Dict], out_path: Path) -> Optional[Path]:
-    """主圖失敗時，用本輪事件渲染簡易長/短清算柱狀圖，確保推播有圖。"""
+    """主圖失敗時，用本輪事件渲染「1h 多/空清算量」對照圖（非價位熱力圖）。
+
+    顯示重點：依爆倉量排序、主導方向、RSI 摘要、合計；避免被誤讀成「下一個清算價」。
+    """
     try:
         from PIL import Image, ImageDraw
 
-        symbols = [str(e.get("symbol") or "") for e in events[:6]]
-        if not symbols:
+        if not events:
             return None
-        long_vals = [float(e.get("buyVolUsd1h") or 0) for e in events[:6]]
-        short_vals = [float(e.get("sellVolUsd1h") or 0) for e in events[:6]]
+
+        sorted_ev = sorted(
+            events,
+            key=lambda e: float(e.get("totalVolUsd1h") or 0),
+            reverse=True,
+        )
+        max_cols = 8
+        picked = sorted_ev[:max_cols]
+        symbols = [str(e.get("symbol") or "") for e in picked]
+        long_vals = [float(e.get("buyVolUsd1h") or 0) for e in picked]
+        short_vals = [float(e.get("sellVolUsd1h") or 0) for e in picked]
         max_v = max(long_vals + short_vals + [1.0])
 
-        w, h = 1100, 640
+        w, h = 1100, 720
         img = Image.new("RGB", (w, h), "#0d1117")
         draw = ImageDraw.Draw(img)
-        draw.text((24, 20), "Liquidity Radar 1H (Fallback)", fill="#ffffff")
-        draw.text((24, 48), "Long=Green, Short=Red  (unit: USD)", fill="#b9c0c8")
+        font_title = _load_cjk_font(17)
+        font_sub = _load_cjk_font(12)
+        font_col = _load_cjk_font(11)
+        font_tiny = _load_cjk_font(10)
 
-        base_y = h - 90
-        left = 60
-        col_w = 150
-        bar_w = 48
-        scale = 420.0 / max_v
+        pad_x = 28
+        header_y = 18
+        draw.text(
+            (pad_x, header_y),
+            "主力清算 · Fallback（近 1h 多／空清算美元量）",
+            fill="#f0f3f6",
+            font=font_title,
+        )
+        draw.text(
+            (pad_x, header_y + 26),
+            "圖意：對照「本輪通過篩選」的幣種，誰在 1h 內被清算得多、主導是多還是空；",
+            fill="#8b949e",
+            font=font_sub,
+        )
+        draw.text(
+            (pad_x, header_y + 44),
+            "不是價位熱力圖，無法標出「下一個清算價在哪」——僅供多空結構與情緒參考。",
+            fill="#8b949e",
+            font=font_sub,
+        )
+        total_shown = sum(float(e.get("totalVolUsd1h") or 0) for e in picked)
+        draw.text(
+            (pad_x, header_y + 64),
+            f"綠柱＝多單被清算（long liq）　紅柱＝空單被清算（short liq）　｜　圖中合計 1h ≈ ${total_shown/10000:.0f} 萬　｜　最多 {len(picked)} 幣",
+            fill="#58a6ff",
+            font=font_sub,
+        )
+
+        base_y = h - 56
+        left = 32
+        n = len(symbols)
+        usable = w - left - 32
+        col_w = usable / max(n, 1)
+        bar_w = max(22, min(44, int((col_w - 18) / 2)))
+        chart_top = header_y + 100
+        plot_h = base_y - chart_top - 8
+        scale = float(plot_h) / max_v
+
+        draw.line((24, base_y, w - 24, base_y), fill="#6f7781", width=1)
 
         for i, sym in enumerate(symbols):
+            ev = picked[i]
             x0 = left + i * col_w
+            x_mid = x0 + col_w / 2
             l_h = int(long_vals[i] * scale)
             s_h = int(short_vals[i] * scale)
-            draw.rectangle((x0, base_y - l_h, x0 + bar_w, base_y), fill="#45bf87")
-            draw.rectangle((x0 + bar_w + 8, base_y - s_h, x0 + bar_w * 2 + 8, base_y), fill="#d9024b")
-            draw.text((x0, base_y + 10), sym, fill="#ffffff")
-            draw.text((x0, base_y - l_h - 18), f"{long_vals[i]/1e4:.1f}萬", fill="#45bf87")
-            draw.text((x0 + bar_w + 8, base_y - s_h - 18), f"{short_vals[i]/1e4:.1f}萬", fill="#d9024b")
+            bx0 = x_mid - bar_w - 5
+            bx1 = x_mid + 5
+            draw.rectangle((bx0, base_y - l_h, bx0 + bar_w, base_y), fill="#45bf87")
+            draw.rectangle((bx1, base_y - s_h, bx1 + bar_w, base_y), fill="#d9024b")
 
-        draw.line((40, base_y, w - 40, base_y), fill="#6f7781", width=1)
+            dom = str(ev.get("dominantSide") or "")
+            dom_short = "多側主導" if "多" in dom else ("空側主導" if "空" in dom else "—")
+            dom_color = "#45bf87" if "多" in dom else "#d9024b"
+            rsi = ev.get("rsi_1m")
+            rsi_line = f"RSI1m {rsi:.0f}" if rsi is not None else ""
+
+            sym_disp = (f"熱·{sym[:10]}" if ev.get("is_hot") else sym)[:14]
+            tb = draw.textbbox((0, 0), sym_disp, font=font_col)
+            tw = tb[2] - tb[0]
+            draw.text((x_mid - tw / 2, base_y + 6), sym_disp, fill="#f0f3f6", font=font_col)
+
+            tb2 = draw.textbbox((0, 0), dom_short, font=font_tiny)
+            t2w = tb2[2] - tb2[0]
+            draw.text((x_mid - t2w / 2, base_y + 22), dom_short, fill=dom_color, font=font_tiny)
+
+            if rsi_line:
+                tb3 = draw.textbbox((0, 0), rsi_line, font=font_tiny)
+                t3w = tb3[2] - tb3[0]
+                draw.text((x_mid - t3w / 2, base_y + 36), rsi_line, fill="#8b949e", font=font_tiny)
+
+            def _tag(v: float, bx: float, h_px: int, color: str) -> None:
+                label = f"{v/1e4:.1f}萬"
+                tb_ = draw.textbbox((0, 0), label, font=font_tiny)
+                lw = tb_[2] - tb_[0]
+                ly = base_y - h_px - 14 if h_px > 0 else base_y - 16
+                draw.text((bx + (bar_w - lw) / 2, ly), label, fill=color, font=font_tiny)
+
+            _tag(long_vals[i], bx0, l_h, "#45bf87")
+            _tag(short_vals[i], bx1, s_h, "#d9024b")
+
         out_path.parent.mkdir(parents=True, exist_ok=True)
         img.save(str(out_path), format="PNG")
         if out_path.is_file():
@@ -9969,7 +10051,12 @@ def run_liquidity_radar_once():
                 if fallback_path and fallback_path.is_file():
                     send_telegram_photo(
                         str(fallback_path),
-                        caption="📊 *主力清算雷達圖（Fallback）*\n_非投資建議，僅供多空結構參考_",
+                        caption=(
+                            "📊 *主力清算 · 附圖（Fallback）*\n"
+                            "本圖為「本輪通過篩選」各幣 *近 1h 多／空清算美元量* 對照（依量排序），"
+                            "*不是*價位清算熱力圖。\n"
+                            "_非投資建議，僅供多空結構參考_"
+                        ),
                         thread_id=thread_id,
                         parse_mode="Markdown",
                         reply_markup=None,
