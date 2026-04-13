@@ -7639,7 +7639,8 @@ def fetch_position_change():
         logger.info(f"本輪無符合條件訊號（1H OI≥動態門檻 & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
 
     # 冷卻規則：同幣同方向 N 小時內不重複推；同輪每方向最多 M 檔（強籌碼優先）
-    COOLDOWN_HOURS = int(os.getenv("SNIPER_COOLDOWN_HOURS", "2" if SNIPER_FAST_MODE else "8"))   # 快進快出建議 1~3h
+    _default_cd_hours = 2.0 if SNIPER_FAST_MODE else 8.0
+    COOLDOWN_HOURS = int(max(1, round(_env_float("SNIPER_COOLDOWN_HOURS", _default_cd_hours))))   # 快進快出建議 1~3h
     MAX_SIGNALS_PER_DIRECTION_PER_ROUND = 2  # 本輪「多」「空」各最多保留檔數
     HISTORY_HOURS = 24   # 冷卻歷史保留 24h（每日自動清理）
     # 順勢 S/A 推過後，此時間內不推「反向」R（S 為主、R 為輔；避免敘事打架）
