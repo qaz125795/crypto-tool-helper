@@ -502,8 +502,22 @@ def _respect_coinglass_rate_limit() -> None:
 
 # ==================== 工具函數 ====================
 
+RISK_DISCLAIMER_LINE = "⚠️ *風險提示：* 本頻道內容僅供研究與教育用途，非投資建議、非任何形式帶單；請自行評估風險並嚴格控倉。"
+
+
+def _append_risk_disclaimer(text: str) -> str:
+    """所有推播統一附上法規風險提示；若已包含則不重複附加。"""
+    base = (text or "").strip()
+    if not base:
+        return RISK_DISCLAIMER_LINE
+    if ("非投資建議" in base) and ("帶單" in base):
+        return base
+    return f"{base}\n\n{RISK_DISCLAIMER_LINE}"
+
+
 def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown", reply_markup: Optional[Dict] = None) -> bool:
     """發送訊息到 Telegram（支援 Inline Keyboard 按鈕）"""
+    text = _append_risk_disclaimer(text)
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -572,6 +586,7 @@ def send_telegram_photo(
     reply_markup: Optional[Dict] = None,
 ) -> bool:
     """發送圖片到 Telegram（sendPhoto；caption 可能超出上限時，外層可改用 sendMessage 備援）"""
+    caption = _append_risk_disclaimer(caption)
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
     payload = {
         "chat_id": CHAT_ID,
