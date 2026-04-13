@@ -3872,13 +3872,13 @@ FR_LONG_LIQUIDATION_BLOCK = 0.005  # +0.5%：多頭嚴重壅擠，爆倉風險�
 MAIN_COINS = {"BTC", "ETH", "SOL"}  # 主流幣：1H OI > 4% 即達標
 
 # ── 流動性門檻（24h 成交值，低於此深度不足）──────────────────────────
-MTF_VOLUME_MIN_USD  = 25_000_000   # 2500 萬 USD（高滑點風險過濾，面向大規模跟單）
+MTF_VOLUME_MIN_USD  = 15_000_000   # 1500 萬 USD（小幅放寬，兼顧流動性與訊號量）
 
 # ── 1H OI 扳機門檻（動態分層，依幣種流動性調整）────────────────────────
 # 嚴格版：主流 4% | 高流動山寨 6% | 其他小幣 8%（減少雜訊）
-OI_THRESHOLD_MAIN   = 4.0           # 主流幣門檻
-OI_THRESHOLD_HIGH_LIQ = 6.0        # 高流動性山寨（24h 成交值 > 50M USD）
-OI_THRESHOLD_SMALL  = 8.0          # 其他小幣種
+OI_THRESHOLD_MAIN   = 3.0           # 主流幣門檻（小幅放寬）
+OI_THRESHOLD_HIGH_LIQ = 5.0        # 高流動性山寨（24h 成交值 > 50M USD）
+OI_THRESHOLD_SMALL  = 7.0          # 其他小幣種
 HIGH_LIQ_VOLUME_USD = 50_000_000   # 24h 成交值 > 50M 視為高流動性
 OI_THRESHOLD_1H     = 5.0          # 向後相容預設值（實際由 _get_oi_threshold_for_item 動態決定）
 PRICE_THRESHOLD_1H  = 1.5           # 1H 價格扳機門檻
@@ -5713,7 +5713,7 @@ def build_report_message_tiered(
     if not has_any:
         no_sig_msg = (
             f"🔍 *持倉異常狙擊鏡* 本輪無訊號\n"
-            f"🕐 {now_str}  條件：1H OI≥動態門檻(主流4%/高流動6%/小幣8%) & 量≥{MTF_VOLUME_MIN_USD/1e6:.0f}M & MTF共振\n"
+            f"🕐 {now_str}  條件：1H OI≥動態門檻(主流3%/高流動5%/小幣7%) & 量≥{MTF_VOLUME_MIN_USD/1e6:.0f}M & MTF共振\n"
             f"繼續監控中..."
         )
         return no_sig_msg, False, 0, [], []
