@@ -21,6 +21,7 @@ import contextlib
 import pandas as pd
 import numpy as np
 from kline_card_renderer import fetch_ohlc_5m, fetch_coinglass_oi_5m, render_kline_oi_card
+from whale_wallet_tracker import run_whale_wallet_tracker_once
 
 # 台灣台北時區（UTC+8）
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -11495,17 +11496,13 @@ def build_hyperliquid_message() -> Optional[str]:
 
 
 def run_hyperliquid_monitor_once():
-    """執行一次 Hyperliquid 聰明錢監控（適合排程觸發）"""
-    logger.info("開始執行 Hyperliquid 聰明錢監控...")
-    
-    message = build_hyperliquid_message()
-    if not message:
-        logger.info("本次 Hyperliquid 監控無有效數據，未發送推播")
+    """執行一次大佬錢包動向追蹤（Discord 專用，不影響既有 TG 訊號）。"""
+    logger.info("開始執行大佬錢包動向追蹤（Hyperliquid + Etherscan）...")
+    sent = run_whale_wallet_tracker_once(DATA_DIR)
+    if sent <= 0:
+        logger.info("本次無新事件或未設定 Discord webhook，未發送推播")
         return
-    
-    thread_id = TG_THREAD_IDS.get("hyperliquid", 252)
-    send_telegram_message(message, thread_id, parse_mode="Markdown")
-    logger.info("Hyperliquid 聰明錢監控推播完成")
+    logger.info("大佬錢包動向追蹤推播完成，已發送 %s 則", sent)
 
 
 def run_gold_signal():
@@ -11986,7 +11983,7 @@ if __name__ == "__main__":
             print("  long_term_index_once  - 長線牛熊導航儀（只執行一次，適合排程）")
             print("  liquidity_radar       - 流動性獵取雷達（極端爆倉彙整）")
             print("  altseason_radar       - 山寨爆發雷達（Altseason + RSI + Buy Ratio）")
-            print("  hyperliquid           - Hyperliquid 聰明錢監控")
+            print("  hyperliquid           - 大佬錢包動向追蹤（Discord）")
             print("  gold_signal           - 黃金 XAUUSD 多空訊號（ORB+MA）")
             print("  api_check             - API 健康檢查（驗證所有端點是否可用）")
             print("  reset_data            - 清除所有冷卻/推播/績效記錄，全新重啟")

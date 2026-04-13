@@ -1,16 +1,16 @@
-name: Hyperliquid 聰明錢監控
+name: 大佬錢包動向追蹤
 
-# 重要：GitHub 的 schedule 對「每 10 分鐘」常會延遲。若要真正每 10 分鐘推播，請用外部定時觸發（見：外部定時觸發推播_設定步驟.md）
+# 重要：GitHub schedule 非即時系統。若要更即時，建議改外部 Cron 或 WebSocket 常駐服務。
 
 on:
   schedule:
-    # 每 10 分鐘（UTC）錯峰：02, 12, 22, 32, 42, 52 分
-    - cron: '2,12,22,32,42,52 * * * *'
+    # GitHub Actions 最快約 5 分鐘；若要更即時請改外部 Cron/WebSocket 常駐
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 # 不取消進行中任務，確保每次觸發都能推播
 concurrency:
-  group: hyperliquid-monitor
+  group: whale-wallet-tracker
   cancel-in-progress: false
 
 jobs:
@@ -42,17 +42,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Hyperliquid monitor task
+      - name: Run whale wallet tracker task
         env:
-          CG_API_KEY: ${{ secrets.CG_API_KEY }}
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
-          TG_THREAD_HYPERLIQUID: ${{ secrets.TG_THREAD_HYPERLIQUID }}
-          DC_TOKEN: ${{ secrets.DC_TOKEN }}
-          DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
-          DC_THREAD_IDShyperliquid: ${{ secrets.DC_THREAD_IDShyperliquid }}
+          # Discord Webhook（新大佬追蹤專用）
+          WHALE_DC_WEBHOOK_URL: ${{ secrets.WHALE_DC_WEBHOOK_URL }}
+          WHALE_DC_THREAD_ID: ${{ secrets.WHALE_DC_THREAD_ID }}
+          # 鏈上掃描參數
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+          WHALE_SPOT_MIN_USD: ${{ secrets.WHALE_SPOT_MIN_USD }}
+          WHALE_LOOKBACK_SECONDS: ${{ secrets.WHALE_LOOKBACK_SECONDS }}
         run: |
-          # 設置超時保護，確保不會卡死
           timeout 480 python jackbot.py hyperliquid || exit 0
           echo "任務執行完成"

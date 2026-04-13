@@ -71,7 +71,7 @@ def health_check():
             '/long_term_index': '長線牛熊導航儀',
             '/liquidity_radar': '流動性獵取雷達',
             '/altseason_radar': '山寨爆發雷達',
-            '/hyperliquid': 'Hyperliquid 聰明錢監控',
+            '/hyperliquid': '大佬錢包動向追蹤（Discord）',
             '/run/<task>': '執行指定任務 (sector_ranking, whale_position, long_term_index_once, liquidity_radar, etc.)'
         }
     }), 200
@@ -161,10 +161,10 @@ def run_altseason_radar():
 @app.route('/hyperliquid', methods=['GET', 'POST'])
 @require_cron_secret
 def run_hyperliquid():
-    """執行 Hyperliquid 聰明錢監控"""
+    """執行大佬錢包動向追蹤"""
     try:
         run_hyperliquid_monitor_once()
-        return jsonify({'status': 'success', 'message': 'Hyperliquid 聰明錢監控執行成功'}), 200
+        return jsonify({'status': 'success', 'message': '大佬錢包動向追蹤執行成功'}), 200
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
