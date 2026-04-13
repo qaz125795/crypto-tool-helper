@@ -26,39 +26,38 @@ ETHERSCAN_API_URL = "https://api.etherscan.io/api"
 WHALE_PROFILES: Dict[str, Dict[str, str]] = {
     "0x020ca66c30bec2c4fe3861a94e4db4a498a35872": {
         "name": "麻吉大哥 (Machi Big Brother)",
+        "confidence": "高可信",
         "intro": "台灣幣圈傳奇，鏈上合約狂人，風格超激進。",
         "pros": "市場情緒指標很強，爆倉後原地重開常是關鍵觀察點。",
         "cons": "常態高槓桿，不愛止損，波動很大不適合無腦跟。",
     },
     "0xe8c19db00287e3536075c60ed78ec809cda52023": {
         "name": "Andrew Kang (Mechanism Capital)",
+        "confidence": "高可信（關聯地址）",
         "intro": "頂級機構交易員，趨勢與反轉判斷很強。",
         "pros": "進出場策略性高，方向參考價值高。",
         "cons": "動作很快且可能在對沖，單筆容易誤判全局。",
     },
     "0x534a0076fb7c2b1f83fa21497429ad7ad3bd7587": {
         "name": "Arthur Hayes (BitMEX 創辦人)",
+        "confidence": "高可信",
         "intro": "幣圈教父級人物，擅長宏觀敘事與趨勢佈局。",
         "pros": "中長線動作常是行情主題前哨。",
         "cons": "頻率較低，且可能帶節奏，需注意成本與滑點。",
     },
     "0xd8da6bf26964af9d7eed9e03e53415d37aa96045": {
         "name": "Vitalik Buterin (V 神)",
+        "confidence": "官方高共識",
         "intro": "以太坊核心人物，平常少做高頻交易，但每次鏈上動作都很有市場影響力。",
         "pros": "大額轉帳常帶動市場情緒，屬於高敏感風向指標。",
         "cons": "未必是交易行為，可能是捐贈或內部調度，容易被過度解讀。",
     },
     "0x3ddfa8ec3052539b6c9549f12cea2c295cff5296": {
         "name": "Justin Sun (孫宇晨)",
+        "confidence": "中高可信（公開關聯）",
         "intro": "高頻資金調度代表人物，常見巨額穩定幣與主流幣轉移。",
         "pros": "大額轉入轉出通常領先市場波動，具風險預警價值。",
         "cons": "錢包眾多且策略複雜，單一地址不代表完整持倉意圖。",
-    },
-    "0x8c11d3ce408c089bb48bed807eb888b58380c548": {
-        "name": "Christian2022.eth (Nd4 相關)",
-        "intro": "巨鯨基金相關地址，常在高波動時做大額倉位與保證金調整。",
-        "pros": "補保證金與倉位異動對市場轉折有參考價值。",
-        "cons": "部分操作偏風控性質，不一定代表主觀方向押注。",
     },
 }
 
@@ -396,6 +395,7 @@ def _build_markdown_message(event: Dict[str, Any]) -> str:
     lines = [
         title,
         f"👤 *{p['name']}*",
+        f"🔎 地址可信度：*{p.get('confidence', '待確認')}*",
         f"🧾 介紹：{p['intro']}",
         f"✅ 優點：{p['pros']}",
         f"⚠️ 缺點：{p['cons']}",
