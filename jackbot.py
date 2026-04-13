@@ -7107,7 +7107,10 @@ def fetch_position_change():
     )
 
     # 分層 OI 門檻：一律依幣種套用 4%（主流）/ 6%（高流動）/ 8%（小幣），無樣本 fallback
-    logger.info("【OI門檻】強制分層：主流 4% / 高流動 6% / 小幣 8%")
+    logger.info(
+        f"【OI門檻】強制分層：主流 {OI_THRESHOLD_MAIN:.0f}% / "
+        f"高流動 {OI_THRESHOLD_HIGH_LIQ:.0f}% / 小幣 {OI_THRESHOLD_SMALL:.0f}%"
+    )
     long_open = [x for x in long_open if abs(x.get('oiChange30m') or 0) >= _get_oi_threshold_for_item(x)]
     long_close = [x for x in long_close if abs(x.get('oiChange30m') or 0) >= _get_oi_threshold_for_item(x)]
     short_open = [x for x in short_open if abs(x.get('oiChange30m') or 0) >= _get_oi_threshold_for_item(x)]
@@ -8058,7 +8061,8 @@ def fetch_position_change():
                 f"| 處理幣種總數 | {processed_count} |",
                 f"| OI 成功數 | {oi_success_count} |",
                 f"| OI 失敗數 | {oi_fail_count} |",
-                "| OI 門檻 | 分層：主流 4% / 高流動 6% / 小幣 8% |",
+                f"| OI 門檻 | 分層：主流 {OI_THRESHOLD_MAIN:.0f}% / "
+                f"高流動 {OI_THRESHOLD_HIGH_LIQ:.0f}% / 小幣 {OI_THRESHOLD_SMALL:.0f}% |",
                 f"| 進入 TOP 候選數 | {len(all_top)} |",
                 f"| 最終推播標的數 | {len(cooled_top)} |",
                 f"| 推播標的列表 | {pushed_list} |",
