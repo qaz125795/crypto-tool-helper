@@ -421,6 +421,7 @@ def _build_markdown_message(event: Dict[str, Any]) -> str:
         action_line,
         detail_line,
         f"地址：`{event['address'][:6]}...{event['address'][-4:]}`",
+        f"🔗 倉位追蹤：https://hyperbot.network/trader/{event['address'].lower()}",
     ]
     liq = event.get("liq_price")
     try:
