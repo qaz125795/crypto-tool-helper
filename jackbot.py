@@ -3872,7 +3872,7 @@ FR_LONG_LIQUIDATION_BLOCK = 0.005  # +0.5%：多頭嚴重壅擠，爆倉風險�
 MAIN_COINS = {"BTC", "ETH", "SOL"}  # 主流幣：1H OI > 4% 即達標
 
 # ── 流動性門檻（24h 成交值，低於此深度不足）──────────────────────────
-MTF_VOLUME_MIN_USD  = 15_000_000   # 1500 萬 USD（小幅放寬，兼顧流動性與訊號量）
+MTF_VOLUME_MIN_USD  = 800_000_000  # 8 億 USD（精品模式：高流動性優先，降低滑價風險）
 
 # ── 1H OI 扳機門檻（動態分層，依幣種流動性調整）────────────────────────
 # 嚴格版：主流 4% | 高流動山寨 6% | 其他小幣 8%（減少雜訊）
@@ -5570,6 +5570,7 @@ def build_report_message_tiered(
         msg_lines.append(f"• 進場：市價 ≈ `{_entry_now_txt}`{_vw_dev_s}")
         msg_lines.append(f"• 止損：`{_sl_txt}`（到價認錯出場）")
         msg_lines.append(f"• 目標：TP1 `{_tp1_txt}`" + (f" → TP2 `{_tp2_txt}`" if _tp2_txt else ""))
+        msg_lines.append("• ⚠️ 請注意資金胃納量與承載量：建議分批下單，避免大額市價造成滑價。")
 
         msg_lines.append("*🌍 環境與籌碼*")
         if _vwap_show is not None:
