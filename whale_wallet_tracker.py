@@ -423,8 +423,12 @@ def _build_markdown_message(event: Dict[str, Any]) -> str:
         f"地址：`{event['address'][:6]}...{event['address'][-4:]}`",
     ]
     liq = event.get("liq_price")
-    if isinstance(liq, (int, float)) and liq > 0:
-        lines.append(f"💥 暴倉價：`{liq:,.4f}`")
+    try:
+        liq_val = float(liq) if liq is not None and str(liq).strip() != "" else None
+    except Exception:
+        liq_val = None
+    if liq_val is not None and liq_val > 0:
+        lines.append(f"💥 暴倉價：`{liq_val:,.4f}`")
     if event.get("hash"):
         lines.append(f"Tx: https://etherscan.io/tx/{event['hash']}")
     lines.append("")
