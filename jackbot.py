@@ -2459,6 +2459,76 @@ def extract_oi_change_1h(coin: Dict) -> Optional[float]:
     return None
 
 
+def format_btc_macro_1h_plain_lines(
+    price_change_1h: Optional[float],
+    oi_change_1h: Optional[float],
+) -> List[str]:
+    """
+    用「1h BTC 漲跌 + 1h 全網 OI 變化」合成白話（單一時間切面，方便讀者一眼看懂大盤氛圍）。
+    註：非嚴格多空因果，僅作市場情緒／參與度參考。
+    """
+    P_TH = 0.12
+    O_TH = 0.8
+
+    def _tri(v: Optional[float], th: float) -> int:
+        if v is None:
+            return 0
+        try:
+            vf = float(v)
+        except (TypeError, ValueError):
+            return 0
+        if vf > th:
+            return 1
+        if vf < -th:
+            return -1
+        return 0
+
+    if price_change_1h is None and oi_change_1h is None:
+        return []
+
+    # 僅單邊有資料：短句交代，避免空白
+    if price_change_1h is not None and oi_change_1h is None:
+        px = float(price_change_1h)
+        tp = _tri(px, P_TH)
+        tone = "短線偏多一點" if tp > 0 else "短線偏空一點" if tp < 0 else "大致橫著走"
+        return [
+            f"• *BTC 大盤 1h*：價格 `{px:+.2f}%`（{tone}）。"
+            " OI 暫無資料——槓桿籌碼面略過。"
+        ]
+    if price_change_1h is None and oi_change_1h is not None:
+        oi = float(oi_change_1h)
+        return [
+            f"• *BTC 大盤 1h*：價格暫缺；全網 OI `{oi:+.2f}%`（僅供槓桿參與度參考）。"
+        ]
+
+    px = float(price_change_1h)  # type: ignore[arg-type]
+    oi = float(oi_change_1h)  # type: ignore[arg-type]
+    p = _tri(px, P_TH)
+    o = _tri(oi, O_TH)
+
+    table: Dict[Tuple[int, int], str] = {
+        (1, 1): "漲、全網槓桿也在變多——多方還敢加碼，偏多氛圍延續感較強。",
+        (1, 0): "有漲、但槓桿沒明顯跟進——像『溫度有上來、火力還沒全開』。",
+        (1, -1): "價格在上、槓桿反而在收——不少人逢高減倉，續漲要保守點看。",
+        (0, 1): "價格橫向、槓桿變多——籌碼在堆，等方向出來。",
+        (0, 0): "價格與 OI 變化都不大——大盤像在等小時級表態。",
+        (0, -1): "盤整中去槓桿——市場先縮倉，波動有時會接著放大。",
+        (-1, 1): "價格在跌、OI 卻變多——常見空方加碼或多方硬扛，波動容易放大。",
+        (-1, 0): "價格走弱、OI 幾乎沒動——偏空一點，還沒看到明顯加倉對賭。",
+        (-1, -1): (
+            "價格在跌、OI 也跟著收——比較像多頭撤退、市場變冷，"
+            "氛圍偏『由熱轉冷／多轉空』一點。"
+        ),
+    }
+    body = table.get((p, o), "價格與槓桿籌碼自行交叉參考即可。")
+
+    line = (
+        f"• *BTC 大盤 1h（白話）*：價格 `{px:+.2f}%`｜未平倉 OI `{oi:+.2f}%`。"
+        f"{body}"
+    )
+    return [line]
+
+
 def fetch_coinglass_indicator(
     symbol: str,
     indicator_name: str,
@@ -5579,6 +5649,11 @@ def build_report_message_tiered(
             _score = 0
         msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
         msg_lines.append(_grade_brief)
+        # R 級：逆勢左側，與順勢 S/A「高勝率」敘事不同；避免使用者以為每單都該贏
+        if _grade == "R":
+            msg_lines.append(
+                "_⚠️ R級＝逆勢左側（與 4H 對做）：不是順勢高勝率單；停損屬正常成本，請小倉、嚴守止損。_"
+            )
         # 冷卻視窗內「反向 S 信號」：允許推播，但提醒使用者時間線上發生過方向切換
         if x.get("cooldown_reverse_recent") and _grade == "S":
             msg_lines.append("🧠 冷卻期間反向出現 S：已允許推播（注意敘事切換）")
@@ -5643,25 +5718,12 @@ def build_report_message_tiered(
             _btc_pen = float(_btc_1h_pct) if _btc_1h_pct is not None else None
         except (TypeError, ValueError):
             _btc_pen = None
-        if _btc_pen is not None:
-            if _btc_pen > 0.12:
-                _btc_txt = f"大盤 BTC 近 1 小時上漲約 {_btc_pen:+.2f}%——整體偏多一點。"
-            elif _btc_pen < -0.12:
-                _btc_txt = f"大盤 BTC 近 1 小時下跌約 {_btc_pen:+.2f}%——整體偏空一點。"
-            else:
-                _btc_txt = f"大盤 BTC 近 1 小時變化約 {_btc_pen:+.2f}%——大致橫向整理。"
-            msg_lines.append(_btc_txt)
         try:
             _btc_oi_txt_v = float(_btc_oi_1h_pct) if _btc_oi_1h_pct is not None else None
         except (TypeError, ValueError):
             _btc_oi_txt_v = None
-        if _btc_oi_txt_v is not None:
-            if _btc_oi_txt_v >= 1.5:
-                msg_lines.append(f"BTC OI 近 1 小時 `{_btc_oi_txt_v:+.2f}%`：主力倉位擴張，市場參與度升高。")
-            elif _btc_oi_txt_v <= -1.5:
-                msg_lines.append(f"BTC OI 近 1 小時 `{_btc_oi_txt_v:+.2f}%`：去槓桿明顯，短線波動風險提升。")
-            else:
-                msg_lines.append(f"BTC OI 近 1 小時 `{_btc_oi_txt_v:+.2f}%`：倉位變化中性，僅作信心輔助。")
+        for _macro_ln in format_btc_macro_1h_plain_lines(_btc_pen, _btc_oi_txt_v):
+            msg_lines.append(_macro_ln)
         if rsi_val is not None and isinstance(rsi_val, (int, float)):
             try:
                 _rv = float(rsi_val)
