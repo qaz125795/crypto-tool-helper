@@ -7764,9 +7764,9 @@ def fetch_position_change():
         logger.info(f"本輪無符合條件訊號（1H OI≥動態門檻 & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
 
     # 冷卻規則：同幣同方向 N 小時內不重複推；同輪每方向最多 M 檔（強籌碼優先）
-    _default_cd_hours = 2.0 if SNIPER_FAST_MODE else 8.0
-    COOLDOWN_HOURS = int(max(1, round(_env_float("SNIPER_COOLDOWN_HOURS", _default_cd_hours))))   # 快進快出建議 1~3h
-    MAX_SIGNALS_PER_DIRECTION_PER_ROUND = 2  # 本輪「多」「空」各最多保留檔數
+    # 統一預設 2 小時冷卻（同幣同方向）；需其他值可設 SNIPER_COOLDOWN_HOURS
+    _default_cd_hours = 2.0
+    COOLDOWN_HOURS = int(max(1, round(_env_float("SNIPER_COOLDOWN_HOURS", _default_cd_hours))))
     HISTORY_HOURS = 24   # 冷卻歷史保留 24h（每日自動清理）
     # 順勢 S/A 推過後，此時間內不推「反向」R（S 為主、R 為輔；避免敘事打架）
     TREND_VS_R_OPPOSITE_HOURS = 12
@@ -7944,7 +7944,7 @@ def fetch_position_change():
     if _skipped > 0:
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
 
-    # 同輪限額：每方向（多/空）最多 N 檔，依 |1H OI%| 大者優先保留
+    # 依方向分組後以 |1H OI%| 排序（大者在前）；不設每方向檔數上限
     def _oi_abs_round_cap(xx: Dict) -> float:
         try:
             return abs(float(xx.get("oiChange1h") or 0))
@@ -7956,18 +7956,12 @@ def fetch_position_change():
         _dkey = _item_direction(_cx)
         if _dkey in _by_dir_lists:
             _by_dir_lists[_dkey].append(_cx)
-    _cooled_limited: List = []
+    _cooled_sorted: List = []
     for _dkey in ("多", "空"):
         _lst = _by_dir_lists[_dkey]
         _lst.sort(key=_oi_abs_round_cap, reverse=True)
-        _cooled_limited.extend(_lst[:MAX_SIGNALS_PER_DIRECTION_PER_ROUND])
-    _cap_removed = len(cooled_top) - len(_cooled_limited)
-    if _cap_removed > 0:
-        logger.info(
-            f"[同輪限額] 每方向最多 {MAX_SIGNALS_PER_DIRECTION_PER_ROUND} 檔（依|1H OI|），"
-            f"剔除 {_cap_removed} 檔，剩餘 {len(_cooled_limited)} 檔"
-        )
-    cooled_top = _cooled_limited
+        _cooled_sorted.extend(_lst)
+    cooled_top = _cooled_sorted
 
     # ── 多所共識已移除（原 fetch_exchange_oi_consensus API 回傳資料與 15m 時間窗口不符，誤判多）────
     # is_global_consensus 欄位保留但固定為 False，is_premium 已不依賴此欄位
