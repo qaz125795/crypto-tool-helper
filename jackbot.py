@@ -615,7 +615,8 @@ def send_telegram_photo(
             if result.get("ok"):
                 logger.info("Telegram 圖片發送成功")
                 tg_ok = True
-            logger.error(f"Telegram sendPhoto API 錯誤: {result}")
+            else:
+                logger.error(f"Telegram sendPhoto API 錯誤: {result}")
         else:
             logger.error(f"Telegram sendPhoto HTTP 錯誤: {resp.status_code} - {resp.text}")
     except Exception as e:
@@ -4660,13 +4661,13 @@ def _classify_signal_and_tier(
         reason = f"1H OI↑+Price↓，空頭積極建倉，{_trend}{fr_note}{mtf_note}{_counter_hint}{_oi_mtf_note}"
     elif category == "long_close":
         label = "💥 多頭平倉"
-        zone = ZONE_DIP
-        _trend = "逆勢摸底機會" if not mtf_trend_ok else "1H下行加速"
+        zone = ZONE_TOP
+        _trend = "逆勢摸頭機會" if not mtf_trend_ok else "1H下行加速"
         reason = f"1H OI↓+Price↓，多頭斷頭出場，空方平倉做空或等反彈做多，{_trend}{fr_note}{mtf_note}{_counter_hint}{_oi_mtf_note}"
     elif category == "short_close":
         label = "🔥 空頭平倉"
-        zone = ZONE_TOP
-        _trend = "逆勢摸頂機會" if not mtf_trend_ok else "1H上行加速"
+        zone = ZONE_DIP
+        _trend = "逆勢摸底機會" if not mtf_trend_ok else "1H上行加速"
         reason = f"1H OI↓+Price↑，空頭遭軋空回補，多方平倉做空或追多，{_trend}{fr_note}{mtf_note}{_counter_hint}{_oi_mtf_note}"
     else:
         return None
