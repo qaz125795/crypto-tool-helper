@@ -5329,12 +5329,12 @@ def build_report_message_tiered(
     # 新版渲染邏輯：30m 四象限極簡格式
     # ══════════════════════════════════════════════════
 
-    # ── 小白友善標題對應（直球做多/做空指令）────────────────────────────
+    # ── 小白友善標題對應（維持 2 月基底：摸頭/摸底/追漲/追跌）──────────────
     _signal_title = {
-        "long_open":   "🟢 【強勢做多 Long】",
-        "short_close": "🟢 【報復反彈 (做多)】",
-        "short_open":  "🔴 【順勢做空 Short】",
-        "long_close":  "🔴 【恐慌崩跌 (做空)】",
+        "long_open":   "🚀 【追漲做多】",
+        "short_close": "📌 【摸底做多】",
+        "short_open":  "💥 【追跌做空】",
+        "long_close":  "🎯 【摸頭做空】",
     }
     # ── 白話文進場邏輯（一句話秒懂）────────────────────────────────────
     _signal_reason = {
@@ -5393,6 +5393,31 @@ def build_report_message_tiered(
             sa_hist_dirs.setdefault(_sn_e, set()).add(_dr_e)
 
     trend_sa_dirs_this_run: Dict[str, Set[str]] = {}
+
+    def _tactic_from_zone(zone: str, is_bull_flag: bool) -> Tuple[str, str]:
+        """回傳 (戰術文案, emoji)"""
+        if zone == ZONE_DIP:
+            return ("摸底（跌深撿便宜）", "📌")
+        if zone == ZONE_TOP:
+            return ("摸頭（漲多放空）", "🎯")
+        if zone == ZONE_BREAKOUT_LONG:
+            return ("追漲（順勢做多）", "🚀")
+        if zone == ZONE_BREAKOUT_SHORT:
+            return ("追跌（順勢做空）", "💥")
+        return (("做多" if is_bull_flag else "做空"), ("🟢" if is_bull_flag else "🔴"))
+
+    def _regime_from_grade_zone(grade: str, zone: str) -> Tuple[str, str]:
+        """
+        三盤型標籤：
+        - R 級固定逆勢
+        - 摸頭/摸底歸震盪
+        - 追漲/追跌歸趨勢
+        """
+        if grade == "R":
+            return ("逆勢訊號", "⚠️")
+        if zone in (ZONE_DIP, ZONE_TOP):
+            return ("震盪訊號", "🌀")
+        return ("趨勢訊號", "📈")
 
     for x in enriched_items:
         sym = x.get("symbol", "")
@@ -5647,7 +5672,13 @@ def build_report_message_tiered(
             _score = int(round(float(x.get("score", 0))))
         except (TypeError, ValueError):
             _score = 0
+        _zone_now = x.get("zone") or ""
+        _tactic_txt, _tactic_emo = _tactic_from_zone(_zone_now, is_bull_sig)
+        _regime_txt, _regime_emo = _regime_from_grade_zone(_grade, _zone_now)
+
         msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
+        msg_lines.append(f"{_tactic_emo} *戰術：* {_tactic_txt}")
+        msg_lines.append(f"{_regime_emo} *盤型：* {_regime_txt}")
         msg_lines.append(_grade_brief)
         # R 級：逆勢左側，與順勢 S/A「高勝率」敘事不同；避免使用者以為每單都該贏
         if _grade == "R":

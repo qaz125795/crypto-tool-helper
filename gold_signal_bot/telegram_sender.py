@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Telegram 訊號發送 - 法人級格式
 """
@@ -13,15 +13,15 @@ from strategy_orb import SignalResult
 logger = logging.getLogger(__name__)
 
 # 圖表連結
-LINK_BINGX_GOLD = "https://bingx.com/zh-tc/perpetual/GOLD(XAU)-USDT/"
+LINK_GATE_GOLD = "https://www.gate.com/futures/USDT/XAU_USDT"
 LINK_YAHOO_GC = "https://finance.yahoo.com/quote/GC=F"
 
 
 def get_gold_chart_keyboard() -> Dict[str, Any]:
-    """回傳 Telegram Inline Keyboard：BingX 走勢圖（主要）+ Yahoo 對照。"""
+    """回傳 Telegram Inline Keyboard：Gate 走勢圖（主要）+ Yahoo 對照。"""
     return {
         "inline_keyboard": [
-            [{"text": "📊 BingX 走勢圖（請自行對照）", "url": LINK_BINGX_GOLD}],
+            [{"text": "📊 Gate 走勢圖（請自行對照）", "url": LINK_GATE_GOLD}],
             [{"text": "📈 Yahoo GC=F 參考", "url": LINK_YAHOO_GC}],
         ]
     }
@@ -68,9 +68,9 @@ def format_signal_message(
         f"{data_line}"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "⚠️ 重要提醒\n"
-        "以上為系統計算的參考價格，請務必開啟 BingX 走勢圖，\n"
+        "以上為系統計算的參考價格，請務必開啟 Gate 走勢圖，\n"
         "對照實際K線結構確認防守點與目標位，\n"
-        "BingX報價與參考價可能有價差，請以圖表為準。\n"
+        "Gate報價與參考價可能有價差，請以圖表為準。\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "#XAUUSD #黃金 #訊號"
     )
@@ -120,7 +120,7 @@ def format_tp_sl_hit_message(
         f"💰 損益：{pnl_str}\n"
         f"⏰ 時間：{time_str}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "提醒：請以 BingX 圖表實際點位為準。\n"
+        "提醒：請以 Gate 圖表實際點位為準。\n"
         "#XAUUSD #黃金 #平倉"
     )
 
