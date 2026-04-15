@@ -4477,12 +4477,18 @@ def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
     # 🎯 B. pullback（完美回踩）：1H/30m 同向 + 15m/5m 呈短線反向
     # ⚠️ C. tier2（觀察名單）：1H/30m 同方向陣營，但 15m 凌亂或 RSI 極端
     #       推播時加「⚠️ 觀察名單」標籤，提醒輕倉
-    # ✘ D. 其餘（Step2 衝突 / 1H&30m 大方向完全相反）→ return None 丟棄
+    # ✘ D. 其餘（1H&30m 大方向完全相反）→ return None 丟棄
     # ══════════════════════════════════════════════════════════
-
-    # Step 2 衝突 → 直接丟（Lazy Fetching 外層已提前攔截，此為第二道防線）
-    if step2_conflict:
-        return None
+    _tf_conflict_soft = bool(item.get("tf_conflict_soft"))
+    # Step2 方向衝突不再硬丟：降為 Tier2（逆勢/觀察）並明確標示。
+    if step2_conflict or _tf_conflict_soft:
+        return {
+            **base,
+            "version": "tier2",
+            "subtype": "30m衝突",
+            "aligned_count": 1,
+            "reversal_hint": "30m 與 1H 方向相反，屬逆勢切入；請小倉並嚴守止損。",
+        }
 
     # ──────────── 前置：方向陣營判定 ─────────────────────────────────────
     is_30m_bull = cat_30m in ("long_open", "short_cover")
@@ -5603,6 +5609,40 @@ def build_report_message_tiered(
 
         _strategy_comment = _gen_comment(category, _sig_version, _sig_subtype, _reversal_hint, rsi_val)
 
+        def _build_oi_plain_lines() -> Tuple[str, str]:
+            """白話解釋 OI 在這筆訊號代表的資金行為與風險。"""
+            def _f(v):
+                try:
+                    return float(v) if v is not None else None
+                except (TypeError, ValueError):
+                    return None
+
+            oi_30 = _f(x.get("oiChange30m"))
+            oi_1h_v = _f(x.get("oiChange1h"))
+            p_30 = _f(x.get("priceChange30m"))
+
+            if oi_30 is None:
+                return "• OI白話：30m OI 無法取得，先依價格結構與風控操作。", "• 注意：資料缺口時，倉位建議再降一級。"
+
+            if oi_30 > 0 and (p_30 is None or p_30 >= 0):
+                oi_story = f"• OI白話：30m OI 增加 `{oi_30:+.2f}%`，代表新資金在進場偏多。"
+            elif oi_30 > 0 and p_30 < 0:
+                oi_story = f"• OI白話：30m OI 增加 `{oi_30:+.2f}%`，但價格下滑，偏向空方新倉在加碼。"
+            elif oi_30 < 0 and (p_30 is None or p_30 > 0):
+                oi_story = f"• OI白話：30m OI 減少 `{oi_30:+.2f}%`，價格走高，偏向空單回補推升。"
+            else:
+                oi_story = f"• OI白話：30m OI 減少 `{oi_30:+.2f}%`，偏向多單退場/止損，波動容易放大。"
+
+            if _sig_subtype == "30m衝突":
+                oi_risk = "• 注意：30m 與 1H 方向衝突，屬逆勢訊號，請小倉、嚴守止損。"
+            elif oi_1h_v is not None and oi_30 * oi_1h_v < 0:
+                oi_risk = "• 注意：30m 與 1H OI 方向不一致，可能只是短線反抽/急跌，勿重倉。"
+            elif abs(oi_30) >= 6:
+                oi_risk = "• 注意：30m OI 變化過大，主力節奏快，建議分批進出。"
+            else:
+                oi_risk = "• 注意：先看是否守住止損位，再考慮續抱到 TP。"
+            return oi_story, oi_risk
+
         # ── 4H 宏觀天候 ────────────────────────────────────────────────
         _ema20_4h_val    = x.get("ema20_4h")
         _rsi_4h_val      = x.get("rsi_4h")
@@ -5762,6 +5802,9 @@ def build_report_message_tiered(
             f"• 較大週期：{_macro_trend}（{_macro_ema_txt}）"
             f"{_rsi_4h_str if _rsi_4h_str else ''}｜本訊號進場：{_exec_mode}"
         )
+        _oi_story_line, _oi_risk_line = _build_oi_plain_lines()
+        msg_lines.append(_oi_story_line)
+        msg_lines.append(_oi_risk_line)
         msg_lines.append(_fr_line)
         try:
             _btc_pen = float(_btc_1h_pct) if _btc_1h_pct is not None else None
@@ -7466,17 +7509,19 @@ def fetch_position_change():
             f"  (1H={cat})"
         )
 
-        # Step 2 衝突阻斷：主力方向相反 → 節省 API，直接放棄
+        # Step 2 衝突改為「降級不阻斷」：
+        # 30m 與 1H 方向相反時，不再直接淘汰；保留進入後續流程，交由 MTF 分級為逆勢/觀察。
         _is_1h_bull_ctx = cat in ("long_open", "short_cover")
         _is_1h_bear_ctx = cat in ("short_open", "long_close")
+        _tf_conflict_soft = False
         if _cat_30m_prelim is not None:
             if (_is_1h_bull_ctx and _cat_30m_prelim == "short_open") or \
                (_is_1h_bear_ctx and _cat_30m_prelim == "long_open"):
+                _tf_conflict_soft = True
                 logger.info(
-                    f"[Step2❌漏斗阻斷] {sym}: 30m={_cat_30m_prelim} 與 1H={cat} "
-                    f"方向衝突，節省 15m+5m API，放棄"
+                    f"[Step2⚠️方向衝突] {sym}: 30m={_cat_30m_prelim} 與 1H={cat} "
+                    f"方向相反，降級為觀察/逆勢候選，續跑 15m+5m 檢查"
                 )
-                continue
 
         # ── Step 3 & 4：15m + 5m OI（僅針對通過 Step 2 的極少數幣種）──────────
         # short_open / long_open 訊號額外抓取 OI 歷史（4 根），供籌碼三步驟陷阱偵測使用
@@ -7512,6 +7557,7 @@ def fetch_position_change():
             "oiChange_5m":      _oi_5m,
             "rsi":              rsi_val,
             "oi_change_4h_pct": _oi_tf.get("4h"),
+            "tf_conflict_soft": _tf_conflict_soft,
         }
         _mtf_result = _classify_mtf_signal(_mtf_item_preview)
 
