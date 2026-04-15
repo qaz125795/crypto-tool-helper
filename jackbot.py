@@ -3985,15 +3985,17 @@ FR_LONG_LIQUIDATION_BLOCK = 0.005  # +0.5%：多頭嚴重壅擠，爆倉風險�
 MAIN_COINS = {"BTC", "ETH", "SOL"}  # 主流幣：1H OI > 4% 即達標
 
 # ── 流動性門檻（24h 成交值，低於此深度不足）──────────────────────────
-MTF_VOLUME_MIN_USD  = 8_000_000    # 800 萬 USD（下修版：平衡訊號量與流動性）
+MTF_VOLUME_MIN_USD  = 5_000_000    # 500 萬 USD（Classic 80%：提高訊號覆蓋，仍保留流動性底線）
 
-# ── 1H OI 扳機門檻（動態分層，依幣種流動性調整）────────────────────────
-# 嚴格版：主流 4% | 高流動山寨 6% | 其他小幣 8%（減少雜訊）
-OI_THRESHOLD_MAIN   = 3.0           # 主流幣門檻（小幅放寬）
-OI_THRESHOLD_HIGH_LIQ = 5.0        # 高流動性山寨（24h 成交值 > 50M USD）
-OI_THRESHOLD_SMALL  = 7.0          # 其他小幣種
+# ── OI 扳機門檻（動態分層，依幣種流動性調整）───────────────────────────
+# 微調版：改為「30m 主判斷 + 1H 保險閥」，避免訊號過少與過度滯後
+OI_THRESHOLD_MAIN   = 2.4           # 主流幣 1H 參考門檻（原 3.0）
+OI_THRESHOLD_HIGH_LIQ = 4.0         # 高流動山寨（原 5.0）
+OI_THRESHOLD_SMALL  = 5.8           # 其他小幣種（原 7.0）
 HIGH_LIQ_VOLUME_USD = 50_000_000   # 24h 成交值 > 50M 視為高流動性
 OI_THRESHOLD_1H     = 5.0          # 向後相容預設值（實際由 _get_oi_threshold_for_item 動態決定）
+OI_THRESHOLD_30M_RATIO = 0.7        # 30m 主判斷門檻 = 1H門檻 × 0.7
+OI_THRESHOLD_1H_GUARD_RATIO = 0.5   # 1H 保險閥（低於 1H門檻一半才視為動能不足）
 PRICE_THRESHOLD_1H  = 1.5           # 1H 價格扳機門檻
 
 # ── 風報比：1R = |進場價 − 止損價|；TP 為 1R 的倍數（與推播 R 標示一致）──────
@@ -4017,7 +4019,7 @@ TP2_R_MULTIPLIER = _env_float("SNIPER_TP2_R", _default_tp2)   # 快進快出建�
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
-MIN_SIGNAL_PUSH_SCORE = 78
+MIN_SIGNAL_PUSH_SCORE = 68          # Classic 80%：降低綜合分數門檻，避免高品質訊號被過濾掉
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
 MAX_ESTIMATED_HOLD_HOURS = _env_float("SNIPER_MAX_HOLD_HOURS", 8.0)
 MIN_1H_MOMENTUM_PCT = _env_float("SNIPER_MIN_1H_MOMENTUM_PCT", 1.0)  # 低於此視為慢盤
@@ -4183,6 +4185,11 @@ def _get_oi_threshold_for_item(item: Dict) -> float:
     except (TypeError, ValueError):
         pass
     return OI_THRESHOLD_SMALL
+
+
+def _get_oi_threshold_30m_for_item(item: Dict) -> float:
+    """30m 主判斷門檻：沿用動態分層，門檻較 1H 更靈敏。"""
+    return _get_oi_threshold_for_item(item) * OI_THRESHOLD_30M_RATIO
 
 
 # ── 黑名單：永久禁止推播的標的（可隨時新增/移除）────────────────────────────────
@@ -4553,14 +4560,25 @@ def _classify_signal_and_tier(
       空頭訊號（short_open / long_close）：price_24h < 0 代表大方向順風
       ⚠️ 逆風：放行但加標記（中期波段允許逆勢佈局）
     """
-    oi = item.get("oiChange1h") or item.get("oiChange30m") or 0
+    oi_30m = item.get("oiChange30m") or 0
+    oi_1h = item.get("oiChange1h")
+    oi = oi_30m
     price_chg_1h_main = item.get("priceChange1h") or item.get("priceChange30m")
     if price_chg_1h_main is not None and not isinstance(price_chg_1h_main, (int, float)):
         price_chg_1h_main = None
 
-    # 扳機條件：1H OI 絕對值 >= 動態門檻（主流 4% / 高流動性山寨 6% / 小幣 8%）
-    oi_threshold = _get_oi_threshold_for_item(item)
-    if abs(oi) < oi_threshold:
+    # 扳機條件（微調）：
+    # 1) 30m OI 為主判斷（避免 1H 過慢、追高）
+    # 2) 1H OI 僅作保險閥（太弱才擋），用來降低畫門假突破
+    oi_threshold_30m = _get_oi_threshold_30m_for_item(item)
+    oi_threshold_1h_guard = _get_oi_threshold_for_item(item) * OI_THRESHOLD_1H_GUARD_RATIO
+    try:
+        oi_1h_f = float(oi_1h) if oi_1h is not None else None
+    except (TypeError, ValueError):
+        oi_1h_f = None
+    if abs(oi_30m) < oi_threshold_30m:
+        return None
+    if oi_1h_f is not None and abs(oi_1h_f) < oi_threshold_1h_guard:
         return None
 
     # 1H 趨勢濾網：多頭訊號需 1h > 0，空頭訊號需 1h < 0
@@ -7742,36 +7760,46 @@ def fetch_position_change():
     for x in all_top:
         x["volume_usd"] = x.get("_volume_usd") or x.get("_cg_volume_usd") or 0
 
-    # 品質門撒③：OI 續航一致性（15m/5m 與訊號類型方向一致），降低假突破噪音
-    # - long_open / short_open 代表「建倉」：短週期 OI 應持續增加
-    # - long_close / short_close 代表「平倉」：短週期 OI 應持續下降
+    # 品質門撒③（微調）：OI 續航軟過濾
+    # - 以前是硬淘汰，訊號容易被砍光
+    # - 現在改成只淘汰「15m+5m 都明顯反向」；其餘降權放行
+    # - 目的：維持抗畫門能力，同時避免 0 訊號
     def _oi_flow_consistent(_x: Dict) -> bool:
         _cat = (_x.get("category") or "").strip()
         try:
             _oi15 = float(_x.get("oiChange_15m") or 0.0)
             _oi5 = float(_x.get("oiChange_5m") or 0.0)
         except (TypeError, ValueError):
-            return False
+            # 無 15m/5m 資料不直接砍，交由後續評分處理
+            return True
         _is_open = _cat in ("long_open", "short_open")
         _is_close = _cat in ("long_close", "short_close")
         if not (_is_open or _is_close):
             return False
-        # 持倉「建倉」要看得到持續加倉；「平倉」要看得到持續減倉
+        # 持倉「建倉」理論上 15m/5m 應偏正；若雙週期都明顯反向才淘汰
         if _is_open:
-            return (_oi15 >= 0.20) and (_oi5 >= 0.10)
-        return (_oi15 <= -0.20) and (_oi5 <= -0.10)
+            if _oi15 <= -0.35 and _oi5 <= -0.20:
+                return False
+            return True
+        # 持倉「平倉」理論上 15m/5m 應偏負；若雙週期都明顯反向才淘汰
+        if _oi15 >= 0.35 and _oi5 >= 0.20:
+            return False
+        return True
 
     _pre_oi_flow = len(all_top)
     all_top = [x for x in all_top if _oi_flow_consistent(x)]
     _drop_oi_flow = _pre_oi_flow - len(all_top)
     if _drop_oi_flow > 0:
         logger.info(
-            f"[品質門撒③ OI續航] 淘汰 {_drop_oi_flow} 個 15m/5m OI 與類型不一致訊號，"
+            f"[品質門撒③ OI續航(軟過濾)] 淘汰 {_drop_oi_flow} 個『15m+5m雙週期明顯反向』訊號，"
             f"剩餘 {len(all_top)} 個"
         )
 
-    # 訊號版本門檻：僅保留「確定籌碼」與「衰竭反轉」（關閉 tier2、潛在/pullback 等）
-    _ALLOW_PUSH_SIGNAL_VERSIONS = frozenset({"confirmed", "exhaustion_reversal"})
+    # 訊號版本門檻（Classic 80%）：
+    # - 保留 confirmed / exhaustion_reversal
+    # - 放行 tier2（觀察轉實戰）與 pullback（回踩跟隨）
+    #   讓節奏更接近 2 月短線狙擊版本，不再只剩極少數訊號
+    _ALLOW_PUSH_SIGNAL_VERSIONS = frozenset({"confirmed", "exhaustion_reversal", "tier2", "pullback"})
     _pre_ver_filt = len(all_top)
     all_top = [
         x for x in all_top
@@ -7786,10 +7814,12 @@ def fetch_position_change():
     _confirmed_cnt = sum(1 for x in all_top if x.get("signal_version") == "confirmed")
     _exhaust_cnt   = sum(1 for x in all_top if x.get("signal_version") == "exhaustion_reversal")
     _tier2_cnt     = sum(1 for x in all_top if x.get("signal_version") == "tier2")
+    _pullback_cnt = sum(1 for x in all_top if x.get("signal_version") == "pullback")
     logger.info(
         f"[Enrichment 完成] {len(all_top)} 個訊號進入推播流程"
         f"（✅確定籌碼 {_confirmed_cnt} | 🔥衰竭反轉 {_exhaust_cnt}"
-        f"{' | ⚠️觀察名單 ' + str(_tier2_cnt) if _tier2_cnt else ''}）"
+        f"{' | ⚠️Tier2 ' + str(_tier2_cnt) if _tier2_cnt else ''}"
+        f"{' | ↩️回踩 ' + str(_pullback_cnt) if _pullback_cnt else ''}）"
     )
     if len(all_top) == 0:
         logger.info(f"本輪無符合條件訊號（1H OI≥動態門檻 & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
