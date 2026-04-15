@@ -20,7 +20,12 @@ import random
 import contextlib
 import pandas as pd
 import numpy as np
-from kline_card_renderer import fetch_ohlc_5m, fetch_coinglass_oi_5m, render_kline_oi_card
+from kline_card_renderer import (
+    fetch_ohlc_5m,
+    fetch_coinglass_oi_5m,
+    render_kline_oi_card,
+    _load_cjk_font,
+)
 from whale_wallet_tracker import run_whale_wallet_tracker_once
 
 # 台灣台北時區（UTC+8）
@@ -2452,6 +2457,76 @@ def extract_oi_change_1h(coin: Dict) -> Optional[float]:
             except ValueError:
                 pass
     return None
+
+
+def format_btc_macro_1h_plain_lines(
+    price_change_1h: Optional[float],
+    oi_change_1h: Optional[float],
+) -> List[str]:
+    """
+    用「1h BTC 漲跌 + 1h 全網 OI 變化」合成白話（單一時間切面，方便讀者一眼看懂大盤氛圍）。
+    註：非嚴格多空因果，僅作市場情緒／參與度參考。
+    """
+    P_TH = 0.12
+    O_TH = 0.8
+
+    def _tri(v: Optional[float], th: float) -> int:
+        if v is None:
+            return 0
+        try:
+            vf = float(v)
+        except (TypeError, ValueError):
+            return 0
+        if vf > th:
+            return 1
+        if vf < -th:
+            return -1
+        return 0
+
+    if price_change_1h is None and oi_change_1h is None:
+        return []
+
+    # 僅單邊有資料：短句交代，避免空白
+    if price_change_1h is not None and oi_change_1h is None:
+        px = float(price_change_1h)
+        tp = _tri(px, P_TH)
+        tone = "短線偏多一點" if tp > 0 else "短線偏空一點" if tp < 0 else "大致橫著走"
+        return [
+            f"• *BTC 大盤 1h*：價格 `{px:+.2f}%`（{tone}）。"
+            " OI 暫無資料——槓桿籌碼面略過。"
+        ]
+    if price_change_1h is None and oi_change_1h is not None:
+        oi = float(oi_change_1h)
+        return [
+            f"• *BTC 大盤 1h*：價格暫缺；全網 OI `{oi:+.2f}%`（僅供槓桿參與度參考）。"
+        ]
+
+    px = float(price_change_1h)  # type: ignore[arg-type]
+    oi = float(oi_change_1h)  # type: ignore[arg-type]
+    p = _tri(px, P_TH)
+    o = _tri(oi, O_TH)
+
+    table: Dict[Tuple[int, int], str] = {
+        (1, 1): "漲、全網槓桿也在變多——多方還敢加碼，偏多氛圍延續感較強。",
+        (1, 0): "有漲、但槓桿沒明顯跟進——像『溫度有上來、火力還沒全開』。",
+        (1, -1): "價格在上、槓桿反而在收——不少人逢高減倉，續漲要保守點看。",
+        (0, 1): "價格橫向、槓桿變多——籌碼在堆，等方向出來。",
+        (0, 0): "價格與 OI 變化都不大——大盤像在等小時級表態。",
+        (0, -1): "盤整中去槓桿——市場先縮倉，波動有時會接著放大。",
+        (-1, 1): "價格在跌、OI 卻變多——常見空方加碼或多方硬扛，波動容易放大。",
+        (-1, 0): "價格走弱、OI 幾乎沒動——偏空一點，還沒看到明顯加倉對賭。",
+        (-1, -1): (
+            "價格在跌、OI 也跟著收——比較像多頭撤退、市場變冷，"
+            "氛圍偏『由熱轉冷／多轉空』一點。"
+        ),
+    }
+    body = table.get((p, o), "價格與槓桿籌碼自行交叉參考即可。")
+
+    line = (
+        f"• *BTC 大盤 1h（白話）*：價格 `{px:+.2f}%`｜未平倉 OI `{oi:+.2f}%`。"
+        f"{body}"
+    )
+    return [line]
 
 
 def fetch_coinglass_indicator(
@@ -5254,12 +5329,12 @@ def build_report_message_tiered(
     # 新版渲染邏輯：30m 四象限極簡格式
     # ══════════════════════════════════════════════════
 
-    # ── 小白友善標題對應（直球做多/做空指令）────────────────────────────
+    # ── 小白友善標題對應（維持 2 月基底：摸頭/摸底/追漲/追跌）──────────────
     _signal_title = {
-        "long_open":   "🟢 【強勢做多 Long】",
-        "short_close": "🟢 【報復反彈 (做多)】",
-        "short_open":  "🔴 【順勢做空 Short】",
-        "long_close":  "🔴 【恐慌崩跌 (做空)】",
+        "long_open":   "🚀 【追漲做多】",
+        "short_close": "📌 【摸底做多】",
+        "short_open":  "💥 【追跌做空】",
+        "long_close":  "🎯 【摸頭做空】",
     }
     # ── 白話文進場邏輯（一句話秒懂）────────────────────────────────────
     _signal_reason = {
@@ -5318,6 +5393,31 @@ def build_report_message_tiered(
             sa_hist_dirs.setdefault(_sn_e, set()).add(_dr_e)
 
     trend_sa_dirs_this_run: Dict[str, Set[str]] = {}
+
+    def _tactic_from_zone(zone: str, is_bull_flag: bool) -> Tuple[str, str]:
+        """回傳 (戰術文案, emoji)"""
+        if zone == ZONE_DIP:
+            return ("摸底（跌深撿便宜）", "📌")
+        if zone == ZONE_TOP:
+            return ("摸頭（漲多放空）", "🎯")
+        if zone == ZONE_BREAKOUT_LONG:
+            return ("追漲（順勢做多）", "🚀")
+        if zone == ZONE_BREAKOUT_SHORT:
+            return ("追跌（順勢做空）", "💥")
+        return (("做多" if is_bull_flag else "做空"), ("🟢" if is_bull_flag else "🔴"))
+
+    def _regime_from_grade_zone(grade: str, zone: str) -> Tuple[str, str]:
+        """
+        三盤型標籤：
+        - R 級固定逆勢
+        - 摸頭/摸底歸震盪
+        - 追漲/追跌歸趨勢
+        """
+        if grade == "R":
+            return ("逆勢訊號", "⚠️")
+        if zone in (ZONE_DIP, ZONE_TOP):
+            return ("震盪訊號", "🌀")
+        return ("趨勢訊號", "📈")
 
     for x in enriched_items:
         sym = x.get("symbol", "")
@@ -5572,8 +5672,19 @@ def build_report_message_tiered(
             _score = int(round(float(x.get("score", 0))))
         except (TypeError, ValueError):
             _score = 0
+        _zone_now = x.get("zone") or ""
+        _tactic_txt, _tactic_emo = _tactic_from_zone(_zone_now, is_bull_sig)
+        _regime_txt, _regime_emo = _regime_from_grade_zone(_grade, _zone_now)
+
         msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
+        msg_lines.append(f"{_tactic_emo} *戰術：* {_tactic_txt}")
+        msg_lines.append(f"{_regime_emo} *盤型：* {_regime_txt}")
         msg_lines.append(_grade_brief)
+        # R 級：逆勢左側，與順勢 S/A「高勝率」敘事不同；避免使用者以為每單都該贏
+        if _grade == "R":
+            msg_lines.append(
+                "_⚠️ R級＝逆勢左側（與 4H 對做）：不是順勢高勝率單；停損屬正常成本，請小倉、嚴守止損。_"
+            )
         # 冷卻視窗內「反向 S 信號」：允許推播，但提醒使用者時間線上發生過方向切換
         if x.get("cooldown_reverse_recent") and _grade == "S":
             msg_lines.append("🧠 冷卻期間反向出現 S：已允許推播（注意敘事切換）")
@@ -5638,25 +5749,12 @@ def build_report_message_tiered(
             _btc_pen = float(_btc_1h_pct) if _btc_1h_pct is not None else None
         except (TypeError, ValueError):
             _btc_pen = None
-        if _btc_pen is not None:
-            if _btc_pen > 0.12:
-                _btc_txt = f"大盤 BTC 近 1 小時上漲約 {_btc_pen:+.2f}%——整體偏多一點。"
-            elif _btc_pen < -0.12:
-                _btc_txt = f"大盤 BTC 近 1 小時下跌約 {_btc_pen:+.2f}%——整體偏空一點。"
-            else:
-                _btc_txt = f"大盤 BTC 近 1 小時變化約 {_btc_pen:+.2f}%——大致橫向整理。"
-            msg_lines.append(_btc_txt)
         try:
             _btc_oi_txt_v = float(_btc_oi_1h_pct) if _btc_oi_1h_pct is not None else None
         except (TypeError, ValueError):
             _btc_oi_txt_v = None
-        if _btc_oi_txt_v is not None:
-            if _btc_oi_txt_v >= 1.5:
-                msg_lines.append(f"BTC OI 近 1 小時 `{_btc_oi_txt_v:+.2f}%`：主力倉位擴張，市場參與度升高。")
-            elif _btc_oi_txt_v <= -1.5:
-                msg_lines.append(f"BTC OI 近 1 小時 `{_btc_oi_txt_v:+.2f}%`：去槓桿明顯，短線波動風險提升。")
-            else:
-                msg_lines.append(f"BTC OI 近 1 小時 `{_btc_oi_txt_v:+.2f}%`：倉位變化中性，僅作信心輔助。")
+        for _macro_ln in format_btc_macro_1h_plain_lines(_btc_pen, _btc_oi_txt_v):
+            msg_lines.append(_macro_ln)
         if rsi_val is not None and isinstance(rsi_val, (int, float)):
             try:
                 _rv = float(rsi_val)
@@ -7697,9 +7795,9 @@ def fetch_position_change():
         logger.info(f"本輪無符合條件訊號（1H OI≥動態門檻 & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
 
     # 冷卻規則：同幣同方向 N 小時內不重複推；同輪每方向最多 M 檔（強籌碼優先）
-    _default_cd_hours = 2.0 if SNIPER_FAST_MODE else 8.0
-    COOLDOWN_HOURS = int(max(1, round(_env_float("SNIPER_COOLDOWN_HOURS", _default_cd_hours))))   # 快進快出建議 1~3h
-    MAX_SIGNALS_PER_DIRECTION_PER_ROUND = 2  # 本輪「多」「空」各最多保留檔數
+    # 統一預設 2 小時冷卻（同幣同方向）；需其他值可設 SNIPER_COOLDOWN_HOURS
+    _default_cd_hours = 2.0
+    COOLDOWN_HOURS = int(max(1, round(_env_float("SNIPER_COOLDOWN_HOURS", _default_cd_hours))))
     HISTORY_HOURS = 24   # 冷卻歷史保留 24h（每日自動清理）
     # 順勢 S/A 推過後，此時間內不推「反向」R（S 為主、R 為輔；避免敘事打架）
     TREND_VS_R_OPPOSITE_HOURS = 12
@@ -7877,7 +7975,7 @@ def fetch_position_change():
     if _skipped > 0:
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
 
-    # 同輪限額：每方向（多/空）最多 N 檔，依 |1H OI%| 大者優先保留
+    # 依方向分組後以 |1H OI%| 排序（大者在前）；不設每方向檔數上限
     def _oi_abs_round_cap(xx: Dict) -> float:
         try:
             return abs(float(xx.get("oiChange1h") or 0))
@@ -7889,18 +7987,12 @@ def fetch_position_change():
         _dkey = _item_direction(_cx)
         if _dkey in _by_dir_lists:
             _by_dir_lists[_dkey].append(_cx)
-    _cooled_limited: List = []
+    _cooled_sorted: List = []
     for _dkey in ("多", "空"):
         _lst = _by_dir_lists[_dkey]
         _lst.sort(key=_oi_abs_round_cap, reverse=True)
-        _cooled_limited.extend(_lst[:MAX_SIGNALS_PER_DIRECTION_PER_ROUND])
-    _cap_removed = len(cooled_top) - len(_cooled_limited)
-    if _cap_removed > 0:
-        logger.info(
-            f"[同輪限額] 每方向最多 {MAX_SIGNALS_PER_DIRECTION_PER_ROUND} 檔（依|1H OI|），"
-            f"剔除 {_cap_removed} 檔，剩餘 {len(_cooled_limited)} 檔"
-        )
-    cooled_top = _cooled_limited
+        _cooled_sorted.extend(_lst)
+    cooled_top = _cooled_sorted
 
     # ── 多所共識已移除（原 fetch_exchange_oi_consensus API 回傳資料與 15m 時間窗口不符，誤判多）────
     # is_global_consensus 欄位保留但固定為 False，is_premium 已不依賴此欄位
@@ -9739,40 +9831,117 @@ def _fetch_liq_coin_list_snapshot() -> Dict[str, Dict]:
 
 
 def _render_liquidity_event_fallback_chart(events: List[Dict], out_path: Path) -> Optional[Path]:
-    """主圖失敗時，用本輪事件渲染簡易長/短清算柱狀圖，確保推播有圖。"""
+    """主圖失敗時，用本輪事件渲染「1h 多/空清算量」對照圖（非價位熱力圖）。
+
+    顯示重點：依爆倉量排序、主導方向、RSI 摘要、合計；避免被誤讀成「下一個清算價」。
+    """
     try:
         from PIL import Image, ImageDraw
 
-        symbols = [str(e.get("symbol") or "") for e in events[:6]]
-        if not symbols:
+        if not events:
             return None
-        long_vals = [float(e.get("buyVolUsd1h") or 0) for e in events[:6]]
-        short_vals = [float(e.get("sellVolUsd1h") or 0) for e in events[:6]]
+
+        sorted_ev = sorted(
+            events,
+            key=lambda e: float(e.get("totalVolUsd1h") or 0),
+            reverse=True,
+        )
+        max_cols = 8
+        picked = sorted_ev[:max_cols]
+        symbols = [str(e.get("symbol") or "") for e in picked]
+        long_vals = [float(e.get("buyVolUsd1h") or 0) for e in picked]
+        short_vals = [float(e.get("sellVolUsd1h") or 0) for e in picked]
         max_v = max(long_vals + short_vals + [1.0])
 
-        w, h = 1100, 640
+        w, h = 1100, 720
         img = Image.new("RGB", (w, h), "#0d1117")
         draw = ImageDraw.Draw(img)
-        draw.text((24, 20), "Liquidity Radar 1H (Fallback)", fill="#ffffff")
-        draw.text((24, 48), "Long=Green, Short=Red  (unit: USD)", fill="#b9c0c8")
+        font_title = _load_cjk_font(17)
+        font_sub = _load_cjk_font(12)
+        font_col = _load_cjk_font(11)
+        font_tiny = _load_cjk_font(10)
 
-        base_y = h - 90
-        left = 60
-        col_w = 150
-        bar_w = 48
-        scale = 420.0 / max_v
+        pad_x = 28
+        header_y = 18
+        draw.text(
+            (pad_x, header_y),
+            "主力清算 · Fallback（近 1h 多／空清算美元量）",
+            fill="#f0f3f6",
+            font=font_title,
+        )
+        draw.text(
+            (pad_x, header_y + 26),
+            "圖意：對照「本輪通過篩選」的幣種，誰在 1h 內被清算得多、主導是多還是空；",
+            fill="#8b949e",
+            font=font_sub,
+        )
+        draw.text(
+            (pad_x, header_y + 44),
+            "不是價位熱力圖，無法標出「下一個清算價在哪」——僅供多空結構與情緒參考。",
+            fill="#8b949e",
+            font=font_sub,
+        )
+        total_shown = sum(float(e.get("totalVolUsd1h") or 0) for e in picked)
+        draw.text(
+            (pad_x, header_y + 64),
+            f"綠柱＝多單被清算（long liq）　紅柱＝空單被清算（short liq）　｜　圖中合計 1h ≈ ${total_shown/10000:.0f} 萬　｜　最多 {len(picked)} 幣",
+            fill="#58a6ff",
+            font=font_sub,
+        )
+
+        base_y = h - 56
+        left = 32
+        n = len(symbols)
+        usable = w - left - 32
+        col_w = usable / max(n, 1)
+        bar_w = max(22, min(44, int((col_w - 18) / 2)))
+        chart_top = header_y + 100
+        plot_h = base_y - chart_top - 8
+        scale = float(plot_h) / max_v
+
+        draw.line((24, base_y, w - 24, base_y), fill="#6f7781", width=1)
 
         for i, sym in enumerate(symbols):
+            ev = picked[i]
             x0 = left + i * col_w
+            x_mid = x0 + col_w / 2
             l_h = int(long_vals[i] * scale)
             s_h = int(short_vals[i] * scale)
-            draw.rectangle((x0, base_y - l_h, x0 + bar_w, base_y), fill="#45bf87")
-            draw.rectangle((x0 + bar_w + 8, base_y - s_h, x0 + bar_w * 2 + 8, base_y), fill="#d9024b")
-            draw.text((x0, base_y + 10), sym, fill="#ffffff")
-            draw.text((x0, base_y - l_h - 18), f"{long_vals[i]/1e4:.1f}萬", fill="#45bf87")
-            draw.text((x0 + bar_w + 8, base_y - s_h - 18), f"{short_vals[i]/1e4:.1f}萬", fill="#d9024b")
+            bx0 = x_mid - bar_w - 5
+            bx1 = x_mid + 5
+            draw.rectangle((bx0, base_y - l_h, bx0 + bar_w, base_y), fill="#45bf87")
+            draw.rectangle((bx1, base_y - s_h, bx1 + bar_w, base_y), fill="#d9024b")
 
-        draw.line((40, base_y, w - 40, base_y), fill="#6f7781", width=1)
+            dom = str(ev.get("dominantSide") or "")
+            dom_short = "多側主導" if "多" in dom else ("空側主導" if "空" in dom else "—")
+            dom_color = "#45bf87" if "多" in dom else "#d9024b"
+            rsi = ev.get("rsi_1m")
+            rsi_line = f"RSI1m {rsi:.0f}" if rsi is not None else ""
+
+            sym_disp = (f"熱·{sym[:10]}" if ev.get("is_hot") else sym)[:14]
+            tb = draw.textbbox((0, 0), sym_disp, font=font_col)
+            tw = tb[2] - tb[0]
+            draw.text((x_mid - tw / 2, base_y + 6), sym_disp, fill="#f0f3f6", font=font_col)
+
+            tb2 = draw.textbbox((0, 0), dom_short, font=font_tiny)
+            t2w = tb2[2] - tb2[0]
+            draw.text((x_mid - t2w / 2, base_y + 22), dom_short, fill=dom_color, font=font_tiny)
+
+            if rsi_line:
+                tb3 = draw.textbbox((0, 0), rsi_line, font=font_tiny)
+                t3w = tb3[2] - tb3[0]
+                draw.text((x_mid - t3w / 2, base_y + 36), rsi_line, fill="#8b949e", font=font_tiny)
+
+            def _tag(v: float, bx: float, h_px: int, color: str) -> None:
+                label = f"{v/1e4:.1f}萬"
+                tb_ = draw.textbbox((0, 0), label, font=font_tiny)
+                lw = tb_[2] - tb_[0]
+                ly = base_y - h_px - 14 if h_px > 0 else base_y - 16
+                draw.text((bx + (bar_w - lw) / 2, ly), label, fill=color, font=font_tiny)
+
+            _tag(long_vals[i], bx0, l_h, "#45bf87")
+            _tag(short_vals[i], bx1, s_h, "#d9024b")
+
         out_path.parent.mkdir(parents=True, exist_ok=True)
         img.save(str(out_path), format="PNG")
         if out_path.is_file():
@@ -9969,7 +10138,12 @@ def run_liquidity_radar_once():
                 if fallback_path and fallback_path.is_file():
                     send_telegram_photo(
                         str(fallback_path),
-                        caption="📊 *主力清算雷達圖（Fallback）*\n_非投資建議，僅供多空結構參考_",
+                        caption=(
+                            "📊 *主力清算 · 附圖（Fallback）*\n"
+                            "本圖為「本輪通過篩選」各幣 *近 1h 多／空清算美元量* 對照（依量排序），"
+                            "*不是*價位清算熱力圖。\n"
+                            "_非投資建議，僅供多空結構參考_"
+                        ),
                         thread_id=thread_id,
                         parse_mode="Markdown",
                         reply_markup=None,

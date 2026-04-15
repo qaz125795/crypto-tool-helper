@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 from typing import Dict, List, Optional, Tuple
@@ -5,6 +6,8 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from PIL import Image, ImageDraw, ImageFont
 
+
+logger = logging.getLogger(__name__)
 
 _FONT_CACHE: Dict[int, ImageFont.ImageFont] = {}
 
@@ -202,17 +205,150 @@ def _fetch_bingx_spot_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[Lis
     return None
 
 
+def _ts_to_unix_sec(t_raw) -> int:
+    try:
+        if t_raw is None:
+            return 0
+        t = float(t_raw)
+        ti = int(t)
+        if ti > 1e12:
+            ti = int(ti / 1000)
+        return ti
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fetch_gate_futures_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dict]]:
+    """Gate.io USDT 永續 5m（免 Key），覆蓋僅在某所上線的山寨；格式對齊 render_kline_oi_card。"""
+    clean = _normalize_base_symbol(symbol_base)
+    for contract in (f"{clean}_USDT", f"1000{clean}_USDT"):
+        try:
+            r = requests.get(
+                "https://api.gateio.ws/api/v4/futures/usdt/candlesticks",
+                params={"contract": contract, "interval": "5m", "limit": limit},
+                timeout=12,
+            )
+            if r.status_code != 200:
+                continue
+            raw = r.json()
+            if not isinstance(raw, list) or len(raw) < 2:
+                continue
+            out: List[Dict] = []
+            for bar in raw[-limit:]:
+                if not isinstance(bar, dict):
+                    continue
+                t_sec = _ts_to_unix_sec(bar.get("t") or bar.get("time"))
+                if not t_sec:
+                    continue
+                try:
+                    o = float(bar.get("o") or 0)
+                    h = float(bar.get("h") or o)
+                    l = float(bar.get("l") or o)
+                    c = float(bar.get("c") or o)
+                    v = float(bar.get("v") or 0)
+                except (TypeError, ValueError):
+                    continue
+                out.append({"t": t_sec, "o": o, "h": h, "l": l, "c": c, "v": v})
+            if len(out) >= 2:
+                logger.info(f"[K線卡片OHLC] {clean}: Gate 永續 5m 備援 {len(out)} 根 ({contract})")
+                return out
+        except Exception as e:
+            logger.debug(f"[K線卡片OHLC] Gate {contract}: {e}")
+            continue
+    return None
+
+
+def _fetch_coinglass_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dict]]:
+    """CoinGlass 聚合期貨 K 線（需 CG_API_KEY），與 jackbot 指標管線一致作最終備援。"""
+    cg_key = (os.getenv("CG_API_KEY") or "").strip()
+    if not cg_key:
+        return None
+    clean = _normalize_base_symbol(symbol_base)
+    base = "https://open-api-v4.coinglass.com"
+    headers = {"CG-API-KEY": cg_key, "accept": "application/json"}
+    try_pairs = [f"{clean}USDT", f"1000{clean}USDT"]
+    exchanges = ["Bybit", "OKX", "Binance", "Gate", "Bitget"]
+    for exchange in exchanges:
+        for sym_pair in try_pairs:
+            try:
+                r = requests.get(
+                    f"{base}/api/futures/price/history",
+                    headers=headers,
+                    params={
+                        "exchange": exchange,
+                        "symbol": sym_pair,
+                        "interval": "5m",
+                        "limit": limit,
+                    },
+                    timeout=12,
+                )
+                if r.status_code == 429:
+                    time.sleep(1.2)
+                    continue
+                if r.status_code != 200:
+                    continue
+                j = r.json()
+                if j.get("code") not in (0, "0", 200, "200", None):
+                    continue
+                raw = j.get("data") or j.get("list") or []
+                if not isinstance(raw, list) or len(raw) < 2:
+                    continue
+                out: List[Dict] = []
+                for row in raw[-limit:]:
+                    if isinstance(row, dict):
+                        t_sec = _ts_to_unix_sec(
+                            row.get("time") or row.get("timestamp") or row.get("t")
+                        )
+                        o = row.get("open") or row.get("o") or row.get("openPrice")
+                        h = row.get("high") or row.get("h") or row.get("highPrice")
+                        l = row.get("low") or row.get("l") or row.get("lowPrice")
+                        c = row.get("close") or row.get("c") or row.get("closePrice")
+                        v = row.get("volume") or row.get("v") or row.get("vol") or 0
+                    elif isinstance(row, (list, tuple)) and len(row) >= 6:
+                        t_sec = _ts_to_unix_sec(row[0])
+                        o, h, l, c, v = row[1], row[2], row[3], row[4], row[5]
+                    else:
+                        continue
+                    if not t_sec or o is None or c is None:
+                        continue
+                    try:
+                        fo, fh, fl, fc = float(o), float(h or c), float(l or c), float(c)
+                        fv = float(v) if v is not None else 0.0
+                    except (TypeError, ValueError):
+                        continue
+                    out.append({"t": t_sec, "o": fo, "h": fh, "l": fl, "c": fc, "v": fv})
+                if len(out) >= 2:
+                    logger.info(
+                        f"[K線卡片OHLC] {clean}: CoinGlass 5m 備援 {len(out)} 根 ({exchange}/{sym_pair})"
+                    )
+                    return out
+            except Exception as e:
+                logger.debug(f"[K線卡片OHLC] CG {exchange}/{sym_pair}: {e}")
+                continue
+    return None
+
+
 def fetch_ohlc_5m(symbol_base: str, limit: int = 60) -> Optional[List[Dict]]:
-    # 優先 Binance（含 volume），其次 Bybit，最後 BingX
+    # 對齊 jackbot 技術指標降級順序：Binance → Bybit → Gate 永續 → BingX 現貨 → CoinGlass
     out = _fetch_binance_ohlc_5m(symbol_base, limit=limit)
     if out:
         return out
     out = _fetch_bybit_ohlc_5m(symbol_base, limit=limit)
     if out:
         return out
+    out = _fetch_gate_futures_ohlc_5m(symbol_base, limit=limit)
+    if out:
+        return out
     out = _fetch_bingx_spot_ohlc_5m(symbol_base, limit=limit)
     if out:
         return out
+    out = _fetch_coinglass_ohlc_5m(symbol_base, limit=limit)
+    if out:
+        return out
+    logger.warning(
+        f"[K線卡片OHLC] {_normalize_base_symbol(symbol_base)}: "
+        f"Binance／Bybit／Gate／BingX／CoinGlass 皆未取得足夠 5m K 線"
+    )
     return None
 
 
