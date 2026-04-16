@@ -4208,7 +4208,7 @@ TP2_R_MULTIPLIER = _env_float("SNIPER_TP2_R", _default_tp2)   # 快進快出建�
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
 MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.0))
-MAX_LIMIT_VWAP_GAP_PCT = 0.02  # 限價進場與主力均價(VWAP)最大允許偏離 2%
+MAX_MARKET_VWAP_GAP_PCT = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_PCT", 0.03)  # 與主力均價差 <=3% 才允許推播（以市價）
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
 MIN_SIGNAL_PUSH_SCORE = 68          # Classic 80%：降低綜合分數門檻，避免高品質訊號被過濾掉
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
@@ -5695,8 +5695,8 @@ def build_report_message_tiered(
         _now_ts = time.time()
 
         # ══════════════════════════════════════════════════════════
-        # 進場：以市價為主；若策略判定需限價，允許限價推播（但限價與主力均價差不可超過 2%）。
-        # TP/SL：以「實際進場價（市價或限價）」為基準，結構防守位（2H 高/低 + EMA20 + VWAP）+ MIN_SL_PERCENT 保底 → 1R → TP1/TP2
+        # 進場：統一市價；若判定需限價，改以「現價與主力均價差」決定是否仍可推播（<=3% 才保留）。
+        # TP/SL：以「實際進場價（市價）」為基準，結構防守位（2H 高/低 + EMA20 + VWAP）+ MIN_SL_PERCENT 保底 → 1R → TP1/TP2
         # ══════════════════════════════════════════════════════════
         sl, tp1, tp2 = None, None, None
         _r1, _r2 = TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
@@ -5714,27 +5714,22 @@ def build_report_message_tiered(
         _entry_note = ""
         _entry_price = float(price)
         if _need_limit:
-            _entry_mode = "限價"
-            try:
-                _entry_price = float(_lp_hint) if _lp_hint is not None and float(_lp_hint) > 0 else float(price)
-            except (TypeError, ValueError):
-                _entry_price = float(price)
             try:
                 _lp_vwap = float(vwap_2h_val) if vwap_2h_val is not None else None
                 _lp_vw_dev = abs(float(_entry_price) - _lp_vwap) / _lp_vwap if _lp_vwap and _lp_vwap > 0 else None
             except (TypeError, ValueError):
                 _lp_vw_dev = None
-            if _lp_vw_dev is not None and _lp_vw_dev > MAX_LIMIT_VWAP_GAP_PCT:
+            if _lp_vw_dev is not None and _lp_vw_dev > MAX_MARKET_VWAP_GAP_PCT:
                 logger.info(
-                    f"[限價過濾] {sym_base}: 限價與主力均價偏離 {_lp_vw_dev:.2%} > {MAX_LIMIT_VWAP_GAP_PCT:.0%}，略過"
+                    f"[進場過濾] {sym_base}: 現價與主力均價偏離 {_lp_vw_dev:.2%} > {MAX_MARKET_VWAP_GAP_PCT:.0%}，略過"
                 )
                 continue
             if _lp_vw_dev is None:
-                _entry_note = "⚠️ 本單採限價進場（主力均價差無法計算）"
+                _entry_note = "⚠️ 進場模式原需限價，但主力均價差無法計算，保守以市價策略顯示。"
             else:
                 _entry_note = (
-                    f"⚠️ 本單採限價進場（與主力均價差 `{_lp_vw_dev:.1%}`，"
-                    f"規則上限 `{MAX_LIMIT_VWAP_GAP_PCT:.0%}`）"
+                    f"⚠️ 進場模式原需限價，但現價與主力均價差 `{_lp_vw_dev:.1%}`"
+                    f"（<= `{MAX_MARKET_VWAP_GAP_PCT:.0%}`），本訊號改用市價方案。"
                 )
 
         if _entry_price and _entry_price > 0:
@@ -6015,7 +6010,7 @@ def build_report_message_tiered(
         except (TypeError, ValueError):
             _vwap_show = None
 
-        _entry_now_txt = _fmt_price(price) if price is not None else "N/A"
+        _entry_now_txt = _fmt_price(_entry_price) if _entry_price is not None else "N/A"
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
         _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
         _tp2_txt = _fmt_price(tp2) if tp2 is not None else None
@@ -6041,9 +6036,9 @@ def build_report_message_tiered(
             pass
 
         msg_lines.append("*📌 跟單*")
-        _vw_dev = _rel_dev_pct(float(price) if price is not None else None, _vwap_show)
+        _vw_dev = _rel_dev_pct(float(_entry_price) if _entry_price is not None else None, _vwap_show)
         _vw_dev_s = f"｜與主力均價差 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
-        _entry_prefix = "市價 ≈" if _entry_mode == "市價" else "限價掛單 ≈"
+        _entry_prefix = "市價 ≈"
         msg_lines.append(f"• 進場：{_entry_prefix} `{_entry_now_txt}`{_vw_dev_s}")
         if _entry_note:
             msg_lines.append(f"• {_entry_note}")
