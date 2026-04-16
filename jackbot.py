@@ -4199,8 +4199,8 @@ def _env_float(name: str, default: float) -> float:
 
 
 SNIPER_FAST_MODE = os.getenv("SNIPER_FAST_MODE", "").strip().lower() in ("1", "true", "yes", "on")
-_default_tp1 = 0.6 if SNIPER_FAST_MODE else 1.0
-_default_tp2 = 1.6 if SNIPER_FAST_MODE else 2.0
+_default_tp1 = 1.2 if SNIPER_FAST_MODE else 1.5
+_default_tp2 = 2.4 if SNIPER_FAST_MODE else 3.0
 _default_min_sl = 0.008 if SNIPER_FAST_MODE else 0.015
 
 TP1_R_MULTIPLIER = max(1.0, _env_float("SNIPER_TP1_R", _default_tp1))   # TP1 至少 1R
@@ -4208,11 +4208,13 @@ TP2_R_MULTIPLIER = max(TP1_R_MULTIPLIER + 0.5, _env_float("SNIPER_TP2_R", _defau
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
 MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.0))
-MAX_MARKET_VWAP_GAP_PCT = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_PCT", 0.03)  # 與主力均價差 <=3% 才允許推播（以市價）
-MARKET_ENTRY_TIER1_PCT = _env_float("SNIPER_MARKET_ENTRY_TIER1_PCT", 0.008)    # 理想市價區（0.8%）
-MARKET_ENTRY_TIER2_PCT = _env_float("SNIPER_MARKET_ENTRY_TIER2_PCT", 0.015)    # 可接受市價區（1.5%，超過不追）
-TP1_EXIT_RATIO = 0.70
-TP2_EXIT_RATIO = 0.30
+MAX_MARKET_VWAP_GAP_ATR = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_ATR", 1.5)    # 防追價：與 VWAP 偏離最多 1.5*ATR
+MARKET_ENTRY_ZONE_ATR = _env_float("SNIPER_ENTRY_ZONE_ATR", 0.2)                 # 市價可進場區：Entry ± 0.2*ATR
+MIN_SL_ATR_MULTIPLIER = _env_float("SNIPER_MIN_SL_ATR", 1.0)                     # 最低 SL 距離：至少 1.0*ATR
+PENDING_PUMP_ATR_MULTIPLIER = _env_float("SNIPER_PENDING_PUMP_ATR", 0.5)         # 已噴發待辦池判定
+PENDING_TTL_HOURS = _env_float("SNIPER_PENDING_TTL_HOURS", 4.0)                  # 待辦訊號最長存活
+TP1_EXIT_RATIO = 0.50
+TP2_EXIT_RATIO = 0.50
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
 MIN_SIGNAL_PUSH_SCORE = 68          # Classic 80%：降低綜合分數門檻，避免高品質訊號被過濾掉
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
@@ -4227,6 +4229,7 @@ def compute_structural_sl_tp(
     ema20: Optional[float],
     recent_low_2h: Optional[float],
     recent_high_2h: Optional[float],
+    atr: Optional[float] = None,
 ) -> Tuple[Optional[float], Optional[float], Optional[float], float, float]:
     """
     以 K 線結構主力防守位定 SL，再套用最小距離保底，最後以 1R 映射 TP1/TP2。
@@ -4257,17 +4260,25 @@ def compute_structural_sl_tp(
     lo2 = _num(recent_low_2h)
     hi2 = _num(recent_high_2h)
 
+    min_sl_distance = entry * MIN_SL_PERCENT
+    try:
+        atr_num = float(atr) if atr is not None else None
+        if atr_num is not None and atr_num > 0:
+            min_sl_distance = max(min_sl_distance, atr_num * MIN_SL_ATR_MULTIPLIER)
+    except (TypeError, ValueError):
+        pass
+
     if is_long:
         cands = [v for v in (lo2, ema, vwap) if v is not None]
         if cands:
             structural_sl = min(cands)
         else:
-            structural_sl = entry * (1.0 - MIN_SL_PERCENT)
+            structural_sl = entry - min_sl_distance
         if structural_sl >= entry:
-            structural_sl = entry * (1.0 - MIN_SL_PERCENT)
+            structural_sl = entry - min_sl_distance
         one_r = abs(entry - structural_sl)
-        if one_r / entry < MIN_SL_PERCENT:
-            one_r = entry * MIN_SL_PERCENT
+        if one_r < min_sl_distance:
+            one_r = min_sl_distance
             structural_sl = entry - one_r
         sl = structural_sl
         tp1 = entry + one_r * TP1_R_MULTIPLIER
@@ -4277,12 +4288,12 @@ def compute_structural_sl_tp(
         if cands:
             structural_sl = max(cands)
         else:
-            structural_sl = entry * (1.0 + MIN_SL_PERCENT)
+            structural_sl = entry + min_sl_distance
         if structural_sl <= entry:
-            structural_sl = entry * (1.0 + MIN_SL_PERCENT)
+            structural_sl = entry + min_sl_distance
         one_r = abs(structural_sl - entry)
-        if one_r / entry < MIN_SL_PERCENT:
-            one_r = entry * MIN_SL_PERCENT
+        if one_r < min_sl_distance:
+            one_r = min_sl_distance
             structural_sl = entry + one_r
         sl = structural_sl
         tp1 = entry - one_r * TP1_R_MULTIPLIER
@@ -4316,6 +4327,7 @@ def derive_limit_order_from_inputs(
     ema20: Optional[float],
     signal_version: str,
     energy_exhausted: bool,
+    atr: Optional[float] = None,
 ) -> Tuple[bool, Optional[float]]:
     """
     與 build_report_message_tiered 進場邏輯一致（順序相同）：
@@ -4352,14 +4364,69 @@ def derive_limit_order_from_inputs(
     if energy_exhausted and ema is not None:
         return True, ema
 
-    if vwap is not None:
-        if is_bull and price <= vwap * 1.025:
+    atr_num = None
+    try:
+        atr_num = float(atr) if atr is not None and float(atr) > 0 else None
+    except (TypeError, ValueError):
+        atr_num = None
+    if vwap is not None and atr_num is not None:
+        if abs(price - vwap) <= MAX_MARKET_VWAP_GAP_ATR * atr_num:
             return False, None
-        if (not is_bull) and price >= vwap * 0.975:
+        return True, vwap * 0.975
+    if vwap is not None:
+        if is_bull and price <= vwap:
+            return False, None
+        if (not is_bull) and price >= vwap:
             return False, None
         return True, vwap * 0.975
 
     return False, None
+
+
+def _macro_regime_snapshot() -> Dict[str, Any]:
+    """大盤防護網：BTC/ETH 1H/4H EMA20 + 15m CVD 趨勢。"""
+    def _ema_state(sym: str, interval: str) -> Optional[bool]:
+        data = fetch_price_history(sym, interval)
+        if not data or len(data) < 20:
+            return None
+        closes: List[float] = []
+        for row in data[-20:]:
+            v = row.get("close")
+            try:
+                closes.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        if len(closes) < 20:
+            return None
+        ema20 = sum(closes) / len(closes)
+        return closes[-1] >= ema20
+
+    btc_1h = _ema_state("BTCUSDT", "1h")
+    btc_4h = _ema_state("BTCUSDT", "4h")
+    eth_1h = _ema_state("ETHUSDT", "1h")
+    eth_4h = _ema_state("ETHUSDT", "4h")
+    btc_cvd_15m = _cvd_change_last2("BTC", "15m")
+    eth_cvd_15m = _cvd_change_last2("ETH", "15m")
+
+    bearish = (btc_1h is False or btc_4h is False) and (btc_cvd_15m is not None and btc_cvd_15m < 0)
+    bullish = (btc_1h is True or btc_4h is True) and (btc_cvd_15m is not None and btc_cvd_15m > 0)
+    if bullish:
+        badge = "🛡️ 大盤環境：BTC 趨勢向上，過濾通過"
+    elif bearish:
+        badge = "🛡️ 大盤環境：BTC 趨勢向下，僅放行順勢空單"
+    else:
+        badge = "🛡️ 大盤環境：中性（EMA/CVD 未完全共振）"
+    return {
+        "bullish": bullish,
+        "bearish": bearish,
+        "badge": badge,
+        "btc_1h": btc_1h,
+        "btc_4h": btc_4h,
+        "btc_cvd_15m": btc_cvd_15m,
+        "eth_1h": eth_1h,
+        "eth_4h": eth_4h,
+        "eth_cvd_15m": eth_cvd_15m,
+    }
 
 
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
@@ -5433,7 +5500,7 @@ def build_report_message_tiered(
         if not price or price <= 0:
             return None, None, None, None, None, "—", "normal", TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
         sl, tp1, tp2, _one_r, sl_pct = compute_structural_sl_tp(
-            float(price), is_long, vwap_2h, ema20, recent_low_2h, recent_high_2h
+            float(price), is_long, vwap_2h, ema20, recent_low_2h, recent_high_2h, atr
         )
         if sl is None:
             return None, None, None, None, None, "—", "normal", TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
@@ -5730,6 +5797,7 @@ def build_report_message_tiered(
             ema20_val,
             _sig_ver,
             bool(x.get("_energy_exhausted")),
+            atr_val,
         )
         _entry_mode = "市價"
         _entry_note = ""
@@ -5737,20 +5805,21 @@ def build_report_message_tiered(
         if _need_limit:
             try:
                 _lp_vwap = float(vwap_2h_val) if vwap_2h_val is not None else None
-                _lp_vw_dev = abs(float(_entry_price) - _lp_vwap) / _lp_vwap if _lp_vwap and _lp_vwap > 0 else None
+                _atr_f = float(atr_val) if atr_val is not None else None
+                _lp_vw_dev_atr = abs(float(_entry_price) - _lp_vwap) / _atr_f if _lp_vwap and _atr_f and _atr_f > 0 else None
             except (TypeError, ValueError):
-                _lp_vw_dev = None
-            if _lp_vw_dev is not None and _lp_vw_dev > MAX_MARKET_VWAP_GAP_PCT:
+                _lp_vw_dev_atr = None
+            if _lp_vw_dev_atr is not None and _lp_vw_dev_atr > MAX_MARKET_VWAP_GAP_ATR:
                 logger.info(
-                    f"[進場過濾] {sym_base}: 現價與主力均價偏離 {_lp_vw_dev:.2%} > {MAX_MARKET_VWAP_GAP_PCT:.0%}，略過"
+                    f"[進場過濾] {sym_base}: 現價與主力均價偏離 {_lp_vw_dev_atr:.2f}ATR > {MAX_MARKET_VWAP_GAP_ATR:.2f}ATR，略過"
                 )
                 continue
-            if _lp_vw_dev is None:
+            if _lp_vw_dev_atr is None:
                 _entry_note = "⚠️ 進場模式原需限價，但主力均價差無法計算，保守以市價策略顯示。"
             else:
                 _entry_note = (
-                    f"⚠️ 進場模式原需限價，但現價與主力均價差 `{_lp_vw_dev:.1%}`"
-                    f"（<= `{MAX_MARKET_VWAP_GAP_PCT:.0%}`），本訊號改用市價方案。"
+                    f"⚠️ 進場模式原需限價，但現價與主力均價差 `{_lp_vw_dev_atr:.2f} ATR`"
+                    f"（<= `{MAX_MARKET_VWAP_GAP_ATR:.2f} ATR`），本訊號改用市價方案。"
                 )
 
         if _entry_price and _entry_price > 0:
@@ -5763,6 +5832,7 @@ def build_report_message_tiered(
                 ema20_val,
                 _recent_lo,
                 _recent_hi,
+                atr_val,
             )
             if sl is None or tp1 is None:
                 logger.warning(f"[SL/TP] {sym_base} 結構計算失敗，跳過此訊號")
@@ -6017,6 +6087,8 @@ def build_report_message_tiered(
         for _help_ln in _reader_help_lines():
             msg_lines.append(_help_ln)
         msg_lines.append(_grade_brief)
+        if x.get("_macro_veto_badge"):
+            msg_lines.append(str(x.get("_macro_veto_badge")))
         # R 級：逆勢左側，與順勢 S/A「高勝率」敘事不同；避免使用者以為每單都該贏
         if _grade == "R":
             msg_lines.append(
@@ -6070,38 +6142,21 @@ def build_report_message_tiered(
         if _entry_note:
             msg_lines.append(f"• {_entry_note}")
         msg_lines.append("")
-        try:
-            _t1 = max(0.001, float(MARKET_ENTRY_TIER1_PCT))
-            _t2 = max(_t1, float(MARKET_ENTRY_TIER2_PCT))
-        except (TypeError, ValueError):
-            _t1, _t2 = 0.008, 0.015
-        if is_bull_sig:
-            _ideal_lo = _entry_price * (1.0 - _t1)
-            _ideal_hi = _entry_price * (1.0 + _t1)
-            _ok_hi = _entry_price * (1.0 + _t2)
+        _atr_zone = float(atr_val) * MARKET_ENTRY_ZONE_ATR if atr_val and isinstance(atr_val, (int, float)) else None
+        if _atr_zone and _atr_zone > 0:
+            _ideal_lo = _entry_price - _atr_zone
+            _ideal_hi = _entry_price + _atr_zone
             msg_lines.append(
-                f"• 市價區間（理想）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{_t1*100:.1f}%）"
-            )
-            msg_lines.append(
-                f"• 市價區間（可接受）：`{_fmt_price(_ideal_hi)}` ~ `{_fmt_price(_ok_hi)}`（最多 +{_t2*100:.1f}%）"
+                f"• 市價區間（ATR動態）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{MARKET_ENTRY_ZONE_ATR:.2f} ATR）"
             )
         else:
-            _ideal_lo = _entry_price * (1.0 - _t1)
-            _ideal_hi = _entry_price * (1.0 + _t1)
-            _ok_lo = _entry_price * (1.0 - _t2)
-            msg_lines.append(
-                f"• 市價區間（理想）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{_t1*100:.1f}%）"
-            )
-            msg_lines.append(
-                f"• 市價區間（可接受）：`{_fmt_price(_ok_lo)}` ~ `{_fmt_price(_ideal_lo)}`（最多 -{_t2*100:.1f}%）"
-            )
+            msg_lines.append("• 市價區間（ATR動態）：ATR 無法取得，請保守降低槓桿")
         msg_lines.append("• ⚠️ 超過可接受區間：不追價、只等下一輪")
         msg_lines.append("")
-        msg_lines.append(f"• **出場分配**：TP1 出 `{int(TP1_EXIT_RATIO*100)}%`｜TP2 出 `{int(TP2_EXIT_RATIO*100)}%`")
-        msg_lines.append(f"• **止損**：`{_sl_txt}`（到價認錯出場）")
-        msg_lines.append(f"• **TP1**：`{_tp1_txt}`")
+        msg_lines.append(f"• **🎯 TP1 ({TP1_R_MULTIPLIER:.1f}R)**：`{_tp1_txt}` → 平倉 `{int(TP1_EXIT_RATIO*100)}%`，其餘 SL 上移到進場價")
         if _tp2_txt:
-            msg_lines.append(f"• **TP2**：`{_tp2_txt}`")
+            msg_lines.append(f"• **🚀 TP2 ({TP2_R_MULTIPLIER:.1f}R)**：`{_tp2_txt}` → 平倉剩餘 `{int(TP2_EXIT_RATIO*100)}%`")
+        msg_lines.append(f"• **止損**：`{_sl_txt}`（到價認錯出場）")
         if 0 < vol_m_val < 10:
             msg_lines.append("• ⚠️ 本幣成交值低於 10M：請注意資金胃納量與承載量，建議分批下單避免滑價。")
 
@@ -6212,6 +6267,12 @@ def build_report_message_tiered(
                 "symbol_base": sym_base,
                 "caption": _msg_str,
                 "direction_is_long": is_bull_sig,
+                "signal_version": _sig_version,
+                "triggered_from_pending": bool(x.get("_triggered_from_pending")),
+                "macro_badge": x.get("_macro_veto_badge"),
+                "atr": x.get("atr"),
+                "tp1_r": TP1_R_MULTIPLIER,
+                "tp2_r": TP2_R_MULTIPLIER,
                 "sl": sl,
                 "tp1": tp1,
                 "tp2": tp2,
@@ -8261,6 +8322,7 @@ def fetch_position_change():
     cooldown_sec = COOLDOWN_HOURS * 3600
     history_sec = HISTORY_HOURS * 3600
     history: List[Dict] = []
+    pending_signals: List[Dict] = []
     push_log_signals: List[Dict] = []
     # 檔案鎖：避免 CI 或多進程同時寫入導致 JSON 損毀
     lock_file = SNIPER_COOLDOWN_FILE.with_suffix(".lock")
@@ -8292,6 +8354,7 @@ def fetch_position_change():
     _gist_data = _gist_load_cooldown()
     if _gist_data is not None:
         history = _gist_data.get("history") or []
+        pending_signals = _gist_data.get("pending_signals") or []
         _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
         logger.info(f"冷卻檔已讀取(Gist): history {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆")
 
@@ -8300,6 +8363,7 @@ def fetch_position_change():
             if SNIPER_COOLDOWN_FILE.exists() and _gist_data is None:
                 raw = json.loads(SNIPER_COOLDOWN_FILE.read_text(encoding="utf-8"))
                 history = raw.get("history") or []
+                pending_signals = raw.get("pending_signals") or []
                 # 相容舊格式：只有 last_round 時轉成 history
                 if not history and raw.get("last_round"):
                     last_round = raw.get("last_round") or []
@@ -8307,17 +8371,23 @@ def fetch_position_change():
                         history = [{"symbol": str(p.get("symbol")), "dir": str(p.get("dir")), "ts": int(now_ts) - 3600} for p in last_round if p.get("symbol") and p.get("dir")]
                     else:
                         history = [{"symbol": str(p[0]), "dir": str(p[1]), "ts": int(now_ts) - 3600} for p in last_round if isinstance(p, (list, tuple)) and len(p) >= 2]
+                if "pending_signals" not in raw:
+                    pending_signals = []
                 logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆")
             else:
                 if _gist_data is None:
                     logger.info(f"冷卻狀態檔不存在，本輪無冷卻限制: {_cooldown_path_abs}")
     except Exception as e:
         history = []
+        pending_signals = []
         logger.warning(f"讀取冷卻狀態檔失敗，本輪無冷卻限制: {e}")
 
     now_tw = datetime.fromtimestamp(now_ts, tz=TAIPEI_TZ)
     _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
-    logger.info(f"冷卻狀態: {len(history)} 筆歷史，{COOLDOWN_HOURS}h 內 {_in_window} 筆（同幣同方向才冷卻）")
+    logger.info(
+        f"冷卻狀態: {len(history)} 筆歷史，{COOLDOWN_HOURS}h 內 {_in_window} 筆（同幣同方向才冷卻）"
+        f" | pending={len(pending_signals)}"
+    )
 
     # 冷卻集合：同幣同方向在 COOLDOWN_HOURS 內已推過則阻擋
     cooldown_symbol_dir_4h: Set[Tuple[str, str]] = set()
@@ -8347,6 +8417,134 @@ def fetch_position_change():
     if _bl_removed > 0:
         logger.info(f"[黑名單🚫] 二道防線攔截 {_bl_removed} 個標的")
 
+    # ── Macro Veto：BTC 1H/4H EMA20 + 15m CVD 一票否決逆勢單 ───────────────────
+    macro_ctx = _macro_regime_snapshot()
+    _macro_filtered: List[Dict] = []
+    for x in all_top:
+        _base = _cooldown_symbol(x.get("symbol") or "")
+        _cat = x.get("category") or ""
+        _is_long_sig = _cat in ("long_open", "short_close")
+        _is_short_sig = _cat in ("short_open", "long_close")
+        x["_macro_veto_badge"] = macro_ctx.get("badge")
+        # BTC/ETH 訊號不做 veto，僅作環境提示
+        if _base in ("BTC", "ETH"):
+            _macro_filtered.append(x)
+            continue
+        if macro_ctx.get("bearish") and _is_long_sig:
+            logger.info(f"[MacroVeto] {_base}: BTC 空頭環境，略過做多訊號")
+            continue
+        if macro_ctx.get("bullish") and _is_short_sig:
+            logger.info(f"[MacroVeto] {_base}: BTC 多頭環境，略過做空訊號")
+            continue
+        _macro_filtered.append(x)
+    all_top = _macro_filtered
+
+    # ── Pending Pool 巡邏：先審查既有待辦（觸發/淘汰/保留）──────────────────────
+    def _pending_live_price(symbol: str) -> Optional[float]:
+        try:
+            snap = _fetch_bingx_ticker_snapshot(symbol)
+            if snap and snap.get("price"):
+                return float(snap.get("price"))
+        except Exception:
+            return None
+        return None
+
+    pending_kept: List[Dict] = []
+    pending_triggered: List[Dict] = []
+    for p in pending_signals:
+        if not isinstance(p, dict):
+            continue
+        p_sym = p.get("symbol")
+        p_dir = p.get("dir")
+        if not p_sym or p_dir not in ("long", "short"):
+            continue
+        p_now = _pending_live_price(p_sym)
+        if p_now is None or p_now <= 0:
+            pending_kept.append(p)
+            continue
+        p_expire = int(p.get("expire_ts") or 0)
+        p_sl = float(p.get("sl") or 0)
+        p_tp1 = float(p.get("tp1") or 0)
+        p_lo = float(p.get("entry_zone_low") or 0)
+        p_hi = float(p.get("entry_zone_high") or 0)
+        if p_expire and now_ts >= p_expire:
+            continue
+        if p_dir == "long" and (p_now <= p_sl or p_now >= p_tp1):
+            continue
+        if p_dir == "short" and (p_now >= p_sl or p_now <= p_tp1):
+            continue
+        if p_lo <= p_now <= p_hi:
+            payload = p.get("signal_payload") or {}
+            if isinstance(payload, dict):
+                payload["current_price"] = p_now
+                payload["_triggered_from_pending"] = True
+                payload["_macro_veto_badge"] = macro_ctx.get("badge")
+                pending_triggered.append(payload)
+            continue
+        pending_kept.append(p)
+
+    # ── Pending Pool 寫入：已噴發訊號先放待辦池，不追價 ─────────────────────────
+    filtered_for_pending: List[Dict] = []
+    for x in all_top:
+        _atr = x.get("atr")
+        _vwap = x.get("vwap_2h")
+        _ema = x.get("ema20") or x.get("ema20_close")
+        _sig_ver = x.get("signal_version") or ""
+        _mtf_ok = int(x.get("mtf_aligned") or 0) >= 3
+        try:
+            _atr_f = float(_atr) if _atr is not None else None
+            _price_f = float(x.get("current_price")) if x.get("current_price") is not None else None
+            _vwap_f = float(_vwap) if _vwap is not None else None
+            _ema_f = float(_ema) if _ema is not None else None
+        except (TypeError, ValueError):
+            _atr_f, _price_f, _vwap_f, _ema_f = None, None, None, None
+        if not (_sig_ver in ("confirmed", "pullback") and _mtf_ok and _atr_f and _price_f and (_vwap_f or _ema_f)):
+            filtered_for_pending.append(x)
+            continue
+        _anchor = _ema_f if _ema_f and _ema_f > 0 else _vwap_f
+        if not _anchor or abs(_price_f - _anchor) <= _atr_f * PENDING_PUMP_ATR_MULTIPLIER:
+            filtered_for_pending.append(x)
+            continue
+        _is_long = (x.get("category") or "") in ("long_open", "short_close")
+        _entry_ref = _anchor
+        _entry_lo = _entry_ref - (_atr_f * MARKET_ENTRY_ZONE_ATR)
+        _entry_hi = _entry_ref + (_atr_f * MARKET_ENTRY_ZONE_ATR)
+        _sl, _tp1, _tp2, _, _ = compute_structural_sl_tp(
+            _entry_ref,
+            _is_long,
+            _vwap_f,
+            _ema_f,
+            x.get("recent_low_2h"),
+            x.get("recent_high_2h"),
+            _atr_f,
+        )
+        if _sl is None or _tp1 is None:
+            filtered_for_pending.append(x)
+            continue
+        _pid = f"{_cooldown_symbol(x.get('symbol') or '')}_{'long' if _is_long else 'short'}_{int(now_ts)}"
+        pending_kept.append({
+            "id": _pid,
+            "symbol": x.get("symbol"),
+            "base": _cooldown_symbol(x.get("symbol") or ""),
+            "dir": "long" if _is_long else "short",
+            "grade": x.get("grade"),
+            "source_version": _sig_ver,
+            "created_ts": int(now_ts),
+            "expire_ts": int(now_ts + PENDING_TTL_HOURS * 3600),
+            "entry_ref_price": _entry_ref,
+            "entry_zone_low": _entry_lo,
+            "entry_zone_high": _entry_hi,
+            "entry_anchor": {"ema20": _ema_f, "vwap_2h": _vwap_f, "atr": _atr_f},
+            "sl": _sl,
+            "tp1": _tp1,
+            "tp2": _tp2,
+            "rr_plan": {"tp1_r": TP1_R_MULTIPLIER, "tp2_r": TP2_R_MULTIPLIER, "min_push_r": MIN_TP1_R_FOR_PUSH},
+            "market_context": {"macro_veto_badge": macro_ctx.get("badge")},
+            "signal_payload": x,
+        })
+        logger.info(f"[PendingPool] {_cooldown_symbol(x.get('symbol') or '')}: 偏離主力成本過大，寫入待辦池")
+    all_top = filtered_for_pending
+
     cooled_top = []
     for x in all_top:
         sym = x.get("symbol") or ""
@@ -8373,6 +8571,10 @@ def fetch_position_change():
     _skipped = len(all_top) - len(cooled_top)
     if _skipped > 0:
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
+
+    if pending_triggered:
+        cooled_top.extend(pending_triggered)
+        logger.info(f"[PendingPool✅] 觸發完美回踩 {len(pending_triggered)} 檔，併入本輪推播候選")
 
     # 依方向分組後以 |1H OI%| 排序（大者在前）；不設每方向檔數上限
     def _oi_abs_round_cap(xx: Dict) -> float:
@@ -8433,6 +8635,7 @@ def fetch_position_change():
                         _ema_rt,
                         _x.get("recent_low_2h"),
                         _x.get("recent_high_2h"),
+                        _x.get("atr"),
                     )
                     if _sl_i is None or _tp1_i is None:
                         continue
@@ -8534,6 +8737,12 @@ def fetch_position_change():
                             ema20_touch_low=payload.get("ema20_touch_low"),
                             ema20_touch_high=payload.get("ema20_touch_high"),
                             ema20_4h=payload.get("ema20_4h"),
+                            atr=payload.get("atr"),
+                            tp1_r=payload.get("tp1_r"),
+                            tp2_r=payload.get("tp2_r"),
+                            macro_badge=payload.get("macro_badge"),
+                            signal_version=payload.get("signal_version"),
+                            triggered_from_pending=bool(payload.get("triggered_from_pending")),
                             out_path=img_path,
                             title_line=f"{sym_b} | 60x5m(~5h) EMA20=purple VWAP=cyan OI=bars",
                         )
@@ -8619,7 +8828,7 @@ def fetch_position_change():
         except Exception as e:
             logger.warning(f"寫入 GitHub Step Summary 失敗: {e}")
 
-    # 寫回冷卻狀態（只保留 history，移除倉位追蹤）
+    # 寫回冷卻狀態（history + pending_signals；向下相容平滑升級）
     try:
         SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
         new_entries = [
@@ -8629,11 +8838,18 @@ def fetch_position_change():
         ]
         history = history + new_entries
         history = [e for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= history_sec]
-        state = {"history": history}
+        state = {
+            "version": 2,
+            "history": history,
+            "pending_signals": pending_kept if isinstance(pending_kept, list) else [],
+        }
         _emergency_sniper_state = state
         with _sniper_file_lock():
             save_json_file(SNIPER_COOLDOWN_FILE, state)
-        logger.info(f"冷卻檔已寫入: 本輪 {len(new_entries)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h)")
+        logger.info(
+            f"冷卻檔已寫入: 本輪 {len(new_entries)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h)"
+            f" | pending={len(state['pending_signals'])}"
+        )
         _gist_save_cooldown(state)
     except Exception as e:
         logger.warning(f"寫入冷卻狀態檔失敗: {e}")

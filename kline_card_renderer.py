@@ -421,6 +421,12 @@ def render_kline_oi_card(
     ema20_touch_low: Optional[float] = None,
     ema20_touch_high: Optional[float] = None,
     ema20_4h: Optional[float] = None,
+    atr: Optional[float] = None,
+    tp1_r: Optional[float] = None,
+    tp2_r: Optional[float] = None,
+    macro_badge: Optional[str] = None,
+    signal_version: str = "",
+    triggered_from_pending: bool = False,
     title_line: str = "",
 ) -> str:
     """
@@ -558,8 +564,43 @@ def render_kline_oi_card(
 
     # draw_hline 會只在 SL + VWAP 顯示數值
 
+    top_text_y = 4
     if title_line:
-        draw.text((pad_left, 4), title_line[:80], fill=text_col, font=font_title)
+        draw.text((pad_left, top_text_y), title_line[:80], fill=text_col, font=font_title)
+        top_text_y += 22
+
+    badge_chunks: List[str] = []
+    if triggered_from_pending:
+        badge_chunks.append("✅ 完美回踩觸發")
+    if signal_version:
+        if signal_version == "confirmed":
+            badge_chunks.append("🚀 確定籌碼")
+        elif signal_version == "pullback":
+            badge_chunks.append("🎯 回踩進場")
+        elif signal_version == "exhaustion_reversal":
+            badge_chunks.append("🔥 衰竭反轉")
+        elif signal_version == "tier2":
+            badge_chunks.append("⚠️ 觀察名單")
+    if badge_chunks:
+        draw.text((pad_left, top_text_y), " | ".join(badge_chunks)[:88], fill=(255, 220, 120), font=font_label)
+        top_text_y += 18
+
+    if macro_badge:
+        macro_line = str(macro_badge).replace("🛡️ ", "")
+        draw.text((pad_left, top_text_y), f"Macro: {macro_line}"[:96], fill=(130, 220, 255), font=font_label)
+
+    # 右上角風控摘要（快速可讀）
+    rr_t1 = _safe_float(tp1_r, None)
+    rr_t2 = _safe_float(tp2_r, None)
+    atr_f = _safe_float(atr, None)
+    summary_parts: List[str] = []
+    if rr_t1 is not None and rr_t2 is not None:
+        summary_parts.append(f"TP1 {rr_t1:.1f}R / TP2 {rr_t2:.1f}R")
+    if atr_f is not None and atr_f > 0:
+        summary_parts.append(f"ATR {atr_f:.4f}")
+    summary_parts.append("Exit 50/50")
+    summary_txt = " | ".join(summary_parts)
+    draw.text((width - 380, 4), summary_txt[:52], fill=(220, 235, 255), font=font_label)
 
     # 依需求：卡片不顯示 TP/SL/Entry 水平線，只保留 VWAP + EMA；VWAP 若遠離 K 線主體仍會畫在邊緣（y 已 clamp）
     if vwap is not None:
