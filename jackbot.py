@@ -692,7 +692,7 @@ def _discord_content_with_mentions(text: str, thread_id: int) -> str:
     """特定主題在 Discord 自動加 @everyone。"""
     base = _convert_text_for_discord(text)
     key = _resolve_thread_key_by_id(thread_id) or ""
-    if key in {"position_change", "economic_data", "hyperliquid"}:
+    if key in {"position_change", "economic_data"}:
         return f"@everyone\n{base}".strip()
     return base
 
