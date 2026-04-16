@@ -417,6 +417,9 @@ def render_kline_oi_card(
     entry: Optional[float],
     vwap: Optional[float],
     out_path: str,
+    vwap_anchor: Optional[float] = None,
+    anchor_fit_stars: int = 0,
+    anchor_hint: str = "",
     ema20: Optional[float] = None,
     ema20_touch_low: Optional[float] = None,
     ema20_touch_high: Optional[float] = None,
@@ -451,6 +454,7 @@ def render_kline_oi_card(
     tp2_col = (0, 160, 90)
     entry_col = (255, 200, 0)
     vwap_col = (90, 200, 255)
+    vwap_anchor_col = (255, 195, 85)  # 金：錨定發動 VWAP（與 2h 主力 VWAP 區隔）
     oi_col = (110, 190, 255)
     ema20_col = (185, 105, 255)         # 紫：1H EMA20
     ema20_4h_col = (255, 195, 90)      # 金黃：4H EMA20
@@ -503,7 +507,7 @@ def render_kline_oi_card(
     span_c = max(p_hi_w - p_lo_w, mid_c * 1e-9)
 
     p_min, p_max = p_lo_w, p_hi_w
-    for p in (sl, tp1, tp2, entry, vwap):
+    for p in (sl, tp1, tp2, entry, vwap, vwap_anchor):
         pf = _safe_float(p, None)
         if pf is not None and pf > 0 and abs(pf - mid_c) <= span_c * 4.5:
             p_min = min(p_min, pf)
@@ -553,8 +557,8 @@ def render_kline_oi_card(
         y = max(plot_top_y0, min(plot_top_y1 - 1, y))
         draw.line([(pad_left, y), (width - pad_right, y)], fill=col, width=2)
 
-        # 只對你指定需要的水平線標示價格：SL + VWAP
-        if label in ("SL", "VWAP"):
+        # 只對你指定需要的水平線標示價格：SL + VWAP + 錨VW
+        if label in ("SL", "VWAP", "錨VW"):
             txt = f"{label}:{price:.4f}"
             txt_show = txt if len(txt) <= 22 else (txt[:20] + "..")
             # 右側小字標籤（不畫整塊框），避免你說的怪字/怪框
@@ -602,7 +606,7 @@ def render_kline_oi_card(
     summary_txt = " | ".join(summary_parts)
     draw.text((width - 380, 4), summary_txt[:52], fill=(220, 235, 255), font=font_label)
 
-    # 依需求：卡片不顯示 TP/SL/Entry 水平線，只保留 VWAP + EMA；VWAP 若遠離 K 線主體仍會畫在邊緣（y 已 clamp）
+    # 主力 2h VWAP（青）；錨定線改在 K 線之後疊加，避免被蠟燭蓋住
     if vwap is not None:
         draw_hline(float(vwap), vwap_col, "VWAP")
 
@@ -677,6 +681,11 @@ def render_kline_oi_card(
 
         # 不在右側標籤框顯示 EMA 價位（由電報文字提供）
 
+    # 錨定發動 VWAP（金線，疊在 K 線／EMA 之上）
+    _va = _safe_float(vwap_anchor, None)
+    if _va is not None and _va > 0:
+        draw_hline(float(_va), vwap_anchor_col, "錨VW")
+
     # OI bars（改用顏色區分漲/跌，較好讀）
     if oi_5m:
         oi_use = oi_5m[-60:]
@@ -709,6 +718,17 @@ def render_kline_oi_card(
         # 讓柱狀圖更乾淨：上升藍、下降橘
         bar_col = oi_col if v_f >= prev_v else (255, 150, 90)
         draw.rectangle([x0, yv, x1, plot_bot_y1 - 1], fill=bar_col)
+
+    _stars_i = max(0, min(3, int(anchor_fit_stars or 0)))
+    if _va is not None and _va > 0:
+        _star_txt = "★" * _stars_i + "☆" * (3 - _stars_i) if _stars_i > 0 else "錨定無星"
+        _hint_short = (anchor_hint or "")[:44] + ("…" if len(anchor_hint or "") > 44 else "")
+        draw.text(
+            (pad_left, height - 22),
+            f"錨定貼合 {_star_txt}  金線=發動VWAP  {_hint_short}",
+            fill=vwap_anchor_col,
+            font=font_label,
+        )
 
     img.save(out_path)
     return out_path

@@ -4494,6 +4494,53 @@ def compute_anchored_launch_vwap_snapshot(symbol_base: str) -> Optional[Dict[str
     }
 
 
+def _anchor_vwap_fit_bonus(x: Dict[str, Any]) -> Tuple[int, int, str, str]:
+    """
+    依「現價 vs 錨定 VWAP」貼合度給綜合分加分與 0～3 星，並附倉位提示（非投資建議）。
+
+    回傳：(score_delta, stars_0_3, reason_snippet, sizing_hint)
+    """
+    va = x.get("vwap_anchor")
+    if va is None:
+        return 0, 0, "", ""
+    try:
+        va_f = float(va)
+        px = float(x.get("current_price") or 0)
+    except (TypeError, ValueError):
+        return 0, 0, "", ""
+    if va_f <= 0 or px <= 0 or px != px:
+        return 0, 0, "", ""
+    dev_pct = abs(px - va_f) / va_f * 100.0
+
+    if dev_pct <= 1.2:
+        return (
+            15,
+            3,
+            "錨定均價高貼合",
+            "籌碼錨定佳：結構上較利於計畫風險報酬時，可考慮在個人承受範圍內略加大倉位（仍須嚴守止損）",
+        )
+    if dev_pct <= 2.5:
+        return (
+            10,
+            2,
+            "錨定均價可接受",
+            "貼合度尚可：倉位可比平常略積極，勿滿倉、勿放大槓桿超過習慣",
+        )
+    if dev_pct <= 4.0:
+        return (
+            5,
+            1,
+            "錨定均價略開",
+            "貼合度一般：建議維持常規倉位",
+        )
+    return (
+        2,
+        0,
+        "價格偏離發動均價",
+        "已偏離發動籌碼成本帶：建議偏保守／縮小倉位",
+    )
+
+
 def _macro_regime_snapshot() -> Dict[str, Any]:
     """大盤防護網：BTC/ETH 1H/4H EMA20 + 15m CVD 趨勢。"""
     def _ema_state(sym: str, interval: str) -> Optional[bool]:
@@ -5205,6 +5252,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
       6. 趨勢情境        (−15~+15) ── 下跌段做多/上漲段做空=+15；上漲段做多/下跌段做空=−10
       7. 跨類別互確認    (max 20) ── 同輪出現互補訊號（嘎空+多開 / 出貨+空開）加分
       8. 大盤敬畏：做多且 BTC 1H<0 或 做空且 BTC 1H>0 → 強制 −10
+      9. 錨定 VWAP 貼合（max ~15）── 現價接近 5m 發動加權成本者加分（見 _anchor_vwap_fit_bonus）
 
     ── 車已發動 / 大盤逆風：分數硬上限 74（最高 A）──────────────────────
     """
@@ -5518,6 +5566,15 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         elif abs(_btc_oi_ref) >= 0.8:
             score += 2
             reasons.append(f"BTC_OI輔助({_btc_oi_ref:+.2f}%)")
+
+    # ── 12. 錨定 VWAP 貼合度（現價 vs 5m 發動加權成本）──────────────────
+    _ab, _ast, _ar_snip, _ahint = _anchor_vwap_fit_bonus(x)
+    x["_anchor_fit_stars"] = int(max(0, min(3, _ast)))
+    x["_anchor_sizing_hint"] = _ahint or ""
+    if _ab:
+        score += _ab
+        if _ar_snip:
+            reasons.append(_ar_snip)
 
     # ── 評級（S / A / R / B；僅「車已發動」限制上限）────────────
     score = max(0, min(100, score))
@@ -6220,7 +6277,7 @@ def build_report_message_tiered(
         if x.get("cooldown_reverse_recent") and _grade == "S":
             msg_lines.append("🧠 冷卻期間反向出現 S：已允許推播（注意敘事切換）")
 
-        # 主力均價（2h VWAP，與結構 SL/掛單邏輯一致）
+        # 2h VWAP（結構止損／掛單邏輯用）+ 錨定 VWAP（推播 📊 區塊；綜合分已含貼合加分）
         try:
             _vwap_show = (
                 float(vwap_2h_val)
@@ -6231,6 +6288,27 @@ def build_report_message_tiered(
             )
         except (TypeError, ValueError):
             _vwap_show = None
+
+        _vwap_anchor_show: Optional[float] = None
+        _vwap_anchor_ts_show = 0
+        try:
+            _raw_va = x.get("vwap_anchor")
+            if _raw_va is not None:
+                _vwap_anchor_show = float(_raw_va)
+                if _vwap_anchor_show != _vwap_anchor_show or _vwap_anchor_show <= 0:
+                    _vwap_anchor_show = None
+        except (TypeError, ValueError):
+            _vwap_anchor_show = None
+        try:
+            _vwap_anchor_ts_show = int(x.get("vwap_anchor_ts") or 0)
+        except (TypeError, ValueError):
+            _vwap_anchor_ts_show = 0
+        try:
+            _anch_fit_stars = int(x.get("_anchor_fit_stars") or 0)
+        except (TypeError, ValueError):
+            _anch_fit_stars = 0
+        _anch_fit_stars = max(0, min(3, _anch_fit_stars))
+        _anchor_hint_disp = str(x.get("_anchor_sizing_hint") or "").strip()
 
         _entry_now_txt = _fmt_price(_entry_price) if _entry_price is not None else "N/A"
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
@@ -6257,7 +6335,43 @@ def build_report_message_tiered(
         except Exception:
             pass
 
-        msg_lines.append("*📌 點位重點*")
+        msg_lines.append("*📊 參考均價與籌碼錨定*")
+        msg_lines.append(
+            "_綜合分已納入「錨定貼合」加分。星級愈高＝現價愈接近本波發動後加權成本，較利於判斷風報比與倉位力度。_"
+        )
+        if _vwap_show is not None:
+            msg_lines.append(
+                f"• **主力參考均價（2h VWAP，風控基準）**：`{_fmt_price(_vwap_show)}`"
+            )
+        else:
+            msg_lines.append("• **主力參考均價（2h VWAP）**：—（風控改以 EMA／2H 結構為主）")
+        if _vwap_anchor_show is not None:
+            _anchor_time_s = ""
+            if _vwap_anchor_ts_show > 0:
+                try:
+                    _anchor_time_s = " " + datetime.fromtimestamp(
+                        float(_vwap_anchor_ts_show), tz=TAIPEI_TZ
+                    ).strftime("%m-%d %H:%M 台北")
+                except (OSError, ValueError, OverflowError):
+                    _anchor_time_s = ""
+            _star_bar = (
+                "★" * _anch_fit_stars + "☆" * (3 - _anch_fit_stars)
+                if _anch_fit_stars > 0
+                else "—（本輪無星級加分）"
+            )
+            msg_lines.append(
+                f"• **錨定加權成本（5m 爆量+OI 階梯→發動 VWAP）**：`{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
+            )
+            msg_lines.append(f"  └ *錨定貼合星級（加分項）*：{_star_bar}")
+            if _anchor_hint_disp:
+                msg_lines.append(f"  └ *倉位思路*：{_anchor_hint_disp}")
+        else:
+            msg_lines.append(
+                "• **錨定加權成本**：—（未取得：多為 OI 不足／未達爆量+OI 門檻）"
+            )
+        msg_lines.append("")
+
+        msg_lines.append("*📌 點位與執行*")
         _vw_dev = _rel_dev_pct(float(_entry_price) if _entry_price is not None else None, _vwap_show)
         _vw_dev_s = f"｜與主力均價差 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
         msg_lines.append(f"• **進場(市價)**：`{_entry_now_txt}`{_vw_dev_s}")
@@ -6295,40 +6409,9 @@ def build_report_message_tiered(
             msg_lines.append("• ⚠️ 本幣成交值低於 10M：請注意資金胃納量與承載量，建議分批下單避免滑價。")
 
         msg_lines.append("*🌍 環境與籌碼*")
-        if _vwap_show is not None:
-            msg_lines.append(
-                f"• 主力這兩小時的平均成本參考（2h VWAP）：`{_fmt_price(_vwap_show)}`"
-            )
-        _vwap_anchor_show: Optional[float] = None
-        _vwap_anchor_ts_show = 0
-        try:
-            _raw_va = x.get("vwap_anchor")
-            if _raw_va is not None:
-                _vwap_anchor_show = float(_raw_va)
-                if _vwap_anchor_show != _vwap_anchor_show or _vwap_anchor_show <= 0:
-                    _vwap_anchor_show = None
-        except (TypeError, ValueError):
-            _vwap_anchor_show = None
-        try:
-            _vwap_anchor_ts_show = int(x.get("vwap_anchor_ts") or 0)
-        except (TypeError, ValueError):
-            _vwap_anchor_ts_show = 0
-        if _vwap_anchor_show is not None:
-            _anchor_time_s = ""
-            if _vwap_anchor_ts_show > 0:
-                try:
-                    _anchor_time_s = datetime.fromtimestamp(
-                        float(_vwap_anchor_ts_show), tz=TAIPEI_TZ
-                    ).strftime("（錨點 %m-%d %H:%M 台北）")
-                except (OSError, ValueError, OverflowError):
-                    _anchor_time_s = ""
-            msg_lines.append(
-                f"• 本波發動加權成本（錨定 VWAP，自 5m 爆量+OI 階梯起算）："
-                f"`{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
-            )
         msg_lines.append(
-            f"• 較大週期：{_macro_trend}（{_macro_ema_txt}）"
-            f"{_rsi_4h_str if _rsi_4h_str else ''}｜本訊號進場：{_exec_mode}"
+            f"• 週期背景：{_macro_trend}（{_macro_ema_txt}）"
+            f"{_rsi_4h_str if _rsi_4h_str else ''}｜本訊號進場模式：{_exec_mode}"
         )
         _oi_story_line, _oi_risk_line = _build_oi_plain_lines()
         msg_lines.append(_oi_story_line)
@@ -6425,6 +6508,18 @@ def build_report_message_tiered(
             _vwap_val = float(vwap_2h_val) if vwap_2h_val is not None else None
         except Exception:
             _vwap_val = None
+        _va_card = None
+        try:
+            if x.get("vwap_anchor") is not None:
+                _va_card = float(x["vwap_anchor"])
+                if _va_card != _va_card or _va_card <= 0:
+                    _va_card = None
+        except (TypeError, ValueError):
+            _va_card = None
+        try:
+            _ast_card = int(x.get("_anchor_fit_stars") or 0)
+        except (TypeError, ValueError):
+            _ast_card = 0
         cards_payload.append(
             {
                 "symbol_base": sym_base,
@@ -6441,6 +6536,9 @@ def build_report_message_tiered(
                 "tp2": tp2,
                 "entry": _entry_val,
                 "vwap": _vwap_val,
+                "vwap_anchor": _va_card,
+                "anchor_fit_stars": max(0, min(3, _ast_card)),
+                "anchor_hint": str(x.get("_anchor_sizing_hint") or ""),
                 "ema20": x.get("ema20"),
                 "ema20_touch_low": x.get("ema20_touch_low"),
                 "ema20_touch_high": x.get("ema20_touch_high"),
@@ -8920,6 +9018,9 @@ def fetch_position_change():
                             tp2=_posf(payload.get("tp2")),
                             entry=_posf(payload.get("entry")),
                             vwap=_posf(payload.get("vwap")),
+                            vwap_anchor=_posf(payload.get("vwap_anchor")),
+                            anchor_fit_stars=int(payload.get("anchor_fit_stars") or 0),
+                            anchor_hint=str(payload.get("anchor_hint") or ""),
                             ema20=payload.get("ema20"),
                             ema20_touch_low=payload.get("ema20_touch_low"),
                             ema20_touch_high=payload.get("ema20_touch_high"),
@@ -8931,7 +9032,7 @@ def fetch_position_change():
                             signal_version=payload.get("signal_version"),
                             triggered_from_pending=bool(payload.get("triggered_from_pending")),
                             out_path=img_path,
-                            title_line=f"{sym_b} | 60x5m(~5h) EMA20=purple VWAP=cyan OI=bars",
+                            title_line=f"{sym_b} | 5m×60  K+OI | 青線=2h主力VWAP 金線=錨定發動VWAP",
                         )
                         ok = send_telegram_photo(
                             img_path,
