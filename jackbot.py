@@ -1103,6 +1103,46 @@ def fetch_aggregated_stablecoin_oi_history(symbol: str = "BTC", interval: str = 
     return None
 
 
+def fetch_aggregated_coin_margin_oi_history(symbol: str = "BTC", interval: str = "1h") -> Optional[List[Dict]]:
+    """幣本位保證金聚合 OI 歷史（與穩定幣路徑對稱，供聰明錢拆分）。"""
+    if not CG_API_KEY:
+        return None
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    intv = _cg_interval(interval)
+    urls_try = [
+        (
+            f"{CG_API_BASE}/api/futures/open-interest/aggregated-coin-margin-history",
+            {"exchange_list": "Binance,Bybit,OKX,Gate", "symbol": base, "interval": intv},
+        ),
+        (
+            f"{CG_API_BASE}/api/futures/open-interest/aggregated-coin-margin-history",
+            {"exchange": "Binance", "symbol": base, "interval": intv},
+        ),
+    ]
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    for url, params in urls_try:
+        try:
+            _respect_coinglass_rate_limit()
+            response = requests.get(url, params=params, headers=headers, timeout=12)
+            if response.status_code != 200:
+                continue
+            data = response.json()
+            if data.get("code") not in ("0", 0, 200, "200", None):
+                continue
+            dl = _coinglass_extract_data_list(data)
+            if dl:
+                logger.info(f"[幣本位OI歷史✅] {url.split('/')[-1]} interval={intv} 筆數={len(dl)}")
+                return dl
+        except Exception as e:
+            logger.debug(f"幣本位 OI 請求失敗 {url}: {e}")
+    j = _cg_get(CG_EP["oi_agg_coin"], {"symbol": base, "interval": intv, "limit": 48})
+    dl = _coinglass_extract_data_list(j)
+    if dl:
+        logger.info(f"[幣本位OI歷史✅] ohlc-coin-margin interval={intv} 筆數={len(dl)}")
+        return dl
+    return None
+
+
 def calculate_marketcap_change(data_list: List[Dict]) -> Optional[Dict]:
     """計算穩定幣市值變化率（1小時和24小時）"""
     if not data_list or len(data_list) < 2:
@@ -1187,10 +1227,15 @@ def calculate_marketcap_change(data_list: List[Dict]) -> Optional[Dict]:
 
 
 def _oi_bar_close(bar: Dict) -> Optional[float]:
-    """從單根 OI K 線取出收盤持倉數值（CoinGlass 常見：c / close / openInterest）。"""
+    """從單根 OI K 線取出收盤持倉數值。注意：部分端點的 `v` 為成交量而非 OI，`v` 放最後。"""
     if not isinstance(bar, dict):
         return None
-    for k in ("c", "close", "value", "v", "openInterest", "oi"):
+    for k in (
+        "c", "close",
+        "openInterest", "open_interest", "sumOpenInterest", "oi", "openInterestUsd",
+        "value",
+        "v",  # 少數文檔混用；最後才用，避免誤把成交量當 OI
+    ):
         v = bar.get(k)
         if v is None:
             continue
@@ -1354,6 +1399,20 @@ def _fetch_smart_money_oi_split(symbol: str = "BTC") -> Dict[str, Any]:
         except Exception as e_c:
             logger.debug("[SmartMoneyOI] coin OI error: " + str(e_c))
 
+    # 備援：camelCase 端點在部分方案下回空，改與「燃料表」相同之 kebab aggregated-history（與持倉異常鏡同源）
+    if not stable_bars or len(stable_bars) < 2:
+        dl_s = fetch_aggregated_stablecoin_oi_history(base, "15m")
+        if dl_s:
+            stable_bars = _parse_oi_bars_from_rows(dl_s)
+            if stable_bars and len(stable_bars) >= 2:
+                logger.info(f"[SmartMoneyOI] stable kebab 備援 bars={len(stable_bars)}")
+    if not coin_bars or len(coin_bars) < 2:
+        dl_c = fetch_aggregated_coin_margin_oi_history(base, "15m")
+        if dl_c:
+            coin_bars = _parse_oi_bars_from_rows(dl_c)
+            if coin_bars and len(coin_bars) >= 2:
+                logger.info(f"[SmartMoneyOI] coin kebab 備援 bars={len(coin_bars)}")
+
     stable_chg = coin_chg = None
     if stable_bars and len(stable_bars) >= 2 and stable_bars[-2] != 0:
         stable_chg = round((stable_bars[-1] - stable_bars[-2]) / stable_bars[-2] * 100, 3)
@@ -1408,15 +1467,17 @@ def _calc_fuel_score(mcap_15m: float, mcap_1h: float, oi_15m: float, oi_1h: floa
 
 
 def _format_oi_notional_billions(latest_oi: Optional[float]) -> str:
-    """將聚合 OI 收盤值轉成易讀美元（API 多為實際美元額，少數為 B 為單位）。"""
+    """將聚合 OI 名目（多為 USD）轉成易讀字串；避免 `.0f` 把小於 1M 的四捨五入成 0M。"""
     if latest_oi is None or latest_oi <= 0:
         return "—"
     x = float(latest_oi)
-    if x >= 1e8:
+    if x >= 1e9:
         return f"${x / 1e9:.2f}B"
-    if x >= 1e5:
-        return f"${x / 1e6:.0f}M"
-    return f"${x:.2f}B"
+    if x >= 1e6:
+        return f"${x / 1e6:.2f}M"
+    if x >= 1e3:
+        return f"${x / 1e3:.1f}K"
+    return f"${x:.0f}"
 
 
 def buying_power_monitor():
@@ -1893,21 +1954,15 @@ def _parse_oi_change_from_data_list(data_list: list) -> Optional[float]:
 
 
 def _parse_oi_bars_from_rows(rows: list) -> list:
-    """通用 OI K線數值解析（支援多種欄位名稱）。"""
-    keys = ["c", "close", "v", "value", "openInterest", "oi"]
-    sorted_rows = sorted(rows, key=lambda x: x.get("t") or x.get("time") or 0)
-    oi_bars = []
+    """通用 OI K 線收盤值（與 _oi_bar_close 同一套欄位，避免把 v=成交量當 OI）。"""
+    sorted_rows = sorted(rows, key=lambda x: _oi_bar_ts_ms(x) if isinstance(x, dict) else 0)
+    oi_bars: List[float] = []
     for row in sorted_rows:
         if not isinstance(row, dict):
             continue
-        for k in keys:
-            val = row.get(k)
-            if val is not None:
-                try:
-                    oi_bars.append(float(val))
-                    break
-                except (TypeError, ValueError):
-                    pass
+        v = _oi_bar_close(row)
+        if v is not None:
+            oi_bars.append(v)
     return oi_bars
 
 
