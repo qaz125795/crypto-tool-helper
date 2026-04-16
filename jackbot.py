@@ -4213,6 +4213,12 @@ MARKET_ENTRY_ZONE_ATR = _env_float("SNIPER_ENTRY_ZONE_ATR", 0.2)                
 MIN_SL_ATR_MULTIPLIER = _env_float("SNIPER_MIN_SL_ATR", 1.0)                     # 最低 SL 距離：至少 1.0*ATR
 PENDING_PUMP_ATR_MULTIPLIER = _env_float("SNIPER_PENDING_PUMP_ATR", 0.5)         # 已噴發待辦池判定
 PENDING_TTL_HOURS = _env_float("SNIPER_PENDING_TTL_HOURS", 4.0)                  # 待辦訊號最長存活
+# 批次版 Anchored VWAP（GitHub Actions 友好）：5m 爆量 + 相鄰 OI 階梯變化 → 錨點起算加權均價
+SNIPER_ANCHOR_ENABLED = os.getenv("SNIPER_ANCHOR_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+SNIPER_ANCHOR_VOL_SPIKE_RATIO = _env_float("SNIPER_ANCHOR_VOL_SPIKE_RATIO", 3.0)  # 當根 volume ≥ 基準×（如 3=300%）
+SNIPER_ANCHOR_OI_STEP_PCT = _env_float("SNIPER_ANCHOR_OI_STEP_PCT", 5.0)          # 相鄰兩根 OI 累計值 |Δ|/prev ≥ %
+SNIPER_ANCHOR_LOOKBACK_BARS = int(max(24, round(_env_float("SNIPER_ANCHOR_LOOKBACK_BARS", 72))))   # 5m 根數（預設 6h）
+SNIPER_ANCHOR_VOL_BASELINE_BARS = int(max(3, round(_env_float("SNIPER_ANCHOR_VOL_BASELINE_BARS", 10))))
 TP1_EXIT_RATIO = 0.50
 TP2_EXIT_RATIO = 0.50
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
@@ -4381,6 +4387,111 @@ def derive_limit_order_from_inputs(
         return True, vwap * 0.975
 
     return False, None
+
+
+def _asof_oi_per_ohlc_bar(
+    ohlc: List[Dict[str, Any]], oi_list: Optional[List[Dict[str, Any]]]
+) -> List[Optional[float]]:
+    """將 OI 時間序列前向對齊到每根 OHLC bar（每根 bar 取 t≤bar_t 的最後一筆 OI）。"""
+    if not ohlc:
+        return []
+    if not oi_list:
+        return [None] * len(ohlc)
+
+    oi_sorted = sorted(
+        [x for x in oi_list if x.get("t") is not None],
+        key=lambda x: int(x["t"]),
+    )
+    out: List[Optional[float]] = []
+    j = 0
+    cur: Optional[float] = None
+    for bar in ohlc:
+        t = int(bar.get("t") or 0)
+        while j < len(oi_sorted) and int(oi_sorted[j].get("t") or 0) <= t:
+            try:
+                cur = float(oi_sorted[j].get("v"))
+            except (TypeError, ValueError):
+                pass
+            j += 1
+        out.append(cur)
+    return out
+
+
+def compute_anchored_launch_vwap_snapshot(symbol_base: str) -> Optional[Dict[str, Any]]:
+    """
+    批次版「發動錨定 VWAP」：在最近 N 根 5m K 內，自右向左找最近一次
+    「爆量（volume ≥ ratio×近 M 根均量）且相鄰兩根 OI 累計階梯變化 ≥ 門檻%」的棒形為錨點，
+    自該棒起至最新棒的成交量加權均價（典型價）。
+    """
+    clean = (symbol_base or "").upper().replace("USDT", "").replace("-", "").replace("/", "")
+    if not clean:
+        return None
+    ohlc = fetch_ohlc_5m(clean, limit=SNIPER_ANCHOR_LOOKBACK_BARS)
+    if not ohlc or len(ohlc) < SNIPER_ANCHOR_VOL_BASELINE_BARS + 2:
+        return None
+    ohlc = sorted(ohlc, key=lambda x: int(x.get("t") or 0))
+    oi_raw = fetch_coinglass_oi_5m(clean, limit=SNIPER_ANCHOR_LOOKBACK_BARS)
+    oi_vals = _asof_oi_per_ohlc_bar(ohlc, oi_raw)
+
+    def _ty(p: Dict[str, Any]) -> float:
+        try:
+            h = float(p.get("h"))
+            l = float(p.get("l"))
+            c = float(p.get("c"))
+        except (TypeError, ValueError):
+            return float("nan")
+        return (h + l + c) / 3.0
+
+    anchor_idx: Optional[int] = None
+    vol_ratio_at_anchor: Optional[float] = None
+    b0 = SNIPER_ANCHOR_VOL_BASELINE_BARS
+    for i in range(len(ohlc) - 1, b0, -1):
+        try:
+            vols = [float(ohlc[j].get("v") or 0) for j in range(i - b0, i)]
+        except (TypeError, ValueError):
+            continue
+        base = sum(vols) / max(len(vols), 1)
+        try:
+            vi = float(ohlc[i].get("v") or 0)
+        except (TypeError, ValueError):
+            vi = 0.0
+        vol_ok = base > 0 and vi >= SNIPER_ANCHOR_VOL_SPIKE_RATIO * base
+        oi_ok = False
+        if i > 0 and oi_vals[i] is not None and oi_vals[i - 1] is not None:
+            prev_oi = float(oi_vals[i - 1])
+            curr_oi = float(oi_vals[i])
+            if prev_oi != 0:
+                step_pct = abs(curr_oi - prev_oi) / abs(prev_oi) * 100.0
+                oi_ok = step_pct >= SNIPER_ANCHOR_OI_STEP_PCT
+        if vol_ok and oi_ok:
+            anchor_idx = i
+            vol_ratio_at_anchor = (vi / base) if base > 0 else None
+            break
+
+    if anchor_idx is None:
+        return {"ok": False, "note": "未偵測到發動錨點（爆量+OI 階梯）"}
+
+    num = 0.0
+    den = 0.0
+    for j in range(anchor_idx, len(ohlc)):
+        tp = _ty(ohlc[j])
+        if tp != tp:
+            continue
+        try:
+            vj = float(ohlc[j].get("v") or 0)
+        except (TypeError, ValueError):
+            vj = 0.0
+        num += tp * vj
+        den += vj
+    vwap = (num / den) if den > 0 else _ty(ohlc[-1])
+
+    return {
+        "ok": True,
+        "vwap_anchor": float(vwap),
+        "anchor_ts": int(ohlc[anchor_idx].get("t") or 0),
+        "vol_ratio": vol_ratio_at_anchor,
+        "note": "發動錨定 VWAP",
+    }
 
 
 def _macro_regime_snapshot() -> Dict[str, Any]:
@@ -5697,8 +5808,21 @@ def build_report_message_tiered(
 
     trend_sa_dirs_this_run: Dict[str, Set[str]] = {}
 
-    def _tactic_from_zone(zone: str, is_bull_flag: bool) -> Tuple[str, str]:
+    def _tactic_from_zone(zone: str, is_bull_flag: bool, grade: str, category: str, price_change_24h: Optional[float]) -> Tuple[str, str]:
         """回傳 (戰術文案, emoji)"""
+        # R 級或明顯逆勢（例如 24h 大漲後做空 / 大跌後做多）強制用左側語彙，避免與順勢標籤打架
+        if grade == "R":
+            if is_bull_flag:
+                return ("左側摸底（支撐承接）", "📌")
+            return ("左側摸頭（阻力做空）", "🎯")
+        try:
+            p24 = float(price_change_24h) if price_change_24h is not None else None
+        except (TypeError, ValueError):
+            p24 = None
+        if category == "short_open" and p24 is not None and p24 >= 8.0:
+            return ("左側摸頭（阻力做空）", "🎯")
+        if category in ("long_open", "short_close") and p24 is not None and p24 <= -8.0:
+            return ("左側摸底（支撐承接）", "📌")
         if zone == ZONE_DIP:
             return ("摸底（跌深撿便宜）", "📌")
         if zone == ZONE_TOP:
@@ -5717,7 +5841,7 @@ def build_report_message_tiered(
         - 追漲/追跌歸趨勢
         """
         if grade == "R":
-            return ("逆勢訊號", "⚠️")
+            return ("逆勢左側", "⚠️")
         if zone in (ZONE_DIP, ZONE_TOP):
             return ("震盪訊號", "🌀")
         return ("趨勢訊號", "📈")
@@ -6078,14 +6202,12 @@ def build_report_message_tiered(
         except (TypeError, ValueError):
             _score = 0
         _zone_now = x.get("zone") or ""
-        _tactic_txt, _tactic_emo = _tactic_from_zone(_zone_now, is_bull_sig)
+        _tactic_txt, _tactic_emo = _tactic_from_zone(_zone_now, is_bull_sig, _grade, category, x.get("priceChange24h"))
         _regime_txt, _regime_emo = _regime_from_grade_zone(_grade, _zone_now)
 
         msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
         msg_lines.append(f"{_tactic_emo} *戰術：* {_tactic_txt}")
         msg_lines.append(f"{_regime_emo} *盤型：* {_regime_txt}")
-        for _help_ln in _reader_help_lines():
-            msg_lines.append(_help_ln)
         msg_lines.append(_grade_brief)
         if x.get("_macro_veto_badge"):
             msg_lines.append(str(x.get("_macro_veto_badge")))
@@ -6157,6 +6279,18 @@ def build_report_message_tiered(
         if _tp2_txt:
             msg_lines.append(f"• **🚀 TP2 ({TP2_R_MULTIPLIER:.1f}R)**：`{_tp2_txt}` → 平倉剩餘 `{int(TP2_EXIT_RATIO*100)}%`")
         msg_lines.append(f"• **止損**：`{_sl_txt}`（到價認錯出場）")
+        try:
+            _sl_gap_pct = abs(float(_entry_price) - float(sl)) / float(_entry_price) * 100 if (_entry_price and sl) else None
+        except (TypeError, ValueError, ZeroDivisionError):
+            _sl_gap_pct = None
+        if _sl_gap_pct is not None and _sl_gap_pct > 10.0:
+            msg_lines.append(
+                f"• 🚨 **警告：本單結構止損極寬（約 `{_sl_gap_pct:.1f}%`）**，請務必調低槓桿倍數，嚴格控管保證金！"
+            )
+        elif _sl_gap_pct is not None and _sl_gap_pct > 5.0:
+            msg_lines.append(
+                f"• ⚠️ 本單止損距離偏寬（約 `{_sl_gap_pct:.1f}%`），請降低槓桿、縮小倉位。"
+            )
         if 0 < vol_m_val < 10:
             msg_lines.append("• ⚠️ 本幣成交值低於 10M：請注意資金胃納量與承載量，建議分批下單避免滑價。")
 
@@ -6164,6 +6298,33 @@ def build_report_message_tiered(
         if _vwap_show is not None:
             msg_lines.append(
                 f"• 主力這兩小時的平均成本參考（2h VWAP）：`{_fmt_price(_vwap_show)}`"
+            )
+        _vwap_anchor_show: Optional[float] = None
+        _vwap_anchor_ts_show = 0
+        try:
+            _raw_va = x.get("vwap_anchor")
+            if _raw_va is not None:
+                _vwap_anchor_show = float(_raw_va)
+                if _vwap_anchor_show != _vwap_anchor_show or _vwap_anchor_show <= 0:
+                    _vwap_anchor_show = None
+        except (TypeError, ValueError):
+            _vwap_anchor_show = None
+        try:
+            _vwap_anchor_ts_show = int(x.get("vwap_anchor_ts") or 0)
+        except (TypeError, ValueError):
+            _vwap_anchor_ts_show = 0
+        if _vwap_anchor_show is not None:
+            _anchor_time_s = ""
+            if _vwap_anchor_ts_show > 0:
+                try:
+                    _anchor_time_s = datetime.fromtimestamp(
+                        float(_vwap_anchor_ts_show), tz=TAIPEI_TZ
+                    ).strftime("（錨點 %m-%d %H:%M 台北）")
+                except (OSError, ValueError, OverflowError):
+                    _anchor_time_s = ""
+            msg_lines.append(
+                f"• 本波發動加權成本（錨定 VWAP，自 5m 爆量+OI 階梯起算）："
+                f"`{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
             )
         msg_lines.append(
             f"• 較大週期：{_macro_trend}（{_macro_ema_txt}）"
@@ -6205,6 +6366,8 @@ def build_report_message_tiered(
 
         msg_lines.append("*💡 策略說明*")
         msg_lines.append(_strategy_comment)
+        for _help_ln in _reader_help_lines():
+            msg_lines.append(_help_ln)
 
         # ─ 風險與環境（有觸發才顯示）─
         if _motion_note:
@@ -8093,6 +8256,20 @@ def fetch_position_change():
             _energy_exhausted,
         )
 
+        _anchor_snap: Optional[Dict[str, Any]] = None
+        if SNIPER_ANCHOR_ENABLED and _effective_version in (
+            "confirmed",
+            "pullback",
+            "exhaustion_reversal",
+            "tier2",
+        ):
+            try:
+                time.sleep(0.12)
+                _anchor_snap = compute_anchored_launch_vwap_snapshot(clean_base)
+            except Exception as _ae:
+                logger.debug(f"[AnchoredVWAP] {clean_base}: {_ae}")
+                _anchor_snap = None
+
         all_top.append({
             **item,
             "priceChange24h": price_24h,
@@ -8130,6 +8307,16 @@ def fetch_position_change():
             "_cvd_confirmed": _cvd_confirmed,
             "_cvd_conflict_strong": _cvd_conflict_strong,
             "vwap_2h": tech.get("vwap_2h") if tech else None,
+            # 發動錨定 VWAP（5m 爆量 + OI 階梯；自錨點棒起至最新的成交量加權典型價）
+            "vwap_anchor": _anchor_snap.get("vwap_anchor")
+            if isinstance(_anchor_snap, dict) and _anchor_snap.get("ok")
+            else None,
+            "vwap_anchor_ts": _anchor_snap.get("anchor_ts")
+            if isinstance(_anchor_snap, dict) and _anchor_snap.get("ok")
+            else None,
+            "vwap_anchor_vol_ratio": _anchor_snap.get("vol_ratio")
+            if isinstance(_anchor_snap, dict) and _anchor_snap.get("ok")
+            else None,
             # _scan_ts = 1H OI 首次偵測時間（process_single_symbol 打上），保留原始時間
             # 若 item 無此欄位（舊路徑），以當前時間補足
             "_detected_ts": item.get("_scan_ts") or time.time(),
