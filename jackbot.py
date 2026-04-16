@@ -5610,6 +5610,51 @@ def build_report_message_tiered(
 
         _strategy_comment = _gen_comment(category, _sig_version, _sig_subtype, _reversal_hint, rsi_val)
 
+        def _reader_help_lines() -> List[str]:
+            """新手友善：釐清附圖時間框 vs 訊號邏輯，減少「圖在底部卻寫摸頭」的誤解。"""
+            _lines: List[str] = [
+                "*📖 怎麼讀這筆？*",
+                "• 附圖是 _5 分鐘、近數小時_，方便看進場附近的價與 OI；"
+                "訊號仍以 **1H 四象限 + 多週期共振** 為主，兩者時間尺度不同很正常。",
+            ]
+            if _sig_version == "exhaustion_reversal":
+                if is_bull_sig:
+                    _lines.append(
+                        "• 「恐慌衰竭」：抓的是急跌後 _空單回補／承接_ 的轉折嘗試，"
+                        "不是保證立刻 V 轉，請小倉並看止損。"
+                    )
+                else:
+                    _lines.append(
+                        "• 「狂熱衰竭」：抓的是急漲後 _多單獲利了結_ 的轉弱嘗試，"
+                        "進場常在回落區，短圖上不一定還在最高點。"
+                    )
+                return _lines
+            if category == "long_close":
+                _lines.append(
+                    "• 「摸頭做空」：抓的是 _前面漲勢轉弱、多單撤退_；"
+                    "進場常在 **回落／整理帶**，5m 上看起來像「已跌一段」是常態，不是標題寫錯。"
+                )
+            elif category in ("short_close", "short_cover"):
+                _lines.append(
+                    "• 「摸底做多」：抓的是 _前面跌勢轉弱、空單回補_；"
+                    "進場常在 **反彈／整理帶**，5m 上看起來像「已漲一段」也正常。"
+                )
+            elif category == "long_open":
+                _lines.append(
+                    "• 「追漲做多」：跟 **新多進場／順勢**；短線已噴一段時請更緊守止損。"
+                )
+            elif category == "short_open":
+                _lines.append(
+                    "• 「追跌做空」：跟 **新空進場／順勢**；短線已殺一段時留意死貓彈。"
+                )
+            else:
+                _lines.append("• 方向以標題多／空為準，請搭配止損一體思考。")
+            if _sig_version == "tier2" and _sig_subtype == "30m衝突":
+                _lines.append(
+                    "• 「30m 衝突」：快慢週期不同步，屬 **觀察／小倉**；假突破多，務必嚴守止損。"
+                )
+            return _lines
+
         def _build_oi_plain_lines() -> Tuple[str, str]:
             """白話解釋 OI 在這筆訊號代表的資金行為與風險。"""
             def _f(v):
@@ -5738,6 +5783,8 @@ def build_report_message_tiered(
         msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
         msg_lines.append(f"{_tactic_emo} *戰術：* {_tactic_txt}")
         msg_lines.append(f"{_regime_emo} *盤型：* {_regime_txt}")
+        for _help_ln in _reader_help_lines():
+            msg_lines.append(_help_ln)
         msg_lines.append(_grade_brief)
         # R 級：逆勢左側，與順勢 S/A「高勝率」敘事不同；避免使用者以為每單都該贏
         if _grade == "R":
