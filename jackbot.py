@@ -6061,13 +6061,13 @@ def build_report_message_tiered(
         except Exception:
             pass
 
-        msg_lines.append("*📌 跟單*")
+        msg_lines.append("*📌 點位重點*")
         _vw_dev = _rel_dev_pct(float(_entry_price) if _entry_price is not None else None, _vwap_show)
         _vw_dev_s = f"｜與主力均價差 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
-        _entry_prefix = "市價 ≈"
-        msg_lines.append(f"• 進場：{_entry_prefix} `{_entry_now_txt}`{_vw_dev_s}")
+        msg_lines.append(f"• **進場(市價)**：`{_entry_now_txt}`{_vw_dev_s}")
         if _entry_note:
             msg_lines.append(f"• {_entry_note}")
+        msg_lines.append("")
         try:
             _t1 = max(0.001, float(MARKET_ENTRY_TIER1_PCT))
             _t2 = max(_t1, float(MARKET_ENTRY_TIER2_PCT))
@@ -6081,7 +6081,7 @@ def build_report_message_tiered(
                 f"• 市價區間（理想）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{_t1*100:.1f}%）"
             )
             msg_lines.append(
-                f"• 市價區間（可接受）：`{_fmt_price(_ideal_hi)}` ~ `{_fmt_price(_ok_hi)}`（最多 +{_t2*100:.1f}%），超過不追價"
+                f"• 市價區間（可接受）：`{_fmt_price(_ideal_hi)}` ~ `{_fmt_price(_ok_hi)}`（最多 +{_t2*100:.1f}%）"
             )
         else:
             _ideal_lo = _entry_price * (1.0 - _t1)
@@ -6091,10 +6091,14 @@ def build_report_message_tiered(
                 f"• 市價區間（理想）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{_t1*100:.1f}%）"
             )
             msg_lines.append(
-                f"• 市價區間（可接受）：`{_fmt_price(_ok_lo)}` ~ `{_fmt_price(_ideal_lo)}`（最多 -{_t2*100:.1f}%），超過不追價"
+                f"• 市價區間（可接受）：`{_fmt_price(_ok_lo)}` ~ `{_fmt_price(_ideal_lo)}`（最多 -{_t2*100:.1f}%）"
             )
-        msg_lines.append(f"• 止損：`{_sl_txt}`（到價認錯出場）")
-        msg_lines.append(f"• 目標：TP1 `{_tp1_txt}`" + (f" → TP2 `{_tp2_txt}`" if _tp2_txt else ""))
+        msg_lines.append("• ⚠️ 超過可接受區間：不追價、只等下一輪")
+        msg_lines.append("")
+        msg_lines.append(f"• **止損**：`{_sl_txt}`（到價認錯出場）")
+        msg_lines.append(f"• **TP1**：`{_tp1_txt}`")
+        if _tp2_txt:
+            msg_lines.append(f"• **TP2**：`{_tp2_txt}`")
         if 0 < vol_m_val < 10:
             msg_lines.append("• ⚠️ 本幣成交值低於 10M：請注意資金胃納量與承載量，建議分批下單避免滑價。")
 
