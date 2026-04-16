@@ -4200,17 +4200,19 @@ def _env_float(name: str, default: float) -> float:
 
 SNIPER_FAST_MODE = os.getenv("SNIPER_FAST_MODE", "").strip().lower() in ("1", "true", "yes", "on")
 _default_tp1 = 0.6 if SNIPER_FAST_MODE else 1.0
-_default_tp2 = 1.2 if SNIPER_FAST_MODE else 3.0
+_default_tp2 = 1.6 if SNIPER_FAST_MODE else 2.0
 _default_min_sl = 0.008 if SNIPER_FAST_MODE else 0.015
 
 TP1_R_MULTIPLIER = max(1.0, _env_float("SNIPER_TP1_R", _default_tp1))   # TP1 至少 1R
-TP2_R_MULTIPLIER = _env_float("SNIPER_TP2_R", _default_tp2)   # 快進快出建議 1.0~1.5
+TP2_R_MULTIPLIER = max(TP1_R_MULTIPLIER + 0.5, _env_float("SNIPER_TP2_R", _default_tp2))   # TP2 必須高於 TP1
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
 MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.0))
 MAX_MARKET_VWAP_GAP_PCT = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_PCT", 0.03)  # 與主力均價差 <=3% 才允許推播（以市價）
 MARKET_ENTRY_TIER1_PCT = _env_float("SNIPER_MARKET_ENTRY_TIER1_PCT", 0.008)    # 理想市價區（0.8%）
 MARKET_ENTRY_TIER2_PCT = _env_float("SNIPER_MARKET_ENTRY_TIER2_PCT", 0.015)    # 可接受市價區（1.5%，超過不追）
+TP1_EXIT_RATIO = 0.70
+TP2_EXIT_RATIO = 0.30
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
 MIN_SIGNAL_PUSH_SCORE = 68          # Classic 80%：降低綜合分數門檻，避免高品質訊號被過濾掉
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
@@ -6095,6 +6097,7 @@ def build_report_message_tiered(
             )
         msg_lines.append("• ⚠️ 超過可接受區間：不追價、只等下一輪")
         msg_lines.append("")
+        msg_lines.append(f"• **出場分配**：TP1 出 `{int(TP1_EXIT_RATIO*100)}%`｜TP2 出 `{int(TP2_EXIT_RATIO*100)}%`")
         msg_lines.append(f"• **止損**：`{_sl_txt}`（到價認錯出場）")
         msg_lines.append(f"• **TP1**：`{_tp1_txt}`")
         if _tp2_txt:
@@ -6714,18 +6717,18 @@ def build_report_message_tiered(
                     # 避免 (t1_note) 與 r1 重複（如 t1_note="1.2R" 且 r1="(1.2R)"）
                     _note_is_r = (r_tp1 is not None and t1_note in (f"{r_tp1}R", f"{r_tp1:.1f}R", f"{r_tp1:.2f}R"))
                     if t1_note and not _note_is_r:
-                        lines.append(f"✅ TP1(60%)：{_tp1_display} ({t1_note}){r1}")
+                        lines.append(f"✅ TP1({int(TP1_EXIT_RATIO*100)}%)：{_tp1_display} ({t1_note}){r1}")
                     else:
-                        lines.append(f"✅ TP1(60%)：{_tp1_display}{r1}")
+                        lines.append(f"✅ TP1({int(TP1_EXIT_RATIO*100)}%)：{_tp1_display}{r1}")
                     if _r2_val is not None:
-                        lines.append(f"🎯 TP2 理論目標：`{_tp2_str}` (~{_r2_val:.1f}R)")
+                        lines.append(f"🎯 TP2({int(TP2_EXIT_RATIO*100)}%) 理論目標：`{_tp2_str}` (~{_r2_val:.1f}R)")
                 else:
-                    # 賭鬼：TP1（落袋60%）+ TP2 理論目標
+                    # 賭鬼：TP1（落袋70%）+ TP2 理論目標
                     lines.append(f"🛑 止損：{_sl_display}{_sl_dist_str}{_cap_tag}")
                     r1 = f" ({r_tp1}R)" if r_tp1 is not None else ""
-                    lines.append(f"✅ TP1(落袋60%)：{_tp1_display}{r1}")
+                    lines.append(f"✅ TP1(落袋{int(TP1_EXIT_RATIO*100)}%)：{_tp1_display}{r1}")
                     if _r2_val is not None:
-                        lines.append(f"🎯 TP2 理論目標：`{_tp2_str}` (~{_r2_val:.1f}R)")
+                        lines.append(f"🎯 TP2({int(TP2_EXIT_RATIO*100)}%) 理論目標：`{_tp2_str}` (~{_r2_val:.1f}R)")
 
                 # ── 📊 訂單流分析（主動買賣比 + 淨倉位 + 腳步圖關鍵位）─────────
                 _flow_score = x.get("flow_score") or 0
