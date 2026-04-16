@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 大佬錢包動向追蹤（Hyperliquid + Etherscan）
-- 追蹤指定地址的 HL 合約開/平倉
-- 追蹤鏈上現貨大額轉帳（> 100k USD）
+- 追蹤指定地址的 HL 合約開/平/加減倉（預設門檻偏寬鬆，易先有訊號）
+- 追蹤鏈上現貨大額轉帳（預設約 ≥3 萬 USD 等值，見 WHALE_SPOT_MIN_USD）
 - 產出 Markdown 訊息，由 jackbot 既有 TG/DC 發送流程送出
 """
 
@@ -517,6 +517,97 @@ def _fmt_usd(v: float) -> str:
     return f"${v:,.0f}"
 
 
+def _format_hl_holdings_for_log(positions: Dict[str, Dict[str, float]]) -> str:
+    """人類可读的 HL 持倉一行摘要（給 LOG 用）。"""
+    if not positions:
+        return "（無持倉）"
+    parts: List[str] = []
+    for coin in sorted(positions.keys()):
+        d = positions.get(coin) or {}
+        try:
+            sz = float(d.get("size") or 0)
+        except Exception:
+            continue
+        if abs(sz) < 1e-12:
+            continue
+        side = "多" if sz > 0 else "空"
+        try:
+            n = float(d.get("notional") or 0)
+        except Exception:
+            n = 0.0
+        parts.append(f"{coin}{side}{_fmt_usd(n)}")
+    return " | ".join(parts) if parts else "（無持倉）"
+
+
+def _log_hl_near_miss_threshold(
+    name: str,
+    addr: str,
+    prev_positions: Dict[str, Dict[str, float]],
+    now_positions: Dict[str, Dict[str, float]],
+    min_delta_usd: float,
+) -> None:
+    """
+    與 _detect_hl_events 邏輯一致：同向加減倉但 delta 名目未達 WHALE_HL_MIN_DELTA_USD 時，印 INFO 說明為何無 hl_evt。
+    """
+    for coin, cur in now_positions.items():
+        if coin not in prev_positions:
+            continue
+        old = prev_positions.get(coin) or {}
+        try:
+            old_size = float(old.get("size") or 0.0)
+            cur_size = float(cur.get("size") or 0.0)
+            old_notional = float(old.get("notional") or 0.0)
+            cur_notional = float(cur.get("notional") or 0.0)
+        except Exception:
+            continue
+        if abs(old_size) < 1e-12 or abs(cur_size) < 1e-12:
+            continue
+        if old_size * cur_size < 0:
+            continue
+        delta_notional = abs(cur_notional - old_notional)
+        delta_size = abs(cur_size) - abs(old_size)
+        if abs(delta_size) < 1e-9:
+            continue
+        if delta_notional >= max(0.0, min_delta_usd):
+            continue
+        logger.info(
+            "[WhaleTracker][未達HL門檻] %s | %s…%s | %s 同向調整 名目變化≈%s < 門檻%s（故不發 hl_add/hl_reduce）",
+            name,
+            addr[:6],
+            addr[-4:],
+            coin,
+            _fmt_usd(delta_notional),
+            _fmt_usd(min_delta_usd),
+        )
+
+
+def _log_event_one_liner(event: Dict[str, Any]) -> str:
+    """本輪單一事件一行文字（LOG）。"""
+    t = event.get("type") or ""
+    p = event.get("profile") or {}
+    name = str(p.get("name") or "?")
+    if t == "hl_open":
+        return f"{name} | 合約開倉 {event.get('coin')} {event.get('side')} 名目~{_fmt_usd(float(event.get('notional') or 0))}"
+    if t == "hl_close":
+        return f"{name} | 合約平倉 {event.get('coin')} 原{event.get('side')} 名目~{_fmt_usd(float(event.get('notional') or 0))}"
+    if t == "hl_add":
+        return (
+            f"{name} | 加倉 {event.get('coin')} Δ名目~{_fmt_usd(float(event.get('delta_notional') or 0))}"
+        )
+    if t == "hl_reduce":
+        return (
+            f"{name} | 減倉 {event.get('coin')} Δ名目~{_fmt_usd(float(event.get('delta_notional') or 0))}"
+        )
+    if t == "hl_flip":
+        return f"{name} | 反手 {event.get('coin')} {event.get('old_side')}→{event.get('new_side')}"
+    if t == "spot_transfer":
+        return (
+            f"{name} | 現貨{event.get('direction')} {event.get('symbol')} "
+            f"~{_fmt_usd(float(event.get('usd') or 0))}"
+        )
+    return f"{name} | type={t}"
+
+
 def _build_markdown_message(event: Dict[str, Any]) -> str:
     p = event["profile"]
     title = "🐋 *鏈上巨鯨動向*"
@@ -595,19 +686,52 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> List[str]:
     sent_transfer_ids = set(state.get("sent_transfer_ids") or [])
     old_hl = state.get("hl_positions") or {}
 
-    min_usd = _env_float("WHALE_SPOT_MIN_USD", 100000.0)
-    lookback_sec = _env_int("WHALE_LOOKBACK_SECONDS", 1800)
-    min_hl_delta_usd = _env_float("WHALE_HL_MIN_DELTA_USD", 50000.0)
+    # 預設偏寬鬆（先求「看得到訊號」）；要減少雜訊可用環境變數拉高門檻
+    min_usd = _env_float("WHALE_SPOT_MIN_USD", 30000.0)
+    lookback_sec = _env_int("WHALE_LOOKBACK_SECONDS", 7200)
+    min_hl_delta_usd = _env_float("WHALE_HL_MIN_DELTA_USD", 12000.0)
     profiles = _load_runtime_whale_profiles()
+
+    es_key_ok = bool(os.getenv("ETHERSCAN_API_KEY", "").strip())
+    logger.info(
+        "[WhaleTracker] 推播門檻: HL加減倉名目變化≥%s | 現貨單筆≥%s 且回溯≤%ss | Etherscan=%s",
+        _fmt_usd(min_hl_delta_usd),
+        _fmt_usd(min_usd),
+        lookback_sec,
+        "已設定" if es_key_ok else "未設定（spot 永遠 0）",
+    )
+    if not es_key_ok:
+        logger.warning(
+            "[WhaleTracker] 未設定 ETHERSCAN_API_KEY：無法掃以太坊鏈上 ERC20/ETH 大額轉帳，"
+            "所有錢包 spot_evt 會是 0（非 bug）。"
+        )
 
     events: List[Dict[str, Any]] = []
     new_hl_state: Dict[str, Dict[str, Dict[str, float]]] = {}
     summary_rows: List[str] = []
 
     for addr, profile in profiles.items():
+        name = str(profile.get("name") or "N/A")
         now_pos = _fetch_hl_positions(addr)
         prev_pos = old_hl.get(addr, {}) if isinstance(old_hl, dict) else {}
+        if not now_pos and addr:
+            logger.info(
+                "[WhaleTracker][主力快照] %s | %s…%s | HL API 回傳無持倉（或未取得資料）",
+                name,
+                addr[:6],
+                addr[-4:],
+            )
+        else:
+            logger.info(
+                "[WhaleTracker][主力快照] %s | %s…%s | %s",
+                name,
+                addr[:6],
+                addr[-4:],
+                _format_hl_holdings_for_log(now_pos),
+            )
+
         hl_events = _detect_hl_events(addr, profile, prev_pos, now_pos, sent_event_ids, min_delta_usd=min_hl_delta_usd)
+        _log_hl_near_miss_threshold(name, addr, prev_pos, now_pos, min_hl_delta_usd)
         spot_events = _detect_spot_transfers(addr, profile, sent_transfer_ids, min_usd=min_usd, lookback_sec=lookback_sec)
         events.extend(hl_events)
         events.extend(spot_events)
@@ -620,10 +744,16 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> List[str]:
         logger.info("[WhaleTracker][摘要] %s", row)
 
     if not events:
-        logger.info("[WhaleTracker] 本輪無新事件")
+        logger.info(
+            "[WhaleTracker] 本輪無新事件（常見原因：與上次快照相比無開平／反手；"
+            "同向加減倉但名目變化未達門檻；或現貨無符合金額+時間窗／未設 Etherscan）"
+        )
         state["hl_positions"] = new_hl_state
         _save_state(state_path, state)
         return []
+
+    for e in events:
+        logger.info("[WhaleTracker][推播事件] %s", _log_event_one_liner(e))
 
     messages = [_build_markdown_message(e) for e in events]
     for e in events:

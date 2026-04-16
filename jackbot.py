@@ -204,6 +204,7 @@ CG_EP = {
     "hl_position":           "/api/hyperliquid/position",                           # HL幣種持倉
     "hl_wallet_pos_dist":    "/api/hyperliquid/wallet/position-distribution",       # HL錢包持倉分布
     "hl_wallet_pnl_dist":    "/api/hyperliquid/wallet/pnl-distribution",            # HL錢包盈虧分布
+    "hl_global_ls_hist":     "/api/hyperliquid/global-long-short-account-ratio/history",  # HL 帳戶多空比歷史
 
     # ════════════════ CVD（舊路徑保留） ════════════════
     "cvd_history":           "/api/futures/cvd/history",
@@ -12363,6 +12364,95 @@ def format_whale_position_message(position: Dict, index: int) -> str:
     return f"{index}. 地址 `...{address_short}` | 倉位：{size_display} [{symbol} {side_text}] | 槓桿：{leverage:.1f}x"
 
 
+def build_hyperliquid_market_digest_message() -> Optional[str]:
+    """
+    CoinGlass「全市場」補充段（與 whale_wallet_tracker 的指定地址追蹤分源）：
+    - /api/hyperliquid/whale-position 榜單節錄
+    - /api/hyperliquid/wallet/pnl-distribution 摘要
+    - 可選：全域多空帳戶比（若 API 回傳可解析）
+
+    需 CG_API_KEY；另需環境變數 WHALE_CG_MARKET_DIGEST=1 才會送出（避免每輪 cron 洗版）。
+    """
+    flag = os.getenv("WHALE_CG_MARKET_DIGEST", "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        return None
+    if not (CG_API_KEY or "").strip():
+        logger.info("[HL全市場快照] 略過：未設定 CG_API_KEY")
+        return None
+
+    logger.info("[HL全市場快照] 組建 CoinGlass HL 榜單／分布摘要…")
+    lines: List[str] = [
+        "🧭 *鏈上巨鯨動向｜HL 全市場（CoinGlass）*",
+        "_與「指定地址」追蹤為不同資料來源：此為 CoinGlass 匯總榜單／分布_",
+        "",
+    ]
+
+    top5 = fetch_hyperliquid_whale_position()
+    if top5:
+        lines.append("*巨鯨持倉榜（whale-position，節錄）*")
+        for i, p in enumerate(top5[:5], 1):
+            lines.append(f"• {format_whale_position_message(p, i)}")
+    else:
+        lines.append("*巨鯨持倉榜*：暫無資料（方案權限、或本輪 API 無回應）")
+
+    pnl_raw = fetch_hyperliquid_pnl_distribution()
+    pnl_tip = ""
+    if isinstance(pnl_raw, dict):
+        data_pnl = pnl_raw.get("data") if "data" in pnl_raw else pnl_raw
+        if isinstance(data_pnl, dict):
+            for k in ("profitablePercent", "winRate", "profitable", "profit_rate"):
+                v = data_pnl.get(k)
+                if v is not None:
+                    try:
+                        pv = float(v)
+                        if pv > 0:
+                            pnl_tip = f"盈利錢包約佔 *{pv:.1f}%*（wallet pnl-distribution）"
+                            break
+                    except (TypeError, ValueError):
+                        pass
+    lines.append("")
+    if pnl_tip:
+        lines.append(f"*全市場盈虧分布*：{pnl_tip}")
+    else:
+        lines.append("*全市場盈虧分布*：未取得可讀摘要（欄位因 API 版本而異）")
+
+    ls_hint = ""
+    try:
+        j_ls = _cg_get(CG_EP["hl_global_ls_hist"], {})
+        if j_ls:
+            raw_ls = j_ls.get("data") or j_ls.get("list") or j_ls
+            if isinstance(raw_ls, list) and raw_ls:
+                last = raw_ls[-1]
+                if isinstance(last, dict):
+                    for a, b in [
+                        ("longAccount", "shortAccount"),
+                        ("long", "short"),
+                        ("longRatio", "shortRatio"),
+                    ]:
+                        if last.get(a) is not None and last.get(b) is not None:
+                            try:
+                                la = float(last[a])
+                                sb = float(last[b])
+                                if sb > 0:
+                                    ls_hint = f"多空帳戶比（長/短）約 `{la/sb:.3f}`（全域 history 最後一筆）"
+                                    break
+                            except (TypeError, ValueError, ZeroDivisionError):
+                                pass
+    except Exception as e_ls:
+        logger.debug("[HL全市場快照] global LS history 解析略過: %s", e_ls)
+
+    lines.append("")
+    if ls_hint:
+        lines.append(f"*帳戶多空*：{ls_hint}")
+    else:
+        lines.append("*帳戶多空*：本輪無法從 API 解析（可忽略）")
+
+    lines.append("")
+    lines.append(f"⏰ {format_datetime(get_taipei_time())}")
+    lines.append("_僅供觀察，非投資建議_")
+    return "\n".join(lines)
+
+
 def build_hyperliquid_message() -> Optional[str]:
     """組合 Hyperliquid 聰明錢監控訊息（僅在有新的 Whale Alert 時推播）"""
     logger.info("開始構建 Hyperliquid 聰明錢監控訊息...")
@@ -12633,18 +12723,53 @@ def build_hyperliquid_message() -> Optional[str]:
 
 
 def run_hyperliquid_monitor_once():
-    """執行一次大佬錢包動向追蹤（走既有 TG+DC 同步推播流程）。"""
-    logger.info("開始執行大佬錢包動向追蹤（Hyperliquid + Etherscan）...")
-    messages = run_whale_wallet_tracker_once(DATA_DIR)
-    if not messages:
-        logger.info("本次無新事件，未發送推播")
-        return
+    """
+    鏈上巨鯨動向（三層，各自獨立）：
+    ① whale_wallet_tracker：指定地址 HL API + Etherscan
+    ② build_hyperliquid_message：CoinGlass whale-alert（有新事件才推）
+    ③ build_hyperliquid_market_digest_message：CoinGlass 榜單／分布（需 WHALE_CG_MARKET_DIGEST=1）
+
+    排程建議（效能／頻率平衡）：
+    - 首選每 **30 分鐘** 觸發一次：巨鯨持倉多為較慢節奏，可明顯節省 API 與避免洗版；與現貨回溯窗（WHALE_LOOKBACK_SECONDS 預設 2h）相容。
+    - 若最重視 CoinGlass Whale Alert 即時性：可 **15 分鐘**；不建議低於 **5 分鐘**（易重複狀態差分、Etherscan／配額壓力）。
+    """
+    logger.info(
+        "開始執行鏈上巨鯨動向：①地址追蹤 ②CoinGlass Whale Alert ③可選全市場快照（WHALE_CG_MARKET_DIGEST）…"
+    )
     thread_id = TG_THREAD_IDS.get("hyperliquid", 252)
-    sent_ok = 0
-    for msg in messages[:20]:
-        if send_telegram_message(msg, thread_id, parse_mode="Markdown"):
-            sent_ok += 1
-    logger.info("大佬錢包動向追蹤推播完成，已發送 %s/%s 則", sent_ok, min(len(messages), 20))
+
+    messages = run_whale_wallet_tracker_once(DATA_DIR)
+    sent_addr = 0
+    if messages:
+        for msg in messages[:20]:
+            if send_telegram_message(msg, thread_id, parse_mode="Markdown"):
+                sent_addr += 1
+        logger.info("[鏈上巨鯨] ① 指定地址事件已發送 %s/%s 則", sent_addr, min(len(messages), 20))
+    else:
+        logger.info("[鏈上巨鯨] ① 指定地址本輪無新事件")
+
+    cg_msg: Optional[str] = None
+    try:
+        cg_msg = build_hyperliquid_message()
+    except Exception as e:
+        logger.warning("[鏈上巨鯨] ② CoinGlass 預警訊息構建失敗: %s", e)
+    if cg_msg:
+        if send_telegram_message(cg_msg, thread_id, parse_mode="Markdown"):
+            logger.info("[鏈上巨鯨] ② CoinGlass Whale Alert 已發送 1 則")
+    else:
+        logger.info("[鏈上巨鯨] ② 無新 Whale Alert 或未達內部過濾（見 fetch_hyperliquid_whale_alert 日誌）")
+
+    digest: Optional[str] = None
+    try:
+        digest = build_hyperliquid_market_digest_message()
+    except Exception as e:
+        logger.warning("[鏈上巨鯨] ③ 全市場快照構建失敗: %s", e)
+    if digest:
+        if send_telegram_message(digest, thread_id, parse_mode="Markdown"):
+            logger.info("[鏈上巨鯨] ③ CoinGlass 全市場快照已發送 1 則")
+
+    if sent_addr == 0 and not cg_msg and not digest:
+        logger.info("[鏈上巨鯨] 本輪①②③皆無可推播內容；若需③請設 WHALE_CG_MARKET_DIGEST=1 並確認 CG_API_KEY")
 
 
 def run_gold_signal():
@@ -13125,7 +13250,7 @@ if __name__ == "__main__":
             print("  long_term_index_once  - 長線牛熊導航儀（只執行一次，適合排程）")
             print("  liquidity_radar       - 流動性獵取雷達（極端爆倉彙整）")
             print("  altseason_radar       - 山寨爆發雷達（Altseason + RSI + Buy Ratio）")
-            print("  hyperliquid           - 大佬錢包動向追蹤（Discord）")
+            print("  hyperliquid           - 鏈上巨鯨動向（地址追蹤+CoinGlass；見 WHALE_CG_MARKET_DIGEST）")
             print("  gold_signal           - 黃金 XAUUSD 多空訊號（ORB+MA）")
             print("  api_check             - API 健康檢查（驗證所有端點是否可用）")
             print("  reset_data            - 清除所有冷卻/推播/績效記錄，全新重啟")
