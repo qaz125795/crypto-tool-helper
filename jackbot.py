@@ -4209,6 +4209,8 @@ SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
 MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.0))
 MAX_MARKET_VWAP_GAP_PCT = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_PCT", 0.03)  # 與主力均價差 <=3% 才允許推播（以市價）
+MARKET_ENTRY_TIER1_PCT = _env_float("SNIPER_MARKET_ENTRY_TIER1_PCT", 0.008)    # 理想市價區（0.8%）
+MARKET_ENTRY_TIER2_PCT = _env_float("SNIPER_MARKET_ENTRY_TIER2_PCT", 0.015)    # 可接受市價區（1.5%，超過不追）
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
 MIN_SIGNAL_PUSH_SCORE = 68          # Classic 80%：降低綜合分數門檻，避免高品質訊號被過濾掉
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
@@ -6042,6 +6044,31 @@ def build_report_message_tiered(
         msg_lines.append(f"• 進場：{_entry_prefix} `{_entry_now_txt}`{_vw_dev_s}")
         if _entry_note:
             msg_lines.append(f"• {_entry_note}")
+        try:
+            _t1 = max(0.001, float(MARKET_ENTRY_TIER1_PCT))
+            _t2 = max(_t1, float(MARKET_ENTRY_TIER2_PCT))
+        except (TypeError, ValueError):
+            _t1, _t2 = 0.008, 0.015
+        if is_bull_sig:
+            _ideal_lo = _entry_price * (1.0 - _t1)
+            _ideal_hi = _entry_price * (1.0 + _t1)
+            _ok_hi = _entry_price * (1.0 + _t2)
+            msg_lines.append(
+                f"• 市價區間（理想）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{_t1*100:.1f}%）"
+            )
+            msg_lines.append(
+                f"• 市價區間（可接受）：`{_fmt_price(_ideal_hi)}` ~ `{_fmt_price(_ok_hi)}`（最多 +{_t2*100:.1f}%），超過不追價"
+            )
+        else:
+            _ideal_lo = _entry_price * (1.0 - _t1)
+            _ideal_hi = _entry_price * (1.0 + _t1)
+            _ok_lo = _entry_price * (1.0 - _t2)
+            msg_lines.append(
+                f"• 市價區間（理想）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{_t1*100:.1f}%）"
+            )
+            msg_lines.append(
+                f"• 市價區間（可接受）：`{_fmt_price(_ok_lo)}` ~ `{_fmt_price(_ideal_lo)}`（最多 -{_t2*100:.1f}%），超過不追價"
+            )
         msg_lines.append(f"• 止損：`{_sl_txt}`（到價認錯出場）")
         msg_lines.append(f"• 目標：TP1 `{_tp1_txt}`" + (f" → TP2 `{_tp2_txt}`" if _tp2_txt else ""))
         if 0 < vol_m_val < 10:
