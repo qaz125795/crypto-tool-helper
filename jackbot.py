@@ -64,37 +64,39 @@ CG_EP = {
     "supported_pairs":       "/api/futures/supported-exchange-pairs",                # 支持的交易對
     "pairs_markets":         "/api/futures/pairs-markets",                           # 合約交易對詳情
     "coins_markets":         "/api/futures/coins-markets",                           # 合約幣種市場行情（主要掃描源）
-    "price_change_list":     "/futures/price-change-list",                           # 幣種價格變化列表
-    "price_ohlc_history":    "/api/price/ohlc-history",                             # 交易對價格K線歷史
+    # 官方 v4：/api/futures/coins-price-change（舊表曾寫成 /futures/price-change-list 缺 /api)
+    "price_change_list":     "/api/futures/coins-price-change",                     # 幣種價格變化列表
+    # 與文件一致：合約價格 K 線用 /api/futures/price/history（見 fetch_price_change_24h_coinglass_klines）
+    "price_ohlc_history":    "/api/futures/price/history",                           # 交易對價格K線歷史
     # ── 現有路徑備援別名 ──
-    "price_history_futures": "/api/futures/price/history",                           # 合約價格K線（舊路徑）
+    "price_history_futures": "/api/futures/price/history",                           # 合約價格K線
     "price_history_spot":    "/api/spot/price/history",                              # 現貨價格K線
     "delisted_pairs":        "/api/futures/delisted-exchange-pairs",                 # 已下架交易對
 
-    # ════════════════ 持倉 Open Interest ════════════════
-    "oi_history":            "/api/futures/openInterest/ohlc-history",              # 合約持倉K線
-    "oi_agg_history":        "/api/futures/openInterest/ohlc-aggregated-history",   # 聚合持倉K線（主力）
-    "oi_agg_stable":         "/api/futures/openInterest/ohlc-aggregated-stablecoin",# 穩定幣保證金持倉
-    "oi_agg_coin":           "/api/futures/openInterest/ohlc-aggregated-coin-margin-history", # 幣本位持倉
-    "oi_exchange_list":      "/api/futures/open-interest/exchange-list",              # 各所持倉列表（文檔確認 kebab-case）
-    "oi_exchange_history":   "/api/futures/open-interest/exchange-history-chart",    # 各所持倉歷史圖表（文檔確認 kebab-case）
-    # ── 舊路徑備援（部分 API 可能只支援新路徑）──
-    "oi_history_old":        "/api/futures/open-interest/history",
-    "oi_agg_history_old":    "/api/futures/open-interest/aggregated-history",
+    # ════════════════ 持倉 Open Interest（官方 v4 均為 /api/futures/open-interest/...）════
+    "oi_history":            "/api/futures/open-interest/history",                    # 合約持倉量 K 線歷史
+    "oi_agg_history":        "/api/futures/open-interest/aggregated-history",          # 聚合持倉K線（主力）
+    "oi_agg_stable":         "/api/futures/open-interest/aggregated-stablecoin-history",
+    "oi_agg_coin":           "/api/futures/open-interest/aggregated-coin-margin-history",
+    "oi_exchange_list":      "/api/futures/open-interest/exchange-list",
+    "oi_exchange_history":   "/api/futures/open-interest/exchange-history-chart",
+    # 舊版 camelCase 路徑（若極少數環境仍只回應此路徑，供除錯對照；主流程已不用）
+    "oi_history_camel":      "/api/futures/openInterest/ohlc-history",
+    "oi_agg_history_camel":  "/api/futures/openInterest/ohlc-aggregated-history",
+    "oi_agg_stable_camel":   "/api/futures/openInterest/ohlc-aggregated-stablecoin",
+    "oi_agg_coin_camel":     "/api/futures/openInterest/ohlc-aggregated-coin-margin-history",
 
-    # ════════════════ 資金費率 Funding Rate ════════════════
-    "fr_history":            "/api/futures/fundingRate/ohlc-history",               # 費率K線
-    "fr_oi_weight":          "/api/futures/fundingRate/oi-weight-ohlc-history",     # OI加權費率（最精準）
-    "fr_vol_weight":         "/api/futures/fundingRate/vol-weight-ohlc-history",    # 成交量加權費率
-    "fr_exchange_list":      "/api/futures/fundingRate/exchange-list",              # 各所費率列表
-    "fr_accum_exchange":     "/api/futures/fundingRate/accumulated-exchange-list",  # 累積費率（過熱偵測）
-    "fr_arbitrage":          "/api/futures/fundingRate/arbitrage",                  # 費率套利機會 🆕
-    # ── 舊路徑備援 ──
-    "fr_history_old":        "/api/futures/funding-rate/history",
-    "fr_oi_weight_old":      "/api/futures/funding-rate/oi-weight-history",
-    "fr_vol_weight_old":     "/api/futures/funding-rate/vol-weight-history",
-    "fr_exchange_list_old":  "/api/futures/funding-rate/exchange-list",
-    "fr_accum_exchange_old": "/api/futures/funding-rate/accumulated-exchange-list",
+    # ════════════════ 資金費率 Funding Rate（官方 v4：/api/futures/funding-rate/...）════
+    "fr_history":            "/api/futures/funding-rate/history",
+    "fr_oi_weight":          "/api/futures/funding-rate/oi-weight-history",
+    "fr_vol_weight":         "/api/futures/funding-rate/vol-weight-history",
+    "fr_exchange_list":      "/api/futures/funding-rate/exchange-list",
+    "fr_accum_exchange":     "/api/futures/funding-rate/accumulated-exchange-list",
+    "fr_arbitrage":          "/api/futures/funding-rate/arbitrage",
+    # 舊版 *Rate/ohlc-* 路徑（僅備查）
+    "fr_history_camel":      "/api/futures/fundingRate/ohlc-history",
+    "fr_oi_weight_camel":    "/api/futures/fundingRate/oi-weight-ohlc-history",
+    "fr_vol_weight_camel":   "/api/futures/fundingRate/vol-weight-ohlc-history",
 
     # ════════════════ 多空比 Long/Short Ratio ════════════════
     "ls_global_history":     "/api/futures/global-long-short-account-ratio/history",# 全網帳戶多空比
@@ -170,7 +172,7 @@ CG_EP = {
     "btc_etf_price":         "/api/etf/bitcoin/price/history",                      # 比特幣ETF價格 🆕
     "btc_etf_detail":        "/api/etf/bitcoin/detail",                             # 比特幣ETF詳情 🆕
     "hk_btc_etf_flow":       "/api/hk-etf/bitcoin/flow-history",                   # 香港BTC ETF流向 🆕
-    "eth_etf_net_assets":    "/api/etf/ethereum/net-assets-history",                # 以太坊ETF淨資產 🆕
+    "eth_etf_net_assets":    "/api/etf/ethereum/net-assets/history",                 # 以太坊ETF淨資產 🆕
     "eth_etf_list":          "/api/etf/ethereum/list",                              # 以太坊ETF列表 🆕
     "eth_etf_flow":          "/api/etf/ethereum/flow-history",                      # 以太坊ETF資金流 🆕
     "grayscale_holdings":    "/api/grayscale/holdings-list",                        # 灰度持倉列表 🆕
@@ -191,8 +193,8 @@ CG_EP = {
     "pi_cycle":              "/api/index/pi-cycle-indicator",                       # Pi Cycle頂部指標 🆕
     "golden_ratio":          "/api/index/golden-ratio-multiplier",                  # 黃金比例乘數 🆕
     "btc_profitable_days":   "/api/index/bitcoin/profitable-days",                  # BTC盈利天數 🆕
-    "btc_rainbow":           "/api/index/bitcoin/rainbow-chart",                    # BTC彩虹圖 🆕
-    "btc_bubble_index":      "/api/index/bitcoin/bubble-index",                     # BTC泡沫指數 🆕
+    "btc_rainbow":           "/api/index/bitcoin-rainbow-chart",                     # BTC彩虹圖 🆕
+    "btc_bubble_index":      "/api/index/bitcoin-bubble-index",                     # BTC泡沫指數 🆕
     "ma_2yr_multiplier":     "/api/index/2-year-ma-multiplier",                     # 2年均線乘數 🆕
     "ma_200wk_heatmap":      "/api/index/200-week-moving-average-heatmap",          # 200週均線熱力圖 🆕
 
@@ -1086,14 +1088,14 @@ def fetch_aggregated_stablecoin_oi_history(symbol: str = "BTC", interval: str = 
         except Exception as e:
             logger.debug(f"穩定幣 OI 請求失敗 {url}: {e}")
 
-    # (B) camelCase 聚合 OHLC 端點（與文件 ohlc-aggregated-stablecoin 一致）
+    # (B) CG_EP 備援（路徑已與官方 v4 kebab-case 對齊）
     j = _cg_get(CG_EP["oi_agg_stable"], {"symbol": base, "interval": intv, "limit": 48})
     dl = _coinglass_extract_data_list(j)
     if dl:
-        logger.info(f"[穩定幣OI歷史✅] ohlc-aggregated-stablecoin interval={intv} 筆數={len(dl)}")
+        logger.info(f"[穩定幣OI歷史✅] oi_agg_stable(interval={intv}) 筆數={len(dl)}")
         return dl
 
-    j2 = _cg_get(CG_EP.get("oi_agg_history_old", "/api/futures/open-interest/aggregated-history"), {"symbol": base, "interval": intv, "limit": 48})
+    j2 = _cg_get(CG_EP["oi_agg_history"], {"symbol": base, "interval": intv, "limit": 48})
     dl2 = _coinglass_extract_data_list(j2)
     if dl2:
         logger.info(f"[穩定幣OI歷史✅] aggregated-history（全網合約 OI 備援）interval={intv} 筆數={len(dl2)}")
@@ -3005,9 +3007,8 @@ def _fetch_funding_rate_map() -> Dict[str, float]:
         pass
 
     # ── 方案B：exchange-list（全量，可一次取得所有幣種）─────────────
-    # 優先使用與 fetch_funding_fortune_list（費率排行榜）完全相同的 kebab-case 端點（已驗證有效）
-    # camelCase 版本曾回傳 404，作為次要備援
-    fr_ep_candidates = [CG_EP["fr_exchange_list_old"], CG_EP["fr_exchange_list"]]
+    # 使用官方 v4：/api/futures/funding-rate/exchange-list（已寫入 CG_EP["fr_exchange_list"]）
+    fr_ep_candidates = [CG_EP["fr_exchange_list"]]
     lst = []
     url_used = ""
     for fr_ep_path in fr_ep_candidates:
@@ -3297,10 +3298,8 @@ def fetch_accumulated_funding_score(symbol: str) -> Dict[str, Any]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fetch_fear_greed_index() -> Dict[str, Any]:
-    """恐懼貪婪指數（整合市場情緒的最佳單一指標）。
-    endpoint: /api/index/fear-greed-history
-    快取 30 分鐘（每日更新一次，短期快取防重複請求）。
-    回傳: {"value": int, "label": str, "emoji": str, "signal": str}
+    """恐懼貪婪指數。與【長線財富週期】共用同一解析：`fetch_latest_fear_greed`（含 data_list 整數序列）。
+    舊版曾用 `_cg_get(..., limit=1)` 只讀 `value` 欄，與實際 API 結構不一致→誤判無資料。
     """
     cache_key = "fear_greed_index"
     now = time.time()
@@ -3309,28 +3308,15 @@ def fetch_fear_greed_index() -> Dict[str, Any]:
         if now - ts < 1800:
             return val if val else {}
 
-    logger.debug(f"[恐懼貪婪] endpoint={CG_EP['fear_greed']}")
+    logger.debug("[恐懼貪婪] 與長線週期同源：fetch_latest_fear_greed")
     empty = {"value": None, "label": "N/A", "emoji": "❓", "signal": "neutral"}
     try:
-        j = _cg_get(CG_EP["fear_greed"], {"limit": 1})
-        if not j:
-            _flow_cache[cache_key] = (empty, now)
-            return empty
-        data = j.get("data") or j.get("list") or j
-        if isinstance(data, list) and data:
-            data = data[-1]  # 最新一筆
-        if not isinstance(data, dict):
-            _flow_cache[cache_key] = (empty, now)
+        fg_val = fetch_latest_fear_greed()
+        if fg_val is None:
+            # 解析失敗不寫入快取，避免誤快取空包 30 分鐘（與長線週期不同路時已發生）
             return empty
 
-        val_raw = data.get("value") or data.get("score") or data.get("index")
-        label_raw = data.get("value_classification") or data.get("label") or data.get("classification") or ""
-        if val_raw is None:
-            _flow_cache[cache_key] = (empty, now)
-            return empty
-
-        fg_val = int(float(val_raw))
-        # 標準化標籤
+        # 標準化標籤（與原邏輯相同）
         if fg_val >= 80:
             emoji, label, signal = "🔥", "極度貪婪", "overbought"
         elif fg_val >= 60:
@@ -3342,14 +3328,12 @@ def fetch_fear_greed_index() -> Dict[str, Any]:
         else:
             emoji, label, signal = "💀", "極度恐懼", "oversold"
 
-        result = {"value": fg_val, "label": label_raw or label, "emoji": emoji,
-                  "signal": signal, "score": fg_val}
+        result = {"value": fg_val, "label": label, "emoji": emoji, "signal": signal, "score": fg_val}
         logger.info(f"[恐懼貪婪✅] 當前指數={fg_val} {emoji} {label}")
         _flow_cache[cache_key] = (result, now)
         return result
     except Exception as e:
         logger.debug(f"[恐懼貪婪] 異常: {e}")
-        _flow_cache[cache_key] = (empty, now)
         return empty
 
 
@@ -4197,10 +4181,12 @@ _default_tp1 = 0.6 if SNIPER_FAST_MODE else 1.0
 _default_tp2 = 1.2 if SNIPER_FAST_MODE else 3.0
 _default_min_sl = 0.008 if SNIPER_FAST_MODE else 0.015
 
-TP1_R_MULTIPLIER = _env_float("SNIPER_TP1_R", _default_tp1)   # 快進快出建議 0.5~0.8
+TP1_R_MULTIPLIER = max(1.0, _env_float("SNIPER_TP1_R", _default_tp1))   # TP1 至少 1R
 TP2_R_MULTIPLIER = _env_float("SNIPER_TP2_R", _default_tp2)   # 快進快出建議 1.0~1.5
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
+MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.0))
+MAX_LIMIT_VWAP_GAP_PCT = 0.02  # 限價進場與主力均價(VWAP)最大允許偏離 2%
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
 MIN_SIGNAL_PUSH_SCORE = 68          # Classic 80%：降低綜合分數門檻，避免高品質訊號被過濾掉
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
@@ -5687,8 +5673,8 @@ def build_report_message_tiered(
         _now_ts = time.time()
 
         # ══════════════════════════════════════════════════════════
-        # 進場：統一市價（現價）。若依 VWAP 帶／衰竭反轉／動能透支等判定「不適合市價」→ 不推播。
-        # TP/SL：以現價為進場，結構防守位（2H 高/低 + EMA20 + VWAP）+ MIN_SL_PERCENT 保底 → 1R → TP1/TP2
+        # 進場：以市價為主；若策略判定需限價，允許限價推播（但限價與主力均價差不可超過 2%）。
+        # TP/SL：以「實際進場價（市價或限價）」為基準，結構防守位（2H 高/低 + EMA20 + VWAP）+ MIN_SL_PERCENT 保底 → 1R → TP1/TP2
         # ══════════════════════════════════════════════════════════
         sl, tp1, tp2 = None, None, None
         _r1, _r2 = TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
@@ -5702,14 +5688,32 @@ def build_report_message_tiered(
             _sig_ver,
             bool(x.get("_energy_exhausted")),
         )
-        if _need_limit:
-            logger.info(
-                f"[僅市價推播] {sym_base}: 不適合市價進場（原需限價 lp≈{_lp_hint}），略過"
-            )
-            continue
-
-        _entry_price = float(price)
         _entry_mode = "市價"
+        _entry_note = ""
+        _entry_price = float(price)
+        if _need_limit:
+            _entry_mode = "限價"
+            try:
+                _entry_price = float(_lp_hint) if _lp_hint is not None and float(_lp_hint) > 0 else float(price)
+            except (TypeError, ValueError):
+                _entry_price = float(price)
+            try:
+                _lp_vwap = float(vwap_2h_val) if vwap_2h_val is not None else None
+                _lp_vw_dev = abs(float(_entry_price) - _lp_vwap) / _lp_vwap if _lp_vwap and _lp_vwap > 0 else None
+            except (TypeError, ValueError):
+                _lp_vw_dev = None
+            if _lp_vw_dev is not None and _lp_vw_dev > MAX_LIMIT_VWAP_GAP_PCT:
+                logger.info(
+                    f"[限價過濾] {sym_base}: 限價與主力均價偏離 {_lp_vw_dev:.2%} > {MAX_LIMIT_VWAP_GAP_PCT:.0%}，略過"
+                )
+                continue
+            if _lp_vw_dev is None:
+                _entry_note = "⚠️ 本單採限價進場（主力均價差無法計算）"
+            else:
+                _entry_note = (
+                    f"⚠️ 本單採限價進場（與主力均價差 `{_lp_vw_dev:.1%}`，"
+                    f"規則上限 `{MAX_LIMIT_VWAP_GAP_PCT:.0%}`）"
+                )
 
         if _entry_price and _entry_price > 0:
             _recent_lo = x.get("recent_low_2h")
@@ -5993,7 +5997,7 @@ def build_report_message_tiered(
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
         _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
         _tp2_txt = _fmt_price(tp2) if tp2 is not None else None
-        _exec_mode = "市價"
+        _exec_mode = _entry_mode
         _exec_note = ""
 
         # ── 持倉時間過濾（維持 TP1=1:1，但淘汰慢訊號）──────────────────────
@@ -6017,7 +6021,10 @@ def build_report_message_tiered(
         msg_lines.append("*📌 跟單*")
         _vw_dev = _rel_dev_pct(float(price) if price is not None else None, _vwap_show)
         _vw_dev_s = f"｜與主力均價差 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
-        msg_lines.append(f"• 進場：市價 ≈ `{_entry_now_txt}`{_vw_dev_s}")
+        _entry_prefix = "市價 ≈" if _entry_mode == "市價" else "限價掛單 ≈"
+        msg_lines.append(f"• 進場：{_entry_prefix} `{_entry_now_txt}`{_vw_dev_s}")
+        if _entry_note:
+            msg_lines.append(f"• {_entry_note}")
         msg_lines.append(f"• 止損：`{_sl_txt}`（到價認錯出場）")
         msg_lines.append(f"• 目標：TP1 `{_tp1_txt}`" + (f" → TP2 `{_tp2_txt}`" if _tp2_txt else ""))
         if 0 < vol_m_val < 10:
