@@ -1028,38 +1028,79 @@ def fetch_stablecoin_marketcap_history() -> Optional[List[Dict]]:
         return None
 
 
+def _coinglass_extract_data_list(payload: Optional[Dict]) -> Optional[List[Dict]]:
+    """從 CoinGlass JSON 取出 OI K 線列表（data 可為 list 或巢狀）。"""
+    if not payload or not isinstance(payload, dict):
+        return None
+    raw = payload.get("data")
+    if isinstance(raw, list) and raw:
+        return raw
+    if isinstance(raw, dict):
+        for k in ("list", "data_list", "history", "items"):
+            v = raw.get(k)
+            if isinstance(v, list) and v:
+                return v
+    return None
+
+
 def fetch_aggregated_stablecoin_oi_history(symbol: str = "BTC", interval: str = "1h") -> Optional[List[Dict]]:
-    """獲取聚合穩定幣保證金持倉歷史數據"""
-    url = "https://open-api-v4.coinglass.com/api/futures/open-interest/aggregated-stablecoin-history"
-    params = {
-        "exchange_list": "Binance",
-        "symbol": symbol,
-        "interval": interval
-    }
-    headers = {
-        "CG-API-KEY": CG_API_KEY,
-        "accept": "application/json"
-    }
-    
-    try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        if response.status_code != 200:
-            logger.error(f"穩定幣 OI API 返回狀態碼: {response.status_code}")
-            return None
-        
-        data = response.json()
-        if data.get('code') not in ['0', 0, 200, '200']:
-            logger.error(f"穩定幣 OI API 返回錯誤: {data.get('msg')}")
-            return None
-        
-        # 返回數據列表
-        data_list = data.get('data', [])
-        if isinstance(data_list, list):
-            return data_list
+    """獲取聚合穩定幣保證金持倉歷史（優先與狙擊鏡相同的 open-interest 路徑 + 正確 interval 格式）。"""
+    if not CG_API_KEY:
         return None
-    except Exception as e:
-        logger.error(f"獲取穩定幣 OI 歷史失敗: {str(e)}")
-        return None
+    base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+    intv = _cg_interval(interval)
+
+    # (A) kebab-case 歷史端點（舊版直連 URL，保留為備援）
+    urls_try = [
+        (
+            f"{CG_API_BASE}/api/futures/open-interest/aggregated-stablecoin-history",
+            {
+                "exchange": "Binance",
+                "symbol": base,
+                "interval": intv,
+            },
+        ),
+        (
+            f"{CG_API_BASE}/api/futures/open-interest/aggregated-stablecoin-history",
+            {
+                "exchange_list": "Binance,Bybit,OKX,Gate",
+                "symbol": base,
+                "interval": intv,
+            },
+        ),
+    ]
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    for url, params in urls_try:
+        try:
+            _respect_coinglass_rate_limit()
+            response = requests.get(url, params=params, headers=headers, timeout=12)
+            if response.status_code != 200:
+                continue
+            data = response.json()
+            if data.get("code") not in ("0", 0, 200, "200", None):
+                continue
+            dl = _coinglass_extract_data_list(data)
+            if dl:
+                logger.info(f"[穩定幣OI歷史✅] {url.split('/')[-1]} interval={intv} 筆數={len(dl)}")
+                return dl
+        except Exception as e:
+            logger.debug(f"穩定幣 OI 請求失敗 {url}: {e}")
+
+    # (B) camelCase 聚合 OHLC 端點（與文件 ohlc-aggregated-stablecoin 一致）
+    j = _cg_get(CG_EP["oi_agg_stable"], {"symbol": base, "interval": intv, "limit": 48})
+    dl = _coinglass_extract_data_list(j)
+    if dl:
+        logger.info(f"[穩定幣OI歷史✅] ohlc-aggregated-stablecoin interval={intv} 筆數={len(dl)}")
+        return dl
+
+    j2 = _cg_get(CG_EP.get("oi_agg_history_old", "/api/futures/open-interest/aggregated-history"), {"symbol": base, "interval": intv, "limit": 48})
+    dl2 = _coinglass_extract_data_list(j2)
+    if dl2:
+        logger.info(f"[穩定幣OI歷史✅] aggregated-history（全網合約 OI 備援）interval={intv} 筆數={len(dl2)}")
+        return dl2
+
+    logger.warning("[穩定幣OI歷史] 所有端點均未取得有效 K 線列表")
+    return None
 
 
 def calculate_marketcap_change(data_list: List[Dict]) -> Optional[Dict]:
@@ -1145,64 +1186,91 @@ def calculate_marketcap_change(data_list: List[Dict]) -> Optional[Dict]:
     return result
 
 
+def _oi_bar_close(bar: Dict) -> Optional[float]:
+    """從單根 OI K 線取出收盤持倉數值（CoinGlass 常見：c / close / openInterest）。"""
+    if not isinstance(bar, dict):
+        return None
+    for k in ("c", "close", "value", "v", "openInterest", "oi"):
+        v = bar.get(k)
+        if v is None:
+            continue
+        try:
+            f = float(v)
+            if f == f and f >= 0:
+                return f
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _oi_bar_ts_ms(bar: Dict) -> int:
+    """統一時間戳為毫秒整數（API 可能給秒或毫秒）。"""
+    t = bar.get("t") or bar.get("time") or bar.get("timestamp") or 0
+    try:
+        ti = int(t)
+        if ti <= 0:
+            return 0
+        if ti < 1_000_000_000_000:  # 秒
+            return ti * 1000
+        return ti
+    except (TypeError, ValueError):
+        return 0
+
+
 def calculate_oi_change(data_list: List[Dict]) -> Optional[Dict]:
-    """計算穩定幣 OI 變化率（1小時和24小時）"""
+    """計算 OI K 線序列：最新名目量 + 近似 1H 變化% + 24H 變化%；缺時間戳時用「倒數第二根」近似。"""
     if not data_list or len(data_list) < 2:
         return None
-    
-    # 按時間戳排序
-    sorted_data = sorted(data_list, key=lambda x: x.get('time', 0) or x.get('timestamp', 0))
-    
-    # 獲取最新值（使用 close 或 value）
+
+    sorted_data = sorted(data_list, key=_oi_bar_ts_ms)
     latest = sorted_data[-1]
-    latest_oi = latest.get('close') or latest.get('value') or latest.get('openInterest')
-    
-    if latest_oi is None:
+    latest_oi = _oi_bar_close(latest)
+    if latest_oi is None or latest_oi <= 0:
         return None
-    
-    # 計算1小時變化
+
+    result: Dict[str, Any] = {
+        "latest_oi": float(latest_oi),
+        "change_1h": None,
+        "change_24h": None,
+        "change_prev_bar": None,
+    }
+
+    prev = sorted_data[-2]
+    prev_oi = _oi_bar_close(prev)
+    if prev_oi is not None and prev_oi > 0:
+        result["change_prev_bar"] = ((latest_oi - prev_oi) / prev_oi) * 100.0
+
     now = get_taipei_time()
-    one_hour_ago = now - timedelta(hours=1)
-    one_hour_ago_ts = int(one_hour_ago.timestamp() * 1000)
-    
+    one_hour_ago_ts = int((now - timedelta(hours=1)).timestamp() * 1000)
+    day_ago_ts = int((now - timedelta(hours=24)).timestamp() * 1000)
+
     one_hour_data = None
-    for item in sorted_data:
-        item_time = item.get('time') or item.get('timestamp', 0)
-        if item_time <= one_hour_ago_ts:
-            one_hour_data = item
-        else:
-            break
-    
-    # 計算24小時變化
-    twenty_four_hours_ago = now - timedelta(hours=24)
-    twenty_four_hours_ago_ts = int(twenty_four_hours_ago.timestamp() * 1000)
-    
     twenty_four_hours_data = None
     for item in sorted_data:
-        item_time = item.get('time') or item.get('timestamp', 0)
-        if item_time <= twenty_four_hours_ago_ts:
+        ts = _oi_bar_ts_ms(item)
+        if ts and ts <= one_hour_ago_ts:
+            one_hour_data = item
+        if ts and ts <= day_ago_ts:
             twenty_four_hours_data = item
-        else:
-            break
-    
-    result = {
-        'latest_oi': float(latest_oi),
-        'change_1h': None,
-        'change_24h': None
-    }
-    
-    # 計算1小時變化率
-    if one_hour_data:
-        one_hour_oi = one_hour_data.get('close') or one_hour_data.get('value') or one_hour_data.get('openInterest')
-        if one_hour_oi and one_hour_oi > 0:
-            result['change_1h'] = ((latest_oi - one_hour_oi) / one_hour_oi) * 100
-    
-    # 計算24小時變化率
-    if twenty_four_hours_data:
-        twenty_four_hours_oi = twenty_four_hours_data.get('close') or twenty_four_hours_data.get('value') or twenty_four_hours_data.get('openInterest')
-        if twenty_four_hours_oi and twenty_four_hours_oi > 0:
-            result['change_24h'] = ((latest_oi - twenty_four_hours_oi) / twenty_four_hours_oi) * 100
-    
+
+    def _pct_from(base_bar: Optional[Dict]) -> Optional[float]:
+        if not base_bar:
+            return None
+        o = _oi_bar_close(base_bar)
+        if o is None or o <= 0:
+            return None
+        return ((latest_oi - o) / o) * 100.0
+
+    ch1 = _pct_from(one_hour_data)
+    ch24 = _pct_from(twenty_four_hours_data)
+    # 時間戳不足時：用「較舊一根」近似短線變化，避免整段變成 0% 與 $0
+    if ch1 is None and result.get("change_prev_bar") is not None:
+        ch1 = result["change_prev_bar"]
+    if ch24 is None and len(sorted_data) >= 3:
+        ch24 = _pct_from(sorted_data[0])
+
+    result["change_1h"] = ch1
+    result["change_24h"] = ch24
     return result
 
 
@@ -1236,34 +1304,55 @@ def _make_fuel_bar(score: int, max_score: int = 5) -> str:
 
 
 def _fetch_smart_money_oi_split(symbol: str = "BTC") -> Dict[str, Any]:
-    """聰明錢 OI 拆分：穩定幣保證金（專業資金）vs 幣本位保證金（散戶槓桿）。
-    方案A：aggregated-stablecoin-history + aggregated-coin-margin-history（最精準）
-    方案B：aggregated-history 總量（備援，無法拆分但至少有數據）
-    回傳 {"stable_chg": float, "coin_chg": float, "smart_money": bool/None}
+    """聰明錢 OI 拆分：穩定幣保證金 vs 幣本位保證金。
+    CoinGlass OHLC 端點需使用 m15/h1 格式（傳 15m 常回空列表→拆分永遠不可用）。
     """
-    empty = {"stable_chg": None, "coin_chg": None, "smart_money": None, "data_source": "none"}
-    base = symbol.upper().replace("USDT", "")
-    params = {"symbol": base, "interval": "15m", "limit": 4}
+    base = symbol.upper().replace("USDT", "").replace("-", "").replace("_", "")
+    _interval_try = (_cg_interval("15m"), _cg_interval("1h"))
 
     logger.debug("[SmartMoneyOI] fetch stable/coin OI split symbol=%s" % base)
 
+    def _rows_from(j: Optional[Dict]) -> list:
+        if not j:
+            return []
+        raw = j.get("data")
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict):
+            for k in ("list", "data_list", "history"):
+                v = raw.get(k)
+                if isinstance(v, list):
+                    return v
+        return []
+
     stable_bars, coin_bars = None, None
-    try:
-        j_s = _cg_get(CG_EP["oi_agg_stable"], params)
-        rows_s = j_s.get("data") or j_s.get("list") or [] if j_s else []
-        stable_bars = _parse_oi_bars_from_rows(rows_s) if rows_s else None
-        _n_stable = len(stable_bars) if stable_bars else 0
-        logger.debug("[SmartMoneyOI] stable OI bars: " + str(_n_stable))
-    except Exception as e_s:
-        logger.debug("[SmartMoneyOI] stable OI error: " + str(e_s))
-    try:
-        j_c = _cg_get(CG_EP["oi_agg_coin"], params)
-        rows_c = j_c.get("data") or j_c.get("list") or [] if j_c else []
-        coin_bars = _parse_oi_bars_from_rows(rows_c) if rows_c else None
-        _n_coin = len(coin_bars) if coin_bars else 0
-        logger.debug("[SmartMoneyOI] coin OI bars: " + str(_n_coin))
-    except Exception as e_c:
-        logger.debug("[SmartMoneyOI] coin OI error: " + str(e_c))
+    for intv in _interval_try:
+        if stable_bars and len(stable_bars) >= 2:
+            break
+        try:
+            params_s = {"symbol": base, "interval": intv, "limit": 12}
+            j_s = _cg_get(CG_EP["oi_agg_stable"], params_s)
+            rows_s = _rows_from(j_s)
+            stable_bars = _parse_oi_bars_from_rows(rows_s) if rows_s else None
+            if stable_bars and len(stable_bars) >= 2:
+                logger.info(f"[SmartMoneyOI] stable OK interval={intv} bars={len(stable_bars)}")
+                break
+        except Exception as e_s:
+            logger.debug("[SmartMoneyOI] stable OI error: " + str(e_s))
+
+    for intv in _interval_try:
+        if coin_bars and len(coin_bars) >= 2:
+            break
+        try:
+            params_c = {"symbol": base, "interval": intv, "limit": 12}
+            j_c = _cg_get(CG_EP["oi_agg_coin"], params_c)
+            rows_c = _rows_from(j_c)
+            coin_bars = _parse_oi_bars_from_rows(rows_c) if rows_c else None
+            if coin_bars and len(coin_bars) >= 2:
+                logger.info(f"[SmartMoneyOI] coin OK interval={intv} bars={len(coin_bars)}")
+                break
+        except Exception as e_c:
+            logger.debug("[SmartMoneyOI] coin OI error: " + str(e_c))
 
     stable_chg = coin_chg = None
     if stable_bars and len(stable_bars) >= 2 and stable_bars[-2] != 0:
@@ -1318,17 +1407,31 @@ def _calc_fuel_score(mcap_15m: float, mcap_1h: float, oi_15m: float, oi_1h: floa
     return score
 
 
+def _format_oi_notional_billions(latest_oi: Optional[float]) -> str:
+    """將聚合 OI 收盤值轉成易讀美元（API 多為實際美元額，少數為 B 為單位）。"""
+    if latest_oi is None or latest_oi <= 0:
+        return "—"
+    x = float(latest_oi)
+    if x >= 1e8:
+        return f"${x / 1e9:.2f}B"
+    if x >= 1e5:
+        return f"${x / 1e6:.0f}M"
+    return f"${x:.2f}B"
+
+
 def buying_power_monitor():
-    """【牛市燃料監控】資金進場=發車，判斷大盤動能（15m 高頻版 + 聰明錢指標）"""
-    logger.info("開始執行牛市燃料監控（15m 高頻版 + 聰明錢拆分版）...")
+    """【牛市燃料監控】場外穩定幣 + 場內 OI + 情緒／機構輔助指標（CoinGlass 為主）。"""
+    logger.info("開始執行牛市燃料監控（CoinGlass 聚合 + 聰明錢拆分）...")
     marketcap_data = fetch_stablecoin_marketcap_history()
     mcap_change = calculate_marketcap_change(marketcap_data) if marketcap_data else {}
 
     # 升級：同時抓取 15m 與 1h OI
     oi_data_15m = fetch_aggregated_stablecoin_oi_history("BTC", "15m")
     oi_data_1h = fetch_aggregated_stablecoin_oi_history("BTC", "1h")
-    oi_change_15m = calculate_oi_change(oi_data_15m) if oi_data_15m else {}
-    oi_change_1h = calculate_oi_change(oi_data_1h) if oi_data_1h else {}
+    oi_change_15m = calculate_oi_change(oi_data_15m) if oi_data_15m else None
+    oi_change_1h = calculate_oi_change(oi_data_1h) if oi_data_1h else None
+    oi_change_15m = oi_change_15m or {}
+    oi_change_1h = oi_change_1h or {}
 
     # 聰明錢拆分：穩定幣OI vs 幣本位OI
     smart_money_data = _fetch_smart_money_oi_split("BTC")
@@ -1372,7 +1475,9 @@ def buying_power_monitor():
         fuel_score += 1    # ETF機構流入=強力買盤
     if cb_data.get("signal") == "bullish":
         fuel_score += 1    # Coinbase溢價=美國機構買入
-    fuel_bar = _make_fuel_bar(fuel_score)
+    # 基礎分最高 7，加上情緒／ETF／CB 後可 >7；進度條與顯示統一用 10 格滿分
+    FUEL_DISPLAY_MAX = 10
+    fuel_bar = _make_fuel_bar(min(fuel_score, FUEL_DISPLAY_MAX), max_score=FUEL_DISPLAY_MAX)
 
     # 根據積分決定主標籤（7 分制）
     if fuel_score >= 6:
@@ -1410,10 +1515,13 @@ def buying_power_monitor():
 
     lines = []
     lines.append("⛽ *【牛市燃料儀表板】*")
-    lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} (台灣) | ⚡ 15M 高頻監控")
+    lines.append(
+        f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} (台灣) "
+        f"| 📡 *CoinGlass 聚合*（內含 15m／1H 等不同週期指標，非單一 15 分鐘排程）"
+    )
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append(f"*{headline}*")
-    lines.append(f"燃料計：`{fuel_bar}` {fuel_score}/7 ({bar_label})")
+    lines.append(f"燃料計：`{fuel_bar}` {min(fuel_score, FUEL_DISPLAY_MAX)}/{FUEL_DISPLAY_MAX} ({bar_label})")
     lines.append("")
 
     # USDT 溢價標籤
@@ -1438,28 +1546,33 @@ def buying_power_monitor():
         _s_emoji = "🟢" if stable_chg > 0.1 else ("🔴" if stable_chg < -0.1 else "🟡")
         lines.append(f"• 穩定幣保證金(機構)：{_s_emoji} `{stable_chg:+.3f}%`")
     else:
-        lines.append("• 穩定幣保證金：`數據不可用`")
+        lines.append("• 穩定幣保證金：`暫無法拆分`（API 無回傳或限額；可參考下方全網 OI）")
     if coin_chg is not None:
         _c_emoji = "🟢" if coin_chg > 0.1 else ("🔴" if coin_chg < -0.1 else "🟡")
         lines.append(f"• 幣本位保證金(散戶)：{_c_emoji} `{coin_chg:+.3f}%`")
     else:
-        lines.append("• 幣本位保證金：`數據不可用`")
+        lines.append("• 幣本位保證金：`暫無法拆分`（同上）")
     if smart_money is True:
         lines.append("• 🎯 *聰明錢主導*：機構/職業交易者正在建倉（穩定幣>幣本位）")
     elif smart_money is False:
         lines.append("• ⚠️ *散戶槓桿主導*：幣本位OI擴張，投機氣氛濃厚，注意清洗")
     else:
-        lines.append("• ❓ 多空資金混合：無明顯方向")
+        lines.append("• ❓ 拆分中性：兩邊變化接近或資料不足，請配合下方全網 OI%")
 
     lines.append("")
-    oi_val_1h = (oi_change_1h.get("latest_oi") or 0) / 1_000_000_000
-    oi_val_15m = (oi_change_15m.get("latest_oi") or 0) / 1_000_000_000 if oi_change_15m else 0
+    oi_snap_15m = _format_oi_notional_billions((oi_change_15m or {}).get("latest_oi") if oi_change_15m else None)
+    oi_snap_1h = _format_oi_notional_billions((oi_change_1h or {}).get("latest_oi") if oi_change_1h else None)
     oi_emoji_15m = "🔥" if oi_15m_chg > 0 else "❄️"
     oi_emoji_1h = "🔥" if oi_1h_chg > 0 else "❄️"
-    lines.append("🎰 *合約持倉（場內槓桿）*")
-    if oi_val_15m > 0:
-        lines.append(f"• 15m 快照：`${oi_val_15m:.2f}B` {oi_emoji_15m} `{oi_15m_chg:+.2f}%`")
-    lines.append(f"• 1H 趨勢：`${oi_val_1h:.2f}B` {oi_emoji_1h} `{oi_1h_chg:+.2f}%`")
+    lines.append("🎰 *合約持倉（場內槓桿 · 穩定幣保證金聚合）*")
+    lines.append(
+        f"• 短週期（{_cg_interval('15m')} K）：名目 {oi_snap_15m} {oi_emoji_15m} "
+        f"近根變化 `{oi_15m_chg:+.2f}%`（與上一根收盤 OI 比）"
+    )
+    lines.append(
+        f"• 較長週期（{_cg_interval('1h')} K）：名目 {oi_snap_1h} {oi_emoji_1h} "
+        f"變化 `{oi_1h_chg:+.2f}%`"
+    )
 
     # ── 機構資金區塊（Fear&Greed + BTC ETF + Coinbase溢價）──────────
     lines.append("")
@@ -1477,12 +1590,13 @@ def buying_power_monitor():
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"💡 *船長指令*：{advice}")
+    lines.append(f"📌 *儀表板摘要*：{advice}")
+    lines.append("_（僅為資金面參考，非下單指令；請自行判讀與控倉。）_")
 
     msg = "\n".join(lines)
     keyboard = {"inline_keyboard": [[{"text": "💰 查看資金流向圖表", "url": "https://www.coinglass.com/zh-TW/pro/futures/OpenInterest"}]]}
     send_telegram_message(msg, TG_THREAD_IDS.get("buying_power_monitor", 246), parse_mode="Markdown", reply_markup=keyboard)
-    logger.info(f"牛市燃料監控推播完成（燃料積分={fuel_score}/5）")
+    logger.info(f"牛市燃料監控推播完成（燃料積分={fuel_score}，顯示滿分={FUEL_DISPLAY_MAX}）")
 
 
 # 保留舊函數名稱以向後兼容
