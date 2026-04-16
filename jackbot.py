@@ -4290,6 +4290,23 @@ def compute_structural_sl_tp(
     return sl, tp1, tp2, one_r, sl_pct
 
 
+def _calc_tp1_r_ratio(entry: Optional[float], sl: Optional[float], tp1: Optional[float]) -> Optional[float]:
+    """用實際價位計算 TP1 風報比（R 值）；無效資料回傳 None。"""
+    try:
+        e = float(entry) if entry is not None else 0.0
+        s = float(sl) if sl is not None else 0.0
+        t = float(tp1) if tp1 is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    if e <= 0 or s <= 0 or t <= 0:
+        return None
+    risk = abs(e - s)
+    if risk <= 0:
+        return None
+    reward = abs(t - e)
+    return reward / risk
+
+
 def derive_limit_order_from_inputs(
     category: str,
     cur_price: Optional[float],
@@ -5752,6 +5769,13 @@ def build_report_message_tiered(
                 f"[SL/TP結構計算] 幣種: {sym_base}, 方向: {'多' if is_bull_sig else '空'}, "
                 f"進場: {_entry_price}, 結構SL: {sl} (距離 {sl_pct_val:.2f}%), TP1: {tp1}"
             )
+            _rr_real = _calc_tp1_r_ratio(_entry_price, sl, tp1)
+            if _rr_real is None or _rr_real < MIN_TP1_R_FOR_PUSH:
+                logger.info(
+                    f"[風報比硬閥] {sym_base}: 實際TP1風報比 {_rr_real if _rr_real is not None else 'N/A'}R < "
+                    f"{MIN_TP1_R_FOR_PUSH}R，略過"
+                )
+                continue
 
         # ══════════════════════════════════════════════════════════
         # 訊號版本 / 標籤 / 策略短評
@@ -6151,8 +6175,8 @@ def build_report_message_tiered(
         x["sl_price_str"]    = _fmt_price(sl)
         x["tp1_price_str"]   = _fmt_price(tp1)
         x["tp2_price_str"]   = _fmt_price(tp2)
-        x["r_tp1"]           = _r1
-        x["r_tp2"]           = _r2
+        x["r_tp1"]           = round(_calc_tp1_r_ratio(_entry_price, sl, tp1) or 0.0, 3)
+        x["r_tp2"]           = round(_calc_tp1_r_ratio(_entry_price, sl, tp2) or 0.0, 3)
         x["sl_source"]       = (
             f"結構防守 min/max(2H,EMA20,VWAP)+保底{MIN_SL_PERCENT*100:.1f}% "
             f"(TP1={TP1_R_MULTIPLIER}R)"
@@ -6425,7 +6449,9 @@ def build_report_message_tiered(
                 x["tp1_label"] = tp1_label
                 x["tp1_real_str"] = tp1_real_str
                 x["tp1_real_note"] = tp1_real_note
-                x["r_tp1"] = r_tp1
+                _entry_for_rr = x.get("current_price")
+                _rr_real = _calc_tp1_r_ratio(_entry_for_rr, sl_val, tp1_val)
+                x["r_tp1"] = round(_rr_real, 3) if _rr_real is not None else r_tp1
                 # 推導 SL 來源（用於止損通知訊息精準描述）
                 _is_long_for_sl = is_bull
                 _fp_sup_stored = x.get("fp_support")
@@ -6459,8 +6485,11 @@ def build_report_message_tiered(
                 x["tp2_price_str"] = tp2_val
                 x["r_tp2"] = r_tp2
                 # 風報比過低不推播：止盈 < 門檻 R 代表賠率差，寧可少出手保勝率
-                if r_tp1 is not None and r_tp1 < MIN_TP1_R_FOR_PUSH:
-                    logger.info(f"狙擊鏡跳過 {sym}: 止盈 風報比 {r_tp1}R < {MIN_TP1_R_FOR_PUSH}R，不推播")
+                if _rr_real is None or _rr_real < MIN_TP1_R_FOR_PUSH:
+                    logger.info(
+                        f"狙擊鏡跳過 {sym}: 實際TP1風報比 {_rr_real if _rr_real is not None else 'N/A'}R < "
+                        f"{MIN_TP1_R_FOR_PUSH}R，不推播"
+                    )
                     continue
 
                 had_any_in_sub = True
