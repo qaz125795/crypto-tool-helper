@@ -564,7 +564,8 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
                 "Content-Type": "application/json",
             }
             dc_payload = {
-                "content": _convert_text_for_discord(text),
+                "content": _discord_content_with_mentions(text, thread_id),
+                "allowed_mentions": {"parse": ["everyone"]},
             }
             components = _convert_reply_markup_to_discord_components(reply_markup)
             if components:
@@ -634,7 +635,8 @@ def send_telegram_photo(
                 "Authorization": f"Bot {DC_TOKEN}",
             }
             dc_payload = {
-                "content": _convert_text_for_discord(caption or ""),
+                "content": _discord_content_with_mentions(caption or "", thread_id),
+                "allowed_mentions": {"parse": ["everyone"]},
             }
             components = _convert_reply_markup_to_discord_components(reply_markup)
             if components:
@@ -673,6 +675,26 @@ def _resolve_dc_channel_id(thread_id: int) -> Optional[int]:
     except Exception:
         return None
     return None
+
+
+def _resolve_thread_key_by_id(thread_id: int) -> Optional[str]:
+    """由 Telegram thread_id 反查功能鍵名（如 position_change/economic_data/hyperliquid）。"""
+    try:
+        for key, tg_tid in TG_THREAD_IDS.items():
+            if int(tg_tid) == int(thread_id):
+                return str(key)
+    except Exception:
+        return None
+    return None
+
+
+def _discord_content_with_mentions(text: str, thread_id: int) -> str:
+    """特定主題在 Discord 自動加 @everyone。"""
+    base = _convert_text_for_discord(text)
+    key = _resolve_thread_key_by_id(thread_id) or ""
+    if key in {"position_change", "economic_data", "hyperliquid"}:
+        return f"@everyone\n{base}".strip()
+    return base
 
 
 def _convert_text_for_discord(text: str) -> str:

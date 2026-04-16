@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -60,6 +61,62 @@ WHALE_PROFILES: Dict[str, Dict[str, str]] = {
         "cons": "錢包眾多且策略複雜，單一地址不代表完整持倉意圖。",
     },
 }
+
+
+def _normalize_addr(addr: str) -> str:
+    s = str(addr or "").strip().lower()
+    if s.startswith("0x") and len(s) == 42:
+        return s
+    return ""
+
+
+def _load_runtime_whale_profiles() -> Dict[str, Dict[str, str]]:
+    """
+    允許透過環境變數擴充追蹤地址：
+    - WHALE_EXTRA_WALLETS_JSON: {"0x...":{"name":"...","confidence":"..."}, ...}
+    - WHALE_EXTRA_WALLETS: 0xabc...,0xdef...
+    """
+    profiles: Dict[str, Dict[str, str]] = copy.deepcopy(WHALE_PROFILES)
+
+    raw_json = os.getenv("WHALE_EXTRA_WALLETS_JSON", "").strip()
+    if raw_json:
+        try:
+            obj = json.loads(raw_json)
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    addr = _normalize_addr(str(k))
+                    if not addr:
+                        continue
+                    base = {
+                        "name": f"自定義巨鯨 {addr[:6]}...{addr[-4:]}",
+                        "confidence": "自定義",
+                        "intro": "使用者自定義加入的追蹤地址。",
+                        "pros": "可快速擴充觀察名單。",
+                        "cons": "需自行驗證地址歸屬與交易意圖。",
+                    }
+                    if isinstance(v, dict):
+                        for field in ("name", "confidence", "intro", "pros", "cons"):
+                            if str(v.get(field) or "").strip():
+                                base[field] = str(v.get(field)).strip()
+                    profiles[addr] = base
+        except Exception as e:
+            logger.warning("[WhaleTracker] WHALE_EXTRA_WALLETS_JSON 解析失敗: %s", e)
+
+    raw_csv = os.getenv("WHALE_EXTRA_WALLETS", "").strip()
+    if raw_csv:
+        for token in raw_csv.split(","):
+            addr = _normalize_addr(token)
+            if not addr or addr in profiles:
+                continue
+            profiles[addr] = {
+                "name": f"自定義巨鯨 {addr[:6]}...{addr[-4:]}",
+                "confidence": "自定義",
+                "intro": "使用者自定義加入的追蹤地址。",
+                "pros": "可快速擴充觀察名單。",
+                "cons": "需自行驗證地址歸屬與交易意圖。",
+            }
+
+    return profiles
 
 
 def _iso_now() -> str:
@@ -165,6 +222,7 @@ def _detect_hl_events(
     prev_positions: Dict[str, Dict[str, float]],
     now_positions: Dict[str, Dict[str, float]],
     sent_ids: set,
+    min_delta_usd: float,
 ) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     now_ts = _iso_now()
@@ -214,6 +272,78 @@ def _detect_hl_events(
                     "liq_price": old.get("liq_price"),
                 }
             )
+
+    # 既有持倉：加倉 / 減倉 / 反手
+    for coin, cur in now_positions.items():
+        if coin not in prev_positions:
+            continue
+        old = prev_positions.get(coin) or {}
+        try:
+            old_size = float(old.get("size") or 0.0)
+            cur_size = float(cur.get("size") or 0.0)
+            old_notional = float(old.get("notional") or 0.0)
+            cur_notional = float(cur.get("notional") or 0.0)
+        except Exception:
+            continue
+        if abs(old_size) < 1e-12 or abs(cur_size) < 1e-12:
+            continue
+
+        # 反手（多轉空 / 空轉多）
+        if old_size * cur_size < 0:
+            evt_id = f"hl_flip:{address}:{coin}:{round(old_size, 6)}:{round(cur_size, 6)}"
+            if evt_id not in sent_ids:
+                events.append(
+                    {
+                        "id": evt_id,
+                        "type": "hl_flip",
+                        "time": now_ts,
+                        "address": address,
+                        "profile": profile,
+                        "coin": coin,
+                        "old_side": "多單" if old_size > 0 else "空單",
+                        "new_side": "多單" if cur_size > 0 else "空單",
+                        "old_size": old_size,
+                        "new_size": cur_size,
+                        "old_notional": old_notional,
+                        "new_notional": cur_notional,
+                        "entry": cur.get("entry"),
+                        "leverage": cur.get("leverage"),
+                        "liq_price": cur.get("liq_price"),
+                    }
+                )
+            continue
+
+        # 同方向變化：加倉 / 減倉
+        delta_size = abs(cur_size) - abs(old_size)
+        delta_notional = abs(cur_notional - old_notional)
+        if delta_notional < max(0.0, min_delta_usd):
+            continue
+        if abs(delta_size) < 1e-9:
+            continue
+        evt_type = "hl_add" if delta_size > 0 else "hl_reduce"
+        evt_id = f"{evt_type}:{address}:{coin}:{round(old_size, 6)}:{round(cur_size, 6)}"
+        if evt_id in sent_ids:
+            continue
+        events.append(
+            {
+                "id": evt_id,
+                "type": evt_type,
+                "time": now_ts,
+                "address": address,
+                "profile": profile,
+                "coin": coin,
+                "side": "多單" if cur_size > 0 else "空單",
+                "old_size": old_size,
+                "new_size": cur_size,
+                "delta_size": delta_size,
+                "old_notional": old_notional,
+                "new_notional": cur_notional,
+                "delta_notional": delta_notional,
+                "entry": cur.get("entry"),
+                "leverage": cur.get("leverage"),
+                "liq_price": cur.get("liq_price"),
+            }
+        )
     return events
 
 
@@ -403,6 +533,24 @@ def _build_markdown_message(event: Dict[str, Any]) -> str:
             f"原名目價值：{_fmt_usd(float(event.get('notional') or 0))} | "
             f"參考均價：{float(event.get('entry') or 0):,.4f}"
         )
+    elif event["type"] == "hl_add":
+        action_line = f"➕ 合約加倉：`{event['coin']}` {event['side']}"
+        detail_line = (
+            f"增量：{_fmt_usd(float(event.get('delta_notional') or 0))} | "
+            f"倉位：{_fmt_usd(float(event.get('old_notional') or 0))} → {_fmt_usd(float(event.get('new_notional') or 0))}"
+        )
+    elif event["type"] == "hl_reduce":
+        action_line = f"➖ 合約減倉：`{event['coin']}` {event['side']}"
+        detail_line = (
+            f"減少：{_fmt_usd(float(event.get('delta_notional') or 0))} | "
+            f"倉位：{_fmt_usd(float(event.get('old_notional') or 0))} → {_fmt_usd(float(event.get('new_notional') or 0))}"
+        )
+    elif event["type"] == "hl_flip":
+        action_line = f"🔄 合約反手：`{event['coin']}` {event.get('old_side')} → {event.get('new_side')}"
+        detail_line = (
+            f"名目：{_fmt_usd(float(event.get('old_notional') or 0))} → {_fmt_usd(float(event.get('new_notional') or 0))} | "
+            f"均價：{float(event.get('entry') or 0):,.4f}"
+        )
     else:
         action_line = f"💸 大額現貨{event['direction']}：`{event['symbol']}`"
         detail_line = (
@@ -449,16 +597,27 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> List[str]:
 
     min_usd = _env_float("WHALE_SPOT_MIN_USD", 100000.0)
     lookback_sec = _env_int("WHALE_LOOKBACK_SECONDS", 1800)
+    min_hl_delta_usd = _env_float("WHALE_HL_MIN_DELTA_USD", 50000.0)
+    profiles = _load_runtime_whale_profiles()
 
     events: List[Dict[str, Any]] = []
     new_hl_state: Dict[str, Dict[str, Dict[str, float]]] = {}
+    summary_rows: List[str] = []
 
-    for addr, profile in WHALE_PROFILES.items():
+    for addr, profile in profiles.items():
         now_pos = _fetch_hl_positions(addr)
         prev_pos = old_hl.get(addr, {}) if isinstance(old_hl, dict) else {}
-        events.extend(_detect_hl_events(addr, profile, prev_pos, now_pos, sent_event_ids))
-        events.extend(_detect_spot_transfers(addr, profile, sent_transfer_ids, min_usd=min_usd, lookback_sec=lookback_sec))
+        hl_events = _detect_hl_events(addr, profile, prev_pos, now_pos, sent_event_ids, min_delta_usd=min_hl_delta_usd)
+        spot_events = _detect_spot_transfers(addr, profile, sent_transfer_ids, min_usd=min_usd, lookback_sec=lookback_sec)
+        events.extend(hl_events)
+        events.extend(spot_events)
+        summary_rows.append(
+            f"{profile.get('name','N/A')}: prev={len(prev_pos)} now={len(now_pos)} hl_evt={len(hl_events)} spot_evt={len(spot_events)}"
+        )
         new_hl_state[addr] = now_pos
+
+    for row in summary_rows:
+        logger.info("[WhaleTracker][摘要] %s", row)
 
     if not events:
         logger.info("[WhaleTracker] 本輪無新事件")
@@ -468,7 +627,7 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> List[str]:
 
     messages = [_build_markdown_message(e) for e in events]
     for e in events:
-        if e["type"] in ("hl_open", "hl_close"):
+        if e["type"] in ("hl_open", "hl_close", "hl_add", "hl_reduce", "hl_flip"):
             sent_event_ids.add(e["id"])
         else:
             sent_transfer_ids.add(e["id"])
