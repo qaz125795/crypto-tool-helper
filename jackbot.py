@@ -2439,24 +2439,37 @@ def extract_price_change_24h(coin: Dict) -> Optional[float]:
 
 
 def extract_oi_change_1h(coin: Dict) -> Optional[float]:
-    """提取 1H OI 變化%，優先讀 coins-markets 常見欄位。"""
-    for key in (
+    """提取 1H OI 變化%，優先讀扁平欄位；若無則讀 `_raw_cg`（coins-markets 解析後完整 payload）。"""
+    _OI_1H_KEYS = (
         "open_interest_change_percent_1h",
         "openInterestChangePercent1h",
         "oi_change_percent_1h",
         "oiChangePercent1h",
         "oiChange1h",
-    ):
-        v = coin.get(key)
-        if isinstance(v, (int, float)) and v == v:
-            return float(v)
-        if isinstance(v, str) and v.strip():
-            try:
-                p = float(v.strip())
-                if p == p:
-                    return p
-            except ValueError:
-                pass
+        "open_interest_change_1h",
+        "openInterestChange1h",
+    )
+
+    def _read_from(d: Dict) -> Optional[float]:
+        for key in _OI_1H_KEYS:
+            v = d.get(key)
+            if isinstance(v, (int, float)) and v == v:
+                return float(v)
+            if isinstance(v, str) and v.strip():
+                try:
+                    p = float(v.strip())
+                    if p == p:
+                        return p
+                except ValueError:
+                    pass
+        return None
+
+    hit = _read_from(coin)
+    if hit is not None:
+        return hit
+    raw = coin.get("_raw_cg")
+    if isinstance(raw, dict):
+        return _read_from(raw)
     return None
 
 
@@ -6835,7 +6848,7 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
         except (TypeError, ValueError):
             taker_ratio_15m = None
 
-        return {
+        out_d: Dict[str, Any] = {
             "symbol": sym,
             "coin": sym,
             "price_change_percent_15m": p15,   # 15m 漲跌幅（獨立欄位，供車已發動偵測用）
@@ -6847,6 +6860,12 @@ def fetch_coinglass_coins_markets() -> List[Dict]:
             "_taker_ratio_15m": taker_ratio_15m,
             "_raw_cg": item,
         }
+        # 1H OI 僅在原始 item 上；扁平化供 extract_oi_change_1h / Step1 大盤讀取
+        _oi1h_snap = extract_oi_change_1h(out_d)
+        if _oi1h_snap is not None:
+            out_d["oiChange1h"] = _oi1h_snap
+            out_d["open_interest_change_percent_1h"] = _oi1h_snap
+        return out_d
 
     def _fetch_one_coins_markets_page(sort_field: str = "", sort_type: str = "0",
                                        seen: Optional[set] = None) -> List[Dict]:
