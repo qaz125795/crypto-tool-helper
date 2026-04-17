@@ -534,6 +534,7 @@ def send_telegram_message(
     reply_markup: Optional[Dict] = None,
     *,
     mirror_discord: bool = True,
+    discord_force_everyone: bool = False,
 ) -> bool:
     """
     發送訊息到 Telegram（支援 Inline Keyboard 按鈕）。
@@ -542,6 +543,7 @@ def send_telegram_message(
     避免「TG 失敗但 DC 成功」時外層誤判為成功而跳過 TG 備援（例如 K 線 caption 失敗）。
 
     mirror_discord=False：僅發 TG（用於已嘗試過 sendPhoto 且 DC 已收到圖時的文字備援，避免 DC 重複洗版）。
+    discord_force_everyone=True：Discord 鏡像訊息前綴 @everyone（須頻道允許 Bot mention everyone）。
     """
     text = _append_risk_disclaimer(text)
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -591,7 +593,9 @@ def send_telegram_message(
                 "Content-Type": "application/json",
             }
             dc_payload = {
-                "content": _discord_content_with_mentions(text, thread_id),
+                "content": _discord_content_with_mentions(
+                    text, thread_id, force_everyone=discord_force_everyone
+                ),
                 "allowed_mentions": {"parse": ["everyone"]},
             }
             components = _convert_reply_markup_to_discord_components(reply_markup)
@@ -743,11 +747,13 @@ def _resolve_thread_key_by_id(thread_id: int) -> Optional[str]:
     return None
 
 
-def _discord_content_with_mentions(text: str, thread_id: int) -> str:
-    """特定主題在 Discord 自動加 @everyone。"""
+def _discord_content_with_mentions(
+    text: str, thread_id: int, *, force_everyone: bool = False
+) -> str:
+    """特定主題或呼叫端指定時，在 Discord 訊息前加 @everyone。"""
     base = _convert_text_for_discord(text)
     key = _resolve_thread_key_by_id(thread_id) or ""
-    if key in {"position_change", "economic_data"}:
+    if force_everyone or key in {"position_change", "economic_data"}:
         return f"@everyone\n{base}".strip()
     return base
 
@@ -1559,6 +1565,37 @@ def _format_oi_notional_billions(latest_oi: Optional[float]) -> str:
     return f"${x:.0f}"
 
 
+def _fuel_buying_power_dc_ping_everyone(
+    fuel_score: int,
+    headline: str,
+    smart_money: Optional[bool],
+    mcap_1h: float,
+    oi_1h_chg: float,
+    premium_boost: bool,
+) -> bool:
+    """
+    Discord 是否加 @everyone：須「中燃料以上」(>=4)，且出現偏買／偏空或風險的「特殊情境」，
+    避免一般盤整也一直全頻道提醒。
+    """
+    if fuel_score < 4:
+        return False
+    special_long = (
+        fuel_score >= 5
+        or smart_money is True
+        or premium_boost
+        or (mcap_1h > 0.04 and oi_1h_chg > 0.25)
+    )
+    special_short_or_risk = (
+        mcap_1h < -0.04
+        or (smart_money is False and oi_1h_chg > 1.0)
+        or any(
+            w in headline
+            for w in ("抽離", "過熱", "散戶槓桿", "清洗", "撤退")
+        )
+    )
+    return bool(special_long or special_short_or_risk)
+
+
 def buying_power_monitor():
     """【牛市燃料監控】場外穩定幣 + 場內 OI + 情緒／機構輔助指標（CoinGlass 為主）。"""
     logger.info("開始執行牛市燃料監控（CoinGlass 聚合 + 聰明錢拆分）...")
@@ -1619,49 +1656,53 @@ def buying_power_monitor():
     FUEL_DISPLAY_MAX = 10
     fuel_bar = _make_fuel_bar(min(fuel_score, FUEL_DISPLAY_MAX), max_score=FUEL_DISPLAY_MAX)
 
-    # 根據積分決定主標籤（7 分制）
+    # 根據積分決定主標籤（白話版，給社群一眼懂）
     if fuel_score >= 6:
-        headline = "🔥 強力做多環境"
-        advice = "聰明錢+資金+槓桿三重確認！全市場資金同步入場，主升段往往在此起爆。"
+        headline = "🔥 錢跟槓桿一起衝（偏香）"
+        advice = "該進的錢、該開的倉好像都來了，這種「全車發動」常常是一小段主升的燃料味；有賺記得分批。"
         bar_label = "燃料滿載"
     elif fuel_score >= 5:
-        headline = "🚀 火力全開（聰明錢主導）" if smart_money else "🚀 火力全開 (雙重利好)"
-        advice = "專業資金主導建倉（穩定幣OI擴張），跟隨機構方向偏多。" if smart_money else "資金 + 槓桿雙噴，回調就是買點！"
+        headline = "🚀 今天偏硬：錢跟槓桿都有在動" if not smart_money else "🚀 聰明錢有在買單的感覺"
+        advice = (
+            "機構那邊穩定幣 OI 有在長，跟著偏多通常比較不心累。"
+            if smart_money
+            else "場外＋場內一起加油，拉回很多人會當買點；別梭哈、部位自己拿捏。"
+        )
         bar_label = "高燃料"
     elif fuel_score >= 4:
-        headline = "💰 資金進場 (現貨買盤)"
-        advice = "場外資金流入，底部墊高，偏多操作。"
+        headline = "💰 有感：錢慢慢流進來"
+        advice = "還不是暴衝那種，但底下墊子變厚，做多有點底；想上車也別一次滿倉。"
         bar_label = "中燃料"
     elif fuel_score >= 2:
-        headline = "➡️ 震盪蓄力"
-        advice = "多看少動，等待方向確認再出手。"
+        headline = "➡️ 盤整味比較重"
+        advice = "方向還在裝死，先當吃瓜看戲，等大戶表態再跟也不遲。"
         bar_label = "低燃料"
     elif oi_1h_chg > 1.5 and smart_money is False:
-        headline = "⚠️ 散戶槓桿堆疊 (高波動預警)"
-        advice = "散戶幣本位OI激增，小心插針清洗。"
+        headline = "⚠️ 散戶槓桿堆太兇（小心被洗）"
+        advice = "幣本位 OI 衝很快，常常是插針前戲；多單別追太滿，空單也別覺得穩贏。"
         bar_label = "危險燃料"
     elif oi_1h_chg > 1.5:
-        headline = "⚠️ 槓桿過熱 (高波動預警)"
-        advice = "只有槓桿在堆，小心插針畫門。"
+        headline = "⚠️ 槓桿熱過頭（波動要來了）"
+        advice = "只有槓桿在嗨、現貨沒跟時，畫門機率變高，心臟小的先閃一邊。"
         bar_label = "危險燃料"
     elif mcap_1h < -0.05:
-        headline = "❄️ 資金抽離警報"
-        advice = "資金正在撤退！反彈請謹慎，空頭考慮加碼。"
+        headline = "❄️ 錢在撤退（偏冷）"
+        advice = "穩定幣池子在縮，反彈先當逃命波看；想空也要控一下，別當送分題。"
         bar_label = "無燃料"
     else:
-        headline = "➡️ 震盪蓄力"
-        advice = "多看少動，等待方向確認再出手。"
+        headline = "➡️ 盤整味比較重"
+        advice = "方向還在裝死，先當吃瓜看戲，等大戶表態再跟也不遲。"
         bar_label = "低燃料"
 
     lines = []
     lines.append("⛽ *【牛市燃料儀表板】*")
     lines.append(
         f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} (台灣) "
-        f"| 📡 *CoinGlass 聚合*（內含 15m／1H 等不同週期指標，非單一 15 分鐘排程）"
+        f"| 📡 CoinGlass 匯總（15 分、1 小時都有瞄，不是只看一根就下結論）"
     )
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append(f"*{headline}*")
-    lines.append(f"燃料計：`{fuel_bar}` {min(fuel_score, FUEL_DISPLAY_MAX)}/{FUEL_DISPLAY_MAX} ({bar_label})")
+    lines.append(f"燃料條：`{fuel_bar}` {min(fuel_score, FUEL_DISPLAY_MAX)}/{FUEL_DISPLAY_MAX}（{bar_label}）")
     lines.append("")
 
     # USDT 溢價標籤
@@ -1675,13 +1716,13 @@ def buying_power_monitor():
     lines.append("")
     mcap_val = (mcap_change.get("latest_mcap") or 0) / 1_000_000_000
     mcap_emoji = "📈" if mcap_1h > 0 else "📉"
-    lines.append("💵 *穩定幣（場外資金）*")
-    lines.append(f"• 總量：`${mcap_val:.2f}B`")
-    lines.append(f"• 1H 變動：{mcap_emoji} `{mcap_1h:+.3f}%`")
+    lines.append("💵 *場外：穩定幣池子（大概＝有多少彈藥在場邊）*")
+    lines.append(f"• 現在大概：`${mcap_val:.2f}B`")
+    lines.append(f"• 最近 1 小時：{mcap_emoji} `{mcap_1h:+.3f}%`（正的多半當好事看）")
 
     # 聰明錢 OI 拆分區塊
     lines.append("")
-    lines.append("🧠 *聰明錢 OI 分析*")
+    lines.append("🧠 *誰在開倉？（粗分機構 vs 散戶槓桿）*")
     if stable_chg is not None:
         _s_emoji = "🟢" if stable_chg > 0.1 else ("🔴" if stable_chg < -0.1 else "🟡")
         lines.append(f"• 穩定幣保證金(機構)：{_s_emoji} `{stable_chg:+.3f}%`")
@@ -1693,30 +1734,30 @@ def buying_power_monitor():
     else:
         lines.append("• 幣本位保證金：`暫無法拆分`（同上）")
     if smart_money is True:
-        lines.append("• 🎯 *聰明錢主導*：機構/職業交易者正在建倉（穩定幣>幣本位）")
+        lines.append("• 🎯 *偏機構味*：穩定幣保證金開倉比較兇（當「職業盤在買」參考）")
     elif smart_money is False:
-        lines.append("• ⚠️ *散戶槓桿主導*：幣本位OI擴張，投機氣氛濃厚，注意清洗")
+        lines.append("• ⚠️ *偏散戶槓桿*：幣本位那邊比較嗨，洗一下很正常，別太戀戰")
     else:
-        lines.append("• ❓ 拆分中性：兩邊變化接近或資料不足，請配合下方全網 OI%")
+        lines.append("• ❓ 兩邊差不多或資料糊掉，下面全網 OI% 自己對一下")
 
     lines.append("")
     oi_snap_15m = _format_oi_notional_billions((oi_change_15m or {}).get("latest_oi") if oi_change_15m else None)
     oi_snap_1h = _format_oi_notional_billions((oi_change_1h or {}).get("latest_oi") if oi_change_1h else None)
     oi_emoji_15m = "🔥" if oi_15m_chg > 0 else "❄️"
     oi_emoji_1h = "🔥" if oi_1h_chg > 0 else "❄️"
-    lines.append("🎰 *合約持倉（場內槓桿 · 穩定幣保證金聚合）*")
+    lines.append("🎰 *場內：合約 OI（大家槓桿堆多少）*")
     lines.append(
-        f"• 短週期（{_cg_interval('15m')} K）：名目 {oi_snap_15m} {oi_emoji_15m} "
-        f"近根變化 `{oi_15m_chg:+.2f}%`（與上一根收盤 OI 比）"
+        f"• 短一點（{_cg_interval('15m')}）：名目約 {oi_snap_15m} {oi_emoji_15m} "
+        f"這根跟前一根比 `{oi_15m_chg:+.2f}%`"
     )
     lines.append(
-        f"• 較長週期（{_cg_interval('1h')} K）：名目 {oi_snap_1h} {oi_emoji_1h} "
+        f"• 拉長看（{_cg_interval('1h')}）：名目約 {oi_snap_1h} {oi_emoji_1h} "
         f"變化 `{oi_1h_chg:+.2f}%`"
     )
 
     # ── 機構資金區塊（Fear&Greed + BTC ETF + Coinbase溢價）──────────
     lines.append("")
-    lines.append("🏦 *機構資金 & 市場情緒*")
+    lines.append("🏦 *情緒與美股那邊的錢（參考用）*")
     if fg_val is not None:
         lines.append(f"• 恐懼貪婪：{fg_data.get('emoji','❓')} `{fg_val}` {fg_data.get('label','')}")
     if etf_data.get("label"):
@@ -1726,16 +1767,27 @@ def buying_power_monitor():
     if cb_data.get("label"):
         lines.append(f"• {cb_data['label']}")
     if not any([fg_val, etf_data.get("label"), cb_data.get("label")]):
-        lines.append("• 機構指標暫無資料")
+        lines.append("• 這塊今天沒撈到資料，略過")
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"📌 *儀表板摘要*：{advice}")
-    lines.append("_（僅為資金面參考，非下單指令；請自行判讀與控倉。）_")
+    lines.append(f"📌 *一句人話*：{advice}")
+    lines.append("_就是給你看錢跟槓桿在幹嘛，不是一串單；自己斟酌部位，賺了請喝手搖。_")
 
     msg = "\n".join(lines)
-    keyboard = {"inline_keyboard": [[{"text": "💰 查看資金流向圖表", "url": "https://www.coinglass.com/zh-TW/pro/futures/OpenInterest"}]]}
-    send_telegram_message(msg, TG_THREAD_IDS.get("buying_power_monitor", 246), parse_mode="Markdown", reply_markup=keyboard)
+    keyboard = {"inline_keyboard": [[{"text": "💰 去 CoinGlass 看圖", "url": "https://www.coinglass.com/zh-TW/pro/futures/OpenInterest"}]]}
+    _dc_ping = _fuel_buying_power_dc_ping_everyone(
+        fuel_score, headline, smart_money, mcap_1h, oi_1h_chg, premium_boost
+    )
+    send_telegram_message(
+        msg,
+        TG_THREAD_IDS.get("buying_power_monitor", 246),
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+        discord_force_everyone=_dc_ping,
+    )
+    if _dc_ping:
+        logger.info("[牛市燃料] Discord 鏡像已帶 @everyone（中燃料以上且特殊買／空或風險情境）")
     logger.info(f"牛市燃料監控推播完成（燃料積分={fuel_score}，顯示滿分={FUEL_DISPLAY_MAX}）")
 
 
