@@ -3,7 +3,7 @@
 """
 大佬錢包動向追蹤（Hyperliquid + Etherscan）
 - 追蹤指定地址的 HL 合約開/平/加減倉（預設門檻偏寬鬆，易先有訊號）
-- 追蹤鏈上現貨大額轉帳（預設約 ≥3 萬 USD 等值，見 WHALE_SPOT_MIN_USD）
+- 追蹤鏈上現貨大額轉帳（預設約 ≥8 萬 USD 等值，見 WHALE_SPOT_MIN_USD）
 - 產出 Markdown 訊息，由 jackbot 既有 TG/DC 發送流程送出
 """
 
@@ -740,11 +740,11 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> List[str]:
     event_cooldowns = state.get("event_cooldowns") or {}
 
     # 預設偏寬鬆（先求「看得到訊號」）；要減少雜訊可用環境變數拉高門檻
-    min_usd = _env_float("WHALE_SPOT_MIN_USD", 30000.0)
+    min_usd = _env_float("WHALE_SPOT_MIN_USD", 80000.0)
     lookback_sec = _env_int("WHALE_LOOKBACK_SECONDS", 7200)
-    min_hl_delta_usd = _env_float("WHALE_HL_MIN_DELTA_USD", 12000.0)
-    noise_cooldown_sec = _env_int("WHALE_EVENT_COOLDOWN_SECONDS", 7200)
-    max_msgs_per_run = max(1, _env_int("WHALE_MAX_MESSAGES_PER_RUN", 4))
+    min_hl_delta_usd = _env_float("WHALE_HL_MIN_DELTA_USD", 30000.0)
+    noise_cooldown_sec = _env_int("WHALE_EVENT_COOLDOWN_SECONDS", 10800)
+    max_msgs_per_run = max(1, _env_int("WHALE_MAX_MESSAGES_PER_RUN", 2))
     profiles = _load_runtime_whale_profiles()
 
     es_key_ok = bool(os.getenv("ETHERSCAN_API_KEY", "").strip())

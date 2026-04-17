@@ -43,6 +43,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# sendPhoto 最近一次 TG 失敗原因（供外層決定是否做文字備援，避免雙發）
+_LAST_TG_PHOTO_FAILURE_REASON = ""
+
 # ==================== 配置設定 ====================
 # 一律從環境變量讀取，避免在程式碼中硬編 API 金鑰等敏感資訊
 
@@ -643,6 +646,8 @@ def send_telegram_photo(
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
+    global _LAST_TG_PHOTO_FAILURE_REASON
+    _LAST_TG_PHOTO_FAILURE_REASON = ""
     tg_ok = False
     try:
         with open(photo_path, "rb") as f:
@@ -654,10 +659,13 @@ def send_telegram_photo(
                 logger.info("Telegram 圖片發送成功")
                 tg_ok = True
             else:
+                _LAST_TG_PHOTO_FAILURE_REASON = str(result.get("description") or result)
                 logger.error(f"Telegram sendPhoto API 錯誤: {result}")
         else:
+            _LAST_TG_PHOTO_FAILURE_REASON = f"HTTP {resp.status_code}: {resp.text[:240]}"
             logger.error(f"Telegram sendPhoto HTTP 錯誤: {resp.status_code} - {resp.text}")
     except Exception as e:
+        _LAST_TG_PHOTO_FAILURE_REASON = str(e)
         logger.error(f"發送 Telegram 圖片失敗: {str(e)}")
 
     if not tg_ok and mirror_discord:
@@ -4269,7 +4277,7 @@ SNIPER_ANCHOR_VOL_BASELINE_BARS = int(max(3, round(_env_float("SNIPER_ANCHOR_VOL
 TP1_EXIT_RATIO = 0.50
 TP2_EXIT_RATIO = 0.50
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
-MIN_SIGNAL_PUSH_SCORE = 68          # Classic 80%：降低綜合分數門檻，避免高品質訊號被過濾掉
+MIN_SIGNAL_PUSH_SCORE = 72          # 略提高門檻，減少邊緣雜訊（可再調整）
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
 MAX_ESTIMATED_HOLD_HOURS = _env_float("SNIPER_MAX_HOLD_HOURS", 8.0)
 MIN_1H_MOMENTUM_PCT = _env_float("SNIPER_MIN_1H_MOMENTUM_PCT", 1.0)  # 低於此視為慢盤
@@ -4832,6 +4840,13 @@ def _check_manipulation_risk(
 def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
     """
     MTF 四層訊號分類器（嚴格版 v3 — 寧缺勿濫）
+
+    【與「反人性／掃損摸頭摸底」敘事的對照（設計意圖，非逐根 K 狀態機）】
+    - 上漲段多平後再空開、或空平後再空開：以 1H 分類 + 短週期反向（pullback／tier2）與
+      `detect_trap_setup` 的 15m 三步（空平→多平→空開 等）共同近似「出貨／掃空損／摸頭」。
+    - 下跌段多平後再多開、或空平後再多開：以 1H bear 陣營 + 短週期 short_cover／long_open
+      與陷阱三步（多平→空平→多開）近似「掃多損／摸底／獲利回補後再攻」。
+    本模組以「多時區 OI×價格共振 + 衰竭反轉 + 籌碼陷阱」量化上述直覺；無法保證與主觀盤感逐句等同。
 
     四象限籌碼狀態定義：
       🟢 long_open:   OI↑ + Price↑ → 多方建倉
@@ -5985,6 +6000,17 @@ def build_report_message_tiered(
         if _grade == "B":
             continue
 
+        # Tier2 觀察名單雜訊較多：僅在籌碼陷阱至少 2/3 步或完整偵測時才推播
+        _sv_early = str(x.get("signal_version") or "")
+        if _sv_early == "tier2":
+            _trap_steps = int(x.get("_bull_trap_steps") or 0)
+            _trap_full = bool(x.get("_bull_trap_detected"))
+            if not _trap_full and _trap_steps < 2:
+                logger.info(
+                    f"[持倉過濾] {sym_base}: Tier2 且籌碼陷阱未達 2/3 步，略過推播"
+                )
+                continue
+
         # 曾推 S/A 順勢「空」後，時窗內不再推 R「多」（摸底）；反之亦然（摸頭 vs 順勢多）
         if _grade == "R":
             _cur_d = "多" if is_bull_sig else "空"
@@ -6264,7 +6290,15 @@ def build_report_message_tiered(
         _tactic_txt, _tactic_emo = _tactic_from_zone(_zone_now, is_bull_sig, _grade, category, x.get("priceChange24h"))
         _regime_txt, _regime_emo = _regime_from_grade_zone(_grade, _zone_now)
 
-        msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
+        _anch_st_title = max(0, min(3, int(x.get("_anchor_fit_stars") or 0)))
+        _anchor_title_suffix = (
+            f" · ⭐*錨定{_anch_st_title}星（已計入綜合分）*"
+            if _anch_st_title >= 1
+            else ""
+        )
+        msg_lines.append(
+            f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}{_anchor_title_suffix}"
+        )
         msg_lines.append(f"{_tactic_emo} *戰術：* {_tactic_txt}")
         msg_lines.append(f"{_regime_emo} *盤型：* {_regime_txt}")
         msg_lines.append(_grade_brief)
@@ -6311,6 +6345,12 @@ def build_report_message_tiered(
             _anch_fit_stars = 0
         _anch_fit_stars = max(0, min(3, _anch_fit_stars))
         _anchor_hint_disp = str(x.get("_anchor_sizing_hint") or "").strip()
+        if _anch_fit_stars >= 1:
+            msg_lines.append(
+                f"🔔 *錨定加分（醒目）*：`{_anch_fit_stars}` 星 — 現價貼近本波發動加權成本，"
+                "風報比與倉位力度判讀較可靠（詳見下方均價區）。"
+            )
+            msg_lines.append("")
 
         _entry_now_txt = _fmt_price(_entry_price) if _entry_price is not None else "N/A"
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
@@ -9036,21 +9076,37 @@ def fetch_position_change():
                         if ok:
                             sent_cnt += 1
                         else:
-                            # caption 可能超長/格式衝突：退回文字推播，確保內容不變
-                            send_telegram_message(
-                                caption_txt,
-                                TG_THREAD_IDS['position_change'],
-                                parse_mode="Markdown",
-                                mirror_discord=False,
+                            # 只在「可判定的格式/長度錯誤」才做 TG 文字備援，避免網路逾時造成 TG 圖+文雙發
+                            _fr = (_LAST_TG_PHOTO_FAILURE_REASON or "").lower()
+                            _fallback_safe = any(
+                                k in _fr for k in (
+                                    "can't parse entities",
+                                    "caption is too long",
+                                    "message caption is too long",
+                                    "text is too long",
+                                    "bad request",
+                                )
                             )
+                            if _fallback_safe:
+                                send_telegram_message(
+                                    caption_txt,
+                                    TG_THREAD_IDS['position_change'],
+                                    parse_mode="Markdown",
+                                    mirror_discord=False,
+                                )
+                            else:
+                                logger.warning(
+                                    f"[K線卡片TG備援略過] {sym_b}: 非確定性失敗（{_LAST_TG_PHOTO_FAILURE_REASON}），"
+                                    "為避免 TG 雙發，不做文字補發"
+                                )
                     except Exception as e:
                         logger.warning(f"[K線卡片渲染/推送失敗] {sym_b}: {e}；改推文字")
-                    send_telegram_message(
-                        caption_txt,
-                        TG_THREAD_IDS['position_change'],
-                        parse_mode="Markdown",
-                        mirror_discord=False,
-                    )
+                        send_telegram_message(
+                            caption_txt,
+                            TG_THREAD_IDS['position_change'],
+                            parse_mode="Markdown",
+                            mirror_discord=False,
+                        )
                 else:
                     logger.warning(
                         f"[K線卡片跳過] {sym_b}: fetch_ohlc_5m 回傳不足 "
@@ -9276,6 +9332,57 @@ def filter_important_data(data_array: List[Dict], min_importance: int = 2) -> Li
             filtered.append(item)
     
     return filtered
+
+
+def is_headline_macro_calendar_push(item: Dict) -> bool:
+    """
+    即時推播用：API 常把 importance=3 標很寬，這裡再收斂到「市場定價錨」級事件。
+    - ≥4：一律推
+    - =3：須符合關鍵字（利率／就業／物價／央行決策等）
+    """
+    imp = int(item.get("importance_level") or item.get("importance") or 0)
+    if imp < 3:
+        return False
+    if imp >= 4:
+        return True
+    name = str(item.get("calendar_name") or item.get("name") or item.get("title") or "")
+    blob = name
+    u = blob.upper()
+    keys = (
+        "非農", "NFP", "NON-FARM", "就業人數", "失業率",
+        "CPI", "PPI", "物價", "PCE", "通膨", "通脹",
+        "GDP",
+        "FOMC", "聯邦基金", "利率決議", "INTEREST RATE", "FED", " POWELL", "鮑威爾", "記者會",
+        "ISM", "PMI",
+        "零售銷售", "RETAIL SALES",
+        "初請", "JOBLESS", "JOLTS", "ADP",
+        "褐皮書", "BEIGE BOOK",
+        "ECB", "BOE", "BOJ", "央行", "升息", "降息", "殖利率", "TREASURY", "債券拍賣",
+    )
+    for k in keys:
+        if k in u or k in blob:
+            return True
+    return False
+
+
+def get_why_macro_matters_plain(data: Dict) -> str:
+    """白話一句：這類數據通常影響哪一層、為什麼市場會動。"""
+    name = str(data.get("calendar_name") or data.get("name") or data.get("title") or "")
+    blob = (name + " " + str(data.get("country_name") or data.get("country") or "")).upper()
+    pairs = (
+        (("CPI", "PPI", "PCE", "物價", "通膨", "通脹"), "物價／通膨數據會改寫市場對「未來利率」的預期；利率預期一動，股債匯與風險資產（含加密）的資金成本與估值錨就跟著重定價。"),
+        (("非農", "NFP", "就業", "失業", "JOBLESS", "JOLTS", "ADP"), "就業是景氣溫度計；強就業常支撐「利率偏高更久」的敘事，對高風險資產的流動性偏好通常偏壓抑，反之亦然。"),
+        (("GDP",), "GDP 描述整體需求強弱；偏弱時市場容易往「寬鬆／衰退交易」靠，波動與避險情緒常升溫。"),
+        (("零售", "RETAIL SALES",), "消費占需求很大塊；零售意外走強或走弱，會牽動「軟著陸 vs 衰退」劇本，短線風險偏好常跟著擺盪。"),
+        (("FOMC", "利率", "聯邦基金", "INTEREST RATE", "Fed", "鮑威爾", "Powell", "ECB", "BOE", "BOJ", "央行"), "央行利率路徑是全局定價之母：一點點預期落差，就足以讓美元、公債殖利率與風險資產同步重估。"),
+        (("ISM", "PMI",), "PMI／ISM 偏景氣領先指標；擴張或萎縮的意外，常直接打在「景氣循環交易」上，波動常放大。"),
+        (("GDP平減", "DEFLATOR",), "平減指數也帶物價成分，市場會拿來交叉驗證通膨黏性。"),
+    )
+    for keys, text in pairs:
+        for k in keys:
+            if k in blob or k in name:
+                return text
+    return "這類日程多半牽動「利率預期、景氣預期、美元與避險情緒」其中至少一項；加密沒有獨立於宏觀的定價，所以短線常跟著風險資產一起反應。"
 
 
 def filter_today_events(data_array: List[Dict], min_importance: int = 4) -> List[Dict]:
@@ -9556,6 +9663,8 @@ def format_economic_data_message(data: Dict) -> str:
     lines.append(f"{importance_badge}")
     if effect_text and effect_text != '待觀察':
         lines.append(f"{effect_emoji} 市場影響：{effect_text}")
+    _why_plain = get_why_macro_matters_plain(data)
+    lines.append(f"🧭 *白話為什麼重要*：{_why_plain}")
     lines.append("")
     
     # 補充說明
@@ -9698,12 +9807,15 @@ def fetch_and_push_economic_data():
         
         logger.info(f"總共獲取 {len(all_data)} 條數據（經濟數據: {len(economic_data)}, 財經事件: {len(financial_events)}, 央行活動: {len(central_bank)}）")
         
-        # 只過濾極高重要性數據（>= 3），高重要性（>= 2 且 < 3）不推播
-        important_data = filter_important_data(all_data, min_importance=3)
-        logger.info(f"過濾後的極高重要性數據: {len(important_data)} 條")
+        # 先取 importance≥3，再以關鍵字收斂（避免 API 標級過寬導致次要事件狂推）
+        important_data = [
+            x for x in filter_important_data(all_data, min_importance=3)
+            if is_headline_macro_calendar_push(x)
+        ]
+        logger.info(f"過濾後的宏觀頭條級數據: {len(important_data)} 條")
         
         if not important_data:
-            logger.info("沒有符合條件的極高重要性數據")
+            logger.info("沒有符合條件的宏觀頭條級數據（importance 或關鍵字未達標）")
             return
         
         # 按發布時間排序（優先推送即將發布的）
