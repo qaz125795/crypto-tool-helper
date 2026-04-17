@@ -49,22 +49,24 @@ class Config:
     MIN_RR_RATIO: float = 2.0        # 最少 1:2
     RISK_PERCENT_PER_TRADE: float = 1.0
 
-    # 突破強度：收盤需超過箱體實體邊至少「此倍數 × ATR」，過濾毛刺假突破
-    MIN_BREAKOUT_ATR_MULT: float = 0.12
+    # 突破強度：收盤需超過箱體實體邊至少「此倍數 × ATR」，過濾毛刺假突破（寧缺勿濫）
+    MIN_BREAKOUT_ATR_MULT: float = 0.20
 
     # 濾網（偏勝率：流動主力時段 + 美元方向 + 波動/動能）
     USE_SESSION_FILTER: bool = True   # 僅倫敦～紐約活躍時段（UTC）
-    SESSION_START_UTC: int = 7       # 倫敦開盤前後
-    SESSION_END_UTC: int = 22        # 紐約午後前
+    SESSION_START_UTC: int = 8        # 略避倫敦開盤首小時雜訊
+    SESSION_END_UTC: int = 21        # 避開紐約尾盤流動轉薄
     USE_VOLATILITY_FILTER: bool = True
-    VOLATILITY_ATR_PERCENT_MIN: float = 0.00125  # ATR/Close 略提高，盤整少做
+    VOLATILITY_ATR_PERCENT_MIN: float = 0.00155  # ATR/Close 提高，盤整假突破少做
     USE_DXY_FILTER: bool = True      # 與 DXY 短期走勢負相關才出單
-    DXY_LOOKBACK: int = 5
+    DXY_LOOKBACK: int = 7            # 稍長視窗，減少單根噪音
+    # DXY 相對變動門檻：|收盤變化|/最新價 須達此比例才視為「有效」美元强弱（0=維持舊行為）
+    DXY_MIN_REL_MOVE: float = 0.0001  # 約 0.01%，過小視同橫盤不過濾
 
     # RSI：避免極端追高殺低
     USE_RSI_FILTER: bool = True
-    RSI_LONG_MAX: float = 66.0      # 多單：RSI 不高於此（預設 14 週期）
-    RSI_SHORT_MIN: float = 34.0     # 空單：RSI 不低於此
+    RSI_LONG_MAX: float = 62.0      # 多單：收緊，減少過熱追多
+    RSI_SHORT_MIN: float = 38.0     # 空單：收緊，減少過冷追空
 
     # SMA40 / SMA100 排列：順勢突破（多：快線在上；空：快線在下）
     USE_MA_STACK_FILTER: bool = True
@@ -75,4 +77,33 @@ class Config:
 
 
 def get_config() -> Config:
-    return Config()
+    """支援以環境變數覆寫（便於測試）：GOLD_MIN_BREAKOUT_ATR_MULT、GOLD_VOLATILITY_ATR_PERCENT_MIN 等。"""
+    c = Config()
+
+    def _ef(name: str, cur: float) -> float:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return cur
+        try:
+            return float(raw)
+        except ValueError:
+            return cur
+
+    def _ei(name: str, cur: int) -> int:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return cur
+        try:
+            return int(raw)
+        except ValueError:
+            return cur
+
+    c.MIN_BREAKOUT_ATR_MULT = _ef("GOLD_MIN_BREAKOUT_ATR_MULT", c.MIN_BREAKOUT_ATR_MULT)
+    c.VOLATILITY_ATR_PERCENT_MIN = _ef("GOLD_VOLATILITY_ATR_PERCENT_MIN", c.VOLATILITY_ATR_PERCENT_MIN)
+    c.DXY_MIN_REL_MOVE = _ef("GOLD_DXY_MIN_REL_MOVE", c.DXY_MIN_REL_MOVE)
+    c.DXY_LOOKBACK = _ei("GOLD_DXY_LOOKBACK", c.DXY_LOOKBACK)
+    c.RSI_LONG_MAX = _ef("GOLD_RSI_LONG_MAX", c.RSI_LONG_MAX)
+    c.RSI_SHORT_MIN = _ef("GOLD_RSI_SHORT_MIN", c.RSI_SHORT_MIN)
+    c.SESSION_START_UTC = _ei("GOLD_SESSION_START_UTC", c.SESSION_START_UTC)
+    c.SESSION_END_UTC = _ei("GOLD_SESSION_END_UTC", c.SESSION_END_UTC)
+    return c

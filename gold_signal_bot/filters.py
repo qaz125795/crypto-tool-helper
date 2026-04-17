@@ -65,9 +65,11 @@ def dxy_aligned(
     df_gold: pd.DataFrame,
     df_dxy: pd.DataFrame,
     lookback: int = 5,
+    min_rel_move: float = 0.0,
 ) -> bool:
     """
     黃金與 DXY 負相關濾網：做多黃金時 DXY 弱勢(短期下跌)，做空時 DXY 強勢(短期上漲)。
+    min_rel_move > 0 時，要求 |ΔDXY|/DXY 達一定比例，避免橫盤微幅波動誤判為「方向一致」。
     若 DXY 數據缺失則放行。
     """
     if df_dxy is None or df_dxy.empty or len(df_dxy) < lookback:
@@ -83,9 +85,18 @@ def dxy_aligned(
             return True
         # 短期趨勢：最近收盤 vs 前收
         trend = float(recent.iloc[-1]) - float(recent.iloc[0])
+        last_px = float(recent.iloc[-1])
+        if last_px <= 0:
+            return True
+        rel = trend / last_px
+        eps = max(float(min_rel_move), 0.0)
         if direction == "long":
-            return trend <= 0  # DXY 下跌利於黃金多
-        return trend >= 0  # DXY 上漲利於黃金空
+            if eps <= 0:
+                return trend <= 0
+            return rel <= -eps
+        if eps <= 0:
+            return trend >= 0
+        return rel >= eps
     except Exception as e:
         logger.warning("dxy_aligned check failed: %s", e)
         return True
@@ -119,7 +130,13 @@ def apply_filters(
             return False, "RSI 處於極端區，跳過追高/追低"
 
     if config.USE_DXY_FILTER and df_dxy is not None and not df_dxy.empty:
-        if not dxy_aligned(direction, df_1h, df_dxy, config.DXY_LOOKBACK):
-            return False, "DXY 與黃金方向未負相關"
+        if not dxy_aligned(
+            direction,
+            df_1h,
+            df_dxy,
+            config.DXY_LOOKBACK,
+            float(getattr(config, "DXY_MIN_REL_MOVE", 0.0)),
+        ):
+            return False, "DXY 與黃金方向未負相關（或美元變化過小）"
 
     return True, "通過"
