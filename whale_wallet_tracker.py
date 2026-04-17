@@ -151,11 +151,21 @@ def _env_int(name: str, default: int) -> int:
 
 def _load_state(path: Path) -> Dict[str, Any]:
     if not path.exists():
-        return {"hl_positions": {}, "sent_event_ids": [], "sent_transfer_ids": []}
+        return {
+            "hl_positions": {},
+            "sent_event_ids": [],
+            "sent_transfer_ids": [],
+            "event_cooldowns": {},
+        }
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return {"hl_positions": {}, "sent_event_ids": [], "sent_transfer_ids": []}
+        return {
+            "hl_positions": {},
+            "sent_event_ids": [],
+            "sent_transfer_ids": [],
+            "event_cooldowns": {},
+        }
 
 
 def _save_state(path: Path, state: Dict[str, Any]) -> None:
@@ -608,6 +618,48 @@ def _log_event_one_liner(event: Dict[str, Any]) -> str:
     return f"{name} | type={t}"
 
 
+def _event_value_usd(event: Dict[str, Any]) -> float:
+    """事件美元量級（排序/限流用）。"""
+    for k in ("delta_notional", "new_notional", "notional", "usd"):
+        try:
+            v = float(event.get(k) or 0.0)
+            if v > 0:
+                return v
+        except Exception:
+            continue
+    return 0.0
+
+
+def _event_priority(event: Dict[str, Any]) -> int:
+    """事件重要度：開平反手 > 大額轉帳 > 加減倉。"""
+    t = str(event.get("type") or "")
+    if t in ("hl_flip", "hl_open", "hl_close"):
+        return 3
+    if t == "spot_transfer":
+        return 2
+    if t in ("hl_add", "hl_reduce"):
+        return 1
+    return 0
+
+
+def _event_cooldown_key(event: Dict[str, Any]) -> str:
+    """
+    噪音事件冷卻 key（避免同地址同幣短時間重複刷屏）。
+    只套用在 hl_add/hl_reduce/spot_transfer；開平反手不冷卻。
+    """
+    t = str(event.get("type") or "")
+    addr = str(event.get("address") or "").lower()
+    if t in ("hl_add", "hl_reduce"):
+        coin = str(event.get("coin") or "").upper()
+        side = str(event.get("side") or "")
+        return f"{t}:{addr}:{coin}:{side}"
+    if t == "spot_transfer":
+        symbol = str(event.get("symbol") or "").upper()
+        direction = str(event.get("direction") or "")
+        return f"{t}:{addr}:{symbol}:{direction}"
+    return ""
+
+
 def _build_markdown_message(event: Dict[str, Any]) -> str:
     p = event["profile"]
     title = "🐋 *鏈上巨鯨動向*"
@@ -685,19 +737,25 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> List[str]:
     sent_event_ids = set(state.get("sent_event_ids") or [])
     sent_transfer_ids = set(state.get("sent_transfer_ids") or [])
     old_hl = state.get("hl_positions") or {}
+    event_cooldowns = state.get("event_cooldowns") or {}
 
     # 預設偏寬鬆（先求「看得到訊號」）；要減少雜訊可用環境變數拉高門檻
     min_usd = _env_float("WHALE_SPOT_MIN_USD", 30000.0)
     lookback_sec = _env_int("WHALE_LOOKBACK_SECONDS", 7200)
     min_hl_delta_usd = _env_float("WHALE_HL_MIN_DELTA_USD", 12000.0)
+    noise_cooldown_sec = _env_int("WHALE_EVENT_COOLDOWN_SECONDS", 7200)
+    max_msgs_per_run = max(1, _env_int("WHALE_MAX_MESSAGES_PER_RUN", 4))
     profiles = _load_runtime_whale_profiles()
 
     es_key_ok = bool(os.getenv("ETHERSCAN_API_KEY", "").strip())
     logger.info(
-        "[WhaleTracker] 推播門檻: HL加減倉名目變化≥%s | 現貨單筆≥%s 且回溯≤%ss | Etherscan=%s",
+        "[WhaleTracker] 推播門檻: HL加減倉名目變化≥%s | 現貨單筆≥%s 且回溯≤%ss | "
+        "噪音事件冷卻=%ss | 單輪最多=%s 則 | Etherscan=%s",
         _fmt_usd(min_hl_delta_usd),
         _fmt_usd(min_usd),
         lookback_sec,
+        noise_cooldown_sec,
+        max_msgs_per_run,
         "已設定" if es_key_ok else "未設定（spot 永遠 0）",
     )
     if not es_key_ok:
@@ -743,12 +801,60 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> List[str]:
     for row in summary_rows:
         logger.info("[WhaleTracker][摘要] %s", row)
 
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    # 冷卻字典先做 GC，避免 state 長大
+    event_cooldowns = {
+        str(k): int(v)
+        for k, v in event_cooldowns.items()
+        if isinstance(v, (int, float)) and int(v) > now_ts
+    }
+    events_after_cd: List[Dict[str, Any]] = []
+    dropped_by_cooldown = 0
+    for e in events:
+        t = str(e.get("type") or "")
+        # 重要事件不做冷卻，確保第一時間能看到
+        if t in ("hl_open", "hl_close", "hl_flip"):
+            events_after_cd.append(e)
+            continue
+        ck = _event_cooldown_key(e)
+        if not ck:
+            events_after_cd.append(e)
+            continue
+        expire_ts = int(event_cooldowns.get(ck) or 0)
+        if expire_ts > now_ts:
+            dropped_by_cooldown += 1
+            continue
+        event_cooldowns[ck] = now_ts + noise_cooldown_sec
+        events_after_cd.append(e)
+
+    if dropped_by_cooldown > 0:
+        logger.info(
+            "[WhaleTracker] 本輪有 %s 則噪音事件在冷卻窗內，已抑制推播",
+            dropped_by_cooldown,
+        )
+
+    # 單輪上限：重要度 + 金額排序，先推最關鍵
+    events_ranked = sorted(
+        events_after_cd,
+        key=lambda x: (_event_priority(x), _event_value_usd(x)),
+        reverse=True,
+    )
+    dropped_by_cap = max(0, len(events_ranked) - max_msgs_per_run)
+    if dropped_by_cap > 0:
+        logger.info(
+            "[WhaleTracker] 本輪事件過多，已依重要度截斷 %s 則（上限=%s）",
+            dropped_by_cap,
+            max_msgs_per_run,
+        )
+    events = events_ranked[:max_msgs_per_run]
+
     if not events:
         logger.info(
             "[WhaleTracker] 本輪無新事件（常見原因：與上次快照相比無開平／反手；"
-            "同向加減倉但名目變化未達門檻；或現貨無符合金額+時間窗／未設 Etherscan）"
+            "同向加減倉但名目變化未達門檻；事件被冷卻/上限抑制；或現貨無符合金額+時間窗／未設 Etherscan）"
         )
         state["hl_positions"] = new_hl_state
+        state["event_cooldowns"] = event_cooldowns
         _save_state(state_path, state)
         return []
 
@@ -763,6 +869,7 @@ def run_whale_wallet_tracker_once(data_dir: Path) -> List[str]:
             sent_transfer_ids.add(e["id"])
 
     state["hl_positions"] = new_hl_state
+    state["event_cooldowns"] = event_cooldowns
     state["sent_event_ids"] = list(sent_event_ids)[-3000:]
     state["sent_transfer_ids"] = list(sent_transfer_ids)[-3000:]
     _save_state(state_path, state)

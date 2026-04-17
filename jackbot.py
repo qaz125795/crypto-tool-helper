@@ -524,8 +524,22 @@ def _append_risk_disclaimer(text: str) -> str:
     return f"{base}\n\n{RISK_DISCLAIMER_LINE}"
 
 
-def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown", reply_markup: Optional[Dict] = None) -> bool:
-    """發送訊息到 Telegram（支援 Inline Keyboard 按鈕）"""
+def send_telegram_message(
+    text: str,
+    thread_id: int,
+    parse_mode: str = "Markdown",
+    reply_markup: Optional[Dict] = None,
+    *,
+    mirror_discord: bool = True,
+) -> bool:
+    """
+    發送訊息到 Telegram（支援 Inline Keyboard 按鈕）。
+
+    回傳值僅代表 **Telegram 是否成功**（與舊版 `tg_ok or dc_ok` 不同），
+    避免「TG 失敗但 DC 成功」時外層誤判為成功而跳過 TG 備援（例如 K 線 caption 失敗）。
+
+    mirror_discord=False：僅發 TG（用於已嘗試過 sendPhoto 且 DC 已收到圖時的文字備援，避免 DC 重複洗版）。
+    """
     text = _append_risk_disclaimer(text)
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
@@ -554,9 +568,18 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
     except Exception as e:
         logger.error(f"發送 Telegram 訊息失敗: {str(e)}")
 
-    # Discord 同步推播（不影響 Telegram 結果）
+    if not tg_ok and mirror_discord:
+        logger.warning(
+            "[推播] Telegram 文字發送失敗，仍將嘗試 Discord 鏡像（若已設定 DC）"
+        )
+
+    # Discord 同步推播（不影響 Telegram 回傳值）
     dc_ok = False
     try:
+        if not mirror_discord:
+            if not tg_ok:
+                logger.info("[推播] 已跳過 Discord 鏡像（mirror_discord=False，通常為圖片失敗後的純文字備援）")
+            return tg_ok
         dc_channel_id = _resolve_dc_channel_id(thread_id)
         if DC_TOKEN and dc_channel_id:
             dc_url = f"https://discord.com/api/v10/channels/{dc_channel_id}/messages"
@@ -585,7 +608,13 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
     except Exception as e:
         logger.error(f"發送 Discord 訊息失敗: {str(e)}")
 
-    return tg_ok or dc_ok
+    if not tg_ok and dc_ok:
+        logger.warning(
+            "[推播不一致] Telegram 失敗但 Discord 已成功：請檢查 TG 的 Markdown/caption 長度、"
+            "thread_id、或 Bot 權限；外層應以「回傳 False」觸發備援。"
+        )
+
+    return tg_ok
 
 
 def send_telegram_photo(
@@ -594,8 +623,13 @@ def send_telegram_photo(
     thread_id: int,
     parse_mode: str = "Markdown",
     reply_markup: Optional[Dict] = None,
+    *,
+    mirror_discord: bool = True,
 ) -> bool:
-    """發送圖片到 Telegram（sendPhoto；caption 可能超出上限時，外層可改用 sendMessage 備援）"""
+    """發送圖片到 Telegram（sendPhoto；caption 可能超出上限時，外層可改用 sendMessage 備援）
+
+    回傳值僅代表 **Telegram sendPhoto 是否成功**。mirror_discord=False 時不發 DC。
+    """
     caption = _append_risk_disclaimer(caption)
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
     payload = {
@@ -626,9 +660,16 @@ def send_telegram_photo(
     except Exception as e:
         logger.error(f"發送 Telegram 圖片失敗: {str(e)}")
 
-    # Discord 同步推播（圖片 + 文字；不影響 Telegram 結果）
+    if not tg_ok and mirror_discord:
+        logger.warning("[推播] Telegram 圖片發送失敗，仍將嘗試 Discord 鏡像（若已設定 DC）")
+
+    # Discord 同步推播（不影響 Telegram 回傳值）
     dc_ok = False
     try:
+        if not mirror_discord:
+            if not tg_ok:
+                logger.info("[推播] 已跳過 Discord 圖片鏡像（mirror_discord=False）")
+            return tg_ok
         dc_channel_id = _resolve_dc_channel_id(thread_id)
         if DC_TOKEN and dc_channel_id:
             dc_url = f"https://discord.com/api/v10/channels/{dc_channel_id}/messages"
@@ -661,7 +702,12 @@ def send_telegram_photo(
     except Exception as e:
         logger.error(f"發送 Discord 圖片失敗: {str(e)}")
 
-    return tg_ok or dc_ok
+    if not tg_ok and dc_ok:
+        logger.warning(
+            "[推播不一致] Telegram 圖片失敗但 Discord 已成功：外層應以回傳 False 觸發純文字備援至 TG"
+        )
+
+    return tg_ok
 
 
 def _resolve_dc_channel_id(thread_id: int) -> Optional[int]:
@@ -6093,51 +6139,6 @@ def build_report_message_tiered(
 
         _strategy_comment = _gen_comment(category, _sig_version, _sig_subtype, _reversal_hint, rsi_val)
 
-        def _reader_help_lines() -> List[str]:
-            """新手友善：釐清附圖時間框 vs 訊號邏輯，減少「圖在底部卻寫摸頭」的誤解。"""
-            _lines: List[str] = [
-                "*📖 怎麼讀這筆？*",
-                "• 附圖是 _5 分鐘、近數小時_，方便看進場附近的價與 OI；"
-                "訊號仍以 **1H 四象限 + 多週期共振** 為主，兩者時間尺度不同很正常。",
-            ]
-            if _sig_version == "exhaustion_reversal":
-                if is_bull_sig:
-                    _lines.append(
-                        "• 「恐慌衰竭」：抓的是急跌後 _空單回補／承接_ 的轉折嘗試，"
-                        "不是保證立刻 V 轉，請小倉並看止損。"
-                    )
-                else:
-                    _lines.append(
-                        "• 「狂熱衰竭」：抓的是急漲後 _多單獲利了結_ 的轉弱嘗試，"
-                        "進場常在回落區，短圖上不一定還在最高點。"
-                    )
-                return _lines
-            if category == "long_close":
-                _lines.append(
-                    "• 「摸頭做空」：抓的是 _前面漲勢轉弱、多單撤退_；"
-                    "進場常在 **回落／整理帶**，5m 上看起來像「已跌一段」是常態，不是標題寫錯。"
-                )
-            elif category in ("short_close", "short_cover"):
-                _lines.append(
-                    "• 「摸底做多」：抓的是 _前面跌勢轉弱、空單回補_；"
-                    "進場常在 **反彈／整理帶**，5m 上看起來像「已漲一段」也正常。"
-                )
-            elif category == "long_open":
-                _lines.append(
-                    "• 「追漲做多」：跟 **新多進場／順勢**；短線已噴一段時請更緊守止損。"
-                )
-            elif category == "short_open":
-                _lines.append(
-                    "• 「追跌做空」：跟 **新空進場／順勢**；短線已殺一段時留意死貓彈。"
-                )
-            else:
-                _lines.append("• 方向以標題多／空為準，請搭配止損一體思考。")
-            if _sig_version == "tier2" and _sig_subtype == "30m衝突":
-                _lines.append(
-                    "• 「30m 衝突」：快慢週期不同步，屬 **觀察／小倉**；假突破多，務必嚴守止損。"
-                )
-            return _lines
-
         def _build_oi_plain_lines() -> Tuple[str, str]:
             """白話解釋 OI 在這筆訊號代表的資金行為與風險。"""
             def _f(v):
@@ -6435,23 +6436,14 @@ def build_report_message_tiered(
                 _rv = None
             if _rv is not None:
                 if _rv >= 72:
-                    _rsi_txt = (
-                        f"短線熱度偏高（RSI 約 {_rv:.0f}）——像「跑太久需要喘口氣」，"
-                        "追價要自己多留意。"
-                    )
+                    _rsi_txt = f"RSI {_rv:.0f} 偏高，追價留意。"
                 elif _rv <= 28:
-                    _rsi_txt = (
-                        f"短線賣壓釋放較多（RSI 約 {_rv:.0f}）——像「跌深喘口氣」，"
-                        "是否反轉仍要看價格結構。"
-                    )
+                    _rsi_txt = f"RSI {_rv:.0f} 偏低，是否反轉仍看結構。"
                 else:
-                    _rsi_txt = f"短線情緒指標 RSI 約 {_rv:.0f}——不算極端冷熱。"
+                    _rsi_txt = f"RSI {_rv:.0f}，中性區。"
                 msg_lines.append(_rsi_txt)
 
-        msg_lines.append("*💡 策略說明*")
-        msg_lines.append(_strategy_comment)
-        for _help_ln in _reader_help_lines():
-            msg_lines.append(_help_ln)
+        msg_lines.append(f"*💡* {_strategy_comment}")
 
         # ─ 風險與環境（有觸發才顯示）─
         if _motion_note:
@@ -9049,19 +9041,22 @@ def fetch_position_change():
                                 caption_txt,
                                 TG_THREAD_IDS['position_change'],
                                 parse_mode="Markdown",
+                                mirror_discord=False,
                             )
                     except Exception as e:
                         logger.warning(f"[K線卡片渲染/推送失敗] {sym_b}: {e}；改推文字")
-                        send_telegram_message(
-                            caption_txt,
-                            TG_THREAD_IDS['position_change'],
-                            parse_mode="Markdown",
-                        )
+                    send_telegram_message(
+                        caption_txt,
+                        TG_THREAD_IDS['position_change'],
+                        parse_mode="Markdown",
+                        mirror_discord=False,
+                    )
                 else:
                     logger.warning(
                         f"[K線卡片跳過] {sym_b}: fetch_ohlc_5m 回傳不足 "
                         f"(ohlc_len={len(ohlc) if ohlc else None})；改推文字"
                     )
+                    # 此路徑未嘗試過 sendPhoto，DC 尚未收到內容 → 維持預設同步 DC
                     send_telegram_message(
                         caption_txt,
                         TG_THREAD_IDS['position_change'],
