@@ -4277,7 +4277,38 @@ SNIPER_ANCHOR_VOL_BASELINE_BARS = int(max(3, round(_env_float("SNIPER_ANCHOR_VOL
 TP1_EXIT_RATIO = 0.50
 TP2_EXIT_RATIO = 0.50
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
-MIN_SIGNAL_PUSH_SCORE = 72          # 略提高門檻，減少邊緣雜訊（可再調整）
+MIN_SIGNAL_PUSH_SCORE = 74          # 平衡：過高會配合「車已發動」壓分誤殺陡坡結構單
+# 逆勢 R 級預設略嚴；但「機構成交 + 平倉浪摸頭/摸底」可用 MIN_R_STRUCT_TOUCH_SCORE 放行（見下方）
+MIN_R_SIGNAL_PUSH_SCORE = 78
+# 非「完美回踩」的潛在訊號（signal_version=potential 且非 pullback）須達此分
+MIN_WEAK_POTENTIAL_PUSH_SCORE = 78
+# 1H 多平/空回補 + MTF≥3 + 成交值達標：逆勢 R 允許的最低分（避免 SIREN 類被 76 線砍成 B）
+MIN_R_STRUCT_TOUCH_SCORE = 64
+SNIPER_STRUCT_MEGA_LIQUIDITY_USD = float(
+    _env_float("SNIPER_STRUCT_MEGA_LIQUIDITY_USD", 80_000_000)
+)  # 預設 8000 萬 USD 等值成交額
+
+
+def _sniper_structural_cascade_touch(x: dict, is_bull_sig: bool) -> bool:
+    """1H 平倉浪摸頭/摸底敘事 + 多時框至少 3 框對齊（與日誌裡『部分共振・3框』一致）。"""
+    try:
+        mtf_al = int(x.get("mtf_aligned") or 0)
+    except (TypeError, ValueError):
+        mtf_al = 0
+    cat = str(x.get("category") or "")
+    if cat == "short_close":
+        cat = "short_cover"
+    touch_short = (not is_bull_sig) and cat == "long_close"
+    touch_long = is_bull_sig and cat in ("short_cover", "short_close")
+    return mtf_al >= 3 and (touch_short or touch_long)
+
+
+def _sniper_mega_liquidity_ok(x: dict) -> bool:
+    try:
+        vol_u = float(x.get("volume_usd") or x.get("_cg_volume_usd") or 0)
+    except (TypeError, ValueError):
+        vol_u = 0.0
+    return vol_u >= SNIPER_STRUCT_MEGA_LIQUIDITY_USD
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
 MAX_ESTIMATED_HOLD_HOURS = _env_float("SNIPER_MAX_HOLD_HOURS", 8.0)
 MIN_1H_MOMENTUM_PCT = _env_float("SNIPER_MIN_1H_MOMENTUM_PCT", 1.0)  # 低於此視為慢盤
@@ -5643,10 +5674,19 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     if _already_moving:
         score = min(score, 74)   # 車已發動：硬上限 74 分 = 最高 A 級
 
-    if score < MIN_SIGNAL_PUSH_SCORE:
+    # 逆勢摸頭/摸底 + 機構級成交：放寬「最低分」以免壓分後變 B（仍須 ≥ MIN_R_STRUCT_TOUCH_SCORE）
+    _min_floor = MIN_SIGNAL_PUSH_SCORE
+    if (
+        _counter_4h
+        and _sniper_structural_cascade_touch(x, is_bull_sig)
+        and _sniper_mega_liquidity_ok(x)
+    ):
+        _min_floor = min(_min_floor, MIN_R_STRUCT_TOUCH_SCORE)
+
+    if score < _min_floor:
         grade = "B"
         grade_badge = "🥈 *B 級*"
-        grade_desc = f"訊號不足（<{MIN_SIGNAL_PUSH_SCORE}分不推播）"
+        grade_desc = f"訊號不足（<{_min_floor}分不推播）"
         brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
         return grade, score, brief, _already_moving, _motion_note
 
@@ -6000,14 +6040,53 @@ def build_report_message_tiered(
         if _grade == "B":
             continue
 
-        # Tier2 觀察名單雜訊較多：僅在籌碼陷阱至少 2/3 步或完整偵測時才推播
+        try:
+            _grade_score_int = int(round(float(_grade_score)))
+        except (TypeError, ValueError):
+            _grade_score_int = 0
+
+        # 逆勢 R：預設須達 MIN_R；「平倉浪結構 + 機構成交」允許降至 MIN_R_STRUCT（仍排除極弱單）
+        if _grade == "R" and _grade_score_int < MIN_R_SIGNAL_PUSH_SCORE:
+            _r_struct_ok = (
+                _sniper_structural_cascade_touch(x, is_bull_sig)
+                and _sniper_mega_liquidity_ok(x)
+                and _grade_score_int >= MIN_R_STRUCT_TOUCH_SCORE
+            )
+            if not _r_struct_ok:
+                logger.info(
+                    f"[勝率過濾] {sym_base}: R 級綜合分 {_grade_score_int} < {MIN_R_SIGNAL_PUSH_SCORE}"
+                    "（且未符合結構+機構成交放行），略過推播"
+                )
+                continue
+
+        # 弱「潛在」訊號（非完美回踩）：須更高分才推，回踩型維持原門檻
         _sv_early = str(x.get("signal_version") or "")
+        _sub_early = str(x.get("signal_subtype") or "")
+        if (
+            _sv_early == "potential"
+            and _sub_early != "pullback"
+            and _grade_score_int < MIN_WEAK_POTENTIAL_PUSH_SCORE
+        ):
+            logger.info(
+                f"[勝率過濾] {sym_base}: 潛在訊號（非回踩）綜合分 {_grade_score_int} < "
+                f"{MIN_WEAK_POTENTIAL_PUSH_SCORE}，略過推播"
+            )
+            continue
+
+        # Tier2：原則上須陷阱步數；若僅因「費率壅擠」降級 + 平倉浪結構 + 機構成交 → 仍放行
         if _sv_early == "tier2":
             _trap_steps = int(x.get("_bull_trap_steps") or 0)
             _trap_full = bool(x.get("_bull_trap_detected"))
-            if not _trap_full and _trap_steps < 2:
+            _sub_t2 = str(x.get("signal_subtype") or "")
+            _tier2_fr_only = ("壅擠" in _sub_t2 or "擁擠" in _sub_t2) and "警示" in _sub_t2
+            _tier2_struct_fr = (
+                _tier2_fr_only
+                and _sniper_structural_cascade_touch(x, is_bull_sig)
+                and _sniper_mega_liquidity_ok(x)
+            )
+            if not _tier2_struct_fr and not _trap_full and _trap_steps < 2:
                 logger.info(
-                    f"[持倉過濾] {sym_base}: Tier2 且籌碼陷阱未達 2/3 步，略過推播"
+                    f"[持倉過濾] {sym_base}: Tier2 且籌碼陷阱未達 2/3 步（非費率降級+結構單），略過推播"
                 )
                 continue
 
@@ -12950,13 +13029,13 @@ def run_gold_signal():
     logger.info("[黃金訊號] 黃金 1h 數據 OK，共 %s 根 | 時間範圍: %s ~ %s",
                 n_rows, df_1h.index.min() if hasattr(df_1h.index, 'min') and len(df_1h) else "N/A", df_1h.index.max() if hasattr(df_1h.index, 'max') and len(df_1h) else "N/A")
 
-    # 狀態檔路徑：與 gold_signal_bot 同層，方便 repo 內放 gold_signal_bot/gold_signal_state/state.json
-    state_dir = cwd / "gold_signal_bot" / "gold_signal_state"
+    # 狀態檔與模組同目錄（勿用 cwd）：避免從別的工作目錄啟動時 TP/SL 追蹤分裂或遺失
+    state_dir = gold_bot_dir / "gold_signal_state"
     state_path = state_dir / "state.json"
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
-        state_path = cwd / "gold_signal_state.json"
+        state_path = gold_bot_dir / "gold_signal_state.json"
 
     def _load_gold_state():
         try:
