@@ -43,6 +43,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# sendPhoto 最近一次 TG 失敗原因（供外層決定是否做文字備援，避免雙發）
+_LAST_TG_PHOTO_FAILURE_REASON = ""
+
 # ==================== 配置設定 ====================
 # 一律從環境變量讀取，避免在程式碼中硬編 API 金鑰等敏感資訊
 
@@ -204,6 +207,7 @@ CG_EP = {
     "hl_position":           "/api/hyperliquid/position",                           # HL幣種持倉
     "hl_wallet_pos_dist":    "/api/hyperliquid/wallet/position-distribution",       # HL錢包持倉分布
     "hl_wallet_pnl_dist":    "/api/hyperliquid/wallet/pnl-distribution",            # HL錢包盈虧分布
+    "hl_global_ls_hist":     "/api/hyperliquid/global-long-short-account-ratio/history",  # HL 帳戶多空比歷史
 
     # ════════════════ CVD（舊路徑保留） ════════════════
     "cvd_history":           "/api/futures/cvd/history",
@@ -523,8 +527,24 @@ def _append_risk_disclaimer(text: str) -> str:
     return f"{base}\n\n{RISK_DISCLAIMER_LINE}"
 
 
-def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown", reply_markup: Optional[Dict] = None) -> bool:
-    """發送訊息到 Telegram（支援 Inline Keyboard 按鈕）"""
+def send_telegram_message(
+    text: str,
+    thread_id: int,
+    parse_mode: str = "Markdown",
+    reply_markup: Optional[Dict] = None,
+    *,
+    mirror_discord: bool = True,
+    discord_force_everyone: bool = False,
+) -> bool:
+    """
+    發送訊息到 Telegram（支援 Inline Keyboard 按鈕）。
+
+    回傳值僅代表 **Telegram 是否成功**（與舊版 `tg_ok or dc_ok` 不同），
+    避免「TG 失敗但 DC 成功」時外層誤判為成功而跳過 TG 備援（例如 K 線 caption 失敗）。
+
+    mirror_discord=False：僅發 TG（用於已嘗試過 sendPhoto 且 DC 已收到圖時的文字備援，避免 DC 重複洗版）。
+    discord_force_everyone=True：Discord 鏡像訊息前綴 @everyone（須頻道允許 Bot mention everyone）。
+    """
     text = _append_risk_disclaimer(text)
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
@@ -553,9 +573,18 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
     except Exception as e:
         logger.error(f"發送 Telegram 訊息失敗: {str(e)}")
 
-    # Discord 同步推播（不影響 Telegram 結果）
+    if not tg_ok and mirror_discord:
+        logger.warning(
+            "[推播] Telegram 文字發送失敗，仍將嘗試 Discord 鏡像（若已設定 DC）"
+        )
+
+    # Discord 同步推播（不影響 Telegram 回傳值）
     dc_ok = False
     try:
+        if not mirror_discord:
+            if not tg_ok:
+                logger.info("[推播] 已跳過 Discord 鏡像（mirror_discord=False，通常為圖片失敗後的純文字備援）")
+            return tg_ok
         dc_channel_id = _resolve_dc_channel_id(thread_id)
         if DC_TOKEN and dc_channel_id:
             dc_url = f"https://discord.com/api/v10/channels/{dc_channel_id}/messages"
@@ -564,7 +593,9 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
                 "Content-Type": "application/json",
             }
             dc_payload = {
-                "content": _discord_content_with_mentions(text, thread_id),
+                "content": _discord_content_with_mentions(
+                    text, thread_id, force_everyone=discord_force_everyone
+                ),
                 "allowed_mentions": {"parse": ["everyone"]},
             }
             components = _convert_reply_markup_to_discord_components(reply_markup)
@@ -584,7 +615,13 @@ def send_telegram_message(text: str, thread_id: int, parse_mode: str = "Markdown
     except Exception as e:
         logger.error(f"發送 Discord 訊息失敗: {str(e)}")
 
-    return tg_ok or dc_ok
+    if not tg_ok and dc_ok:
+        logger.warning(
+            "[推播不一致] Telegram 失敗但 Discord 已成功：請檢查 TG 的 Markdown/caption 長度、"
+            "thread_id、或 Bot 權限；外層應以「回傳 False」觸發備援。"
+        )
+
+    return tg_ok
 
 
 def send_telegram_photo(
@@ -593,8 +630,13 @@ def send_telegram_photo(
     thread_id: int,
     parse_mode: str = "Markdown",
     reply_markup: Optional[Dict] = None,
+    *,
+    mirror_discord: bool = True,
 ) -> bool:
-    """發送圖片到 Telegram（sendPhoto；caption 可能超出上限時，外層可改用 sendMessage 備援）"""
+    """發送圖片到 Telegram（sendPhoto；caption 可能超出上限時，外層可改用 sendMessage 備援）
+
+    回傳值僅代表 **Telegram sendPhoto 是否成功**。mirror_discord=False 時不發 DC。
+    """
     caption = _append_risk_disclaimer(caption)
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
     payload = {
@@ -608,6 +650,8 @@ def send_telegram_photo(
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
+    global _LAST_TG_PHOTO_FAILURE_REASON
+    _LAST_TG_PHOTO_FAILURE_REASON = ""
     tg_ok = False
     try:
         with open(photo_path, "rb") as f:
@@ -619,15 +663,25 @@ def send_telegram_photo(
                 logger.info("Telegram 圖片發送成功")
                 tg_ok = True
             else:
+                _LAST_TG_PHOTO_FAILURE_REASON = str(result.get("description") or result)
                 logger.error(f"Telegram sendPhoto API 錯誤: {result}")
         else:
+            _LAST_TG_PHOTO_FAILURE_REASON = f"HTTP {resp.status_code}: {resp.text[:240]}"
             logger.error(f"Telegram sendPhoto HTTP 錯誤: {resp.status_code} - {resp.text}")
     except Exception as e:
+        _LAST_TG_PHOTO_FAILURE_REASON = str(e)
         logger.error(f"發送 Telegram 圖片失敗: {str(e)}")
 
-    # Discord 同步推播（圖片 + 文字；不影響 Telegram 結果）
+    if not tg_ok and mirror_discord:
+        logger.warning("[推播] Telegram 圖片發送失敗，仍將嘗試 Discord 鏡像（若已設定 DC）")
+
+    # Discord 同步推播（不影響 Telegram 回傳值）
     dc_ok = False
     try:
+        if not mirror_discord:
+            if not tg_ok:
+                logger.info("[推播] 已跳過 Discord 圖片鏡像（mirror_discord=False）")
+            return tg_ok
         dc_channel_id = _resolve_dc_channel_id(thread_id)
         if DC_TOKEN and dc_channel_id:
             dc_url = f"https://discord.com/api/v10/channels/{dc_channel_id}/messages"
@@ -660,7 +714,12 @@ def send_telegram_photo(
     except Exception as e:
         logger.error(f"發送 Discord 圖片失敗: {str(e)}")
 
-    return tg_ok or dc_ok
+    if not tg_ok and dc_ok:
+        logger.warning(
+            "[推播不一致] Telegram 圖片失敗但 Discord 已成功：外層應以回傳 False 觸發純文字備援至 TG"
+        )
+
+    return tg_ok
 
 
 def _resolve_dc_channel_id(thread_id: int) -> Optional[int]:
@@ -688,11 +747,13 @@ def _resolve_thread_key_by_id(thread_id: int) -> Optional[str]:
     return None
 
 
-def _discord_content_with_mentions(text: str, thread_id: int) -> str:
-    """特定主題在 Discord 自動加 @everyone。"""
+def _discord_content_with_mentions(
+    text: str, thread_id: int, *, force_everyone: bool = False
+) -> str:
+    """特定主題或呼叫端指定時，在 Discord 訊息前加 @everyone。"""
     base = _convert_text_for_discord(text)
     key = _resolve_thread_key_by_id(thread_id) or ""
-    if key in {"position_change", "economic_data"}:
+    if force_everyone or key in {"position_change", "economic_data"}:
         return f"@everyone\n{base}".strip()
     return base
 
@@ -1504,6 +1565,37 @@ def _format_oi_notional_billions(latest_oi: Optional[float]) -> str:
     return f"${x:.0f}"
 
 
+def _fuel_buying_power_dc_ping_everyone(
+    fuel_score: int,
+    headline: str,
+    smart_money: Optional[bool],
+    mcap_1h: float,
+    oi_1h_chg: float,
+    premium_boost: bool,
+) -> bool:
+    """
+    Discord 是否加 @everyone：須「中燃料以上」(>=4)，且出現偏買／偏空或風險的「特殊情境」，
+    避免一般盤整也一直全頻道提醒。
+    """
+    if fuel_score < 4:
+        return False
+    special_long = (
+        fuel_score >= 5
+        or smart_money is True
+        or premium_boost
+        or (mcap_1h > 0.04 and oi_1h_chg > 0.25)
+    )
+    special_short_or_risk = (
+        mcap_1h < -0.04
+        or (smart_money is False and oi_1h_chg > 1.0)
+        or any(
+            w in headline
+            for w in ("抽離", "過熱", "散戶槓桿", "清洗", "撤退")
+        )
+    )
+    return bool(special_long or special_short_or_risk)
+
+
 def buying_power_monitor():
     """【牛市燃料監控】場外穩定幣 + 場內 OI + 情緒／機構輔助指標（CoinGlass 為主）。"""
     logger.info("開始執行牛市燃料監控（CoinGlass 聚合 + 聰明錢拆分）...")
@@ -1564,49 +1656,53 @@ def buying_power_monitor():
     FUEL_DISPLAY_MAX = 10
     fuel_bar = _make_fuel_bar(min(fuel_score, FUEL_DISPLAY_MAX), max_score=FUEL_DISPLAY_MAX)
 
-    # 根據積分決定主標籤（7 分制）
+    # 根據積分決定主標籤（白話版，給社群一眼懂）
     if fuel_score >= 6:
-        headline = "🔥 強力做多環境"
-        advice = "聰明錢+資金+槓桿三重確認！全市場資金同步入場，主升段往往在此起爆。"
+        headline = "🔥 錢跟槓桿一起衝（偏香）"
+        advice = "該進的錢、該開的倉好像都來了，這種「全車發動」常常是一小段主升的燃料味；有賺記得分批。"
         bar_label = "燃料滿載"
     elif fuel_score >= 5:
-        headline = "🚀 火力全開（聰明錢主導）" if smart_money else "🚀 火力全開 (雙重利好)"
-        advice = "專業資金主導建倉（穩定幣OI擴張），跟隨機構方向偏多。" if smart_money else "資金 + 槓桿雙噴，回調就是買點！"
+        headline = "🚀 今天偏硬：錢跟槓桿都有在動" if not smart_money else "🚀 聰明錢有在買單的感覺"
+        advice = (
+            "機構那邊穩定幣 OI 有在長，跟著偏多通常比較不心累。"
+            if smart_money
+            else "場外＋場內一起加油，拉回很多人會當買點；別梭哈、部位自己拿捏。"
+        )
         bar_label = "高燃料"
     elif fuel_score >= 4:
-        headline = "💰 資金進場 (現貨買盤)"
-        advice = "場外資金流入，底部墊高，偏多操作。"
+        headline = "💰 有感：錢慢慢流進來"
+        advice = "還不是暴衝那種，但底下墊子變厚，做多有點底；想上車也別一次滿倉。"
         bar_label = "中燃料"
     elif fuel_score >= 2:
-        headline = "➡️ 震盪蓄力"
-        advice = "多看少動，等待方向確認再出手。"
+        headline = "➡️ 盤整味比較重"
+        advice = "方向還在裝死，先當吃瓜看戲，等大戶表態再跟也不遲。"
         bar_label = "低燃料"
     elif oi_1h_chg > 1.5 and smart_money is False:
-        headline = "⚠️ 散戶槓桿堆疊 (高波動預警)"
-        advice = "散戶幣本位OI激增，小心插針清洗。"
+        headline = "⚠️ 散戶槓桿堆太兇（小心被洗）"
+        advice = "幣本位 OI 衝很快，常常是插針前戲；多單別追太滿，空單也別覺得穩贏。"
         bar_label = "危險燃料"
     elif oi_1h_chg > 1.5:
-        headline = "⚠️ 槓桿過熱 (高波動預警)"
-        advice = "只有槓桿在堆，小心插針畫門。"
+        headline = "⚠️ 槓桿熱過頭（波動要來了）"
+        advice = "只有槓桿在嗨、現貨沒跟時，畫門機率變高，心臟小的先閃一邊。"
         bar_label = "危險燃料"
     elif mcap_1h < -0.05:
-        headline = "❄️ 資金抽離警報"
-        advice = "資金正在撤退！反彈請謹慎，空頭考慮加碼。"
+        headline = "❄️ 錢在撤退（偏冷）"
+        advice = "穩定幣池子在縮，反彈先當逃命波看；想空也要控一下，別當送分題。"
         bar_label = "無燃料"
     else:
-        headline = "➡️ 震盪蓄力"
-        advice = "多看少動，等待方向確認再出手。"
+        headline = "➡️ 盤整味比較重"
+        advice = "方向還在裝死，先當吃瓜看戲，等大戶表態再跟也不遲。"
         bar_label = "低燃料"
 
     lines = []
     lines.append("⛽ *【牛市燃料儀表板】*")
     lines.append(
         f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} (台灣) "
-        f"| 📡 *CoinGlass 聚合*（內含 15m／1H 等不同週期指標，非單一 15 分鐘排程）"
+        f"| 📡 CoinGlass 匯總（15 分、1 小時都有瞄，不是只看一根就下結論）"
     )
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append(f"*{headline}*")
-    lines.append(f"燃料計：`{fuel_bar}` {min(fuel_score, FUEL_DISPLAY_MAX)}/{FUEL_DISPLAY_MAX} ({bar_label})")
+    lines.append(f"燃料條：`{fuel_bar}` {min(fuel_score, FUEL_DISPLAY_MAX)}/{FUEL_DISPLAY_MAX}（{bar_label}）")
     lines.append("")
 
     # USDT 溢價標籤
@@ -1620,13 +1716,13 @@ def buying_power_monitor():
     lines.append("")
     mcap_val = (mcap_change.get("latest_mcap") or 0) / 1_000_000_000
     mcap_emoji = "📈" if mcap_1h > 0 else "📉"
-    lines.append("💵 *穩定幣（場外資金）*")
-    lines.append(f"• 總量：`${mcap_val:.2f}B`")
-    lines.append(f"• 1H 變動：{mcap_emoji} `{mcap_1h:+.3f}%`")
+    lines.append("💵 *場外：穩定幣池子（大概＝有多少彈藥在場邊）*")
+    lines.append(f"• 現在大概：`${mcap_val:.2f}B`")
+    lines.append(f"• 最近 1 小時：{mcap_emoji} `{mcap_1h:+.3f}%`（正的多半當好事看）")
 
     # 聰明錢 OI 拆分區塊
     lines.append("")
-    lines.append("🧠 *聰明錢 OI 分析*")
+    lines.append("🧠 *誰在開倉？（粗分機構 vs 散戶槓桿）*")
     if stable_chg is not None:
         _s_emoji = "🟢" if stable_chg > 0.1 else ("🔴" if stable_chg < -0.1 else "🟡")
         lines.append(f"• 穩定幣保證金(機構)：{_s_emoji} `{stable_chg:+.3f}%`")
@@ -1638,30 +1734,30 @@ def buying_power_monitor():
     else:
         lines.append("• 幣本位保證金：`暫無法拆分`（同上）")
     if smart_money is True:
-        lines.append("• 🎯 *聰明錢主導*：機構/職業交易者正在建倉（穩定幣>幣本位）")
+        lines.append("• 🎯 *偏機構味*：穩定幣保證金開倉比較兇（當「職業盤在買」參考）")
     elif smart_money is False:
-        lines.append("• ⚠️ *散戶槓桿主導*：幣本位OI擴張，投機氣氛濃厚，注意清洗")
+        lines.append("• ⚠️ *偏散戶槓桿*：幣本位那邊比較嗨，洗一下很正常，別太戀戰")
     else:
-        lines.append("• ❓ 拆分中性：兩邊變化接近或資料不足，請配合下方全網 OI%")
+        lines.append("• ❓ 兩邊差不多或資料糊掉，下面全網 OI% 自己對一下")
 
     lines.append("")
     oi_snap_15m = _format_oi_notional_billions((oi_change_15m or {}).get("latest_oi") if oi_change_15m else None)
     oi_snap_1h = _format_oi_notional_billions((oi_change_1h or {}).get("latest_oi") if oi_change_1h else None)
     oi_emoji_15m = "🔥" if oi_15m_chg > 0 else "❄️"
     oi_emoji_1h = "🔥" if oi_1h_chg > 0 else "❄️"
-    lines.append("🎰 *合約持倉（場內槓桿 · 穩定幣保證金聚合）*")
+    lines.append("🎰 *場內：合約 OI（大家槓桿堆多少）*")
     lines.append(
-        f"• 短週期（{_cg_interval('15m')} K）：名目 {oi_snap_15m} {oi_emoji_15m} "
-        f"近根變化 `{oi_15m_chg:+.2f}%`（與上一根收盤 OI 比）"
+        f"• 短一點（{_cg_interval('15m')}）：名目約 {oi_snap_15m} {oi_emoji_15m} "
+        f"這根跟前一根比 `{oi_15m_chg:+.2f}%`"
     )
     lines.append(
-        f"• 較長週期（{_cg_interval('1h')} K）：名目 {oi_snap_1h} {oi_emoji_1h} "
+        f"• 拉長看（{_cg_interval('1h')}）：名目約 {oi_snap_1h} {oi_emoji_1h} "
         f"變化 `{oi_1h_chg:+.2f}%`"
     )
 
     # ── 機構資金區塊（Fear&Greed + BTC ETF + Coinbase溢價）──────────
     lines.append("")
-    lines.append("🏦 *機構資金 & 市場情緒*")
+    lines.append("🏦 *情緒與美股那邊的錢（參考用）*")
     if fg_val is not None:
         lines.append(f"• 恐懼貪婪：{fg_data.get('emoji','❓')} `{fg_val}` {fg_data.get('label','')}")
     if etf_data.get("label"):
@@ -1671,16 +1767,27 @@ def buying_power_monitor():
     if cb_data.get("label"):
         lines.append(f"• {cb_data['label']}")
     if not any([fg_val, etf_data.get("label"), cb_data.get("label")]):
-        lines.append("• 機構指標暫無資料")
+        lines.append("• 這塊今天沒撈到資料，略過")
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"📌 *儀表板摘要*：{advice}")
-    lines.append("_（僅為資金面參考，非下單指令；請自行判讀與控倉。）_")
+    lines.append(f"📌 *一句人話*：{advice}")
+    lines.append("_就是給你看錢跟槓桿在幹嘛，不是一串單；自己斟酌部位，賺了請喝手搖。_")
 
     msg = "\n".join(lines)
-    keyboard = {"inline_keyboard": [[{"text": "💰 查看資金流向圖表", "url": "https://www.coinglass.com/zh-TW/pro/futures/OpenInterest"}]]}
-    send_telegram_message(msg, TG_THREAD_IDS.get("buying_power_monitor", 246), parse_mode="Markdown", reply_markup=keyboard)
+    keyboard = {"inline_keyboard": [[{"text": "💰 去 CoinGlass 看圖", "url": "https://www.coinglass.com/zh-TW/pro/futures/OpenInterest"}]]}
+    _dc_ping = _fuel_buying_power_dc_ping_everyone(
+        fuel_score, headline, smart_money, mcap_1h, oi_1h_chg, premium_boost
+    )
+    send_telegram_message(
+        msg,
+        TG_THREAD_IDS.get("buying_power_monitor", 246),
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+        discord_force_everyone=_dc_ping,
+    )
+    if _dc_ping:
+        logger.info("[牛市燃料] Discord 鏡像已帶 @everyone（中燃料以上且特殊買／空或風險情境）")
     logger.info(f"牛市燃料監控推播完成（燃料積分={fuel_score}，顯示滿分={FUEL_DISPLAY_MAX}）")
 
 
@@ -4199,8 +4306,8 @@ def _env_float(name: str, default: float) -> float:
 
 
 SNIPER_FAST_MODE = os.getenv("SNIPER_FAST_MODE", "").strip().lower() in ("1", "true", "yes", "on")
-_default_tp1 = 0.6 if SNIPER_FAST_MODE else 1.0
-_default_tp2 = 1.6 if SNIPER_FAST_MODE else 2.0
+_default_tp1 = 1.2 if SNIPER_FAST_MODE else 1.5
+_default_tp2 = 2.4 if SNIPER_FAST_MODE else 3.0
 _default_min_sl = 0.008 if SNIPER_FAST_MODE else 0.015
 
 TP1_R_MULTIPLIER = max(1.0, _env_float("SNIPER_TP1_R", _default_tp1))   # TP1 至少 1R
@@ -4208,13 +4315,52 @@ TP2_R_MULTIPLIER = max(TP1_R_MULTIPLIER + 0.5, _env_float("SNIPER_TP2_R", _defau
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
 MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.0))
-MAX_MARKET_VWAP_GAP_PCT = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_PCT", 0.03)  # 與主力均價差 <=3% 才允許推播（以市價）
-MARKET_ENTRY_TIER1_PCT = _env_float("SNIPER_MARKET_ENTRY_TIER1_PCT", 0.008)    # 理想市價區（0.8%）
-MARKET_ENTRY_TIER2_PCT = _env_float("SNIPER_MARKET_ENTRY_TIER2_PCT", 0.015)    # 可接受市價區（1.5%，超過不追）
-TP1_EXIT_RATIO = 0.70
-TP2_EXIT_RATIO = 0.30
+MAX_MARKET_VWAP_GAP_ATR = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_ATR", 1.5)    # 防追價：與 VWAP 偏離最多 1.5*ATR
+MARKET_ENTRY_ZONE_ATR = _env_float("SNIPER_ENTRY_ZONE_ATR", 0.2)                 # 市價可進場區：Entry ± 0.2*ATR
+MIN_SL_ATR_MULTIPLIER = _env_float("SNIPER_MIN_SL_ATR", 1.0)                     # 最低 SL 距離：至少 1.0*ATR
+PENDING_PUMP_ATR_MULTIPLIER = _env_float("SNIPER_PENDING_PUMP_ATR", 0.5)         # 已噴發待辦池判定
+PENDING_TTL_HOURS = _env_float("SNIPER_PENDING_TTL_HOURS", 4.0)                  # 待辦訊號最長存活
+# 批次版 Anchored VWAP（GitHub Actions 友好）：5m 爆量 + 相鄰 OI 階梯變化 → 錨點起算加權均價
+SNIPER_ANCHOR_ENABLED = os.getenv("SNIPER_ANCHOR_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+SNIPER_ANCHOR_VOL_SPIKE_RATIO = _env_float("SNIPER_ANCHOR_VOL_SPIKE_RATIO", 3.0)  # 當根 volume ≥ 基準×（如 3=300%）
+SNIPER_ANCHOR_OI_STEP_PCT = _env_float("SNIPER_ANCHOR_OI_STEP_PCT", 5.0)          # 相鄰兩根 OI 累計值 |Δ|/prev ≥ %
+SNIPER_ANCHOR_LOOKBACK_BARS = int(max(24, round(_env_float("SNIPER_ANCHOR_LOOKBACK_BARS", 72))))   # 5m 根數（預設 6h）
+SNIPER_ANCHOR_VOL_BASELINE_BARS = int(max(3, round(_env_float("SNIPER_ANCHOR_VOL_BASELINE_BARS", 10))))
+TP1_EXIT_RATIO = 0.50
+TP2_EXIT_RATIO = 0.50
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
-MIN_SIGNAL_PUSH_SCORE = 68          # Classic 80%：降低綜合分數門檻，避免高品質訊號被過濾掉
+MIN_SIGNAL_PUSH_SCORE = 74          # 平衡：過高會配合「車已發動」壓分誤殺陡坡結構單
+# 逆勢 R 級預設略嚴；但「機構成交 + 平倉浪摸頭/摸底」可用 MIN_R_STRUCT_TOUCH_SCORE 放行（見下方）
+MIN_R_SIGNAL_PUSH_SCORE = 78
+# 非「完美回踩」的潛在訊號（signal_version=potential 且非 pullback）須達此分
+MIN_WEAK_POTENTIAL_PUSH_SCORE = 78
+# 1H 多平/空回補 + MTF≥3 + 成交值達標：逆勢 R 允許的最低分（避免 SIREN 類被 76 線砍成 B）
+MIN_R_STRUCT_TOUCH_SCORE = 64
+SNIPER_STRUCT_MEGA_LIQUIDITY_USD = float(
+    _env_float("SNIPER_STRUCT_MEGA_LIQUIDITY_USD", 80_000_000)
+)  # 預設 8000 萬 USD 等值成交額
+
+
+def _sniper_structural_cascade_touch(x: dict, is_bull_sig: bool) -> bool:
+    """1H 平倉浪摸頭/摸底敘事 + 多時框至少 3 框對齊（與日誌裡『部分共振・3框』一致）。"""
+    try:
+        mtf_al = int(x.get("mtf_aligned") or 0)
+    except (TypeError, ValueError):
+        mtf_al = 0
+    cat = str(x.get("category") or "")
+    if cat == "short_close":
+        cat = "short_cover"
+    touch_short = (not is_bull_sig) and cat == "long_close"
+    touch_long = is_bull_sig and cat in ("short_cover", "short_close")
+    return mtf_al >= 3 and (touch_short or touch_long)
+
+
+def _sniper_mega_liquidity_ok(x: dict) -> bool:
+    try:
+        vol_u = float(x.get("volume_usd") or x.get("_cg_volume_usd") or 0)
+    except (TypeError, ValueError):
+        vol_u = 0.0
+    return vol_u >= SNIPER_STRUCT_MEGA_LIQUIDITY_USD
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
 MAX_ESTIMATED_HOLD_HOURS = _env_float("SNIPER_MAX_HOLD_HOURS", 8.0)
 MIN_1H_MOMENTUM_PCT = _env_float("SNIPER_MIN_1H_MOMENTUM_PCT", 1.0)  # 低於此視為慢盤
@@ -4227,6 +4373,7 @@ def compute_structural_sl_tp(
     ema20: Optional[float],
     recent_low_2h: Optional[float],
     recent_high_2h: Optional[float],
+    atr: Optional[float] = None,
 ) -> Tuple[Optional[float], Optional[float], Optional[float], float, float]:
     """
     以 K 線結構主力防守位定 SL，再套用最小距離保底，最後以 1R 映射 TP1/TP2。
@@ -4257,17 +4404,25 @@ def compute_structural_sl_tp(
     lo2 = _num(recent_low_2h)
     hi2 = _num(recent_high_2h)
 
+    min_sl_distance = entry * MIN_SL_PERCENT
+    try:
+        atr_num = float(atr) if atr is not None else None
+        if atr_num is not None and atr_num > 0:
+            min_sl_distance = max(min_sl_distance, atr_num * MIN_SL_ATR_MULTIPLIER)
+    except (TypeError, ValueError):
+        pass
+
     if is_long:
         cands = [v for v in (lo2, ema, vwap) if v is not None]
         if cands:
             structural_sl = min(cands)
         else:
-            structural_sl = entry * (1.0 - MIN_SL_PERCENT)
+            structural_sl = entry - min_sl_distance
         if structural_sl >= entry:
-            structural_sl = entry * (1.0 - MIN_SL_PERCENT)
+            structural_sl = entry - min_sl_distance
         one_r = abs(entry - structural_sl)
-        if one_r / entry < MIN_SL_PERCENT:
-            one_r = entry * MIN_SL_PERCENT
+        if one_r < min_sl_distance:
+            one_r = min_sl_distance
             structural_sl = entry - one_r
         sl = structural_sl
         tp1 = entry + one_r * TP1_R_MULTIPLIER
@@ -4277,12 +4432,12 @@ def compute_structural_sl_tp(
         if cands:
             structural_sl = max(cands)
         else:
-            structural_sl = entry * (1.0 + MIN_SL_PERCENT)
+            structural_sl = entry + min_sl_distance
         if structural_sl <= entry:
-            structural_sl = entry * (1.0 + MIN_SL_PERCENT)
+            structural_sl = entry + min_sl_distance
         one_r = abs(structural_sl - entry)
-        if one_r / entry < MIN_SL_PERCENT:
-            one_r = entry * MIN_SL_PERCENT
+        if one_r < min_sl_distance:
+            one_r = min_sl_distance
             structural_sl = entry + one_r
         sl = structural_sl
         tp1 = entry - one_r * TP1_R_MULTIPLIER
@@ -4316,6 +4471,7 @@ def derive_limit_order_from_inputs(
     ema20: Optional[float],
     signal_version: str,
     energy_exhausted: bool,
+    atr: Optional[float] = None,
 ) -> Tuple[bool, Optional[float]]:
     """
     與 build_report_message_tiered 進場邏輯一致（順序相同）：
@@ -4352,14 +4508,221 @@ def derive_limit_order_from_inputs(
     if energy_exhausted and ema is not None:
         return True, ema
 
-    if vwap is not None:
-        if is_bull and price <= vwap * 1.025:
+    atr_num = None
+    try:
+        atr_num = float(atr) if atr is not None and float(atr) > 0 else None
+    except (TypeError, ValueError):
+        atr_num = None
+    if vwap is not None and atr_num is not None:
+        if abs(price - vwap) <= MAX_MARKET_VWAP_GAP_ATR * atr_num:
             return False, None
-        if (not is_bull) and price >= vwap * 0.975:
+        return True, vwap * 0.975
+    if vwap is not None:
+        if is_bull and price <= vwap:
+            return False, None
+        if (not is_bull) and price >= vwap:
             return False, None
         return True, vwap * 0.975
 
     return False, None
+
+
+def _asof_oi_per_ohlc_bar(
+    ohlc: List[Dict[str, Any]], oi_list: Optional[List[Dict[str, Any]]]
+) -> List[Optional[float]]:
+    """將 OI 時間序列前向對齊到每根 OHLC bar（每根 bar 取 t≤bar_t 的最後一筆 OI）。"""
+    if not ohlc:
+        return []
+    if not oi_list:
+        return [None] * len(ohlc)
+
+    oi_sorted = sorted(
+        [x for x in oi_list if x.get("t") is not None],
+        key=lambda x: int(x["t"]),
+    )
+    out: List[Optional[float]] = []
+    j = 0
+    cur: Optional[float] = None
+    for bar in ohlc:
+        t = int(bar.get("t") or 0)
+        while j < len(oi_sorted) and int(oi_sorted[j].get("t") or 0) <= t:
+            try:
+                cur = float(oi_sorted[j].get("v"))
+            except (TypeError, ValueError):
+                pass
+            j += 1
+        out.append(cur)
+    return out
+
+
+def compute_anchored_launch_vwap_snapshot(symbol_base: str) -> Optional[Dict[str, Any]]:
+    """
+    批次版「發動錨定 VWAP」：在最近 N 根 5m K 內，自右向左找最近一次
+    「爆量（volume ≥ ratio×近 M 根均量）且相鄰兩根 OI 累計階梯變化 ≥ 門檻%」的棒形為錨點，
+    自該棒起至最新棒的成交量加權均價（典型價）。
+    """
+    clean = (symbol_base or "").upper().replace("USDT", "").replace("-", "").replace("/", "")
+    if not clean:
+        return None
+    ohlc = fetch_ohlc_5m(clean, limit=SNIPER_ANCHOR_LOOKBACK_BARS)
+    if not ohlc or len(ohlc) < SNIPER_ANCHOR_VOL_BASELINE_BARS + 2:
+        return None
+    ohlc = sorted(ohlc, key=lambda x: int(x.get("t") or 0))
+    oi_raw = fetch_coinglass_oi_5m(clean, limit=SNIPER_ANCHOR_LOOKBACK_BARS)
+    oi_vals = _asof_oi_per_ohlc_bar(ohlc, oi_raw)
+
+    def _ty(p: Dict[str, Any]) -> float:
+        try:
+            h = float(p.get("h"))
+            l = float(p.get("l"))
+            c = float(p.get("c"))
+        except (TypeError, ValueError):
+            return float("nan")
+        return (h + l + c) / 3.0
+
+    anchor_idx: Optional[int] = None
+    vol_ratio_at_anchor: Optional[float] = None
+    b0 = SNIPER_ANCHOR_VOL_BASELINE_BARS
+    for i in range(len(ohlc) - 1, b0, -1):
+        try:
+            vols = [float(ohlc[j].get("v") or 0) for j in range(i - b0, i)]
+        except (TypeError, ValueError):
+            continue
+        base = sum(vols) / max(len(vols), 1)
+        try:
+            vi = float(ohlc[i].get("v") or 0)
+        except (TypeError, ValueError):
+            vi = 0.0
+        vol_ok = base > 0 and vi >= SNIPER_ANCHOR_VOL_SPIKE_RATIO * base
+        oi_ok = False
+        if i > 0 and oi_vals[i] is not None and oi_vals[i - 1] is not None:
+            prev_oi = float(oi_vals[i - 1])
+            curr_oi = float(oi_vals[i])
+            if prev_oi != 0:
+                step_pct = abs(curr_oi - prev_oi) / abs(prev_oi) * 100.0
+                oi_ok = step_pct >= SNIPER_ANCHOR_OI_STEP_PCT
+        if vol_ok and oi_ok:
+            anchor_idx = i
+            vol_ratio_at_anchor = (vi / base) if base > 0 else None
+            break
+
+    if anchor_idx is None:
+        return {"ok": False, "note": "未偵測到發動錨點（爆量+OI 階梯）"}
+
+    num = 0.0
+    den = 0.0
+    for j in range(anchor_idx, len(ohlc)):
+        tp = _ty(ohlc[j])
+        if tp != tp:
+            continue
+        try:
+            vj = float(ohlc[j].get("v") or 0)
+        except (TypeError, ValueError):
+            vj = 0.0
+        num += tp * vj
+        den += vj
+    vwap = (num / den) if den > 0 else _ty(ohlc[-1])
+
+    return {
+        "ok": True,
+        "vwap_anchor": float(vwap),
+        "anchor_ts": int(ohlc[anchor_idx].get("t") or 0),
+        "vol_ratio": vol_ratio_at_anchor,
+        "note": "發動錨定 VWAP",
+    }
+
+
+def _anchor_vwap_fit_bonus(x: Dict[str, Any]) -> Tuple[int, int, str, str]:
+    """
+    依「現價 vs 錨定 VWAP」貼合度給綜合分加分與 0～3 星，並附倉位提示（非投資建議）。
+
+    回傳：(score_delta, stars_0_3, reason_snippet, sizing_hint)
+    """
+    va = x.get("vwap_anchor")
+    if va is None:
+        return 0, 0, "", ""
+    try:
+        va_f = float(va)
+        px = float(x.get("current_price") or 0)
+    except (TypeError, ValueError):
+        return 0, 0, "", ""
+    if va_f <= 0 or px <= 0 or px != px:
+        return 0, 0, "", ""
+    dev_pct = abs(px - va_f) / va_f * 100.0
+
+    if dev_pct <= 1.2:
+        return (
+            15,
+            3,
+            "錨定均價高貼合",
+            "籌碼錨定佳：結構上較利於計畫風險報酬時，可考慮在個人承受範圍內略加大倉位（仍須嚴守止損）",
+        )
+    if dev_pct <= 2.5:
+        return (
+            10,
+            2,
+            "錨定均價可接受",
+            "貼合度尚可：倉位可比平常略積極，勿滿倉、勿放大槓桿超過習慣",
+        )
+    if dev_pct <= 4.0:
+        return (
+            5,
+            1,
+            "錨定均價略開",
+            "貼合度一般：建議維持常規倉位",
+        )
+    return (
+        2,
+        0,
+        "價格偏離發動均價",
+        "已偏離發動籌碼成本帶：建議偏保守／縮小倉位",
+    )
+
+
+def _macro_regime_snapshot() -> Dict[str, Any]:
+    """大盤防護網：BTC/ETH 1H/4H EMA20 + 15m CVD 趨勢。"""
+    def _ema_state(sym: str, interval: str) -> Optional[bool]:
+        data = fetch_price_history(sym, interval)
+        if not data or len(data) < 20:
+            return None
+        closes: List[float] = []
+        for row in data[-20:]:
+            v = row.get("close")
+            try:
+                closes.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        if len(closes) < 20:
+            return None
+        ema20 = sum(closes) / len(closes)
+        return closes[-1] >= ema20
+
+    btc_1h = _ema_state("BTCUSDT", "1h")
+    btc_4h = _ema_state("BTCUSDT", "4h")
+    eth_1h = _ema_state("ETHUSDT", "1h")
+    eth_4h = _ema_state("ETHUSDT", "4h")
+    btc_cvd_15m = _cvd_change_last2("BTC", "15m")
+    eth_cvd_15m = _cvd_change_last2("ETH", "15m")
+
+    bearish = (btc_1h is False or btc_4h is False) and (btc_cvd_15m is not None and btc_cvd_15m < 0)
+    bullish = (btc_1h is True or btc_4h is True) and (btc_cvd_15m is not None and btc_cvd_15m > 0)
+    if bullish:
+        badge = "🛡️ 大盤環境：BTC 趨勢向上，過濾通過"
+    elif bearish:
+        badge = "🛡️ 大盤環境：BTC 趨勢向下，僅放行順勢空單"
+    else:
+        badge = "🛡️ 大盤環境：中性（EMA/CVD 未完全共振）"
+    return {
+        "bullish": bullish,
+        "bearish": bearish,
+        "badge": badge,
+        "btc_1h": btc_1h,
+        "btc_4h": btc_4h,
+        "btc_cvd_15m": btc_cvd_15m,
+        "eth_1h": eth_1h,
+        "eth_4h": eth_4h,
+        "eth_cvd_15m": eth_cvd_15m,
+    }
 
 
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
@@ -4560,6 +4923,13 @@ def _check_manipulation_risk(
 def _classify_mtf_signal(item: Dict) -> Optional[Dict[str, Any]]:
     """
     MTF 四層訊號分類器（嚴格版 v3 — 寧缺勿濫）
+
+    【與「反人性／掃損摸頭摸底」敘事的對照（設計意圖，非逐根 K 狀態機）】
+    - 上漲段多平後再空開、或空平後再空開：以 1H 分類 + 短週期反向（pullback／tier2）與
+      `detect_trap_setup` 的 15m 三步（空平→多平→空開 等）共同近似「出貨／掃空損／摸頭」。
+    - 下跌段多平後再多開、或空平後再多開：以 1H bear 陣營 + 短週期 short_cover／long_open
+      與陷阱三步（多平→空平→多開）近似「掃多損／摸底／獲利回補後再攻」。
+    本模組以「多時區 OI×價格共振 + 衰竭反轉 + 籌碼陷阱」量化上述直覺；無法保證與主觀盤感逐句等同。
 
     四象限籌碼狀態定義：
       🟢 long_open:   OI↑ + Price↑ → 多方建倉
@@ -5027,6 +5397,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
       6. 趨勢情境        (−15~+15) ── 下跌段做多/上漲段做空=+15；上漲段做多/下跌段做空=−10
       7. 跨類別互確認    (max 20) ── 同輪出現互補訊號（嘎空+多開 / 出貨+空開）加分
       8. 大盤敬畏：做多且 BTC 1H<0 或 做空且 BTC 1H>0 → 強制 −10
+      9. 錨定 VWAP 貼合（max ~15）── 現價接近 5m 發動加權成本者加分（見 _anchor_vwap_fit_bonus）
 
     ── 車已發動 / 大盤逆風：分數硬上限 74（最高 A）──────────────────────
     """
@@ -5341,15 +5712,33 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
             score += 2
             reasons.append(f"BTC_OI輔助({_btc_oi_ref:+.2f}%)")
 
+    # ── 12. 錨定 VWAP 貼合度（現價 vs 5m 發動加權成本）──────────────────
+    _ab, _ast, _ar_snip, _ahint = _anchor_vwap_fit_bonus(x)
+    x["_anchor_fit_stars"] = int(max(0, min(3, _ast)))
+    x["_anchor_sizing_hint"] = _ahint or ""
+    if _ab:
+        score += _ab
+        if _ar_snip:
+            reasons.append(_ar_snip)
+
     # ── 評級（S / A / R / B；僅「車已發動」限制上限）────────────
     score = max(0, min(100, score))
     if _already_moving:
         score = min(score, 74)   # 車已發動：硬上限 74 分 = 最高 A 級
 
-    if score < MIN_SIGNAL_PUSH_SCORE:
+    # 逆勢摸頭/摸底 + 機構級成交：放寬「最低分」以免壓分後變 B（仍須 ≥ MIN_R_STRUCT_TOUCH_SCORE）
+    _min_floor = MIN_SIGNAL_PUSH_SCORE
+    if (
+        _counter_4h
+        and _sniper_structural_cascade_touch(x, is_bull_sig)
+        and _sniper_mega_liquidity_ok(x)
+    ):
+        _min_floor = min(_min_floor, MIN_R_STRUCT_TOUCH_SCORE)
+
+    if score < _min_floor:
         grade = "B"
         grade_badge = "🥈 *B 級*"
-        grade_desc = f"訊號不足（<{MIN_SIGNAL_PUSH_SCORE}分不推播）"
+        grade_desc = f"訊號不足（<{_min_floor}分不推播）"
         brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
         return grade, score, brief, _already_moving, _motion_note
 
@@ -5433,7 +5822,7 @@ def build_report_message_tiered(
         if not price or price <= 0:
             return None, None, None, None, None, "—", "normal", TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
         sl, tp1, tp2, _one_r, sl_pct = compute_structural_sl_tp(
-            float(price), is_long, vwap_2h, ema20, recent_low_2h, recent_high_2h
+            float(price), is_long, vwap_2h, ema20, recent_low_2h, recent_high_2h, atr
         )
         if sl is None:
             return None, None, None, None, None, "—", "normal", TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
@@ -5630,8 +6019,21 @@ def build_report_message_tiered(
 
     trend_sa_dirs_this_run: Dict[str, Set[str]] = {}
 
-    def _tactic_from_zone(zone: str, is_bull_flag: bool) -> Tuple[str, str]:
+    def _tactic_from_zone(zone: str, is_bull_flag: bool, grade: str, category: str, price_change_24h: Optional[float]) -> Tuple[str, str]:
         """回傳 (戰術文案, emoji)"""
+        # R 級或明顯逆勢（例如 24h 大漲後做空 / 大跌後做多）強制用左側語彙，避免與順勢標籤打架
+        if grade == "R":
+            if is_bull_flag:
+                return ("左側摸底（支撐承接）", "📌")
+            return ("左側摸頭（阻力做空）", "🎯")
+        try:
+            p24 = float(price_change_24h) if price_change_24h is not None else None
+        except (TypeError, ValueError):
+            p24 = None
+        if category == "short_open" and p24 is not None and p24 >= 8.0:
+            return ("左側摸頭（阻力做空）", "🎯")
+        if category in ("long_open", "short_close") and p24 is not None and p24 <= -8.0:
+            return ("左側摸底（支撐承接）", "📌")
         if zone == ZONE_DIP:
             return ("摸底（跌深撿便宜）", "📌")
         if zone == ZONE_TOP:
@@ -5650,7 +6052,7 @@ def build_report_message_tiered(
         - 追漲/追跌歸趨勢
         """
         if grade == "R":
-            return ("逆勢訊號", "⚠️")
+            return ("逆勢左側", "⚠️")
         if zone in (ZONE_DIP, ZONE_TOP):
             return ("震盪訊號", "🌀")
         return ("趨勢訊號", "📈")
@@ -5689,6 +6091,56 @@ def build_report_message_tiered(
             x["score"] = 0
         if _grade == "B":
             continue
+
+        try:
+            _grade_score_int = int(round(float(_grade_score)))
+        except (TypeError, ValueError):
+            _grade_score_int = 0
+
+        # 逆勢 R：預設須達 MIN_R；「平倉浪結構 + 機構成交」允許降至 MIN_R_STRUCT（仍排除極弱單）
+        if _grade == "R" and _grade_score_int < MIN_R_SIGNAL_PUSH_SCORE:
+            _r_struct_ok = (
+                _sniper_structural_cascade_touch(x, is_bull_sig)
+                and _sniper_mega_liquidity_ok(x)
+                and _grade_score_int >= MIN_R_STRUCT_TOUCH_SCORE
+            )
+            if not _r_struct_ok:
+                logger.info(
+                    f"[勝率過濾] {sym_base}: R 級綜合分 {_grade_score_int} < {MIN_R_SIGNAL_PUSH_SCORE}"
+                    "（且未符合結構+機構成交放行），略過推播"
+                )
+                continue
+
+        # 弱「潛在」訊號（非完美回踩）：須更高分才推，回踩型維持原門檻
+        _sv_early = str(x.get("signal_version") or "")
+        _sub_early = str(x.get("signal_subtype") or "")
+        if (
+            _sv_early == "potential"
+            and _sub_early != "pullback"
+            and _grade_score_int < MIN_WEAK_POTENTIAL_PUSH_SCORE
+        ):
+            logger.info(
+                f"[勝率過濾] {sym_base}: 潛在訊號（非回踩）綜合分 {_grade_score_int} < "
+                f"{MIN_WEAK_POTENTIAL_PUSH_SCORE}，略過推播"
+            )
+            continue
+
+        # Tier2：原則上須陷阱步數；若僅因「費率壅擠」降級 + 平倉浪結構 + 機構成交 → 仍放行
+        if _sv_early == "tier2":
+            _trap_steps = int(x.get("_bull_trap_steps") or 0)
+            _trap_full = bool(x.get("_bull_trap_detected"))
+            _sub_t2 = str(x.get("signal_subtype") or "")
+            _tier2_fr_only = ("壅擠" in _sub_t2 or "擁擠" in _sub_t2) and "警示" in _sub_t2
+            _tier2_struct_fr = (
+                _tier2_fr_only
+                and _sniper_structural_cascade_touch(x, is_bull_sig)
+                and _sniper_mega_liquidity_ok(x)
+            )
+            if not _tier2_struct_fr and not _trap_full and _trap_steps < 2:
+                logger.info(
+                    f"[持倉過濾] {sym_base}: Tier2 且籌碼陷阱未達 2/3 步（非費率降級+結構單），略過推播"
+                )
+                continue
 
         # 曾推 S/A 順勢「空」後，時窗內不再推 R「多」（摸底）；反之亦然（摸頭 vs 順勢多）
         if _grade == "R":
@@ -5730,6 +6182,7 @@ def build_report_message_tiered(
             ema20_val,
             _sig_ver,
             bool(x.get("_energy_exhausted")),
+            atr_val,
         )
         _entry_mode = "市價"
         _entry_note = ""
@@ -5737,20 +6190,21 @@ def build_report_message_tiered(
         if _need_limit:
             try:
                 _lp_vwap = float(vwap_2h_val) if vwap_2h_val is not None else None
-                _lp_vw_dev = abs(float(_entry_price) - _lp_vwap) / _lp_vwap if _lp_vwap and _lp_vwap > 0 else None
+                _atr_f = float(atr_val) if atr_val is not None else None
+                _lp_vw_dev_atr = abs(float(_entry_price) - _lp_vwap) / _atr_f if _lp_vwap and _atr_f and _atr_f > 0 else None
             except (TypeError, ValueError):
-                _lp_vw_dev = None
-            if _lp_vw_dev is not None and _lp_vw_dev > MAX_MARKET_VWAP_GAP_PCT:
+                _lp_vw_dev_atr = None
+            if _lp_vw_dev_atr is not None and _lp_vw_dev_atr > MAX_MARKET_VWAP_GAP_ATR:
                 logger.info(
-                    f"[進場過濾] {sym_base}: 現價與主力均價偏離 {_lp_vw_dev:.2%} > {MAX_MARKET_VWAP_GAP_PCT:.0%}，略過"
+                    f"[進場過濾] {sym_base}: 現價與主力均價偏離 {_lp_vw_dev_atr:.2f}ATR > {MAX_MARKET_VWAP_GAP_ATR:.2f}ATR，略過"
                 )
                 continue
-            if _lp_vw_dev is None:
+            if _lp_vw_dev_atr is None:
                 _entry_note = "⚠️ 進場模式原需限價，但主力均價差無法計算，保守以市價策略顯示。"
             else:
                 _entry_note = (
-                    f"⚠️ 進場模式原需限價，但現價與主力均價差 `{_lp_vw_dev:.1%}`"
-                    f"（<= `{MAX_MARKET_VWAP_GAP_PCT:.0%}`），本訊號改用市價方案。"
+                    f"⚠️ 進場模式原需限價，但現價與主力均價差 `{_lp_vw_dev_atr:.2f} ATR`"
+                    f"（<= `{MAX_MARKET_VWAP_GAP_ATR:.2f} ATR`），本訊號改用市價方案。"
                 )
 
         if _entry_price and _entry_price > 0:
@@ -5763,6 +6217,7 @@ def build_report_message_tiered(
                 ema20_val,
                 _recent_lo,
                 _recent_hi,
+                atr_val,
             )
             if sl is None or tp1 is None:
                 logger.warning(f"[SL/TP] {sym_base} 結構計算失敗，跳過此訊號")
@@ -5840,51 +6295,6 @@ def build_report_message_tiered(
             return "籌碼方向確認中，嚴守止損。"
 
         _strategy_comment = _gen_comment(category, _sig_version, _sig_subtype, _reversal_hint, rsi_val)
-
-        def _reader_help_lines() -> List[str]:
-            """新手友善：釐清附圖時間框 vs 訊號邏輯，減少「圖在底部卻寫摸頭」的誤解。"""
-            _lines: List[str] = [
-                "*📖 怎麼讀這筆？*",
-                "• 附圖是 _5 分鐘、近數小時_，方便看進場附近的價與 OI；"
-                "訊號仍以 **1H 四象限 + 多週期共振** 為主，兩者時間尺度不同很正常。",
-            ]
-            if _sig_version == "exhaustion_reversal":
-                if is_bull_sig:
-                    _lines.append(
-                        "• 「恐慌衰竭」：抓的是急跌後 _空單回補／承接_ 的轉折嘗試，"
-                        "不是保證立刻 V 轉，請小倉並看止損。"
-                    )
-                else:
-                    _lines.append(
-                        "• 「狂熱衰竭」：抓的是急漲後 _多單獲利了結_ 的轉弱嘗試，"
-                        "進場常在回落區，短圖上不一定還在最高點。"
-                    )
-                return _lines
-            if category == "long_close":
-                _lines.append(
-                    "• 「摸頭做空」：抓的是 _前面漲勢轉弱、多單撤退_；"
-                    "進場常在 **回落／整理帶**，5m 上看起來像「已跌一段」是常態，不是標題寫錯。"
-                )
-            elif category in ("short_close", "short_cover"):
-                _lines.append(
-                    "• 「摸底做多」：抓的是 _前面跌勢轉弱、空單回補_；"
-                    "進場常在 **反彈／整理帶**，5m 上看起來像「已漲一段」也正常。"
-                )
-            elif category == "long_open":
-                _lines.append(
-                    "• 「追漲做多」：跟 **新多進場／順勢**；短線已噴一段時請更緊守止損。"
-                )
-            elif category == "short_open":
-                _lines.append(
-                    "• 「追跌做空」：跟 **新空進場／順勢**；短線已殺一段時留意死貓彈。"
-                )
-            else:
-                _lines.append("• 方向以標題多／空為準，請搭配止損一體思考。")
-            if _sig_version == "tier2" and _sig_subtype == "30m衝突":
-                _lines.append(
-                    "• 「30m 衝突」：快慢週期不同步，屬 **觀察／小倉**；假突破多，務必嚴守止損。"
-                )
-            return _lines
 
         def _build_oi_plain_lines() -> Tuple[str, str]:
             """白話解釋 OI 在這筆訊號代表的資金行為與風險。"""
@@ -6008,15 +6418,23 @@ def build_report_message_tiered(
         except (TypeError, ValueError):
             _score = 0
         _zone_now = x.get("zone") or ""
-        _tactic_txt, _tactic_emo = _tactic_from_zone(_zone_now, is_bull_sig)
+        _tactic_txt, _tactic_emo = _tactic_from_zone(_zone_now, is_bull_sig, _grade, category, x.get("priceChange24h"))
         _regime_txt, _regime_emo = _regime_from_grade_zone(_grade, _zone_now)
 
-        msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}")
+        _anch_st_title = max(0, min(3, int(x.get("_anchor_fit_stars") or 0)))
+        _anchor_title_suffix = (
+            f" · ⭐*錨定{_anch_st_title}星（已計入綜合分）*"
+            if _anch_st_title >= 1
+            else ""
+        )
+        msg_lines.append(
+            f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}{_anchor_title_suffix}"
+        )
         msg_lines.append(f"{_tactic_emo} *戰術：* {_tactic_txt}")
         msg_lines.append(f"{_regime_emo} *盤型：* {_regime_txt}")
-        for _help_ln in _reader_help_lines():
-            msg_lines.append(_help_ln)
         msg_lines.append(_grade_brief)
+        if x.get("_macro_veto_badge"):
+            msg_lines.append(str(x.get("_macro_veto_badge")))
         # R 級：逆勢左側，與順勢 S/A「高勝率」敘事不同；避免使用者以為每單都該贏
         if _grade == "R":
             msg_lines.append(
@@ -6026,7 +6444,7 @@ def build_report_message_tiered(
         if x.get("cooldown_reverse_recent") and _grade == "S":
             msg_lines.append("🧠 冷卻期間反向出現 S：已允許推播（注意敘事切換）")
 
-        # 主力均價（2h VWAP，與結構 SL/掛單邏輯一致）
+        # 2h VWAP（結構止損／掛單邏輯用）+ 錨定 VWAP（推播 📊 區塊；綜合分已含貼合加分）
         try:
             _vwap_show = (
                 float(vwap_2h_val)
@@ -6037,6 +6455,33 @@ def build_report_message_tiered(
             )
         except (TypeError, ValueError):
             _vwap_show = None
+
+        _vwap_anchor_show: Optional[float] = None
+        _vwap_anchor_ts_show = 0
+        try:
+            _raw_va = x.get("vwap_anchor")
+            if _raw_va is not None:
+                _vwap_anchor_show = float(_raw_va)
+                if _vwap_anchor_show != _vwap_anchor_show or _vwap_anchor_show <= 0:
+                    _vwap_anchor_show = None
+        except (TypeError, ValueError):
+            _vwap_anchor_show = None
+        try:
+            _vwap_anchor_ts_show = int(x.get("vwap_anchor_ts") or 0)
+        except (TypeError, ValueError):
+            _vwap_anchor_ts_show = 0
+        try:
+            _anch_fit_stars = int(x.get("_anchor_fit_stars") or 0)
+        except (TypeError, ValueError):
+            _anch_fit_stars = 0
+        _anch_fit_stars = max(0, min(3, _anch_fit_stars))
+        _anchor_hint_disp = str(x.get("_anchor_sizing_hint") or "").strip()
+        if _anch_fit_stars >= 1:
+            msg_lines.append(
+                f"🔔 *錨定加分（醒目）*：`{_anch_fit_stars}` 星 — 現價貼近本波發動加權成本，"
+                "風報比與倉位力度判讀較可靠（詳見下方均價區）。"
+            )
+            msg_lines.append("")
 
         _entry_now_txt = _fmt_price(_entry_price) if _entry_price is not None else "N/A"
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
@@ -6063,56 +6508,83 @@ def build_report_message_tiered(
         except Exception:
             pass
 
-        msg_lines.append("*📌 點位重點*")
+        msg_lines.append("*📊 參考均價與籌碼錨定*")
+        msg_lines.append(
+            "_綜合分已納入「錨定貼合」加分。星級愈高＝現價愈接近本波發動後加權成本，較利於判斷風報比與倉位力度。_"
+        )
+        if _vwap_show is not None:
+            msg_lines.append(
+                f"• **主力參考均價（2h VWAP，風控基準）**：`{_fmt_price(_vwap_show)}`"
+            )
+        else:
+            msg_lines.append("• **主力參考均價（2h VWAP）**：—（風控改以 EMA／2H 結構為主）")
+        if _vwap_anchor_show is not None:
+            _anchor_time_s = ""
+            if _vwap_anchor_ts_show > 0:
+                try:
+                    _anchor_time_s = " " + datetime.fromtimestamp(
+                        float(_vwap_anchor_ts_show), tz=TAIPEI_TZ
+                    ).strftime("%m-%d %H:%M 台北")
+                except (OSError, ValueError, OverflowError):
+                    _anchor_time_s = ""
+            _star_bar = (
+                "★" * _anch_fit_stars + "☆" * (3 - _anch_fit_stars)
+                if _anch_fit_stars > 0
+                else "—（本輪無星級加分）"
+            )
+            msg_lines.append(
+                f"• **錨定加權成本（5m 爆量+OI 階梯→發動 VWAP）**：`{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
+            )
+            msg_lines.append(f"  └ *錨定貼合星級（加分項）*：{_star_bar}")
+            if _anchor_hint_disp:
+                msg_lines.append(f"  └ *倉位思路*：{_anchor_hint_disp}")
+        else:
+            msg_lines.append(
+                "• **錨定加權成本**：—（未取得：多為 OI 不足／未達爆量+OI 門檻）"
+            )
+        msg_lines.append("")
+
+        msg_lines.append("*📌 點位與執行*")
         _vw_dev = _rel_dev_pct(float(_entry_price) if _entry_price is not None else None, _vwap_show)
         _vw_dev_s = f"｜與主力均價差 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
         msg_lines.append(f"• **進場(市價)**：`{_entry_now_txt}`{_vw_dev_s}")
         if _entry_note:
             msg_lines.append(f"• {_entry_note}")
         msg_lines.append("")
-        try:
-            _t1 = max(0.001, float(MARKET_ENTRY_TIER1_PCT))
-            _t2 = max(_t1, float(MARKET_ENTRY_TIER2_PCT))
-        except (TypeError, ValueError):
-            _t1, _t2 = 0.008, 0.015
-        if is_bull_sig:
-            _ideal_lo = _entry_price * (1.0 - _t1)
-            _ideal_hi = _entry_price * (1.0 + _t1)
-            _ok_hi = _entry_price * (1.0 + _t2)
+        _atr_zone = float(atr_val) * MARKET_ENTRY_ZONE_ATR if atr_val and isinstance(atr_val, (int, float)) else None
+        if _atr_zone and _atr_zone > 0:
+            _ideal_lo = _entry_price - _atr_zone
+            _ideal_hi = _entry_price + _atr_zone
             msg_lines.append(
-                f"• 市價區間（理想）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{_t1*100:.1f}%）"
-            )
-            msg_lines.append(
-                f"• 市價區間（可接受）：`{_fmt_price(_ideal_hi)}` ~ `{_fmt_price(_ok_hi)}`（最多 +{_t2*100:.1f}%）"
+                f"• 市價區間（ATR動態）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{MARKET_ENTRY_ZONE_ATR:.2f} ATR）"
             )
         else:
-            _ideal_lo = _entry_price * (1.0 - _t1)
-            _ideal_hi = _entry_price * (1.0 + _t1)
-            _ok_lo = _entry_price * (1.0 - _t2)
-            msg_lines.append(
-                f"• 市價區間（理想）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{_t1*100:.1f}%）"
-            )
-            msg_lines.append(
-                f"• 市價區間（可接受）：`{_fmt_price(_ok_lo)}` ~ `{_fmt_price(_ideal_lo)}`（最多 -{_t2*100:.1f}%）"
-            )
+            msg_lines.append("• 市價區間（ATR動態）：ATR 無法取得，請保守降低槓桿")
         msg_lines.append("• ⚠️ 超過可接受區間：不追價、只等下一輪")
         msg_lines.append("")
-        msg_lines.append(f"• **出場分配**：TP1 出 `{int(TP1_EXIT_RATIO*100)}%`｜TP2 出 `{int(TP2_EXIT_RATIO*100)}%`")
-        msg_lines.append(f"• **止損**：`{_sl_txt}`（到價認錯出場）")
-        msg_lines.append(f"• **TP1**：`{_tp1_txt}`")
+        msg_lines.append(f"• **🎯 TP1 ({TP1_R_MULTIPLIER:.1f}R)**：`{_tp1_txt}` → 平倉 `{int(TP1_EXIT_RATIO*100)}%`，其餘 SL 上移到進場價")
         if _tp2_txt:
-            msg_lines.append(f"• **TP2**：`{_tp2_txt}`")
+            msg_lines.append(f"• **🚀 TP2 ({TP2_R_MULTIPLIER:.1f}R)**：`{_tp2_txt}` → 平倉剩餘 `{int(TP2_EXIT_RATIO*100)}%`")
+        msg_lines.append(f"• **止損**：`{_sl_txt}`（到價認錯出場）")
+        try:
+            _sl_gap_pct = abs(float(_entry_price) - float(sl)) / float(_entry_price) * 100 if (_entry_price and sl) else None
+        except (TypeError, ValueError, ZeroDivisionError):
+            _sl_gap_pct = None
+        if _sl_gap_pct is not None and _sl_gap_pct > 10.0:
+            msg_lines.append(
+                f"• 🚨 **警告：本單結構止損極寬（約 `{_sl_gap_pct:.1f}%`）**，請務必調低槓桿倍數，嚴格控管保證金！"
+            )
+        elif _sl_gap_pct is not None and _sl_gap_pct > 5.0:
+            msg_lines.append(
+                f"• ⚠️ 本單止損距離偏寬（約 `{_sl_gap_pct:.1f}%`），請降低槓桿、縮小倉位。"
+            )
         if 0 < vol_m_val < 10:
             msg_lines.append("• ⚠️ 本幣成交值低於 10M：請注意資金胃納量與承載量，建議分批下單避免滑價。")
 
         msg_lines.append("*🌍 環境與籌碼*")
-        if _vwap_show is not None:
-            msg_lines.append(
-                f"• 主力這兩小時的平均成本參考（2h VWAP）：`{_fmt_price(_vwap_show)}`"
-            )
         msg_lines.append(
-            f"• 較大週期：{_macro_trend}（{_macro_ema_txt}）"
-            f"{_rsi_4h_str if _rsi_4h_str else ''}｜本訊號進場：{_exec_mode}"
+            f"• 週期背景：{_macro_trend}（{_macro_ema_txt}）"
+            f"{_rsi_4h_str if _rsi_4h_str else ''}｜本訊號進場模式：{_exec_mode}"
         )
         _oi_story_line, _oi_risk_line = _build_oi_plain_lines()
         msg_lines.append(_oi_story_line)
@@ -6135,21 +6607,14 @@ def build_report_message_tiered(
                 _rv = None
             if _rv is not None:
                 if _rv >= 72:
-                    _rsi_txt = (
-                        f"短線熱度偏高（RSI 約 {_rv:.0f}）——像「跑太久需要喘口氣」，"
-                        "追價要自己多留意。"
-                    )
+                    _rsi_txt = f"RSI {_rv:.0f} 偏高，追價留意。"
                 elif _rv <= 28:
-                    _rsi_txt = (
-                        f"短線賣壓釋放較多（RSI 約 {_rv:.0f}）——像「跌深喘口氣」，"
-                        "是否反轉仍要看價格結構。"
-                    )
+                    _rsi_txt = f"RSI {_rv:.0f} 偏低，是否反轉仍看結構。"
                 else:
-                    _rsi_txt = f"短線情緒指標 RSI 約 {_rv:.0f}——不算極端冷熱。"
+                    _rsi_txt = f"RSI {_rv:.0f}，中性區。"
                 msg_lines.append(_rsi_txt)
 
-        msg_lines.append("*💡 策略說明*")
-        msg_lines.append(_strategy_comment)
+        msg_lines.append(f"*💡* {_strategy_comment}")
 
         # ─ 風險與環境（有觸發才顯示）─
         if _motion_note:
@@ -6207,16 +6672,37 @@ def build_report_message_tiered(
             _vwap_val = float(vwap_2h_val) if vwap_2h_val is not None else None
         except Exception:
             _vwap_val = None
+        _va_card = None
+        try:
+            if x.get("vwap_anchor") is not None:
+                _va_card = float(x["vwap_anchor"])
+                if _va_card != _va_card or _va_card <= 0:
+                    _va_card = None
+        except (TypeError, ValueError):
+            _va_card = None
+        try:
+            _ast_card = int(x.get("_anchor_fit_stars") or 0)
+        except (TypeError, ValueError):
+            _ast_card = 0
         cards_payload.append(
             {
                 "symbol_base": sym_base,
                 "caption": _msg_str,
                 "direction_is_long": is_bull_sig,
+                "signal_version": _sig_version,
+                "triggered_from_pending": bool(x.get("_triggered_from_pending")),
+                "macro_badge": x.get("_macro_veto_badge"),
+                "atr": x.get("atr"),
+                "tp1_r": TP1_R_MULTIPLIER,
+                "tp2_r": TP2_R_MULTIPLIER,
                 "sl": sl,
                 "tp1": tp1,
                 "tp2": tp2,
                 "entry": _entry_val,
                 "vwap": _vwap_val,
+                "vwap_anchor": _va_card,
+                "anchor_fit_stars": max(0, min(3, _ast_card)),
+                "anchor_hint": str(x.get("_anchor_sizing_hint") or ""),
                 "ema20": x.get("ema20"),
                 "ema20_touch_low": x.get("ema20_touch_low"),
                 "ema20_touch_high": x.get("ema20_touch_high"),
@@ -8032,6 +8518,20 @@ def fetch_position_change():
             _energy_exhausted,
         )
 
+        _anchor_snap: Optional[Dict[str, Any]] = None
+        if SNIPER_ANCHOR_ENABLED and _effective_version in (
+            "confirmed",
+            "pullback",
+            "exhaustion_reversal",
+            "tier2",
+        ):
+            try:
+                time.sleep(0.12)
+                _anchor_snap = compute_anchored_launch_vwap_snapshot(clean_base)
+            except Exception as _ae:
+                logger.debug(f"[AnchoredVWAP] {clean_base}: {_ae}")
+                _anchor_snap = None
+
         all_top.append({
             **item,
             "priceChange24h": price_24h,
@@ -8069,6 +8569,16 @@ def fetch_position_change():
             "_cvd_confirmed": _cvd_confirmed,
             "_cvd_conflict_strong": _cvd_conflict_strong,
             "vwap_2h": tech.get("vwap_2h") if tech else None,
+            # 發動錨定 VWAP（5m 爆量 + OI 階梯；自錨點棒起至最新的成交量加權典型價）
+            "vwap_anchor": _anchor_snap.get("vwap_anchor")
+            if isinstance(_anchor_snap, dict) and _anchor_snap.get("ok")
+            else None,
+            "vwap_anchor_ts": _anchor_snap.get("anchor_ts")
+            if isinstance(_anchor_snap, dict) and _anchor_snap.get("ok")
+            else None,
+            "vwap_anchor_vol_ratio": _anchor_snap.get("vol_ratio")
+            if isinstance(_anchor_snap, dict) and _anchor_snap.get("ok")
+            else None,
             # _scan_ts = 1H OI 首次偵測時間（process_single_symbol 打上），保留原始時間
             # 若 item 無此欄位（舊路徑），以當前時間補足
             "_detected_ts": item.get("_scan_ts") or time.time(),
@@ -8261,6 +8771,7 @@ def fetch_position_change():
     cooldown_sec = COOLDOWN_HOURS * 3600
     history_sec = HISTORY_HOURS * 3600
     history: List[Dict] = []
+    pending_signals: List[Dict] = []
     push_log_signals: List[Dict] = []
     # 檔案鎖：避免 CI 或多進程同時寫入導致 JSON 損毀
     lock_file = SNIPER_COOLDOWN_FILE.with_suffix(".lock")
@@ -8292,6 +8803,7 @@ def fetch_position_change():
     _gist_data = _gist_load_cooldown()
     if _gist_data is not None:
         history = _gist_data.get("history") or []
+        pending_signals = _gist_data.get("pending_signals") or []
         _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
         logger.info(f"冷卻檔已讀取(Gist): history {len(history)} 筆，{COOLDOWN_HOURS}h 內 {_in_window} 筆")
 
@@ -8300,6 +8812,7 @@ def fetch_position_change():
             if SNIPER_COOLDOWN_FILE.exists() and _gist_data is None:
                 raw = json.loads(SNIPER_COOLDOWN_FILE.read_text(encoding="utf-8"))
                 history = raw.get("history") or []
+                pending_signals = raw.get("pending_signals") or []
                 # 相容舊格式：只有 last_round 時轉成 history
                 if not history and raw.get("last_round"):
                     last_round = raw.get("last_round") or []
@@ -8307,17 +8820,23 @@ def fetch_position_change():
                         history = [{"symbol": str(p.get("symbol")), "dir": str(p.get("dir")), "ts": int(now_ts) - 3600} for p in last_round if p.get("symbol") and p.get("dir")]
                     else:
                         history = [{"symbol": str(p[0]), "dir": str(p[1]), "ts": int(now_ts) - 3600} for p in last_round if isinstance(p, (list, tuple)) and len(p) >= 2]
+                if "pending_signals" not in raw:
+                    pending_signals = []
                 logger.info(f"冷卻檔已讀取: {_cooldown_path_abs} | 歷史 {len(history)} 筆")
             else:
                 if _gist_data is None:
                     logger.info(f"冷卻狀態檔不存在，本輪無冷卻限制: {_cooldown_path_abs}")
     except Exception as e:
         history = []
+        pending_signals = []
         logger.warning(f"讀取冷卻狀態檔失敗，本輪無冷卻限制: {e}")
 
     now_tw = datetime.fromtimestamp(now_ts, tz=TAIPEI_TZ)
     _in_window = sum(1 for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= cooldown_sec)
-    logger.info(f"冷卻狀態: {len(history)} 筆歷史，{COOLDOWN_HOURS}h 內 {_in_window} 筆（同幣同方向才冷卻）")
+    logger.info(
+        f"冷卻狀態: {len(history)} 筆歷史，{COOLDOWN_HOURS}h 內 {_in_window} 筆（同幣同方向才冷卻）"
+        f" | pending={len(pending_signals)}"
+    )
 
     # 冷卻集合：同幣同方向在 COOLDOWN_HOURS 內已推過則阻擋
     cooldown_symbol_dir_4h: Set[Tuple[str, str]] = set()
@@ -8347,6 +8866,143 @@ def fetch_position_change():
     if _bl_removed > 0:
         logger.info(f"[黑名單🚫] 二道防線攔截 {_bl_removed} 個標的")
 
+    # ── Macro Veto：BTC 1H/4H EMA20 + 15m CVD 一票否決逆勢單 ───────────────────
+    macro_ctx = _macro_regime_snapshot()
+    _macro_filtered: List[Dict] = []
+    for x in all_top:
+        _base = _cooldown_symbol(x.get("symbol") or "")
+        _cat = x.get("category") or ""
+        _is_long_sig = _cat in ("long_open", "short_close")
+        _is_short_sig = _cat in ("short_open", "long_close")
+        x["_macro_veto_badge"] = macro_ctx.get("badge")
+        # BTC/ETH 訊號不做 veto，僅作環境提示
+        if _base in ("BTC", "ETH"):
+            _macro_filtered.append(x)
+            continue
+        if macro_ctx.get("bearish") and _is_long_sig:
+            logger.info(f"[MacroVeto] {_base}: BTC 空頭環境，略過做多訊號")
+            continue
+        if macro_ctx.get("bullish") and _is_short_sig:
+            logger.info(f"[MacroVeto] {_base}: BTC 多頭環境，略過做空訊號")
+            continue
+        _macro_filtered.append(x)
+    all_top = _macro_filtered
+
+    # ── Pending Pool 巡邏：先審查既有待辦（觸發/淘汰/保留）──────────────────────
+    def _pending_live_price(symbol: str) -> Optional[float]:
+        try:
+            snap = _fetch_bingx_ticker_snapshot(symbol)
+            if snap and snap.get("price"):
+                return float(snap.get("price"))
+        except Exception:
+            return None
+        return None
+
+    pending_kept: List[Dict] = []
+    pending_triggered: List[Dict] = []
+    for p in pending_signals:
+        if not isinstance(p, dict):
+            continue
+        p_sym = p.get("symbol")
+        p_dir = p.get("dir")
+        if not p_sym or p_dir not in ("long", "short"):
+            continue
+        p_now = _pending_live_price(p_sym)
+        if p_now is None or p_now <= 0:
+            pending_kept.append(p)
+            continue
+        p_expire = int(p.get("expire_ts") or 0)
+        p_sl = float(p.get("sl") or 0)
+        p_tp1 = float(p.get("tp1") or 0)
+        p_lo = float(p.get("entry_zone_low") or 0)
+        p_hi = float(p.get("entry_zone_high") or 0)
+        if p_expire and now_ts >= p_expire:
+            continue
+        if p_dir == "long" and (p_now <= p_sl or p_now >= p_tp1):
+            continue
+        if p_dir == "short" and (p_now >= p_sl or p_now <= p_tp1):
+            continue
+        if p_lo <= p_now <= p_hi:
+            payload = p.get("signal_payload") or {}
+            if isinstance(payload, dict):
+                payload["current_price"] = p_now
+                payload["_triggered_from_pending"] = True
+                payload["_macro_veto_badge"] = macro_ctx.get("badge")
+                pending_triggered.append(payload)
+            continue
+        pending_kept.append(p)
+
+    # ── Pending Pool 寫入：已噴發訊號先放待辦池，不追價 ─────────────────────────
+    filtered_for_pending: List[Dict] = []
+    _pending_stashed_this_run = 0  # 本輪新進待辦（不併入即時推播）的檔數，供日誌說明
+    for x in all_top:
+        _atr = x.get("atr")
+        _vwap = x.get("vwap_2h")
+        _ema = x.get("ema20") or x.get("ema20_close")
+        _sig_ver = x.get("signal_version") or ""
+        _mtf_ok = int(x.get("mtf_aligned") or 0) >= 3
+        try:
+            _atr_f = float(_atr) if _atr is not None else None
+            _price_f = float(x.get("current_price")) if x.get("current_price") is not None else None
+            _vwap_f = float(_vwap) if _vwap is not None else None
+            _ema_f = float(_ema) if _ema is not None else None
+        except (TypeError, ValueError):
+            _atr_f, _price_f, _vwap_f, _ema_f = None, None, None, None
+        if not (_sig_ver in ("confirmed", "pullback") and _mtf_ok and _atr_f and _price_f and (_vwap_f or _ema_f)):
+            filtered_for_pending.append(x)
+            continue
+        _anchor = _ema_f if _ema_f and _ema_f > 0 else _vwap_f
+        if not _anchor or abs(_price_f - _anchor) <= _atr_f * PENDING_PUMP_ATR_MULTIPLIER:
+            filtered_for_pending.append(x)
+            continue
+        _is_long = (x.get("category") or "") in ("long_open", "short_close")
+        _entry_ref = _anchor
+        _entry_lo = _entry_ref - (_atr_f * MARKET_ENTRY_ZONE_ATR)
+        _entry_hi = _entry_ref + (_atr_f * MARKET_ENTRY_ZONE_ATR)
+        _sl, _tp1, _tp2, _, _ = compute_structural_sl_tp(
+            _entry_ref,
+            _is_long,
+            _vwap_f,
+            _ema_f,
+            x.get("recent_low_2h"),
+            x.get("recent_high_2h"),
+            _atr_f,
+        )
+        if _sl is None or _tp1 is None:
+            filtered_for_pending.append(x)
+            continue
+        _pid = f"{_cooldown_symbol(x.get('symbol') or '')}_{'long' if _is_long else 'short'}_{int(now_ts)}"
+        pending_kept.append({
+            "id": _pid,
+            "symbol": x.get("symbol"),
+            "base": _cooldown_symbol(x.get("symbol") or ""),
+            "dir": "long" if _is_long else "short",
+            "grade": x.get("grade"),
+            "source_version": _sig_ver,
+            "created_ts": int(now_ts),
+            "expire_ts": int(now_ts + PENDING_TTL_HOURS * 3600),
+            "entry_ref_price": _entry_ref,
+            "entry_zone_low": _entry_lo,
+            "entry_zone_high": _entry_hi,
+            "entry_anchor": {"ema20": _ema_f, "vwap_2h": _vwap_f, "atr": _atr_f},
+            "sl": _sl,
+            "tp1": _tp1,
+            "tp2": _tp2,
+            "rr_plan": {"tp1_r": TP1_R_MULTIPLIER, "tp2_r": TP2_R_MULTIPLIER, "min_push_r": MIN_TP1_R_FOR_PUSH},
+            "market_context": {"macro_veto_badge": macro_ctx.get("badge")},
+            "signal_payload": x,
+        })
+        _pending_stashed_this_run += 1
+        logger.info(f"[PendingPool] {_cooldown_symbol(x.get('symbol') or '')}: 偏離主力成本過大，寫入待辦池")
+    all_top = filtered_for_pending
+    if _pending_stashed_this_run:
+        logger.info(
+            f"[PendingPool📌] 本輪 {_pending_stashed_this_run} 檔因「現價偏離 EMA/VWAP "
+            f"> {PENDING_PUMP_ATR_MULTIPLIER:g}×ATR」進**待辦池**，**本輪不發即時推播**"
+            f"（拉回進價區後會併入下輪觸發）；即時推播候選剩 {len(all_top)} 檔。"
+            f" 若要放寬門檻可設環境變數 SNIPER_PENDING_PUMP_ATR（預設 0.5）。"
+        )
+
     cooled_top = []
     for x in all_top:
         sym = x.get("symbol") or ""
@@ -8373,6 +9029,10 @@ def fetch_position_change():
     _skipped = len(all_top) - len(cooled_top)
     if _skipped > 0:
         logger.info(f"本輪冷卻跳過 {_skipped} 檔（同幣同方向 {COOLDOWN_HOURS}h 內不重推）")
+
+    if pending_triggered:
+        cooled_top.extend(pending_triggered)
+        logger.info(f"[PendingPool✅] 觸發完美回踩 {len(pending_triggered)} 檔，併入本輪推播候選")
 
     # 依方向分組後以 |1H OI%| 排序（大者在前）；不設每方向檔數上限
     def _oi_abs_round_cap(xx: Dict) -> float:
@@ -8433,6 +9093,7 @@ def fetch_position_change():
                         _ema_rt,
                         _x.get("recent_low_2h"),
                         _x.get("recent_high_2h"),
+                        _x.get("atr"),
                     )
                     if _sl_i is None or _tp1_i is None:
                         continue
@@ -8530,12 +9191,21 @@ def fetch_position_change():
                             tp2=_posf(payload.get("tp2")),
                             entry=_posf(payload.get("entry")),
                             vwap=_posf(payload.get("vwap")),
+                            vwap_anchor=_posf(payload.get("vwap_anchor")),
+                            anchor_fit_stars=int(payload.get("anchor_fit_stars") or 0),
+                            anchor_hint=str(payload.get("anchor_hint") or ""),
                             ema20=payload.get("ema20"),
                             ema20_touch_low=payload.get("ema20_touch_low"),
                             ema20_touch_high=payload.get("ema20_touch_high"),
                             ema20_4h=payload.get("ema20_4h"),
+                            atr=payload.get("atr"),
+                            tp1_r=payload.get("tp1_r"),
+                            tp2_r=payload.get("tp2_r"),
+                            macro_badge=payload.get("macro_badge"),
+                            signal_version=payload.get("signal_version"),
+                            triggered_from_pending=bool(payload.get("triggered_from_pending")),
                             out_path=img_path,
-                            title_line=f"{sym_b} | 60x5m(~5h) EMA20=purple VWAP=cyan OI=bars",
+                            title_line=f"{sym_b} | 5m×60  K+OI | 青線=2h主力VWAP 金線=錨定發動VWAP",
                         )
                         ok = send_telegram_photo(
                             img_path,
@@ -8546,24 +9216,43 @@ def fetch_position_change():
                         if ok:
                             sent_cnt += 1
                         else:
-                            # caption 可能超長/格式衝突：退回文字推播，確保內容不變
-                            send_telegram_message(
-                                caption_txt,
-                                TG_THREAD_IDS['position_change'],
-                                parse_mode="Markdown",
+                            # 只在「可判定的格式/長度錯誤」才做 TG 文字備援，避免網路逾時造成 TG 圖+文雙發
+                            _fr = (_LAST_TG_PHOTO_FAILURE_REASON or "").lower()
+                            _fallback_safe = any(
+                                k in _fr for k in (
+                                    "can't parse entities",
+                                    "caption is too long",
+                                    "message caption is too long",
+                                    "text is too long",
+                                    "bad request",
+                                )
                             )
+                            if _fallback_safe:
+                                send_telegram_message(
+                                    caption_txt,
+                                    TG_THREAD_IDS['position_change'],
+                                    parse_mode="Markdown",
+                                    mirror_discord=False,
+                                )
+                            else:
+                                logger.warning(
+                                    f"[K線卡片TG備援略過] {sym_b}: 非確定性失敗（{_LAST_TG_PHOTO_FAILURE_REASON}），"
+                                    "為避免 TG 雙發，不做文字補發"
+                                )
                     except Exception as e:
                         logger.warning(f"[K線卡片渲染/推送失敗] {sym_b}: {e}；改推文字")
                         send_telegram_message(
                             caption_txt,
                             TG_THREAD_IDS['position_change'],
                             parse_mode="Markdown",
+                            mirror_discord=False,
                         )
                 else:
                     logger.warning(
                         f"[K線卡片跳過] {sym_b}: fetch_ohlc_5m 回傳不足 "
                         f"(ohlc_len={len(ohlc) if ohlc else None})；改推文字"
                     )
+                    # 此路徑未嘗試過 sendPhoto，DC 尚未收到內容 → 維持預設同步 DC
                     send_telegram_message(
                         caption_txt,
                         TG_THREAD_IDS['position_change'],
@@ -8619,7 +9308,7 @@ def fetch_position_change():
         except Exception as e:
             logger.warning(f"寫入 GitHub Step Summary 失敗: {e}")
 
-    # 寫回冷卻狀態（只保留 history，移除倉位追蹤）
+    # 寫回冷卻狀態（history + pending_signals；向下相容平滑升級）
     try:
         SNIPER_COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
         new_entries = [
@@ -8629,11 +9318,18 @@ def fetch_position_change():
         ]
         history = history + new_entries
         history = [e for e in history if isinstance(e, dict) and (now_ts - e.get("ts", 0)) <= history_sec]
-        state = {"history": history}
+        state = {
+            "version": 2,
+            "history": history,
+            "pending_signals": pending_kept if isinstance(pending_kept, list) else [],
+        }
         _emergency_sniper_state = state
         with _sniper_file_lock():
             save_json_file(SNIPER_COOLDOWN_FILE, state)
-        logger.info(f"冷卻檔已寫入: 本輪 {len(new_entries)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h)")
+        logger.info(
+            f"冷卻檔已寫入: 本輪 {len(new_entries)} 筆，歷史共 {len(history)} 筆 (保留 {HISTORY_HOURS}h)"
+            f" | pending={len(state['pending_signals'])}"
+        )
         _gist_save_cooldown(state)
     except Exception as e:
         logger.warning(f"寫入冷卻狀態檔失敗: {e}")
@@ -8776,6 +9472,57 @@ def filter_important_data(data_array: List[Dict], min_importance: int = 2) -> Li
             filtered.append(item)
     
     return filtered
+
+
+def is_headline_macro_calendar_push(item: Dict) -> bool:
+    """
+    即時推播用：API 常把 importance=3 標很寬，這裡再收斂到「市場定價錨」級事件。
+    - ≥4：一律推
+    - =3：須符合關鍵字（利率／就業／物價／央行決策等）
+    """
+    imp = int(item.get("importance_level") or item.get("importance") or 0)
+    if imp < 3:
+        return False
+    if imp >= 4:
+        return True
+    name = str(item.get("calendar_name") or item.get("name") or item.get("title") or "")
+    blob = name
+    u = blob.upper()
+    keys = (
+        "非農", "NFP", "NON-FARM", "就業人數", "失業率",
+        "CPI", "PPI", "物價", "PCE", "通膨", "通脹",
+        "GDP",
+        "FOMC", "聯邦基金", "利率決議", "INTEREST RATE", "FED", " POWELL", "鮑威爾", "記者會",
+        "ISM", "PMI",
+        "零售銷售", "RETAIL SALES",
+        "初請", "JOBLESS", "JOLTS", "ADP",
+        "褐皮書", "BEIGE BOOK",
+        "ECB", "BOE", "BOJ", "央行", "升息", "降息", "殖利率", "TREASURY", "債券拍賣",
+    )
+    for k in keys:
+        if k in u or k in blob:
+            return True
+    return False
+
+
+def get_why_macro_matters_plain(data: Dict) -> str:
+    """白話一句：這類數據通常影響哪一層、為什麼市場會動。"""
+    name = str(data.get("calendar_name") or data.get("name") or data.get("title") or "")
+    blob = (name + " " + str(data.get("country_name") or data.get("country") or "")).upper()
+    pairs = (
+        (("CPI", "PPI", "PCE", "物價", "通膨", "通脹"), "物價／通膨數據會改寫市場對「未來利率」的預期；利率預期一動，股債匯與風險資產（含加密）的資金成本與估值錨就跟著重定價。"),
+        (("非農", "NFP", "就業", "失業", "JOBLESS", "JOLTS", "ADP"), "就業是景氣溫度計；強就業常支撐「利率偏高更久」的敘事，對高風險資產的流動性偏好通常偏壓抑，反之亦然。"),
+        (("GDP",), "GDP 描述整體需求強弱；偏弱時市場容易往「寬鬆／衰退交易」靠，波動與避險情緒常升溫。"),
+        (("零售", "RETAIL SALES",), "消費占需求很大塊；零售意外走強或走弱，會牽動「軟著陸 vs 衰退」劇本，短線風險偏好常跟著擺盪。"),
+        (("FOMC", "利率", "聯邦基金", "INTEREST RATE", "Fed", "鮑威爾", "Powell", "ECB", "BOE", "BOJ", "央行"), "央行利率路徑是全局定價之母：一點點預期落差，就足以讓美元、公債殖利率與風險資產同步重估。"),
+        (("ISM", "PMI",), "PMI／ISM 偏景氣領先指標；擴張或萎縮的意外，常直接打在「景氣循環交易」上，波動常放大。"),
+        (("GDP平減", "DEFLATOR",), "平減指數也帶物價成分，市場會拿來交叉驗證通膨黏性。"),
+    )
+    for keys, text in pairs:
+        for k in keys:
+            if k in blob or k in name:
+                return text
+    return "這類日程多半牽動「利率預期、景氣預期、美元與避險情緒」其中至少一項；加密沒有獨立於宏觀的定價，所以短線常跟著風險資產一起反應。"
 
 
 def filter_today_events(data_array: List[Dict], min_importance: int = 4) -> List[Dict]:
@@ -9056,6 +9803,8 @@ def format_economic_data_message(data: Dict) -> str:
     lines.append(f"{importance_badge}")
     if effect_text and effect_text != '待觀察':
         lines.append(f"{effect_emoji} 市場影響：{effect_text}")
+    _why_plain = get_why_macro_matters_plain(data)
+    lines.append(f"🧭 *白話為什麼重要*：{_why_plain}")
     lines.append("")
     
     # 補充說明
@@ -9198,12 +9947,15 @@ def fetch_and_push_economic_data():
         
         logger.info(f"總共獲取 {len(all_data)} 條數據（經濟數據: {len(economic_data)}, 財經事件: {len(financial_events)}, 央行活動: {len(central_bank)}）")
         
-        # 只過濾極高重要性數據（>= 3），高重要性（>= 2 且 < 3）不推播
-        important_data = filter_important_data(all_data, min_importance=3)
-        logger.info(f"過濾後的極高重要性數據: {len(important_data)} 條")
+        # 先取 importance≥3，再以關鍵字收斂（避免 API 標級過寬導致次要事件狂推）
+        important_data = [
+            x for x in filter_important_data(all_data, min_importance=3)
+            if is_headline_macro_calendar_push(x)
+        ]
+        logger.info(f"過濾後的宏觀頭條級數據: {len(important_data)} 條")
         
         if not important_data:
-            logger.info("沒有符合條件的極高重要性數據")
+            logger.info("沒有符合條件的宏觀頭條級數據（importance 或關鍵字未達標）")
             return
         
         # 按發布時間排序（優先推送即將發布的）
@@ -11859,6 +12611,95 @@ def format_whale_position_message(position: Dict, index: int) -> str:
     return f"{index}. 地址 `...{address_short}` | 倉位：{size_display} [{symbol} {side_text}] | 槓桿：{leverage:.1f}x"
 
 
+def build_hyperliquid_market_digest_message() -> Optional[str]:
+    """
+    CoinGlass「全市場」補充段（與 whale_wallet_tracker 的指定地址追蹤分源）：
+    - /api/hyperliquid/whale-position 榜單節錄
+    - /api/hyperliquid/wallet/pnl-distribution 摘要
+    - 可選：全域多空帳戶比（若 API 回傳可解析）
+
+    需 CG_API_KEY；另需環境變數 WHALE_CG_MARKET_DIGEST=1 才會送出（避免每輪 cron 洗版）。
+    """
+    flag = os.getenv("WHALE_CG_MARKET_DIGEST", "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        return None
+    if not (CG_API_KEY or "").strip():
+        logger.info("[HL全市場快照] 略過：未設定 CG_API_KEY")
+        return None
+
+    logger.info("[HL全市場快照] 組建 CoinGlass HL 榜單／分布摘要…")
+    lines: List[str] = [
+        "🧭 *鏈上巨鯨動向｜HL 全市場（CoinGlass）*",
+        "_與「指定地址」追蹤為不同資料來源：此為 CoinGlass 匯總榜單／分布_",
+        "",
+    ]
+
+    top5 = fetch_hyperliquid_whale_position()
+    if top5:
+        lines.append("*巨鯨持倉榜（whale-position，節錄）*")
+        for i, p in enumerate(top5[:5], 1):
+            lines.append(f"• {format_whale_position_message(p, i)}")
+    else:
+        lines.append("*巨鯨持倉榜*：暫無資料（方案權限、或本輪 API 無回應）")
+
+    pnl_raw = fetch_hyperliquid_pnl_distribution()
+    pnl_tip = ""
+    if isinstance(pnl_raw, dict):
+        data_pnl = pnl_raw.get("data") if "data" in pnl_raw else pnl_raw
+        if isinstance(data_pnl, dict):
+            for k in ("profitablePercent", "winRate", "profitable", "profit_rate"):
+                v = data_pnl.get(k)
+                if v is not None:
+                    try:
+                        pv = float(v)
+                        if pv > 0:
+                            pnl_tip = f"盈利錢包約佔 *{pv:.1f}%*（wallet pnl-distribution）"
+                            break
+                    except (TypeError, ValueError):
+                        pass
+    lines.append("")
+    if pnl_tip:
+        lines.append(f"*全市場盈虧分布*：{pnl_tip}")
+    else:
+        lines.append("*全市場盈虧分布*：未取得可讀摘要（欄位因 API 版本而異）")
+
+    ls_hint = ""
+    try:
+        j_ls = _cg_get(CG_EP["hl_global_ls_hist"], {})
+        if j_ls:
+            raw_ls = j_ls.get("data") or j_ls.get("list") or j_ls
+            if isinstance(raw_ls, list) and raw_ls:
+                last = raw_ls[-1]
+                if isinstance(last, dict):
+                    for a, b in [
+                        ("longAccount", "shortAccount"),
+                        ("long", "short"),
+                        ("longRatio", "shortRatio"),
+                    ]:
+                        if last.get(a) is not None and last.get(b) is not None:
+                            try:
+                                la = float(last[a])
+                                sb = float(last[b])
+                                if sb > 0:
+                                    ls_hint = f"多空帳戶比（長/短）約 `{la/sb:.3f}`（全域 history 最後一筆）"
+                                    break
+                            except (TypeError, ValueError, ZeroDivisionError):
+                                pass
+    except Exception as e_ls:
+        logger.debug("[HL全市場快照] global LS history 解析略過: %s", e_ls)
+
+    lines.append("")
+    if ls_hint:
+        lines.append(f"*帳戶多空*：{ls_hint}")
+    else:
+        lines.append("*帳戶多空*：本輪無法從 API 解析（可忽略）")
+
+    lines.append("")
+    lines.append(f"⏰ {format_datetime(get_taipei_time())}")
+    lines.append("_僅供觀察，非投資建議_")
+    return "\n".join(lines)
+
+
 def build_hyperliquid_message() -> Optional[str]:
     """組合 Hyperliquid 聰明錢監控訊息（僅在有新的 Whale Alert 時推播）"""
     logger.info("開始構建 Hyperliquid 聰明錢監控訊息...")
@@ -12129,18 +12970,53 @@ def build_hyperliquid_message() -> Optional[str]:
 
 
 def run_hyperliquid_monitor_once():
-    """執行一次大佬錢包動向追蹤（走既有 TG+DC 同步推播流程）。"""
-    logger.info("開始執行大佬錢包動向追蹤（Hyperliquid + Etherscan）...")
-    messages = run_whale_wallet_tracker_once(DATA_DIR)
-    if not messages:
-        logger.info("本次無新事件，未發送推播")
-        return
+    """
+    鏈上巨鯨動向（三層，各自獨立）：
+    ① whale_wallet_tracker：指定地址 HL API + Etherscan
+    ② build_hyperliquid_message：CoinGlass whale-alert（有新事件才推）
+    ③ build_hyperliquid_market_digest_message：CoinGlass 榜單／分布（需 WHALE_CG_MARKET_DIGEST=1）
+
+    排程建議（效能／頻率平衡）：
+    - 首選每 **30 分鐘** 觸發一次：巨鯨持倉多為較慢節奏，可明顯節省 API 與避免洗版；與現貨回溯窗（WHALE_LOOKBACK_SECONDS 預設 2h）相容。
+    - 若最重視 CoinGlass Whale Alert 即時性：可 **15 分鐘**；不建議低於 **5 分鐘**（易重複狀態差分、Etherscan／配額壓力）。
+    """
+    logger.info(
+        "開始執行鏈上巨鯨動向：①地址追蹤 ②CoinGlass Whale Alert ③可選全市場快照（WHALE_CG_MARKET_DIGEST）…"
+    )
     thread_id = TG_THREAD_IDS.get("hyperliquid", 252)
-    sent_ok = 0
-    for msg in messages[:20]:
-        if send_telegram_message(msg, thread_id, parse_mode="Markdown"):
-            sent_ok += 1
-    logger.info("大佬錢包動向追蹤推播完成，已發送 %s/%s 則", sent_ok, min(len(messages), 20))
+
+    messages = run_whale_wallet_tracker_once(DATA_DIR)
+    sent_addr = 0
+    if messages:
+        for msg in messages[:20]:
+            if send_telegram_message(msg, thread_id, parse_mode="Markdown"):
+                sent_addr += 1
+        logger.info("[鏈上巨鯨] ① 指定地址事件已發送 %s/%s 則", sent_addr, min(len(messages), 20))
+    else:
+        logger.info("[鏈上巨鯨] ① 指定地址本輪無新事件")
+
+    cg_msg: Optional[str] = None
+    try:
+        cg_msg = build_hyperliquid_message()
+    except Exception as e:
+        logger.warning("[鏈上巨鯨] ② CoinGlass 預警訊息構建失敗: %s", e)
+    if cg_msg:
+        if send_telegram_message(cg_msg, thread_id, parse_mode="Markdown"):
+            logger.info("[鏈上巨鯨] ② CoinGlass Whale Alert 已發送 1 則")
+    else:
+        logger.info("[鏈上巨鯨] ② 無新 Whale Alert 或未達內部過濾（見 fetch_hyperliquid_whale_alert 日誌）")
+
+    digest: Optional[str] = None
+    try:
+        digest = build_hyperliquid_market_digest_message()
+    except Exception as e:
+        logger.warning("[鏈上巨鯨] ③ 全市場快照構建失敗: %s", e)
+    if digest:
+        if send_telegram_message(digest, thread_id, parse_mode="Markdown"):
+            logger.info("[鏈上巨鯨] ③ CoinGlass 全市場快照已發送 1 則")
+
+    if sent_addr == 0 and not cg_msg and not digest:
+        logger.info("[鏈上巨鯨] 本輪①②③皆無可推播內容；若需③請設 WHALE_CG_MARKET_DIGEST=1 並確認 CG_API_KEY")
 
 
 def run_gold_signal():
@@ -12214,13 +13090,13 @@ def run_gold_signal():
     logger.info("[黃金訊號] 黃金 1h 數據 OK，共 %s 根 | 時間範圍: %s ~ %s",
                 n_rows, df_1h.index.min() if hasattr(df_1h.index, 'min') and len(df_1h) else "N/A", df_1h.index.max() if hasattr(df_1h.index, 'max') and len(df_1h) else "N/A")
 
-    # 狀態檔路徑：與 gold_signal_bot 同層，方便 repo 內放 gold_signal_bot/gold_signal_state/state.json
-    state_dir = cwd / "gold_signal_bot" / "gold_signal_state"
+    # 狀態檔與模組同目錄（勿用 cwd）：避免從別的工作目錄啟動時 TP/SL 追蹤分裂或遺失
+    state_dir = gold_bot_dir / "gold_signal_state"
     state_path = state_dir / "state.json"
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
-        state_path = cwd / "gold_signal_state.json"
+        state_path = gold_bot_dir / "gold_signal_state.json"
 
     def _load_gold_state():
         try:
@@ -12621,7 +13497,7 @@ if __name__ == "__main__":
             print("  long_term_index_once  - 長線牛熊導航儀（只執行一次，適合排程）")
             print("  liquidity_radar       - 流動性獵取雷達（極端爆倉彙整）")
             print("  altseason_radar       - 山寨爆發雷達（Altseason + RSI + Buy Ratio）")
-            print("  hyperliquid           - 大佬錢包動向追蹤（Discord）")
+            print("  hyperliquid           - 鏈上巨鯨動向（地址追蹤+CoinGlass；見 WHALE_CG_MARKET_DIGEST）")
             print("  gold_signal           - 黃金 XAUUSD 多空訊號（ORB+MA）")
             print("  api_check             - API 健康檢查（驗證所有端點是否可用）")
             print("  reset_data            - 清除所有冷卻/推播/績效記錄，全新重啟")
