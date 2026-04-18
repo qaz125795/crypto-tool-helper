@@ -3756,15 +3756,18 @@ def _calc_indicators_from_ohlcv(
     # VWAP_2h（最近 8 根 15m K 線）與收盤價相對 VWAP 的標準差（供 TP2 軌道用）
     vwap_2h = None
     vwap_std = None
+    vwap_vol_weighted = True
     if len(closes) >= 8 and len(volumes) >= 8:
         uc, uh, ul, uv = closes[-8:], highs[-8:], lows[-8:], volumes[-8:]
         typical = [(uh[i] + ul[i] + uc[i]) / 3.0 for i in range(len(uc))]
         total_vol = sum(uv)
         if total_vol > 0:
             vwap_2h = sum(typical[i] * uv[i] for i in range(len(typical))) / total_vol
+            vwap_vol_weighted = True
             logger.info(f"[指標計算] {clean}: VWAP_2h 使用最近 8 根 K 線成交量加權 (典型價 H+L+C/3)")
         else:
             vwap_2h = sum(typical) / len(typical)
+            vwap_vol_weighted = False
             logger.info(f"[指標計算] {clean}: VWAP_2h 無 volume，改用等權典型價均值 (TWAP 近似)")
         if vwap_2h is not None and uc:
             try:
@@ -3841,6 +3844,7 @@ def _calc_indicators_from_ohlcv(
         out["last_kline_close_30m"] = float(closes[-1])
     if vwap_2h is not None:
         out["vwap_2h"] = vwap_2h
+        out["vwap_2h_volume_weighted"] = bool(vwap_vol_weighted)
     if vwap_std is not None:
         out["vwap_std"] = vwap_std
     if ema20_close is not None:
@@ -4320,16 +4324,19 @@ MARKET_ENTRY_ZONE_ATR = _env_float("SNIPER_ENTRY_ZONE_ATR", 0.2)                
 MIN_SL_ATR_MULTIPLIER = _env_float("SNIPER_MIN_SL_ATR", 1.0)                     # 最低 SL 距離：至少 1.0*ATR
 PENDING_PUMP_ATR_MULTIPLIER = _env_float("SNIPER_PENDING_PUMP_ATR", 0.5)         # 已噴發待辦池判定
 PENDING_TTL_HOURS = _env_float("SNIPER_PENDING_TTL_HOURS", 4.0)                  # 待辦訊號最長存活
-# 批次版 Anchored VWAP（GitHub Actions 友好）：5m 爆量 + 相鄰 OI 階梯變化 → 錨點起算加權均價
+# 批次版 Anchored VWAP：5m 爆量 + OI 變化（視窗內最大階梯）→ 錨點起算加權均價；無 OI 時可降級為僅爆量
 SNIPER_ANCHOR_ENABLED = os.getenv("SNIPER_ANCHOR_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
-SNIPER_ANCHOR_VOL_SPIKE_RATIO = _env_float("SNIPER_ANCHOR_VOL_SPIKE_RATIO", 3.0)  # 當根 volume ≥ 基準×（如 3=300%）
-SNIPER_ANCHOR_OI_STEP_PCT = _env_float("SNIPER_ANCHOR_OI_STEP_PCT", 5.0)          # 相鄰兩根 OI 累計值 |Δ|/prev ≥ %
+SNIPER_ANCHOR_VOL_SPIKE_RATIO = _env_float("SNIPER_ANCHOR_VOL_SPIKE_RATIO", 2.2)  # 當根 volume ≥ 近 M 根均量×此倍數
+SNIPER_ANCHOR_OI_STEP_PCT = _env_float("SNIPER_ANCHOR_OI_STEP_PCT", 2.5)  # 與視窗內任一前棒 OI 比，|Δ|/ref ≥ %
+SNIPER_ANCHOR_OI_LOOKBACK_BARS = int(max(2, round(_env_float("SNIPER_ANCHOR_OI_LOOKBACK_BARS", 6))))  # 最多回看幾根 5m 算 OI 變化
 SNIPER_ANCHOR_LOOKBACK_BARS = int(max(24, round(_env_float("SNIPER_ANCHOR_LOOKBACK_BARS", 72))))   # 5m 根數（預設 6h）
 SNIPER_ANCHOR_VOL_BASELINE_BARS = int(max(3, round(_env_float("SNIPER_ANCHOR_VOL_BASELINE_BARS", 10))))
 TP1_EXIT_RATIO = 0.50
 TP2_EXIT_RATIO = 0.50
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
 MIN_SIGNAL_PUSH_SCORE = 74          # 平衡：過高會配合「車已發動」壓分誤殺陡坡結構單
+# Tier2（觀察名單）略降底分，避免崩盤日僅剩觀察單卻全日無推播
+MIN_SIGNAL_PUSH_SCORE_TIER2 = int(round(_env_float("MIN_SIGNAL_PUSH_SCORE_TIER2", 66)))
 # 逆勢 R 級預設略嚴；但「機構成交 + 平倉浪摸頭/摸底」可用 MIN_R_STRUCT_TOUCH_SCORE 放行（見下方）
 MIN_R_SIGNAL_PUSH_SCORE = 78
 # 非「完美回踩」的潛在訊號（signal_version=potential 且非 pullback）須達此分
@@ -4364,6 +4371,7 @@ def _sniper_mega_liquidity_ok(x: dict) -> bool:
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
 MAX_ESTIMATED_HOLD_HOURS = _env_float("SNIPER_MAX_HOLD_HOURS", 8.0)
 MIN_1H_MOMENTUM_PCT = _env_float("SNIPER_MIN_1H_MOMENTUM_PCT", 1.0)  # 低於此視為慢盤
+MIN_1H_MOMENTUM_TIER2_PCT = _env_float("SNIPER_MIN_1H_MOMENTUM_TIER2_PCT", 0.35)  # tier2 略放寬（崩盤後 1H 常鈍化）
 
 
 def compute_structural_sl_tp(
@@ -4472,6 +4480,7 @@ def derive_limit_order_from_inputs(
     signal_version: str,
     energy_exhausted: bool,
     atr: Optional[float] = None,
+    vwap_volume_weighted: bool = True,
 ) -> Tuple[bool, Optional[float]]:
     """
     與 build_report_message_tiered 進場邏輯一致（順序相同）：
@@ -4480,6 +4489,8 @@ def derive_limit_order_from_inputs(
       3) VWAP：在帶內 → 市價；否則 掛單價 = VWAP×0.975（與現行程式相同）
     回傳 (is_limit_order, limit_price)；市價進場為 (False, None)。
     推播策略：僅市價進場；若此函式回傳需限價（True, …）則該標的不推播。
+    vwap_volume_weighted=False：K 線無 volume 時的 TWAP 近似，不作「主力 VWAP 帶」
+    以免崩盤後現價與錨點脫節導致整筆被進場濾網誤殺。
     """
     is_bull = category in ("long_open", "short_close")
     try:
@@ -4493,6 +4504,8 @@ def derive_limit_order_from_inputs(
     try:
         vwap = float(vwap_2h) if vwap_2h is not None and float(vwap_2h) > 0 else None
     except (TypeError, ValueError):
+        vwap = None
+    if not vwap_volume_weighted:
         vwap = None
     try:
         ema = float(ema20) if ema20 is not None and float(ema20) > 0 else None
@@ -4555,11 +4568,40 @@ def _asof_oi_per_ohlc_bar(
     return out
 
 
+def _max_oi_step_pct_in_window(
+    oi_vals: List[Optional[float]], i: int, lookback: int
+) -> float:
+    """
+    與區間 [i-lookback, i-1] 內任一非空 OI 比較，回傳 |Oi-Oj|/|Oj|*100 的最大值（捕捉非相鄰棒更新／API 對齊延遲）。
+    """
+    if i < 1 or i >= len(oi_vals) or oi_vals[i] is None:
+        return 0.0
+    try:
+        curr = float(oi_vals[i])
+    except (TypeError, ValueError):
+        return 0.0
+    start = max(0, i - int(lookback))
+    best = 0.0
+    for j in range(start, i):
+        if oi_vals[j] is None:
+            continue
+        try:
+            prev = float(oi_vals[j])
+        except (TypeError, ValueError):
+            continue
+        ap = abs(prev)
+        if ap < 1e-12:
+            continue
+        best = max(best, abs(curr - prev) / ap * 100.0)
+    return best
+
+
 def compute_anchored_launch_vwap_snapshot(symbol_base: str) -> Optional[Dict[str, Any]]:
     """
     批次版「發動錨定 VWAP」：在最近 N 根 5m K 內，自右向左找最近一次
-    「爆量（volume ≥ ratio×近 M 根均量）且相鄰兩根 OI 累計階梯變化 ≥ 門檻%」的棒形為錨點，
-    自該棒起至最新棒的成交量加權均價（典型價）。
+    「爆量（volume ≥ ratio×近 M 根均量）且 OI 在視窗內相對前段有足夠變化」的棒為錨點；
+    若全視窗無法滿足 OI 條件（無 API、OI 重複採樣等），則降級為「僅爆量」錨點。
+    自錨點棒起至最新棒的成交量加權均價（典型價）。
     """
     clean = (symbol_base or "").upper().replace("USDT", "").replace("-", "").replace("/", "")
     if not clean:
@@ -4580,34 +4622,44 @@ def compute_anchored_launch_vwap_snapshot(symbol_base: str) -> Optional[Dict[str
             return float("nan")
         return (h + l + c) / 3.0
 
-    anchor_idx: Optional[int] = None
-    vol_ratio_at_anchor: Optional[float] = None
-    b0 = SNIPER_ANCHOR_VOL_BASELINE_BARS
-    for i in range(len(ohlc) - 1, b0, -1):
+    def _vol_metrics_at(i: int) -> Tuple[bool, float, float]:
+        """(vol_ok, vi, base) — base 為 i 前 b0 根均量。"""
         try:
             vols = [float(ohlc[j].get("v") or 0) for j in range(i - b0, i)]
         except (TypeError, ValueError):
-            continue
+            return False, 0.0, 0.0
         base = sum(vols) / max(len(vols), 1)
         try:
             vi = float(ohlc[i].get("v") or 0)
         except (TypeError, ValueError):
             vi = 0.0
         vol_ok = base > 0 and vi >= SNIPER_ANCHOR_VOL_SPIKE_RATIO * base
-        oi_ok = False
-        if i > 0 and oi_vals[i] is not None and oi_vals[i - 1] is not None:
-            prev_oi = float(oi_vals[i - 1])
-            curr_oi = float(oi_vals[i])
-            if prev_oi != 0:
-                step_pct = abs(curr_oi - prev_oi) / abs(prev_oi) * 100.0
-                oi_ok = step_pct >= SNIPER_ANCHOR_OI_STEP_PCT
-        if vol_ok and oi_ok:
+        return vol_ok, vi, base
+
+    anchor_idx: Optional[int] = None
+    vol_ratio_at_anchor: Optional[float] = None
+    b0 = SNIPER_ANCHOR_VOL_BASELINE_BARS
+    oi_lb = SNIPER_ANCHOR_OI_LOOKBACK_BARS
+    for i in range(len(ohlc) - 1, b0, -1):
+        vol_ok, vi, base = _vol_metrics_at(i)
+        if not vol_ok:
+            continue
+        oi_step = _max_oi_step_pct_in_window(oi_vals, i, oi_lb)
+        if oi_step >= SNIPER_ANCHOR_OI_STEP_PCT:
             anchor_idx = i
             vol_ratio_at_anchor = (vi / base) if base > 0 else None
             break
 
     if anchor_idx is None:
-        return {"ok": False, "note": "未偵測到發動錨點（爆量+OI 階梯）"}
+        for i in range(len(ohlc) - 1, b0, -1):
+            vol_ok, vi, base = _vol_metrics_at(i)
+            if vol_ok:
+                anchor_idx = i
+                vol_ratio_at_anchor = (vi / base) if base > 0 else None
+                break
+
+    if anchor_idx is None:
+        return {"ok": False, "note": "未偵測到發動錨點（爆量／近段無明顯量能集中）"}
 
     num = 0.0
     den = 0.0
@@ -5642,7 +5694,17 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
                 score += 15
                 reasons.append("上漲段摸頭")   # 上漲段建空 = 摸頭
             elif p24h < -10.0:
-                score -= 10                     # 大跌後建空 = 追低
+                # 崩盤日多數標的 24h 深跌；若 1H OI 仍強，視為空頭加倉而非單純追低
+                try:
+                    _oi1_abs = abs(float(x.get("oiChange1h") or 0))
+                except (TypeError, ValueError):
+                    _oi1_abs = 0.0
+                if _oi1_abs >= 4.0:
+                    score -= 3
+                    reasons.append("大跌段空頭加倉")
+                else:
+                    score -= 10
+                    reasons.append("大跌後弱OI追空")
         elif cat == "long_close":
             # 多方平倉 = 看空，在上漲段出現更好（出貨）
             if p24h > 3.0:
@@ -5736,11 +5798,15 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         _min_floor = min(_min_floor, MIN_R_STRUCT_TOUCH_SCORE)
 
     if score < _min_floor:
-        grade = "B"
-        grade_badge = "🥈 *B 級*"
-        grade_desc = f"訊號不足（<{_min_floor}分不推播）"
-        brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
-        return grade, score, brief, _already_moving, _motion_note
+        _eff_floor = _min_floor
+        if (x.get("signal_version") or "") == "tier2":
+            _eff_floor = max(MIN_R_STRUCT_TOUCH_SCORE, MIN_SIGNAL_PUSH_SCORE_TIER2)
+        if score < _eff_floor:
+            grade = "B"
+            grade_badge = "🥈 *B 級*"
+            grade_desc = f"訊號不足（<{_eff_floor}分不推播）"
+            brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
+            return grade, score, brief, _already_moving, _motion_note
 
     # score ≥ MIN：依 4H 順逆分流 S/A/R
     _dir_label = "摸頭・逆勢做空" if not is_bull_sig else "摸底・逆勢做多"
@@ -6136,9 +6202,11 @@ def build_report_message_tiered(
                 and _sniper_structural_cascade_touch(x, is_bull_sig)
                 and _sniper_mega_liquidity_ok(x)
             )
-            if not _tier2_struct_fr and not _trap_full and _trap_steps < 2:
+            _tier2_need_trap = 1 if _tier2_fr_only else 2
+            if not _tier2_struct_fr and not _trap_full and _trap_steps < _tier2_need_trap:
                 logger.info(
-                    f"[持倉過濾] {sym_base}: Tier2 且籌碼陷阱未達 2/3 步（非費率降級+結構單），略過推播"
+                    f"[持倉過濾] {sym_base}: Tier2 且籌碼陷阱未達 {_tier2_need_trap}/3 步"
+                    f"（非費率降級+結構單），略過推播"
                 )
                 continue
 
@@ -6165,6 +6233,8 @@ def build_report_message_tiered(
         rsi_val = x.get("rsi")
         detected_ts = x.get("_detected_ts")
         vwap_2h_val = x.get("vwap_2h")
+        _vwap_vol_ok = bool(x.get("vwap_2h_volume_weighted", True))
+        vwap_for_struct = vwap_2h_val if _vwap_vol_ok else None
         _now_ts = time.time()
 
         # ══════════════════════════════════════════════════════════
@@ -6183,6 +6253,7 @@ def build_report_message_tiered(
             _sig_ver,
             bool(x.get("_energy_exhausted")),
             atr_val,
+            _vwap_vol_ok,
         )
         _entry_mode = "市價"
         _entry_note = ""
@@ -6213,7 +6284,7 @@ def build_report_message_tiered(
             sl, tp1, tp2, _one_r_u, sl_pct_val = compute_structural_sl_tp(
                 float(_entry_price),
                 is_bull_sig,
-                vwap_2h_val,
+                vwap_for_struct,
                 ema20_val,
                 _recent_lo,
                 _recent_hi,
@@ -6448,7 +6519,8 @@ def build_report_message_tiered(
         try:
             _vwap_show = (
                 float(vwap_2h_val)
-                if vwap_2h_val is not None
+                if _vwap_vol_ok
+                and vwap_2h_val is not None
                 and isinstance(vwap_2h_val, (int, float))
                 and float(vwap_2h_val) > 0
                 else None
@@ -6495,8 +6567,14 @@ def build_report_message_tiered(
             _tp1_dist_pct = abs(float(tp1) - float(_entry_price)) / float(_entry_price) * 100 if (tp1 and _entry_price) else None
             _pc1h = x.get("priceChange1h")
             _mom_1h = abs(float(_pc1h)) if _pc1h is not None else 0.0
-            if _mom_1h < MIN_1H_MOMENTUM_PCT:
-                logger.info(f"[時間過濾⏱️] {sym_base}: 1H動能 {_mom_1h:.2f}% < {MIN_1H_MOMENTUM_PCT:.2f}%，略過慢盤訊號")
+            _mom_need = MIN_1H_MOMENTUM_PCT
+            if str(x.get("signal_version") or "") == "tier2":
+                _mom_need = min(_mom_need, MIN_1H_MOMENTUM_TIER2_PCT)
+            if _mom_1h < _mom_need:
+                logger.info(
+                    f"[時間過濾⏱️] {sym_base}: 1H動能 {_mom_1h:.2f}% < {_mom_need:.2f}%"
+                    f"（{'tier2 門檻' if _mom_need < MIN_1H_MOMENTUM_PCT else '標準門檻'}），略過慢盤訊號"
+                )
                 continue
             if _tp1_dist_pct is not None:
                 _est_hold_h = _tp1_dist_pct / max(_mom_1h, 0.05)
@@ -6533,14 +6611,14 @@ def build_report_message_tiered(
                 else "—（本輪無星級加分）"
             )
             msg_lines.append(
-                f"• **錨定加權成本（5m 爆量+OI 階梯→發動 VWAP）**：`{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
+                f"• **錨定加權成本（5m 量能錨→發動 VWAP；優先 OI 共振）**：`{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
             )
             msg_lines.append(f"  └ *錨定貼合星級（加分項）*：{_star_bar}")
             if _anchor_hint_disp:
                 msg_lines.append(f"  └ *倉位思路*：{_anchor_hint_disp}")
         else:
             msg_lines.append(
-                "• **錨定加權成本**：—（未取得：多為 OI 不足／未達爆量+OI 門檻）"
+                "• **錨定加權成本**：—（未取得：近段 5m 無達標之量能錨點）"
             )
         msg_lines.append("")
 
@@ -8500,7 +8578,13 @@ def fetch_position_change():
         _energy_exhausted = _energy_exhausted_manip
         if _effective_version == "confirmed" and not _energy_exhausted:
             _vwap = tech.get("vwap_2h") if tech else None
-            if _vwap and _cur_price and float(_vwap) > 0:
+            if (
+                tech
+                and tech.get("vwap_2h_volume_weighted", True)
+                and _vwap
+                and _cur_price
+                and float(_vwap) > 0
+            ):
                 _dev_pct = abs(float(_cur_price) - float(_vwap)) / float(_vwap) * 100
                 if _dev_pct > 1.0:
                     _energy_exhausted = True
@@ -8516,6 +8600,8 @@ def fetch_position_change():
             tech.get("ema20_close") if tech else None,
             _effective_version,
             _energy_exhausted,
+            tech.get("atr") if tech else None,
+            bool(tech.get("vwap_2h_volume_weighted", True)),
         )
 
         _anchor_snap: Optional[Dict[str, Any]] = None
@@ -8569,7 +8655,8 @@ def fetch_position_change():
             "_cvd_confirmed": _cvd_confirmed,
             "_cvd_conflict_strong": _cvd_conflict_strong,
             "vwap_2h": tech.get("vwap_2h") if tech else None,
-            # 發動錨定 VWAP（5m 爆量 + OI 階梯；自錨點棒起至最新的成交量加權典型價）
+            "vwap_2h_volume_weighted": bool(tech.get("vwap_2h_volume_weighted", True)),
+            # 發動錨定 VWAP（5m 爆量；優先 OI 視窗共振，否則僅量能錨；自錨點起 VWAP）
             "vwap_anchor": _anchor_snap.get("vwap_anchor")
             if isinstance(_anchor_snap, dict) and _anchor_snap.get("ok")
             else None,
@@ -8959,10 +9046,11 @@ def fetch_position_change():
         _entry_ref = _anchor
         _entry_lo = _entry_ref - (_atr_f * MARKET_ENTRY_ZONE_ATR)
         _entry_hi = _entry_ref + (_atr_f * MARKET_ENTRY_ZONE_ATR)
+        _vwap_pending = _vwap_f if x.get("vwap_2h_volume_weighted", True) else None
         _sl, _tp1, _tp2, _, _ = compute_structural_sl_tp(
             _entry_ref,
             _is_long,
-            _vwap_f,
+            _vwap_pending,
             _ema_f,
             x.get("recent_low_2h"),
             x.get("recent_high_2h"),
@@ -9082,7 +9170,11 @@ def fetch_position_change():
                             f"（偏差 {_drift:.1%}）"
                         )
                     _is_long_rt = (_x.get("category") or "") in ("long_open", "short_close")
-                    _vwap_2h = _x.get("vwap_2h")
+                    _vwap_2h = (
+                        _x.get("vwap_2h")
+                        if _x.get("vwap_2h_volume_weighted", True)
+                        else None
+                    )
                     _ema_rt = _x.get("ema20") or _x.get("ema20_close")
                     # 與推播一致：僅市價進場，結構 SL/TP 一律以即時價為進場基準
                     _entry_rt = _live
