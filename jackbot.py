@@ -4323,6 +4323,8 @@ MAX_MARKET_VWAP_GAP_ATR = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_ATR", 1.5)    #
 MARKET_ENTRY_ZONE_ATR = _env_float("SNIPER_ENTRY_ZONE_ATR", 0.2)                 # 市價可進場區：Entry ± 0.2*ATR
 MIN_SL_ATR_MULTIPLIER = _env_float("SNIPER_MIN_SL_ATR", 1.0)                     # 最低 SL 距離：至少 1.0*ATR
 PENDING_PUMP_ATR_MULTIPLIER = _env_float("SNIPER_PENDING_PUMP_ATR", 0.5)         # 已噴發待辦池判定
+# Tier2 推播至少需籌碼陷阱步數（0～3）；預設 1＝崩盤/弱共振日仍可有觀察單（設 2 恢復較嚴）
+SNIPER_TIER2_MIN_TRAP_STEPS = int(max(0, min(3, round(_env_float("SNIPER_TIER2_MIN_TRAP_STEPS", 1)))))
 PENDING_TTL_HOURS = _env_float("SNIPER_PENDING_TTL_HOURS", 4.0)                  # 待辦訊號最長存活
 # 批次版 Anchored VWAP：5m 爆量 + OI 變化（視窗內最大階梯）→ 錨點起算加權均價；無 OI 時可降級為僅爆量
 SNIPER_ANCHOR_ENABLED = os.getenv("SNIPER_ANCHOR_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
@@ -4338,7 +4340,7 @@ MIN_SIGNAL_PUSH_SCORE = 74          # 平衡：過高會配合「車已發動」
 # Tier2（觀察名單）略降底分，避免崩盤日僅剩觀察單卻全日無推播
 MIN_SIGNAL_PUSH_SCORE_TIER2 = int(round(_env_float("MIN_SIGNAL_PUSH_SCORE_TIER2", 66)))
 # 逆勢 R 級預設略嚴；但「機構成交 + 平倉浪摸頭/摸底」可用 MIN_R_STRUCT_TOUCH_SCORE 放行（見下方）
-MIN_R_SIGNAL_PUSH_SCORE = 78
+MIN_R_SIGNAL_PUSH_SCORE = int(round(_env_float("MIN_R_SIGNAL_PUSH_SCORE", 70)))  # 逆勢 R；測試期預設略降
 # 非「完美回踩」的潛在訊號（signal_version=potential 且非 pullback）須達此分
 MIN_WEAK_POTENTIAL_PUSH_SCORE = 78
 # 1H 多平/空回補 + MTF≥3 + 成交值達標：逆勢 R 允許的最低分（避免 SIREN 類被 76 線砍成 B）
@@ -6202,7 +6204,9 @@ def build_report_message_tiered(
                 and _sniper_structural_cascade_touch(x, is_bull_sig)
                 and _sniper_mega_liquidity_ok(x)
             )
-            _tier2_need_trap = 1 if _tier2_fr_only else 2
+            _tier2_need_trap = SNIPER_TIER2_MIN_TRAP_STEPS
+            if _tier2_fr_only:
+                _tier2_need_trap = min(_tier2_need_trap, 1)
             if not _tier2_struct_fr and not _trap_full and _trap_steps < _tier2_need_trap:
                 logger.info(
                     f"[持倉過濾] {sym_base}: Tier2 且籌碼陷阱未達 {_tier2_need_trap}/3 步"
@@ -9036,6 +9040,10 @@ def fetch_position_change():
         except (TypeError, ValueError):
             _atr_f, _price_f, _vwap_f, _ema_f = None, None, None, None
         if not (_sig_ver in ("confirmed", "pullback") and _mtf_ok and _atr_f and _price_f and (_vwap_f or _ema_f)):
+            filtered_for_pending.append(x)
+            continue
+        # 已觸發「動能透支→限價 EMA」的確定籌碼：代表已接受偏離，不再塞待辦池以免整輪無推播
+        if bool(x.get("_energy_exhausted")):
             filtered_for_pending.append(x)
             continue
         _anchor = _ema_f if _ema_f and _ema_f > 0 else _vwap_f
