@@ -2,8 +2,8 @@ name: 長線牛熊導航儀
 
 on:
   schedule:
-    # 每 4 小時執行（UTC），錯峰 48 分
-    - cron: '48 */4 * * *'
+    # 每天 1 次：台灣時間 08:00 = UTC 00:00（GitHub Actions cron 為 UTC）
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 # 防止並發執行

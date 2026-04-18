@@ -10516,28 +10516,25 @@ def build_long_term_message() -> Optional[str]:
     elif ahr > 1.2 and fg is not None and fg > 80:
         status, action, color = "🔥 泡沫區 (減倉)", "人聲鼎沸時離場，分批賣出。", "🟠"
 
+    fg_str = str(int(fg)) if fg is not None else "—"
     lines = []
-    lines.append("⏳ *【長線財富週期】*")
+    lines.append("⏳ 【長線財富週期】")
     lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"📍 *當前位置：{color} {status}*")
+    lines.append(f"📍 當前位置：{color} {status}")
     lines.append("")
-    lines.append(f"💰 *AHR999 指數：{ahr:.2f}*")
-    lines.append(f"🌡️ *貪婪恐懼指數：{fg}*" if fg is not None else "🌡️ *貪婪恐懼指數：—*")
+    lines.append(f"💰 AHR999 指數：{ahr:.2f}")
+    lines.append(f"🌡️ 貪婪恐懼指數：{fg_str}")
     lines.append("")
-    lines.append("🧠 *盤面碎碎念*：")
+    lines.append("🧠 盤面碎碎念：")
     lines.append(f"👉 {action}")
-    if fg is not None and fg < 20:
-        lines.append("👉 現在市場極度恐懼，但這通常是富人變更有錢的時候。")
-    if fg is not None and fg > 80:
-        lines.append("👉 現在市場極度貪婪，擦鞋童都在問幣，你該小心了。")
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append(f"⏰ {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d')}")
     return "\n".join(lines)
 
 
-def run_long_term_monitor(interval_hours: int = 4):
-    """24 小時常駐，每 interval_hours 小時抓取並推播一次"""
+def run_long_term_monitor(interval_hours: int = 24):
+    """常駐模式：預設每 24 小時推播一次（與「每天一次」排程一致；本機常駐請自行調 interval）"""
     logger.info(f"啟動長線指標監控，每 {interval_hours} 小時更新一次...")
     interval_sec = max(1, int(interval_hours * 3600))
     while True:
@@ -13493,7 +13490,7 @@ if __name__ == "__main__":
             print("  economic_data    - 重要經濟數據推播")
             print("  news             - 新聞快訊推播")
             print("  funding_rate     - 資金費率排行榜")
-            print("  long_term_index       - 長線牛熊導航儀（24 小時每 4 小時更新）")
+            print("  long_term_index       - 長線牛熊導航儀（常駐；預設每 24 小時；排程建議用 long_term_index_once）")
             print("  long_term_index_once  - 長線牛熊導航儀（只執行一次，適合排程）")
             print("  liquidity_radar       - 流動性獵取雷達（極端爆倉彙整）")
             print("  altseason_radar       - 山寨爆發雷達（Altseason + RSI + Buy Ratio）")
