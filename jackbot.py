@@ -6207,6 +6207,9 @@ def build_report_message_tiered(
             _tier2_need_trap = SNIPER_TIER2_MIN_TRAP_STEPS
             if _tier2_fr_only:
                 _tier2_need_trap = min(_tier2_need_trap, 1)
+            # 已因「30m vs 1H 方向衝突」降級為觀察：不再強制籌碼陷阱步數（否則常 0 步 → 整輪無推播）
+            if "30m衝突" in _sub_t2:
+                _tier2_need_trap = 0
             if not _tier2_struct_fr and not _trap_full and _trap_steps < _tier2_need_trap:
                 logger.info(
                     f"[持倉過濾] {sym_base}: Tier2 且籌碼陷阱未達 {_tier2_need_trap}/3 步"
