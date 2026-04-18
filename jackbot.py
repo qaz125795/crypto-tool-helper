@@ -4372,6 +4372,8 @@ def _sniper_mega_liquidity_ok(x: dict) -> bool:
     return vol_u >= SNIPER_STRUCT_MEGA_LIQUIDITY_USD
 # 訊號持倉時間過濾：若以近 1H 動能推估，TP1 可能超過此時數，則不推播（避免「等兩天沒到」）
 MAX_ESTIMATED_HOLD_HOURS = _env_float("SNIPER_MAX_HOLD_HOURS", 8.0)
+# 確定籌碼／衰竭反轉：結構 SL 常較寬，TP1 距離% 大時易誤觸 8h 線；另設上限（可用 SNIPER_MAX_HOLD_HOURS_CONFIRMED 覆寫）
+MAX_ESTIMATED_HOLD_HOURS_CONFIRMED = _env_float("SNIPER_MAX_HOLD_HOURS_CONFIRMED", 18.0)
 MIN_1H_MOMENTUM_PCT = _env_float("SNIPER_MIN_1H_MOMENTUM_PCT", 1.0)  # 低於此視為慢盤
 MIN_1H_MOMENTUM_TIER2_PCT = _env_float("SNIPER_MIN_1H_MOMENTUM_TIER2_PCT", 0.35)  # tier2 略放寬（崩盤後 1H 常鈍化）
 
@@ -6585,9 +6587,12 @@ def build_report_message_tiered(
                 continue
             if _tp1_dist_pct is not None:
                 _est_hold_h = _tp1_dist_pct / max(_mom_1h, 0.05)
-                if _est_hold_h > MAX_ESTIMATED_HOLD_HOURS:
+                _hold_cap = MAX_ESTIMATED_HOLD_HOURS
+                if str(x.get("signal_version") or "") in ("confirmed", "exhaustion_reversal"):
+                    _hold_cap = max(_hold_cap, MAX_ESTIMATED_HOLD_HOURS_CONFIRMED)
+                if _est_hold_h > _hold_cap:
                     logger.info(
-                        f"[時間過濾⏱️] {sym_base}: 預估到TP1約 {_est_hold_h:.1f}h > {MAX_ESTIMATED_HOLD_HOURS:.1f}h，略過"
+                        f"[時間過濾⏱️] {sym_base}: 預估到TP1約 {_est_hold_h:.1f}h > {_hold_cap:.1f}h，略過"
                     )
                     continue
         except Exception:
