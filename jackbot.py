@@ -1293,8 +1293,18 @@ def calculate_marketcap_change(data_list: List[Dict]) -> Optional[Dict]:
     result = {
         'latest_mcap': float(latest_mcap),
         'change_1h': None,
-        'change_24h': None
+        'change_24h': None,
+        'change_prev': None,
     }
+    # 最後兩個數據點的步長%（API 無時間戳時，供燃料「短線」維度用）
+    if len(sorted_data) >= 2:
+        try:
+            prev_pt = sorted_data[-2]
+            prev_mcap = prev_pt.get('marketCap') or prev_pt.get('market_cap') or prev_pt.get('value')
+            if prev_mcap and float(prev_mcap) > 0:
+                result['change_prev'] = ((float(latest_mcap) - float(prev_mcap)) / float(prev_mcap)) * 100
+        except (TypeError, ValueError):
+            pass
     
     # 計算1小時變化率
     if one_hour_data:
@@ -1538,15 +1548,15 @@ def _calc_fuel_score(mcap_15m: float, mcap_1h: float, oi_15m: float, oi_1h: floa
         score += 1
     if mcap_1h > 0.03:
         score += 1
-    if oi_15m > 0.3:
+    if oi_15m > 0.22:
         score += 1
-    if oi_1h > 0.8:
+    if oi_1h > 0.55:
         score += 1
     if usdt_premium is not None and usdt_premium > 0.05:
         score += 1
     if smart_money is True:
         score += 1
-    if smart_money is True and oi_1h > 0.8:  # 聰明錢+持倉擴張雙確認
+    if smart_money is True and oi_1h > 0.55:
         score += 1
     return score
 
@@ -1631,7 +1641,14 @@ def buying_power_monitor():
     usdt_premium = _fetch_usdt_premium()
 
     mcap_1h = mcap_change.get("change_1h") or 0
-    oi_15m_chg = (oi_change_15m.get("change_1h") or 0)
+    try:
+        mcap_15m = float(mcap_change.get("change_prev") or 0)
+    except (TypeError, ValueError):
+        mcap_15m = 0.0
+    try:
+        oi_15m_chg = float(oi_change_15m.get("change_prev_bar") or 0)
+    except (TypeError, ValueError):
+        oi_15m_chg = 0.0
     oi_1h_chg = (oi_change_1h.get("change_1h") or 0)
 
     # 「USDT 溢價>0.05%」才視為真實買盤
@@ -1640,7 +1657,21 @@ def buying_power_monitor():
         logger.info(f"[牛市燃料] USDT 溢價 {usdt_premium:+.4f}% > 0.05%，加權燃料等級")
 
     # 積分（升級至 7 分滿，引入聰明錢維度）
-    fuel_score = _calc_fuel_score(mcap_1h, mcap_1h, oi_15m_chg, oi_1h_chg, usdt_premium, smart_money)
+    fuel_score = _calc_fuel_score(mcap_15m, mcap_1h, oi_15m_chg, oi_1h_chg, usdt_premium, smart_money)
+    # 急跌／池子抽離：給「波動燃料」分（不必 OI 仍為正），避免崩盤永遠卡在低燃料
+    try:
+        oi_1h_f = float(oi_1h_chg)
+    except (TypeError, ValueError):
+        oi_1h_f = 0.0
+    try:
+        if mcap_1h < -0.025:
+            fuel_score += 1
+        if mcap_1h < -0.04 and abs(oi_1h_f) >= 0.1:
+            fuel_score += 1
+        if mcap_1h < -0.02 and oi_1h_f > 0.18:
+            fuel_score += 1
+    except (TypeError, ValueError):
+        pass
     # 附加維度：恐懼貪婪 + ETF流 + Coinbase溢價（各+1分，最高可達 10 分）
     fg_val = fg_data.get("value")
     if fg_val is not None:
@@ -1696,10 +1727,7 @@ def buying_power_monitor():
 
     lines = []
     lines.append("⛽ *【牛市燃料儀表板】*")
-    lines.append(
-        f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} (台灣) "
-        f"| 📡 CoinGlass 匯總（15 分、1 小時都有瞄，不是只看一根就下結論）"
-    )
+    lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} 台北｜CoinGlass")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append(f"*{headline}*")
     lines.append(f"燃料條：`{fuel_bar}` {min(fuel_score, FUEL_DISPLAY_MAX)}/{FUEL_DISPLAY_MAX}（{bar_label}）")
@@ -4335,6 +4363,14 @@ SNIPER_ANCHOR_LOOKBACK_BARS = int(max(24, round(_env_float("SNIPER_ANCHOR_LOOKBA
 SNIPER_ANCHOR_VOL_BASELINE_BARS = int(max(3, round(_env_float("SNIPER_ANCHOR_VOL_BASELINE_BARS", 10))))
 TP1_EXIT_RATIO = 0.50
 TP2_EXIT_RATIO = 0.50
+# TP2 箱體等幅（15m）：箱頂/箱底 ± 箱高；與原 TP2_R 取「多=max／空=min」，且保證比 TP1 更遠
+SNIPER_TP2_BOX_ENABLED = os.getenv("SNIPER_TP2_BOX", "1").strip().lower() in ("1", "true", "yes", "on")
+SNIPER_TP2_BOX_FETCH_LIMIT = int(max(24, round(_env_float("SNIPER_TP2_BOX_FETCH_LIMIT", 48))))
+SNIPER_TP2_BOX_LOOKBACK_BARS = int(max(16, round(_env_float("SNIPER_TP2_BOX_LOOKBACK", 32))))
+SNIPER_TP2_BOX_MIN_HEIGHT_ATR = _env_float("SNIPER_TP2_BOX_MIN_H_ATR", 0.35)
+SNIPER_TP2_BOX_MIN_HEIGHT_R = _env_float("SNIPER_TP2_BOX_MIN_H_R", 0.12)
+SNIPER_TP2_BOX_MIN_HEIGHT_PCT = _env_float("SNIPER_TP2_BOX_MIN_H_PCT", 0.12)  # 箱高 ≥ 現價×此%
+SNIPER_TP2_MAX_R = max(TP2_R_MULTIPLIER, _env_float("SNIPER_TP2_MAX_R", 6.0))
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
 MIN_SIGNAL_PUSH_SCORE = 74          # 平衡：過高會配合「車已發動」壓分誤殺陡坡結構單
 # Tier2（觀察名單）略降底分，避免崩盤日僅剩觀察單卻全日無推播
@@ -4457,6 +4493,144 @@ def compute_structural_sl_tp(
 
     sl_pct = (one_r / entry * 100.0) if entry > 0 else 0.0
     return sl, tp1, tp2, one_r, sl_pct
+
+
+_FETCH_15M_HLC_TTL_SEC = 75.0
+_FETCH_15M_HLC_CACHE: Dict[str, Tuple[float, Tuple[List[float], List[float], List[float]]]] = {}
+
+
+def _fetch_15m_hlc_arrays(symbol_base: str, limit: int) -> Optional[Tuple[List[float], List[float], List[float]]]:
+    """Binance 期貨 15m：僅取 high/low/close，供箱體 TP2；失敗回 None。"""
+    clean = symbol_base.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+    lim = int(max(24, min(1500, limit)))
+    _ck = f"{clean}|{lim}"
+    _now = time.time()
+    _hit = _FETCH_15M_HLC_CACHE.get(_ck)
+    if _hit and (_now - _hit[0]) <= _FETCH_15M_HLC_TTL_SEC:
+        return _hit[1]
+    for sym_pair in (f"{clean}USDT", f"1000{clean}USDT"):
+        try:
+            r = requests.get(
+                "https://fapi.binance.com/fapi/v1/klines",
+                params={"symbol": sym_pair, "interval": "15m", "limit": lim},
+                timeout=5,
+            )
+            if r.status_code != 200:
+                continue
+            raw = r.json()
+            if not isinstance(raw, list) or len(raw) < 24:
+                continue
+            highs: List[float] = []
+            lows: List[float] = []
+            closes: List[float] = []
+            for bar in raw:
+                try:
+                    highs.append(float(bar[2]))
+                    lows.append(float(bar[3]))
+                    closes.append(float(bar[4]))
+                except (IndexError, TypeError, ValueError):
+                    continue
+            if len(highs) < 24:
+                continue
+            _tup = (highs, lows, closes)
+            _FETCH_15M_HLC_CACHE[_ck] = (_now, _tup)
+            return _tup
+        except Exception:
+            continue
+    return None
+
+
+def refine_tp2_box_measured_move(
+    symbol_base: str,
+    entry: float,
+    is_long: bool,
+    tp1: float,
+    tp2_from_r: float,
+    one_r: float,
+    atr: Optional[float],
+) -> Tuple[float, str]:
+    """
+    15m 近視窗箱體：高=max(high)、低=min(low)，高 H=箱高。
+    多：投射價 box_tp = 箱頂 + H；空：box_tp = 箱底 − H。
+    結果與原 R 倍 TP2 合併：多取較遠（max）、空取較遠（min），再夹 SNIPER_TP2_MAX_R，且嚴格比 TP1 更遠。
+    無資料或箱體太扁 → 回傳 tp2_from_r。
+    """
+    try:
+        e = float(entry)
+        t1 = float(tp1)
+        t2r = float(tp2_from_r)
+        r1 = float(one_r)
+    except (TypeError, ValueError):
+        return tp2_from_r, "r_mult"
+    if e <= 0 or r1 <= 0:
+        return tp2_from_r, "r_mult"
+    if not SNIPER_TP2_BOX_ENABLED:
+        return t2r, "r_mult"
+
+    hlc = _fetch_15m_hlc_arrays(symbol_base, SNIPER_TP2_BOX_FETCH_LIMIT)
+    if not hlc:
+        return t2r, "r_mult"
+    highs, lows, _closes = hlc
+    n = min(SNIPER_TP2_BOX_LOOKBACK_BARS, len(highs), len(lows))
+    if n < 16:
+        return t2r, "r_mult"
+    seg_h = highs[-n:]
+    seg_l = lows[-n:]
+    try:
+        box_hi = float(max(seg_h))
+        box_lo = float(min(seg_l))
+    except (TypeError, ValueError):
+        return t2r, "r_mult"
+    H = box_hi - box_lo
+    if H <= 0 or box_hi <= 0 or box_lo <= 0:
+        return t2r, "r_mult"
+
+    atr_f = None
+    try:
+        if atr is not None:
+            atr_f = float(atr)
+            if atr_f != atr_f or atr_f <= 0:
+                atr_f = None
+    except (TypeError, ValueError):
+        atr_f = None
+
+    h_min = max(
+        e * (SNIPER_TP2_BOX_MIN_HEIGHT_PCT / 100.0),
+        r1 * SNIPER_TP2_BOX_MIN_HEIGHT_R,
+    )
+    if atr_f is not None:
+        h_min = max(h_min, atr_f * SNIPER_TP2_BOX_MIN_HEIGHT_ATR)
+    if H < h_min:
+        return t2r, "r_mult"
+
+    tp_cap_dist = r1 * SNIPER_TP2_MAX_R
+    min_gap = max(r1 * 0.02, e * 0.0002)
+    eps = max(e * 1e-8, 1e-12)
+
+    if is_long:
+        box_tp = box_hi + H
+        if box_tp <= e + eps:
+            return t2r, "r_mult"
+        merged = max(box_tp, t2r)
+        if merged <= t1 + min_gap:
+            return t2r, "r_mult"
+        tp2 = min(merged, e + tp_cap_dist)
+        if tp2 <= t1 + min_gap:
+            tp2 = min(max(t2r, t1 + min_gap), e + tp_cap_dist)
+        used_box = box_tp > t2r + eps
+        return tp2, ("box1:1" if used_box else "r_mult")
+
+    box_tp = box_lo - H
+    if box_tp >= e - eps:
+        return t2r, "r_mult"
+    merged = min(box_tp, t2r)
+    if merged >= t1 - min_gap:
+        return t2r, "r_mult"
+    tp2 = max(merged, e - tp_cap_dist)
+    if tp2 >= t1 - min_gap:
+        tp2 = max(min(t2r, t1 - min_gap), e - tp_cap_dist)
+    used_box = box_tp < t2r - eps
+    return tp2, ("box1:1" if used_box else "r_mult")
 
 
 def _calc_tp1_r_ratio(entry: Optional[float], sl: Optional[float], tp1: Optional[float]) -> Optional[float]:
@@ -6302,9 +6476,20 @@ def build_report_message_tiered(
             if sl is None or tp1 is None:
                 logger.warning(f"[SL/TP] {sym_base} 結構計算失敗，跳過此訊號")
                 continue
+            _tp2_raw = float(tp2)
+            tp2, _tp2_src = refine_tp2_box_measured_move(
+                sym_base,
+                float(_entry_price),
+                is_bull_sig,
+                float(tp1),
+                _tp2_raw,
+                float(_one_r_u),
+                atr_val,
+            )
+            x["_tp2_src"] = _tp2_src
             logger.info(
                 f"[SL/TP結構計算] 幣種: {sym_base}, 方向: {'多' if is_bull_sig else '空'}, "
-                f"進場: {_entry_price}, 結構SL: {sl} (距離 {sl_pct_val:.2f}%), TP1: {tp1}"
+                f"進場: {_entry_price}, 結構SL: {sl} (距離 {sl_pct_val:.2f}%), TP1: {tp1}, TP2({_tp2_src}): {tp2}"
             )
             _rr_real = _calc_tp1_r_ratio(_entry_price, sl, tp1)
             if _rr_real is None or _rr_real < MIN_TP1_R_FOR_PUSH:
@@ -6424,7 +6609,6 @@ def build_report_message_tiered(
             _macro_trend   = "—"
             _macro_ema_txt = "4H EMA20 無數據"
         _rsi_4h_str  = f" · RSI {_rsi_4h_val:.0f}" if _rsi_4h_val is not None else ""
-        _macro_line  = f"🌍 *4H天候：* {_macro_trend} · {_macro_ema_txt}{_rsi_4h_str}"
 
         # ── 資金費率（含多空壅擠判讀）────────────────────────────────────────
         # 費率偏負 = 空頭支付費率（空頭壅擠）→ 做多是順風，做空風險高（嘎空）
@@ -6475,7 +6659,7 @@ def build_report_message_tiered(
             _vol_line = ""  # 無成交值資料時不顯示此行，避免誤導
 
         # ══════════════════════════════════════════════════════════
-        # 組裝電報訊息（新手友善：先「怎麼做」再「為什麼」）
+        # 組裝電報訊息：重點／點位前置；錨定滿星＝3 顆 ⭐
         # ══════════════════════════════════════════════════════════
         msg_lines: List[str] = []
 
@@ -6491,7 +6675,7 @@ def build_report_message_tiered(
             except (TypeError, ValueError):
                 return None
 
-        # ─ 標題行 ─
+        # ─ 標題（錨定星級 0～3＝⭐ 顆數）──────────────────────────────
         _copy_sym = sym if sym.endswith("USDT") else f"{sym_base}USDT"
         try:
             _score = int(round(float(x.get("score", 0))))
@@ -6501,28 +6685,31 @@ def build_report_message_tiered(
         _tactic_txt, _tactic_emo = _tactic_from_zone(_zone_now, is_bull_sig, _grade, category, x.get("priceChange24h"))
         _regime_txt, _regime_emo = _regime_from_grade_zone(_grade, _zone_now)
 
-        _anch_st_title = max(0, min(3, int(x.get("_anchor_fit_stars") or 0)))
-        _anchor_title_suffix = (
-            f" · ⭐*錨定{_anch_st_title}星（已計入綜合分）*"
-            if _anch_st_title >= 1
-            else ""
+        try:
+            _anch_fit_stars = max(0, min(3, int(round(float(x.get("_anchor_fit_stars") or 0)))))
+        except (TypeError, ValueError):
+            _anch_fit_stars = 0
+        _star_emoji = "⭐" * _anch_fit_stars
+        _ver_short = {
+            "exhaustion_reversal": "🔥衰竭",
+            "confirmed": "✅確定",
+            "tier2": "⚠️觀察",
+            "pullback": "🎯回踩",
+        }.get(str(_sig_version or "potential"), "📌")
+
+        msg_lines.append(
+            f"{_dir_emoji} *{_dir_str}* `{sym_base}` · `{_score}分` · `{_grade}`{_star_emoji}"
         )
         msg_lines.append(
-            f"{_dir_emoji} *{_dir_str}* `{sym_base}` ({_score}分) {_badge_emo}{_anchor_title_suffix}"
+            f"{_badge_emo} `{_ver_short}` {_type_str}｜{_tactic_emo}{_tactic_txt} · {_regime_txt}"
         )
-        msg_lines.append(f"{_tactic_emo} *戰術：* {_tactic_txt}")
-        msg_lines.append(f"{_regime_emo} *盤型：* {_regime_txt}")
         msg_lines.append(_grade_brief)
         if x.get("_macro_veto_badge"):
             msg_lines.append(str(x.get("_macro_veto_badge")))
-        # R 級：逆勢左側，與順勢 S/A「高勝率」敘事不同；避免使用者以為每單都該贏
         if _grade == "R":
-            msg_lines.append(
-                "_⚠️ R級＝逆勢左側（與 4H 對做）：不是順勢高勝率單；停損屬正常成本，請小倉、嚴守止損。_"
-            )
-        # 冷卻視窗內「反向 S 信號」：允許推播，但提醒使用者時間線上發生過方向切換
+            msg_lines.append("_⚠️ R級＝逆勢左側，小倉、嚴守止損。_")
         if x.get("cooldown_reverse_recent") and _grade == "S":
-            msg_lines.append("🧠 冷卻期間反向出現 S：已允許推播（注意敘事切換）")
+            msg_lines.append("🧠 冷卻期內曾反向，本次仍放行。")
 
         # 2h VWAP（結構止損／掛單邏輯用）+ 錨定 VWAP（推播 📊 區塊；綜合分已含貼合加分）
         try:
@@ -6551,18 +6738,7 @@ def build_report_message_tiered(
             _vwap_anchor_ts_show = int(x.get("vwap_anchor_ts") or 0)
         except (TypeError, ValueError):
             _vwap_anchor_ts_show = 0
-        try:
-            _anch_fit_stars = int(x.get("_anchor_fit_stars") or 0)
-        except (TypeError, ValueError):
-            _anch_fit_stars = 0
-        _anch_fit_stars = max(0, min(3, _anch_fit_stars))
         _anchor_hint_disp = str(x.get("_anchor_sizing_hint") or "").strip()
-        if _anch_fit_stars >= 1:
-            msg_lines.append(
-                f"🔔 *錨定加分（醒目）*：`{_anch_fit_stars}` 星 — 現價貼近本波發動加權成本，"
-                "風報比與倉位力度判讀較可靠（詳見下方均價區）。"
-            )
-            msg_lines.append("")
 
         _entry_now_txt = _fmt_price(_entry_price) if _entry_price is not None else "N/A"
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
@@ -6598,87 +6774,85 @@ def build_report_message_tiered(
         except Exception:
             pass
 
-        msg_lines.append("*📊 參考均價與籌碼錨定*")
-        msg_lines.append(
-            "_綜合分已納入「錨定貼合」加分。星級愈高＝現價愈接近本波發動後加權成本，較利於判斷風報比與倉位力度。_"
-        )
-        if _vwap_show is not None:
-            msg_lines.append(
-                f"• **主力參考均價（2h VWAP，風控基準）**：`{_fmt_price(_vwap_show)}`"
-            )
-        else:
-            msg_lines.append("• **主力參考均價（2h VWAP）**：—（風控改以 EMA／2H 結構為主）")
-        if _vwap_anchor_show is not None:
-            _anchor_time_s = ""
-            if _vwap_anchor_ts_show > 0:
-                try:
-                    _anchor_time_s = " " + datetime.fromtimestamp(
-                        float(_vwap_anchor_ts_show), tz=TAIPEI_TZ
-                    ).strftime("%m-%d %H:%M 台北")
-                except (OSError, ValueError, OverflowError):
-                    _anchor_time_s = ""
-            _star_bar = (
-                "★" * _anch_fit_stars + "☆" * (3 - _anch_fit_stars)
-                if _anch_fit_stars > 0
-                else "—（本輪無星級加分）"
-            )
-            msg_lines.append(
-                f"• **錨定加權成本（5m 量能錨→發動 VWAP；優先 OI 共振）**：`{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
-            )
-            msg_lines.append(f"  └ *錨定貼合星級（加分項）*：{_star_bar}")
-            if _anchor_hint_disp:
-                msg_lines.append(f"  └ *倉位思路*：{_anchor_hint_disp}")
-        else:
-            msg_lines.append(
-                "• **錨定加權成本**：—（未取得：近段 5m 無達標之量能錨點）"
-            )
-        msg_lines.append("")
-
-        msg_lines.append("*📌 點位與執行*")
+        # ── 點位（前置）──────────────────────────────────────────────
+        msg_lines.append("*📌 點位*")
         _vw_dev = _rel_dev_pct(float(_entry_price) if _entry_price is not None else None, _vwap_show)
-        _vw_dev_s = f"｜與主力均價差 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
-        msg_lines.append(f"• **進場(市價)**：`{_entry_now_txt}`{_vw_dev_s}")
+        _vw_dev_s = f" ｜距2h均價 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
+        msg_lines.append(f"進場 `{_entry_now_txt}`{_vw_dev_s}")
         if _entry_note:
-            msg_lines.append(f"• {_entry_note}")
-        msg_lines.append("")
+            msg_lines.append(str(_entry_note))
+        try:
+            _tp2_rr_msg = float(_calc_tp1_r_ratio(_entry_price, sl, tp2) or 0.0)
+        except (TypeError, ValueError):
+            _tp2_rr_msg = 0.0
+        if _tp2_rr_msg <= 0:
+            _tp2_rr_msg = float(TP2_R_MULTIPLIER)
+        _tp2_box_sfx = " ·箱1:1" if str(x.get("_tp2_src") or "") == "box1:1" else ""
+        _tp2_compact = (
+            f" TP2 `{_tp2_txt}`（{_tp2_rr_msg:.1f}R 餘{int(TP2_EXIT_RATIO * 100)}%）{_tp2_box_sfx}"
+            if _tp2_txt
+            else ""
+        )
+        msg_lines.append(
+            f"TP1 `{_tp1_txt}`（{TP1_R_MULTIPLIER:.1f}R 平{int(TP1_EXIT_RATIO * 100)}% 移SL至進場）"
+            f"{_tp2_compact} ｜ SL `{_sl_txt}`"
+        )
         _atr_zone = float(atr_val) * MARKET_ENTRY_ZONE_ATR if atr_val and isinstance(atr_val, (int, float)) else None
         if _atr_zone and _atr_zone > 0:
             _ideal_lo = _entry_price - _atr_zone
             _ideal_hi = _entry_price + _atr_zone
             msg_lines.append(
-                f"• 市價區間（ATR動態）：`{_fmt_price(_ideal_lo)}` ~ `{_fmt_price(_ideal_hi)}`（±{MARKET_ENTRY_ZONE_ATR:.2f} ATR）"
+                f"市價帶 `{_fmt_price(_ideal_lo)}`～`{_fmt_price(_ideal_hi)}`（±{MARKET_ENTRY_ZONE_ATR:.2f}ATR）｜超區勿追"
             )
         else:
-            msg_lines.append("• 市價區間（ATR動態）：ATR 無法取得，請保守降低槓桿")
-        msg_lines.append("• ⚠️ 超過可接受區間：不追價、只等下一輪")
-        msg_lines.append("")
-        msg_lines.append(f"• **🎯 TP1 ({TP1_R_MULTIPLIER:.1f}R)**：`{_tp1_txt}` → 平倉 `{int(TP1_EXIT_RATIO*100)}%`，其餘 SL 上移到進場價")
-        if _tp2_txt:
-            msg_lines.append(f"• **🚀 TP2 ({TP2_R_MULTIPLIER:.1f}R)**：`{_tp2_txt}` → 平倉剩餘 `{int(TP2_EXIT_RATIO*100)}%`")
-        msg_lines.append(f"• **止損**：`{_sl_txt}`（到價認錯出場）")
+            msg_lines.append("市價帶：ATR 無｜保守槓桿")
         try:
             _sl_gap_pct = abs(float(_entry_price) - float(sl)) / float(_entry_price) * 100 if (_entry_price and sl) else None
         except (TypeError, ValueError, ZeroDivisionError):
             _sl_gap_pct = None
         if _sl_gap_pct is not None and _sl_gap_pct > 10.0:
             msg_lines.append(
-                f"• 🚨 **警告：本單結構止損極寬（約 `{_sl_gap_pct:.1f}%`）**，請務必調低槓桿倍數，嚴格控管保證金！"
+                f"🚨 止損極寬（約 `{_sl_gap_pct:.1f}%`）— 務必降槓桿。"
             )
         elif _sl_gap_pct is not None and _sl_gap_pct > 5.0:
-            msg_lines.append(
-                f"• ⚠️ 本單止損距離偏寬（約 `{_sl_gap_pct:.1f}%`），請降低槓桿、縮小倉位。"
-            )
+            msg_lines.append(f"⚠️ 止損偏寬（約 `{_sl_gap_pct:.1f}%`）— 降槓桿／縮倉。")
         if 0 < vol_m_val < 10:
-            msg_lines.append("• ⚠️ 本幣成交值低於 10M：請注意資金胃納量與承載量，建議分批下單避免滑價。")
+            msg_lines.append("⚠️ 成交值 <10M：留意滑價，建議分批。")
 
-        msg_lines.append("*🌍 環境與籌碼*")
+        # ── 均價／錨（精簡）──────────────────────────────────────────
+        msg_lines.append("*📊 均價／錨*")
+        if _vwap_show is not None:
+            _vwap_part = f"2h VWAP `{_fmt_price(_vwap_show)}`"
+        else:
+            _vwap_part = "2h VWAP —"
+        if _vwap_anchor_show is not None:
+            _anchor_time_s = ""
+            if _vwap_anchor_ts_show > 0:
+                try:
+                    _anchor_time_s = " " + datetime.fromtimestamp(
+                        float(_vwap_anchor_ts_show), tz=TAIPEI_TZ
+                    ).strftime("%m-%d %H:%M")
+                except (OSError, ValueError, OverflowError):
+                    _anchor_time_s = ""
+            _stars_inline = ("⭐" * _anch_fit_stars) if _anch_fit_stars > 0 else ""
+            msg_lines.append(
+                f"{_vwap_part} ｜ 錨 `{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
+                f"{(' ' + _stars_inline) if _stars_inline else ''}"
+            )
+            if _anchor_hint_disp:
+                msg_lines.append(f"倉位：{_anchor_hint_disp}")
+        else:
+            msg_lines.append(f"{_vwap_part} ｜ 錨 —（近段 5m 無達標錨點）")
+
+        # ── 環境（精簡）──────────────────────────────────────────────
+        msg_lines.append("*🌍 環境*")
         msg_lines.append(
-            f"• 週期背景：{_macro_trend}（{_macro_ema_txt}）"
-            f"{_rsi_4h_str if _rsi_4h_str else ''}｜本訊號進場模式：{_exec_mode}"
+            f"4H：{_macro_trend} · {_macro_ema_txt}{_rsi_4h_str if _rsi_4h_str else ''} ｜ 模式 `{_exec_mode}`"
         )
         _oi_story_line, _oi_risk_line = _build_oi_plain_lines()
-        msg_lines.append(_oi_story_line)
-        msg_lines.append(_oi_risk_line)
+        msg_lines.append(_oi_story_line.replace("• OI白話：", "• OI："))
+        if "先看是否守住止損位" not in _oi_risk_line:
+            msg_lines.append(_oi_risk_line)
         msg_lines.append(_fr_line)
         try:
             _btc_pen = float(_btc_1h_pct) if _btc_1h_pct is not None else None
@@ -6695,13 +6869,12 @@ def build_report_message_tiered(
                 _rv = float(rsi_val)
             except (TypeError, ValueError):
                 _rv = None
-            if _rv is not None:
-                if _rv >= 72:
-                    _rsi_txt = f"RSI {_rv:.0f} 偏高，追價留意。"
-                elif _rv <= 28:
-                    _rsi_txt = f"RSI {_rv:.0f} 偏低，是否反轉仍看結構。"
-                else:
-                    _rsi_txt = f"RSI {_rv:.0f}，中性區。"
+            if _rv is not None and (_rv >= 72 or _rv <= 28):
+                _rsi_txt = (
+                    f"RSI {_rv:.0f} 偏高"
+                    if _rv >= 72
+                    else f"RSI {_rv:.0f} 偏低"
+                )
                 msg_lines.append(_rsi_txt)
 
         msg_lines.append(f"*💡* {_strategy_comment}")
@@ -6784,7 +6957,7 @@ def build_report_message_tiered(
                 "macro_badge": x.get("_macro_veto_badge"),
                 "atr": x.get("atr"),
                 "tp1_r": TP1_R_MULTIPLIER,
-                "tp2_r": TP2_R_MULTIPLIER,
+                "tp2_r": float(x["r_tp2"]) if x.get("r_tp2") is not None else TP2_R_MULTIPLIER,
                 "sl": sl,
                 "tp1": tp1,
                 "tp2": tp2,
@@ -9063,7 +9236,7 @@ def fetch_position_change():
         _entry_lo = _entry_ref - (_atr_f * MARKET_ENTRY_ZONE_ATR)
         _entry_hi = _entry_ref + (_atr_f * MARKET_ENTRY_ZONE_ATR)
         _vwap_pending = _vwap_f if x.get("vwap_2h_volume_weighted", True) else None
-        _sl, _tp1, _tp2, _, _ = compute_structural_sl_tp(
+        _sl, _tp1, _tp2, _one_r_pd, _ = compute_structural_sl_tp(
             _entry_ref,
             _is_long,
             _vwap_pending,
@@ -9075,6 +9248,16 @@ def fetch_position_change():
         if _sl is None or _tp1 is None:
             filtered_for_pending.append(x)
             continue
+        _bpd = _cooldown_symbol(x.get("symbol") or "")
+        _tp2, _ = refine_tp2_box_measured_move(
+            _bpd,
+            float(_entry_ref),
+            _is_long,
+            float(_tp1),
+            float(_tp2),
+            float(_one_r_pd),
+            _atr_f,
+        )
         _pid = f"{_cooldown_symbol(x.get('symbol') or '')}_{'long' if _is_long else 'short'}_{int(now_ts)}"
         pending_kept.append({
             "id": _pid,

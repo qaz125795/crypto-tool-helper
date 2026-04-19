@@ -435,14 +435,14 @@ def render_kline_oi_card(
     """
     用 PIL 畫：上半 K線、下半 OI 柱狀；並疊加水平線（SL/TP1/TP2/進場/VWAP/EMA20）。
     """
-    width, height = 980, 520
-    pad_left, pad_right = 70, 20
-    pad_top, pad_bottom = 18, 28
-    # 放大 K 線區塊、縮小 OI 柱狀區塊（讓上半部更明顯）
-    top_h = 420
+    width, height = 1000, 580
+    pad_left, pad_right = 68, 18
+    pad_top, pad_bottom = 16, 22
+    # 放大 K 線區塊；OI 區維持可讀下限
+    top_h = 475
     bot_h = height - pad_top - pad_bottom - top_h
-    if bot_h < 55:
-        bot_h = 70
+    if bot_h < 52:
+        bot_h = 52
         top_h = height - pad_top - pad_bottom - bot_h
 
     bg = (14, 18, 33)
@@ -482,7 +482,7 @@ def render_kline_oi_card(
 
     ohlc_use = ohlc_5m[-60:] if ohlc_5m else []
     candle_slot = plot_w / 60.0
-    candle_w = max(2, int(candle_slot * 0.55))
+    candle_w = max(2, int(candle_slot * 0.70))
 
     def _winsor_lo_hi(vals: List[float], trim_ratio: float = 0.03) -> Tuple[float, float]:
         s = sorted(v for v in vals if v == v and v > 0)
@@ -721,11 +721,11 @@ def render_kline_oi_card(
 
     _stars_i = max(0, min(3, int(anchor_fit_stars or 0)))
     if _va is not None and _va > 0:
-        _star_txt = "★" * _stars_i + "☆" * (3 - _stars_i) if _stars_i > 0 else "錨定無星"
-        _hint_short = (anchor_hint or "")[:44] + ("…" if len(anchor_hint or "") > 44 else "")
+        _star_txt = ("⭐" * _stars_i) if _stars_i > 0 else "—"
+        _hint_short = (anchor_hint or "")[:40] + ("…" if len(anchor_hint or "") > 40 else "")
         draw.text(
             (pad_left, height - 22),
-            f"錨定貼合 {_star_txt}  金線=發動VWAP  {_hint_short}",
+            f"錨 {_star_txt}  金線=發動VWAP  {_hint_short}",
             fill=vwap_anchor_col,
             font=font_label,
         )
