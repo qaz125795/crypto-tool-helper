@@ -2865,7 +2865,7 @@ def format_btc_macro_1h_plain_lines(
     body = table.get((p, o), "價格與槓桿籌碼自行交叉參考即可。")
 
     line = (
-        f"• *BTC 大盤 1h（白話）*：價格 `{px:+.2f}%`｜未平倉 OI `{oi:+.2f}%`。"
+        f"• *BTC 大盤 1h*：價格 `{px:+.2f}%`｜未平倉 OI `{oi:+.2f}%`。"
         f"{body}"
     )
     return [line]
@@ -6438,8 +6438,6 @@ def build_report_message_tiered(
             atr_val,
             _vwap_vol_ok,
         )
-        _entry_mode = "市價"
-        _entry_note = ""
         _entry_price = float(price)
         if _need_limit:
             try:
@@ -6453,13 +6451,6 @@ def build_report_message_tiered(
                     f"[進場過濾] {sym_base}: 現價與主力均價偏離 {_lp_vw_dev_atr:.2f}ATR > {MAX_MARKET_VWAP_GAP_ATR:.2f}ATR，略過"
                 )
                 continue
-            if _lp_vw_dev_atr is None:
-                _entry_note = "⚠️ 進場模式原需限價，但主力均價差無法計算，保守以市價策略顯示。"
-            else:
-                _entry_note = (
-                    f"⚠️ 進場模式原需限價，但現價與主力均價差 `{_lp_vw_dev_atr:.2f} ATR`"
-                    f"（<= `{MAX_MARKET_VWAP_GAP_ATR:.2f} ATR`），本訊號改用市價方案。"
-                )
 
         if _entry_price and _entry_price > 0:
             _recent_lo = x.get("recent_low_2h")
@@ -6504,62 +6495,20 @@ def build_report_message_tiered(
         # ══════════════════════════════════════════════════════════
         _sig_version   = x.get("signal_version") or "potential"
         _sig_subtype   = x.get("signal_subtype") or ""
-        _mtf_desc      = x.get("mtf_desc") or ""
-        _reversal_hint = x.get("reversal_hint") or ""
 
-        # 標題標籤（exhaustion_reversal / confirmed / pullback / tier2）
+        # 訊號版本（僅供 emoji 彙總）
         _dir_str   = "做多" if is_bull_sig else "做空"
         _dir_emoji = "🟢"   if is_bull_sig else "🔴"
         if _sig_version == "exhaustion_reversal":
-            _type_str  = "衰竭反轉・抄底" if is_bull_sig else "衰竭反轉・摸頭"
-            _badge_emo = "🎯"
-            _ver_label = "🔥 *衰竭反轉*（動能衰竭後二次確認；僅市價帶內才推播）"
-            sig_emoji  = "🔥"
+            sig_emoji = "🔥"
         elif _sig_version == "confirmed":
-            _type_str  = "確定籌碼・右側突破"
-            _badge_emo = "🚀"
-            _ver_label = "✅ *確定籌碼*（鐵三角共振 1H/30m/15m 一致）"
-            sig_emoji  = "💎"
+            sig_emoji = "💎"
         elif _sig_version == "tier2":
-            _t2_sub    = _sig_subtype or "弱共振"
-            _type_str  = f"觀察名單・{_t2_sub}"
-            _badge_emo = "⚠️"
-            _ver_label = f"⚠️ *觀察名單*（{_t2_sub}，建議輕倉）"
-            sig_emoji  = "👀"
-        else:  # pullback
-            _type_str  = "潛在機會・牛回頭低接" if is_bull_sig else "潛在機會・熊反彈做空"
-            _badge_emo = "🧲"
-            _ver_label = "🎯 *潛在機會*（完美回踩）"
-            sig_emoji  = "🏎️"
+            sig_emoji = "👀"
+        else:
+            sig_emoji = "🏎️"
 
         x["_sig_emoji"] = sig_emoji  # 供 header 彙總列用
-
-        # ── 策略短評（自動生成）───────────────────────────────────────
-        def _gen_comment(cat: str, ver: str, sub: str, hint: str, rsi_v) -> str:
-            # short_close（原始值）與 short_cover（內部標準化值）語意相同：OI↓+Price↑ = 空方回補
-            _is_bull_cat = cat in ("long_open", "short_cover", "short_close")
-            _is_bear_cat = cat in ("short_open", "long_close")
-            if ver == "exhaustion_reversal":
-                return hint if hint else ("空方動能衰竭，出現獲利回補跡象，抄底做多。" if is_bull_sig else "多方動能衰竭，出現獲利回補跡象，摸頭做空。")
-            if ver == "confirmed":
-                if cat == "long_open":                    return "主力三層共振建多倉，動能明確，右側追多機會！"
-                if cat == "short_open":                   return "主力三層共振建空倉，空頭動能確認，右側追空機會！"
-                if cat in ("short_cover", "short_close"): return "空方三層共振回補，軋空燃料充足，右側做多機會！"
-                return "多方三層共振平倉，看空動能聚積，右側做空機會！"
-            if sub == "pullback":
-                if _is_bull_cat:
-                    return "大時框多頭趨勢確立，小週期短暫回調，是低接進場的黃金時機。"
-                return "大時框空頭趨勢確立，小週期短暫反彈，是逢高做空的黃金時機。"
-            if ver == "tier2":
-                if sub == "RSI極端":
-                    rsi_str = f"RSI={rsi_v:.0f}" if rsi_v else "RSI偏高"
-                    if _is_bull_cat:
-                        return f"鐵三角成立但 {rsi_str} 已偏熱，單邊行情可輕倉，嚴控止損。"
-                    return f"鐵三角成立但 {rsi_str} 已偏冷，反彈可輕倉，嚴控止損。"
-                return "籌碼方向確認中，嚴守止損。"
-            return "籌碼方向確認中，嚴守止損。"
-
-        _strategy_comment = _gen_comment(category, _sig_version, _sig_subtype, _reversal_hint, rsi_val)
 
         def _build_oi_plain_lines() -> Tuple[str, str]:
             """白話解釋 OI 在這筆訊號代表的資金行為與風險。"""
@@ -6574,16 +6523,16 @@ def build_report_message_tiered(
             p_30 = _f(x.get("priceChange30m"))
 
             if oi_30 is None:
-                return "• OI白話：30m OI 無法取得，先依價格結構與風控操作。", "• 注意：資料缺口時，倉位建議再降一級。"
+                return "• OI：30m OI 無法取得，先依價格結構與風控操作。", "• 注意：資料缺口時，倉位建議再降一級。"
 
             if oi_30 > 0 and (p_30 is None or p_30 >= 0):
-                oi_story = f"• OI白話：30m OI 增加 `{oi_30:+.2f}%`，代表新資金在進場偏多。"
+                oi_story = f"• OI：30m OI 增加 `{oi_30:+.2f}%`，代表新資金在進場偏多。"
             elif oi_30 > 0 and p_30 < 0:
-                oi_story = f"• OI白話：30m OI 增加 `{oi_30:+.2f}%`，但價格下滑，偏向空方新倉在加碼。"
+                oi_story = f"• OI：30m OI 增加 `{oi_30:+.2f}%`，但價格下滑，偏向空方新倉在加碼。"
             elif oi_30 < 0 and (p_30 is None or p_30 > 0):
-                oi_story = f"• OI白話：30m OI 減少 `{oi_30:+.2f}%`，價格走高，偏向空單回補推升。"
+                oi_story = f"• OI：30m OI 減少 `{oi_30:+.2f}%`，價格走高，偏向空單回補推升。"
             else:
-                oi_story = f"• OI白話：30m OI 減少 `{oi_30:+.2f}%`，偏向多單退場/止損，波動容易放大。"
+                oi_story = f"• OI：30m OI 減少 `{oi_30:+.2f}%`，偏向多單退場/止損，波動容易放大。"
 
             if _sig_subtype == "30m衝突":
                 oi_risk = "• 注意：30m 與 1H 方向衝突，屬逆勢訊號，請小倉、嚴守止損。"
@@ -6639,22 +6588,22 @@ def build_report_message_tiered(
                 _fr_desc = "略偏空"
             # 自動去尾零：0.0100% → 0.01%，-0.0500% → -0.05%
             _fr_str = f"{_fr_val:+.4f}".rstrip('0').rstrip('.')
-            _fr_line = f"💸 *費率：* `{_fr_str}%` {_fr_desc}"
+            _fr_line = f"💸 費率： {_fr_str}% {_fr_desc}"
         else:
-            _fr_line = "💸 *費率：* 無數據"
+            _fr_line = "💸 費率： 無數據"
 
         # ── 成交值 ────────────────────────────────────────────────────
         vol_m_val    = float(vol_usd) / 1e6 if vol_usd and float(vol_usd) > 0 else 0.0
         _vol_src_tag = x.get("_vol_source", "CoinGlass")
         _src_note    = f" _{_vol_src_tag}_" if _vol_src_tag not in ("CoinGlass", "") else ""
         if vol_m_val >= 50:
-            _vol_line = f"📊 成交值 `{vol_m_val:.0f}M` ✅ 機構級"
+            _vol_line = f"📊 成交值 {vol_m_val:.0f}M ✅ 機構級"
         elif vol_m_val >= 20:
-            _vol_line = f"📊 成交值 `{vol_m_val:.0f}M` ✅ 深度充足"
+            _vol_line = f"📊 成交值 {vol_m_val:.0f}M ✅ 深度充足"
         elif vol_m_val >= 5:
-            _vol_line = f"📊 成交值 `{vol_m_val:.1f}M`{_src_note} ⚠️ 流動性偏低"
+            _vol_line = f"📊 成交值 {vol_m_val:.1f}M{_src_note} ⚠️ 流動性偏低"
         elif vol_m_val > 0:
-            _vol_line = f"📊 成交值 `{vol_m_val:.1f}M`{_src_note} ⚠️ 極低流動性"
+            _vol_line = f"📊 成交值 {vol_m_val:.1f}M{_src_note} ⚠️ 極低流動性"
         else:
             _vol_line = ""  # 無成交值資料時不顯示此行，避免誤導
 
@@ -6663,55 +6612,44 @@ def build_report_message_tiered(
         # ══════════════════════════════════════════════════════════
         msg_lines: List[str] = []
 
-        def _rel_dev_pct(a: Optional[float], b: Optional[float]) -> Optional[float]:
-            """|a-b|/b，用於現價 vs 主力均價。"""
-            try:
-                if a is None or b is None:
-                    return None
-                af, bf = float(a), float(b)
-                if bf <= 0:
-                    return None
-                return abs(af - bf) / bf
-            except (TypeError, ValueError):
-                return None
-
-        # ─ 標題（錨定星級 0～3＝⭐ 顆數）──────────────────────────────
-        _copy_sym = sym if sym.endswith("USDT") else f"{sym_base}USDT"
+        # ─ 標題（讀者視角：市價進場，不堆製程／ATR 說明）────────────────────
         try:
             _score = int(round(float(x.get("score", 0))))
         except (TypeError, ValueError):
             _score = 0
         _zone_now = x.get("zone") or ""
         _tactic_txt, _tactic_emo = _tactic_from_zone(_zone_now, is_bull_sig, _grade, category, x.get("priceChange24h"))
-        _regime_txt, _regime_emo = _regime_from_grade_zone(_grade, _zone_now)
+        _regime_txt, _ = _regime_from_grade_zone(_grade, _zone_now)
 
         try:
             _anch_fit_stars = max(0, min(3, int(round(float(x.get("_anchor_fit_stars") or 0)))))
         except (TypeError, ValueError):
             _anch_fit_stars = 0
         _star_emoji = "⭐" * _anch_fit_stars
-        _ver_short = {
-            "exhaustion_reversal": "🔥衰竭",
-            "confirmed": "✅確定",
-            "tier2": "⚠️觀察",
-            "pullback": "🎯回踩",
-        }.get(str(_sig_version or "potential"), "📌")
 
-        msg_lines.append(
-            f"{_dir_emoji} *{_dir_str}* `{sym_base}` · `{_score}分` · `{_grade}`{_star_emoji}"
-        )
-        msg_lines.append(
-            f"{_badge_emo} `{_ver_short}` {_type_str}｜{_tactic_emo}{_tactic_txt} · {_regime_txt}"
-        )
-        msg_lines.append(_grade_brief)
-        if x.get("_macro_veto_badge"):
-            msg_lines.append(str(x.get("_macro_veto_badge")))
+        def _macro_badge_short_tv() -> str:
+            b = x.get("_macro_veto_badge")
+            if not b:
+                return ""
+            s = str(b).replace("*", "").strip()
+            if "（" in s:
+                s = s.split("（", 1)[0].strip()
+            return s
+
+        _title_tail = f"{_score} {_grade}"
+        if _star_emoji:
+            _title_tail = f"{_title_tail} {_star_emoji}"
+        msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` {_title_tail}")
+        msg_lines.append(f"{_tactic_emo}{_tactic_txt} · {_regime_txt}")
+        _menv_one = _macro_badge_short_tv()
+        if _menv_one:
+            msg_lines.append(_menv_one)
         if _grade == "R":
             msg_lines.append("_⚠️ R級＝逆勢左側，小倉、嚴守止損。_")
         if x.get("cooldown_reverse_recent") and _grade == "S":
             msg_lines.append("🧠 冷卻期內曾反向，本次仍放行。")
 
-        # 2h VWAP（結構止損／掛單邏輯用）+ 錨定 VWAP（推播 📊 區塊；綜合分已含貼合加分）
+        # 2h VWAP + 錨定（供均價區）
         try:
             _vwap_show = (
                 float(vwap_2h_val)
@@ -6738,15 +6676,10 @@ def build_report_message_tiered(
             _vwap_anchor_ts_show = int(x.get("vwap_anchor_ts") or 0)
         except (TypeError, ValueError):
             _vwap_anchor_ts_show = 0
-        _anchor_hint_disp = str(x.get("_anchor_sizing_hint") or "").strip()
-
         _entry_now_txt = _fmt_price(_entry_price) if _entry_price is not None else "N/A"
         _sl_txt = _fmt_price(sl) if sl is not None else "N/A"
         _tp1_txt = _fmt_price(tp1) if tp1 is not None else "N/A"
         _tp2_txt = _fmt_price(tp2) if tp2 is not None else None
-        _exec_mode = _entry_mode
-        _exec_note = ""
-
         # ── 持倉時間過濾（維持 TP1=1:1，但淘汰慢訊號）──────────────────────
         try:
             _tp1_dist_pct = abs(float(tp1) - float(_entry_price)) / float(_entry_price) * 100 if (tp1 and _entry_price) else None
@@ -6774,57 +6707,31 @@ def build_report_message_tiered(
         except Exception:
             pass
 
-        # ── 點位（前置）──────────────────────────────────────────────
+        # ── 點位（價格為主，不寫 R／ATR 教學）──────────────────────────────
         msg_lines.append("*📌 點位*")
-        _vw_dev = _rel_dev_pct(float(_entry_price) if _entry_price is not None else None, _vwap_show)
-        _vw_dev_s = f" ｜距2h均價 `{_vw_dev:.1%}`" if _vw_dev is not None else ""
-        msg_lines.append(f"進場 `{_entry_now_txt}`{_vw_dev_s}")
-        if _entry_note:
-            msg_lines.append(str(_entry_note))
-        try:
-            _tp2_rr_msg = float(_calc_tp1_r_ratio(_entry_price, sl, tp2) or 0.0)
-        except (TypeError, ValueError):
-            _tp2_rr_msg = 0.0
-        if _tp2_rr_msg <= 0:
-            _tp2_rr_msg = float(TP2_R_MULTIPLIER)
-        _tp2_box_sfx = " ·箱1:1" if str(x.get("_tp2_src") or "") == "box1:1" else ""
-        _tp2_compact = (
-            f" TP2 `{_tp2_txt}`（{_tp2_rr_msg:.1f}R 餘{int(TP2_EXIT_RATIO * 100)}%）{_tp2_box_sfx}"
-            if _tp2_txt
-            else ""
-        )
-        msg_lines.append(
-            f"TP1 `{_tp1_txt}`（{TP1_R_MULTIPLIER:.1f}R 平{int(TP1_EXIT_RATIO * 100)}% 移SL至進場）"
-            f"{_tp2_compact} ｜ SL `{_sl_txt}`"
-        )
+        msg_lines.append(f"現在價格 {_entry_now_txt}")
         _atr_zone = float(atr_val) * MARKET_ENTRY_ZONE_ATR if atr_val and isinstance(atr_val, (int, float)) else None
         if _atr_zone and _atr_zone > 0:
             _ideal_lo = _entry_price - _atr_zone
             _ideal_hi = _entry_price + _atr_zone
-            msg_lines.append(
-                f"市價帶 `{_fmt_price(_ideal_lo)}`～`{_fmt_price(_ideal_hi)}`（±{MARKET_ENTRY_ZONE_ATR:.2f}ATR）｜超區勿追"
-            )
+            msg_lines.append(f"進場範圍 {_fmt_price(_ideal_lo)}～{_fmt_price(_ideal_hi)}")
         else:
-            msg_lines.append("市價帶：ATR 無｜保守槓桿")
-        try:
-            _sl_gap_pct = abs(float(_entry_price) - float(sl)) / float(_entry_price) * 100 if (_entry_price and sl) else None
-        except (TypeError, ValueError, ZeroDivisionError):
-            _sl_gap_pct = None
-        if _sl_gap_pct is not None and _sl_gap_pct > 10.0:
-            msg_lines.append(
-                f"🚨 止損極寬（約 `{_sl_gap_pct:.1f}%`）— 務必降槓桿。"
-            )
-        elif _sl_gap_pct is not None and _sl_gap_pct > 5.0:
-            msg_lines.append(f"⚠️ 止損偏寬（約 `{_sl_gap_pct:.1f}%`）— 降槓桿／縮倉。")
-        if 0 < vol_m_val < 10:
-            msg_lines.append("⚠️ 成交值 <10M：留意滑價，建議分批。")
+            msg_lines.append("進場範圍 —")
+        msg_lines.append(f"TP1 {_tp1_txt}")
+        if _tp2_txt:
+            _tp2_ln = f"TP2 {_tp2_txt}"
+            if str(x.get("_tp2_src") or "") == "box1:1":
+                _tp2_ln += "（箱體等幅）"
+            msg_lines.append(_tp2_ln)
+        msg_lines.append(f"SL {_sl_txt}")
 
-        # ── 均價／錨（精簡）──────────────────────────────────────────
-        msg_lines.append("*📊 均價／錨*")
+        # ── 均價（不附倉位教學長文）──────────────────────────────────────
+        msg_lines.append("主力均價")
+        msg_lines.append("*📊 均價*")
         if _vwap_show is not None:
-            _vwap_part = f"2h VWAP `{_fmt_price(_vwap_show)}`"
+            _vwap_part = f"VWAP {_fmt_price(_vwap_show)}"
         else:
-            _vwap_part = "2h VWAP —"
+            _vwap_part = "VWAP —"
         if _vwap_anchor_show is not None:
             _anchor_time_s = ""
             if _vwap_anchor_ts_show > 0:
@@ -6836,21 +6743,20 @@ def build_report_message_tiered(
                     _anchor_time_s = ""
             _stars_inline = ("⭐" * _anch_fit_stars) if _anch_fit_stars > 0 else ""
             msg_lines.append(
-                f"{_vwap_part} ｜ 錨 `{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
+                f"{_vwap_part} ｜ {_fmt_price(_vwap_anchor_show)}{_anchor_time_s}"
                 f"{(' ' + _stars_inline) if _stars_inline else ''}"
             )
-            if _anchor_hint_disp:
-                msg_lines.append(f"倉位：{_anchor_hint_disp}")
         else:
-            msg_lines.append(f"{_vwap_part} ｜ 錨 —（近段 5m 無達標錨點）")
+            msg_lines.append(f"{_vwap_part} ｜ —")
 
-        # ── 環境（精簡）──────────────────────────────────────────────
+        if _vol_line:
+            msg_lines.append(_vol_line)
+
+        # ── 環境 ──────────────────────────────────────────────────────
         msg_lines.append("*🌍 環境*")
-        msg_lines.append(
-            f"4H：{_macro_trend} · {_macro_ema_txt}{_rsi_4h_str if _rsi_4h_str else ''} ｜ 模式 `{_exec_mode}`"
-        )
+        msg_lines.append(f"4H：{_macro_trend} · {_macro_ema_txt}{_rsi_4h_str if _rsi_4h_str else ''}")
         _oi_story_line, _oi_risk_line = _build_oi_plain_lines()
-        msg_lines.append(_oi_story_line.replace("• OI白話：", "• OI："))
+        msg_lines.append(_oi_story_line)
         if "先看是否守住止損位" not in _oi_risk_line:
             msg_lines.append(_oi_risk_line)
         msg_lines.append(_fr_line)
@@ -6864,26 +6770,6 @@ def build_report_message_tiered(
             _btc_oi_txt_v = None
         for _macro_ln in format_btc_macro_1h_plain_lines(_btc_pen, _btc_oi_txt_v):
             msg_lines.append(_macro_ln)
-        if rsi_val is not None and isinstance(rsi_val, (int, float)):
-            try:
-                _rv = float(rsi_val)
-            except (TypeError, ValueError):
-                _rv = None
-            if _rv is not None and (_rv >= 72 or _rv <= 28):
-                _rsi_txt = (
-                    f"RSI {_rv:.0f} 偏高"
-                    if _rv >= 72
-                    else f"RSI {_rv:.0f} 偏低"
-                )
-                msg_lines.append(_rsi_txt)
-
-        msg_lines.append(f"*💡* {_strategy_comment}")
-
-        # ─ 風險與環境（有觸發才顯示）─
-        if _motion_note:
-            msg_lines.append(f"⚠️ {_motion_note}")
-        if _vol_line:
-            msg_lines.append(_vol_line)
 
         # 機讀資料：不貼在 Telegram（避免群組出現 JSON）；寫入 log + item 供後台／審計讀取
         _fr_ai = (
