@@ -3778,6 +3778,12 @@ def _calc_indicators_from_ohlcv(
         ema = alpha * float(closes[i]) + (1.0 - alpha) * ema
         ema20_series.append(ema)
     ema20_close = ema
+    ema100_close = None
+    if len(closes) >= 100:
+        try:
+            ema100_close = float(pd.Series(closes, dtype=float).ewm(span=100, adjust=False).mean().iloc[-1])
+        except Exception:
+            ema100_close = None
     # 還原成與 closes 等長的完整序列（前 period 根填 None）
     ema20_full = [None] * period + ema20_series
 
@@ -3877,6 +3883,8 @@ def _calc_indicators_from_ohlcv(
         out["vwap_std"] = vwap_std
     if ema20_close is not None:
         out["ema20_close"] = ema20_close
+    if ema100_close is not None:
+        out["ema100_close"] = ema100_close
     if len(highs) >= 8:
         out["recent_high_2h"] = max(highs[-8:])
         out["recent_low_2h"] = min(lows[-8:])
@@ -4346,6 +4354,8 @@ TP1_R_MULTIPLIER = max(1.0, _env_float("SNIPER_TP1_R", _default_tp1))   # TP1 �
 TP2_R_MULTIPLIER = max(TP1_R_MULTIPLIER + 0.5, _env_float("SNIPER_TP2_R", _default_tp2))   # TP2 必須高於 TP1
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
+MAX_SL_PERCENT = _env_float("SNIPER_MAX_SL_PCT", 0.055)  # 過寬止損上限（預設 5.5%），由 EMA20/EMA100（15m）優先收斂
+SL_EMA_GUARD_BUFFER_ATR = _env_float("SNIPER_SL_EMA_GUARD_BUFFER_ATR", 0.12)  # EMA 防守位外再留一點呼吸空間
 MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.0))
 MAX_MARKET_VWAP_GAP_ATR = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_ATR", 1.5)    # 防追價：與 VWAP 偏離最多 1.5*ATR
 MARKET_ENTRY_ZONE_ATR = _env_float("SNIPER_ENTRY_ZONE_ATR", 0.2)                 # 市價可進場區：Entry ± 0.2*ATR
@@ -4419,6 +4429,7 @@ def compute_structural_sl_tp(
     is_long: bool,
     vwap_2h: Optional[float],
     ema20: Optional[float],
+    ema100: Optional[float],
     recent_low_2h: Optional[float],
     recent_high_2h: Optional[float],
     atr: Optional[float] = None,
@@ -4431,6 +4442,7 @@ def compute_structural_sl_tp(
 
     one_r = |進場 − 結構 SL|；若 one_r/進場 < MIN_SL_PERCENT，強制 one_r = 進場×MIN_SL_PERCENT
     並反推 SL（多：進場−one_r；空：進場+one_r）。
+    若 one_r/進場 > MAX_SL_PERCENT，優先嘗試用 15m EMA20/EMA100 防守位收斂（不破壞最小風控距離）。
 
     回傳 (sl, tp1, tp2, one_r, sl_pct)
     """
@@ -4449,6 +4461,7 @@ def compute_structural_sl_tp(
 
     vwap = _num(vwap_2h)
     ema = _num(ema20)
+    ema_100 = _num(ema100)
     lo2 = _num(recent_low_2h)
     hi2 = _num(recent_high_2h)
 
@@ -4459,6 +4472,11 @@ def compute_structural_sl_tp(
             min_sl_distance = max(min_sl_distance, atr_num * MIN_SL_ATR_MULTIPLIER)
     except (TypeError, ValueError):
         pass
+
+    max_sl_distance = entry * MAX_SL_PERCENT if (MAX_SL_PERCENT and MAX_SL_PERCENT > 0) else None
+    sl_guard_buffer = entry * 0.0012
+    if atr_num is not None and atr_num > 0:
+        sl_guard_buffer = max(sl_guard_buffer, atr_num * SL_EMA_GUARD_BUFFER_ATR)
 
     if is_long:
         cands = [v for v in (lo2, ema, vwap) if v is not None]
@@ -4472,6 +4490,15 @@ def compute_structural_sl_tp(
         if one_r < min_sl_distance:
             one_r = min_sl_distance
             structural_sl = entry - one_r
+        if max_sl_distance is not None and one_r > max_sl_distance:
+            guard_levels = [v for v in (ema, ema_100, vwap) if v is not None and v < entry]
+            if guard_levels:
+                guard_base = max(guard_levels)  # 最靠近進場的防守均線
+                guard_sl = guard_base - sl_guard_buffer
+                guard_dist = entry - guard_sl
+                if min_sl_distance <= guard_dist <= max_sl_distance * 1.02:
+                    structural_sl = guard_sl
+                    one_r = guard_dist
         sl = structural_sl
         tp1 = entry + one_r * TP1_R_MULTIPLIER
         tp2 = entry + one_r * TP2_R_MULTIPLIER
@@ -4487,6 +4514,15 @@ def compute_structural_sl_tp(
         if one_r < min_sl_distance:
             one_r = min_sl_distance
             structural_sl = entry + one_r
+        if max_sl_distance is not None and one_r > max_sl_distance:
+            guard_levels = [v for v in (ema, ema_100, vwap) if v is not None and v > entry]
+            if guard_levels:
+                guard_base = min(guard_levels)  # 最靠近進場的防守均線
+                guard_sl = guard_base + sl_guard_buffer
+                guard_dist = guard_sl - entry
+                if min_sl_distance <= guard_dist <= max_sl_distance * 1.02:
+                    structural_sl = guard_sl
+                    one_r = guard_dist
         sl = structural_sl
         tp1 = entry - one_r * TP1_R_MULTIPLIER
         tp2 = entry - one_r * TP2_R_MULTIPLIER
@@ -6054,6 +6090,7 @@ def build_report_message_tiered(
         pre_breakout_low: Optional[float] = None,
         pre_breakout_high: Optional[float] = None,
         ema20: Optional[float] = None,
+        ema100: Optional[float] = None,
         rsi: Optional[float] = None,
         ema20_touch_low: Optional[float] = None,
         ema20_touch_high: Optional[float] = None,
@@ -6066,7 +6103,7 @@ def build_report_message_tiered(
         if not price or price <= 0:
             return None, None, None, None, None, "—", "normal", TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
         sl, tp1, tp2, _one_r, sl_pct = compute_structural_sl_tp(
-            float(price), is_long, vwap_2h, ema20, recent_low_2h, recent_high_2h, atr
+            float(price), is_long, vwap_2h, ema20, ema100, recent_low_2h, recent_high_2h, atr
         )
         if sl is None:
             return None, None, None, None, None, "—", "normal", TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
@@ -6428,6 +6465,7 @@ def build_report_message_tiered(
         _r1, _r2 = TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
         sl_pct_val = None
         ema20_val = x.get("ema20") or x.get("ema20_close")
+        ema100_val = x.get("ema100") or x.get("ema100_close")
         _need_limit, _lp_hint = derive_limit_order_from_inputs(
             category,
             float(price),
@@ -6460,6 +6498,7 @@ def build_report_message_tiered(
                 is_bull_sig,
                 vwap_for_struct,
                 ema20_val,
+                ema100_val,
                 _recent_lo,
                 _recent_hi,
                 atr_val,
@@ -6711,10 +6750,12 @@ def build_report_message_tiered(
         msg_lines.append("*📌 點位*")
         msg_lines.append(f"現在價格 {_entry_now_txt}")
         _atr_zone = float(atr_val) * MARKET_ENTRY_ZONE_ATR if atr_val and isinstance(atr_val, (int, float)) else None
+        _entry_range_copy = "—"
         if _atr_zone and _atr_zone > 0:
             _ideal_lo = _entry_price - _atr_zone
             _ideal_hi = _entry_price + _atr_zone
             msg_lines.append(f"進場範圍 {_fmt_price(_ideal_lo)}～{_fmt_price(_ideal_hi)}")
+            _entry_range_copy = f"{_fmt_price(_ideal_lo)}~{_fmt_price(_ideal_hi)}"
         else:
             msg_lines.append("進場範圍 —")
         msg_lines.append(f"TP1 {_tp1_txt}")
@@ -6724,6 +6765,13 @@ def build_report_message_tiered(
                 _tp2_ln += "（箱體等幅）"
             msg_lines.append(_tp2_ln)
         msg_lines.append(f"SL {_sl_txt}")
+        _tp2_copy = _tp2_txt or "-"
+        _copy_line = (
+            f"{sym_base} | NOW {_entry_now_txt} | ENTRY {_entry_range_copy} | "
+            f"TP1 {_tp1_txt} | TP2 {_tp2_copy} | SL {_sl_txt}"
+        )
+        msg_lines.append("📋 複製版")
+        msg_lines.append(f"```{_copy_line}```")
 
         # ── 均價（不附倉位教學長文）──────────────────────────────────────
         msg_lines.append("主力均價")
@@ -8704,6 +8752,7 @@ def fetch_position_change():
             "pre_breakout_low": tech.get("pre_breakout_low") if tech else None,
             "pre_breakout_high": tech.get("pre_breakout_high") if tech else None,
             "ema20": tech.get("ema20_close") if tech else None,
+            "ema100": tech.get("ema100_close") if tech else None,
             "ema20_touch_low": tech.get("ema20_touch_low") if tech else None,
             "ema20_touch_high": tech.get("ema20_touch_high") if tech else None,
             "last_kline_high_30m": tech.get("last_kline_high_30m") if tech else None,
@@ -8861,10 +8910,13 @@ def fetch_position_change():
     if len(all_top) == 0:
         logger.info(f"本輪無符合條件訊號（1H OI≥動態門檻 & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
 
-    # 冷卻規則：同幣同方向 N 小時內不重複推；同輪每方向最多 M 檔（強籌碼優先）
+    # 冷卻規則：同幣同方向 N 小時內不重複推；反向訊號另設「最短間隔」避免短時間連發打架
     # 統一預設 2 小時冷卻（同幣同方向）；需其他值可設 SNIPER_COOLDOWN_HOURS
     _default_cd_hours = 2.0
     COOLDOWN_HOURS = int(max(1, round(_env_float("SNIPER_COOLDOWN_HOURS", _default_cd_hours))))
+    # 同幣反向訊號最短間隔（分鐘）：預設 45 分鐘，避免半小時內同標的多空連炸
+    COOLDOWN_OPPOSITE_MINUTES = int(max(0, round(_env_float("SNIPER_COOLDOWN_OPPOSITE_MINUTES", 45))))
+    cooldown_opp_sec = COOLDOWN_OPPOSITE_MINUTES * 60
     HISTORY_HOURS = 24   # 冷卻歷史保留 24h（每日自動清理）
     # 順勢 S/A 推過後，此時間內不推「反向」R（S 為主、R 為輔；避免敘事打架）
     TREND_VS_R_OPPOSITE_HOURS = 12
@@ -9127,6 +9179,7 @@ def fetch_position_change():
             _is_long,
             _vwap_pending,
             _ema_f,
+            x.get("ema100") or x.get("ema100_close"),
             x.get("recent_low_2h"),
             x.get("recent_high_2h"),
             _atr_f,
@@ -9190,6 +9243,18 @@ def fetch_position_change():
         # 同幣同方向：COOLDOWN_HOURS 內阻擋重推
         if (sym_norm, cur_dir) in cooldown_symbol_dir_4h:
             logger.info(f"冷卻跳過: {sym_norm} ({cur_dir}) ({COOLDOWN_HOURS}h 內同幣同方向已報過)")
+            continue
+        # 同幣反向：短時間內阻擋（避免「同標的多空連炸」）
+        _opp_last_ts = last_push_ts_by_sym_dir.get((sym_norm, _opp_dir))
+        if (
+            cooldown_opp_sec > 0
+            and _opp_last_ts
+            and (now_ts - float(_opp_last_ts)) < cooldown_opp_sec
+        ):
+            _mins = (now_ts - float(_opp_last_ts)) / 60.0
+            logger.info(
+                f"冷卻跳過: {sym_norm} ({cur_dir})（距反向訊號僅 {_mins:.1f} 分鐘 < {COOLDOWN_OPPOSITE_MINUTES} 分鐘）"
+            )
             continue
 
         # 同幣換方向：標記多轉空/空轉多提醒
@@ -9268,6 +9333,7 @@ def fetch_position_change():
                         _is_long_rt,
                         _vwap_2h,
                         _ema_rt,
+                        _x.get("ema100") or _x.get("ema100_close"),
                         _x.get("recent_low_2h"),
                         _x.get("recent_high_2h"),
                         _x.get("atr"),
