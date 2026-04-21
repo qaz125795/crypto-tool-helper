@@ -183,6 +183,9 @@ CG_EP = {
 
     # ════════════════ 市場指標 Indicators ════════════════
     "rsi_list":              "/api/futures/rsi/list",                               # RSI列表
+    "ema_list":              "/api/futures/ema/list",                               # 全市場 EMA（Standard+）🆕
+    "td_list":               "/api/futures/td/list",                                # 全市場 TD Sequential（Standard+）🆕
+    "atr_list":              "/api/futures/avg-true-range/list",                    # 全市場 ATR（Standard+；見 docs）🆕
     "contract_basis":        "/api/futures/basis/history",                          # 合約基差歷史 🆕
     "borrow_rate":           "/api/borrow-interest-rate/history",                   # 借貸利率歷史 🆕
     "coinbase_premium":      "/api/coinbase-premium-index",                         # Coinbase溢價指數 🆕
@@ -2881,6 +2884,112 @@ def format_btc_macro_1h_plain_lines(
     return [line]
 
 
+# ── CoinGlass 全市場 ATR list（/api/futures/avg-true-range/list）────────────────
+# 文件：https://docs.coinglass.com/reference/futures-avg-true-range-list
+# Standard+ 方案；Startup 以下可能 403，自動降級為 indicators/avg-true-range 單幣查詢。
+_cg_atr_list_cache: Dict[str, Any] = {"ts": 0.0, "by_base": {}}
+_CG_ATR_LIST_TTL = 90.0
+_cg_atr_list_plan_logged: bool = False
+
+
+def _cg_atr_list_column(interval: str) -> str:
+    """對應 list API 回傳欄位 avg_true_range_{1m|5m|15m|...}。"""
+    s = (interval or "15m").strip().lower()
+    alias = {
+        "m1": "1m", "m3": "3m", "m5": "5m", "m15": "15m", "m30": "30m",
+        "h1": "1h", "h4": "4h", "d1": "1d", "w1": "1w",
+    }
+    s = alias.get(s, s)
+    if s not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"):
+        s = "15m"
+    return f"avg_true_range_{s}"
+
+
+def _refresh_cg_atr_list_cache() -> None:
+    """拉取全市場 ATR list，寫入 _cg_atr_list_cache（by_base → 欄位名→值）。"""
+    global _cg_atr_list_cache, _cg_atr_list_plan_logged
+    if not CG_API_KEY:
+        return
+    now = time.time()
+    if (
+        now - float(_cg_atr_list_cache.get("ts") or 0) < _CG_ATR_LIST_TTL
+        and _cg_atr_list_cache.get("by_base")
+    ):
+        return
+    ep = CG_EP.get("atr_list", "/api/futures/avg-true-range/list")
+    try:
+        _respect_coinglass_rate_limit()
+        r = requests.get(
+            f"{CG_API_BASE}{ep}",
+            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+            timeout=18,
+        )
+        if r.status_code in (401, 403):
+            if not _cg_atr_list_plan_logged:
+                logger.info(
+                    "[ATR批次] list HTTP %s（多為方案不含 avg-true-range/list），"
+                    "ATR 改走 indicators/avg-true-range 單幣",
+                    r.status_code,
+                )
+                _cg_atr_list_plan_logged = True
+            _cg_atr_list_cache = {"ts": now, "by_base": {}}
+            return
+        if r.status_code != 200:
+            logger.debug("[ATR批次] list HTTP %s", r.status_code)
+            return
+        j = r.json()
+        if j.get("code") not in (0, "0", 200, "200", None):
+            logger.debug("[ATR批次] list code=%s msg=%s", j.get("code"), j.get("msg"))
+            return
+        raw = j.get("data") or j.get("list") or []
+        by_base: Dict[str, Dict[str, float]] = {}
+        if not isinstance(raw, list):
+            _cg_atr_list_cache = {"ts": now, "by_base": {}}
+            return
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            sym_raw = item.get("symbol") or item.get("coin") or item.get("base") or ""
+            sym = str(sym_raw).replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+            if not sym:
+                continue
+            row: Dict[str, float] = {}
+            for k, v in item.items():
+                if not isinstance(k, str) or "avg_true_range" not in k.lower():
+                    continue
+                try:
+                    fv = float(v)
+                    if fv > 0:
+                        row[k] = fv
+                except (TypeError, ValueError):
+                    continue
+            if row:
+                by_base[sym] = row
+        logger.info("[ATR批次] list 載入 %d 幣種（%s）", len(by_base), ep)
+        _cg_atr_list_cache = {"ts": now, "by_base": by_base}
+    except Exception as e:
+        logger.debug("[ATR批次] list 異常: %s", e)
+
+
+def _get_atr_from_coinglass_list(base: str, interval: str) -> Optional[float]:
+    """從 list 快取取單幣 ATR；無則 None（由上層改走 indicators）。"""
+    _refresh_cg_atr_list_cache()
+    col = _cg_atr_list_column(interval)
+    by_base = _cg_atr_list_cache.get("by_base") or {}
+    row = by_base.get(base)
+    if not row and base.startswith("1000"):
+        row = by_base.get(base[4:])
+    if not row:
+        return None
+    if col in row:
+        return float(row[col])
+    col_l = col.lower()
+    for k, v in row.items():
+        if isinstance(k, str) and k.lower() == col_l:
+            return float(v)
+    return None
+
+
 def fetch_coinglass_indicator(
     symbol: str,
     indicator_name: str,
@@ -2890,6 +2999,8 @@ def fetch_coinglass_indicator(
     通用 CoinGlass 技術指標 API：支援 ATR（平均真實波幅）、BOLL（布林帶）。
     - indicator_name: 'atr' | 'boll'
     - 回傳：atr 為最新一筆 ATR 數值 (float)；boll 為完整 API 回應 (dict，含 data/list)。
+    - ATR：優先 /api/futures/avg-true-range/list（全市場批次），無資料再呼叫
+      /api/futures/indicators/avg-true-range（單幣種）。
     """
     base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     symbol_param = base + "USDT"
@@ -2900,6 +3011,9 @@ def fetch_coinglass_indicator(
     url = f"{CG_API_BASE}/api/futures/indicators/{path}"
     headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
     if indicator_name.lower() == "atr":
+        list_atr = _get_atr_from_coinglass_list(base, interval)
+        if list_atr is not None and list_atr > 0:
+            return float(list_atr)
         tries = [("Binance", symbol_param)]
     else:
         tries = [("Binance", symbol_param), ("Gate", symbol_param), ("Gate", base)]
@@ -4044,6 +4158,7 @@ def _try_binance_futures_klines_direct(
             )
             if result:
                 result["source"] = "Binance-Direct"
+                _finalize_tech_after_klines(result, clean, interval)
                 logger.info(
                     f"[BinanceDirect✅] {clean}: {sym_pair} {interval} {len(closes)} 根（含 volume）"
                 )
@@ -4105,6 +4220,7 @@ def _try_bybit_futures_klines_direct(
             )
             if result:
                 result["source"] = "Bybit-Direct"
+                _finalize_tech_after_klines(result, clean, interval)
                 logger.info(
                     f"[BybitDirect✅] {clean}: {sym_pair} {interval} {len(closes)} 根（含 volume）"
                 )
@@ -4158,6 +4274,7 @@ def _try_bingx_spot_klines_direct(
         )
         if result:
             result["source"] = "Gate-Futures"
+            _finalize_tech_after_klines(result, clean, interval)
             logger.info(
                 f"[Gate-Futures✅] {clean}: {sym_pair} {interval} {len(closes)} 根（含 volume）"
             )
@@ -4291,6 +4408,7 @@ def _fetch_cg_klines_and_calc(symbol: str, interval: str = "15m", limit: int = 6
                 )
                 if result:
                     result["source"] = "CoinGlass"
+                    _finalize_tech_after_klines(result, clean, interval)
                     return result
             except Exception as e:
                 logger.debug(f"[CG K線] {clean}/{exchange}/{sym_pair} 異常: {e}")
@@ -6074,6 +6192,53 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         score += _ab
         if _ar_snip:
             reasons.append(_ar_snip)
+
+    # ── 13. TD Sequential（15m；CoinGlass td/list 預載）加／扣分 ───────────
+    _td_raw = x.get("cg_td_15m")
+    td: Optional[float] = None
+    if _td_raw is not None:
+        try:
+            td = float(_td_raw)
+        except (TypeError, ValueError):
+            td = None
+    if td is not None and td == td:
+        mag = abs(td)
+        if is_bull_sig:
+            if td > 0:
+                if mag >= 8:
+                    score -= 4
+                    reasons.append("TD15m買計數偏高(衰竭風險)")
+                elif mag >= 4:
+                    score += 5
+                    reasons.append("TD15m買勢延續")
+                else:
+                    score += 2
+                    reasons.append("TD15m偏多")
+            else:
+                if mag >= 6:
+                    score -= 5
+                    reasons.append("TD15m賣壓計數")
+                elif mag >= 3:
+                    score -= 2
+                    reasons.append("TD15m偏空")
+        else:
+            if td < 0:
+                if mag >= 8:
+                    score -= 4
+                    reasons.append("TD15m賣計數偏高(衰竭風險)")
+                elif mag >= 4:
+                    score += 5
+                    reasons.append("TD15m賣勢延續")
+                else:
+                    score += 2
+                    reasons.append("TD15m偏空")
+            else:
+                if mag >= 6:
+                    score -= 5
+                    reasons.append("TD15m買壓計數")
+                elif mag >= 3:
+                    score -= 2
+                    reasons.append("TD15m偏多")
 
     # ── 評級（S / A / R / B；僅「車已發動」限制上限）────────────
     score = max(0, min(100, score))
@@ -8482,6 +8647,8 @@ def fetch_position_change():
     # ════════════════════════════════════════════════════════
     _cg_fr_map: Dict[str, float] = _fetch_funding_rate_map()
     logger.info(f"[FR批次] CoinGlass Funding Rate 預載完成，共 {len(_cg_fr_map)} 個幣種")
+    _cg_td15_map: Dict[str, Optional[float]] = fetch_cg_td_map_for_interval("15m")
+    logger.info(f"[TD批次] CoinGlass TD list 15m 預載完成，共 {len(_cg_td15_map)} 個幣種")
 
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
@@ -8870,6 +9037,10 @@ def fetch_position_change():
                 logger.debug(f"[AnchoredVWAP] {clean_base}: {_ae}")
                 _anchor_snap = None
 
+        _td15_val = _cg_td15_map.get(_base_fr)
+        if _td15_val is None and str(_base_fr).startswith("1000"):
+            _td15_val = _cg_td15_map.get(str(_base_fr)[4:])
+
         all_top.append({
             **item,
             "priceChange24h": price_24h,
@@ -8952,6 +9123,8 @@ def fetch_position_change():
             "limit_price": _lp_val,
             # 衰竭反轉：抄底/摸頭方向（long/short），供推播覆寫 is_bull_sig 與標題
             "_exhaustion_reversal_direction": _mtf_result.get("exhaustion_direction"),
+            # TD Sequential（15m，list 批次）：供 _calc_signal_grade 加分／減分
+            "cg_td_15m": _td15_val,
         })
         _ver_tag = (
             "🔥衰竭反轉" if _effective_version == "exhaustion_reversal"
@@ -9030,6 +9203,13 @@ def fetch_position_change():
         logger.info(
             f"[版本門檻] 淘汰 {_pre_ver_filt - len(all_top)} 個非 confirmed/衰竭反轉，"
             f"剩餘 {len(all_top)} 個"
+        )
+
+    _gk_pre = len(all_top)
+    all_top = [x for x in all_top if sniper_coinglass_gatekeeper_allow(x)]
+    if _gk_pre - len(all_top) > 0:
+        logger.info(
+            f"[守門員] CoinGlass 規則擋下 {_gk_pre - len(all_top)} 筆，剩餘 {len(all_top)} 筆"
         )
 
     _confirmed_cnt = sum(1 for x in all_top if x.get("signal_version") == "confirmed")
@@ -11956,6 +12136,307 @@ def fetch_cg_rsi_bulk(interval: str = "15m") -> Dict[str, Optional[float]]:
         return _cg_rsi_bulk_cache.get("data", {})
 
 
+# ── CoinGlass EMA list 備援（K 線主算；缺 ema20/ema100 時補）────────────────────
+# 文件：https://docs.coinglass.com/reference/futures-ema-list
+_cg_ema_list_cache: Dict[str, Any] = {"ts": 0.0, "by_base": {}}
+_CG_EMA_LIST_TTL = 90.0
+
+
+def _cg_ema_list_field_key(interval: str) -> str:
+    s = (interval or "15m").strip().lower()
+    alias = {
+        "m1": "1m", "m3": "3m", "m5": "5m", "m15": "15m", "m30": "30m",
+        "h1": "1h", "h4": "4h", "d1": "1d", "w1": "1w",
+    }
+    s = alias.get(s, s)
+    if s not in ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"):
+        s = "15m"
+    return f"ema_{s}"
+
+
+def _refresh_cg_ema_list_cache() -> None:
+    global _cg_ema_list_cache
+    if not CG_API_KEY:
+        return
+    now = time.time()
+    if (
+        now - float(_cg_ema_list_cache.get("ts") or 0) < _CG_EMA_LIST_TTL
+        and _cg_ema_list_cache.get("by_base")
+    ):
+        return
+    ep = CG_EP.get("ema_list", "/api/futures/ema/list")
+    try:
+        _respect_coinglass_rate_limit()
+        r = requests.get(
+            f"{CG_API_BASE}{ep}",
+            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+            timeout=22,
+        )
+        if r.status_code in (401, 403):
+            logger.debug("[EMA批次] list HTTP %s", r.status_code)
+            _cg_ema_list_cache = {"ts": now, "by_base": {}}
+            return
+        if r.status_code != 200:
+            return
+        j = r.json()
+        if j.get("code") not in (0, "0", 200, "200", None):
+            return
+        raw = j.get("data") or j.get("list") or []
+        by_base: Dict[str, Dict[str, float]] = {}
+        for item in (raw if isinstance(raw, list) else []):
+            if not isinstance(item, dict):
+                continue
+            sym = (item.get("symbol") or item.get("coin") or "").upper()
+            sym = sym.replace("USDT", "").replace("-", "").replace("_", "").strip()
+            if not sym:
+                continue
+            row: Dict[str, float] = {}
+            for k, v in item.items():
+                if not isinstance(k, str) or not k.lower().startswith("ema_"):
+                    continue
+                try:
+                    fv = float(v)
+                    if fv > 0:
+                        row[k] = fv
+                except (TypeError, ValueError):
+                    continue
+            if row:
+                by_base[sym] = row
+        logger.info("[EMA批次] list 載入 %d 幣種（%s）", len(by_base), ep)
+        _cg_ema_list_cache = {"ts": now, "by_base": by_base}
+    except Exception as e:
+        logger.debug("[EMA批次] list 異常: %s", e)
+
+
+def _lookup_cg_ema_list_price(base: str, interval: str) -> Optional[float]:
+    _refresh_cg_ema_list_cache()
+    fk = _cg_ema_list_field_key(interval)
+    byb = _cg_ema_list_cache.get("by_base") or {}
+    row = byb.get(base) or (byb.get(base[4:]) if base.startswith("1000") else None)
+    if not row:
+        return None
+    if fk in row:
+        return float(row[fk])
+    fkl = fk.lower()
+    for k, v in row.items():
+        if isinstance(k, str) and k.lower() == fkl:
+            return float(v)
+    return None
+
+
+def _fetch_coinglass_ema_indicator_last(base: str, interval: str, window: int) -> Optional[float]:
+    """單幣 /api/futures/indicators/ema 取最新值（備援）。"""
+    if not CG_API_KEY:
+        return None
+    sym = base + "USDT"
+    url = f"{CG_API_BASE}/api/futures/indicators/ema"
+    headers = {"CG-API-KEY": CG_API_KEY, "accept": "application/json"}
+    for ex in ("Binance", "Bybit", "OKX"):
+        try:
+            _respect_coinglass_rate_limit()
+            time.sleep(0.1)
+            r = requests.get(
+                url,
+                headers=headers,
+                params={
+                    "exchange": ex,
+                    "symbol": sym,
+                    "interval": interval,
+                    "window": int(window),
+                    "limit": 4,
+                },
+                timeout=10,
+            )
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            if data.get("code") not in (0, "0", 200, "200", None):
+                continue
+            raw = data.get("data") or data.get("list") or []
+            if not isinstance(raw, list) or not raw:
+                continue
+            last = raw[-1] if isinstance(raw[-1], dict) else None
+            if not last:
+                continue
+            v = last.get("ema_value") or last.get("value") or last.get("ema")
+            if v is not None:
+                fv = float(v)
+                if fv > 0:
+                    return fv
+        except Exception:
+            continue
+    return None
+
+
+def _apply_coinglass_ema_backfill(tech: Dict[str, Any], base: str, interval: str) -> None:
+    """K 線主算為主；僅補齊缺漏的 ema20_close / ema100_close（list → indicators）。"""
+    if not tech or not base:
+        return
+    need20 = tech.get("ema20_close") is None
+    need100 = tech.get("ema100_close") is None
+    if not need20 and not need100:
+        return
+    if need20:
+        ev = _lookup_cg_ema_list_price(base, interval)
+        if ev is None or ev <= 0:
+            ev = _fetch_coinglass_ema_indicator_last(base, interval, 20)
+        if ev is not None and ev > 0:
+            tech["ema20_close"] = float(ev)
+            tech["_ema_cg_fallback"] = True
+    if need100:
+        ev100 = _fetch_coinglass_ema_indicator_last(base, interval, 100)
+        if ev100 is not None and ev100 > 0:
+            tech["ema100_close"] = float(ev100)
+            tech["_ema_cg_fallback"] = True
+
+
+def _finalize_tech_after_klines(tech: Optional[Dict[str, Any]], base: str, interval: str) -> Optional[Dict[str, Any]]:
+    if tech:
+        _apply_coinglass_ema_backfill(tech, base, interval)
+    return tech
+
+
+# ── CoinGlass TD list（全市場 15m TD，供狙擊評分加分）──────────────────────────
+# 文件：https://docs.coinglass.com/reference/futures-td-list
+_cg_td_list_cache: Dict[str, Any] = {"ts": 0.0, "by_base": {}}
+_CG_TD_LIST_TTL = 90.0
+
+
+def _cg_td_list_field_key(interval: str) -> str:
+    s = (interval or "15m").strip().lower()
+    alias = {"m15": "15m", "h1": "1h", "h4": "4h"}
+    s = alias.get(s, s)
+    if s not in ("1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"):
+        s = "15m"
+    return f"td_{s}"
+
+
+def _refresh_cg_td_list_cache() -> None:
+    global _cg_td_list_cache
+    if not CG_API_KEY:
+        return
+    now = time.time()
+    if (
+        now - float(_cg_td_list_cache.get("ts") or 0) < _CG_TD_LIST_TTL
+        and _cg_td_list_cache.get("by_base")
+    ):
+        return
+    ep = CG_EP.get("td_list", "/api/futures/td/list")
+    try:
+        _respect_coinglass_rate_limit()
+        r = requests.get(
+            f"{CG_API_BASE}{ep}",
+            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+            timeout=22,
+        )
+        if r.status_code in (401, 403):
+            _cg_td_list_cache = {"ts": now, "by_base": {}}
+            return
+        if r.status_code != 200:
+            return
+        j = r.json()
+        if j.get("code") not in (0, "0", 200, "200", None):
+            return
+        raw = j.get("data") or j.get("list") or []
+        by_base: Dict[str, Dict[str, float]] = {}
+        for item in (raw if isinstance(raw, list) else []):
+            if not isinstance(item, dict):
+                continue
+            sym = (item.get("symbol") or item.get("coin") or "").upper()
+            sym = sym.replace("USDT", "").replace("-", "").replace("_", "").strip()
+            if not sym:
+                continue
+            row: Dict[str, float] = {}
+            for k, v in item.items():
+                if not isinstance(k, str) or not k.lower().startswith("td_"):
+                    continue
+                try:
+                    row[k] = float(v)
+                except (TypeError, ValueError):
+                    continue
+            if row:
+                by_base[sym] = row
+        logger.info("[TD批次] list 載入 %d 幣種（%s）", len(by_base), ep)
+        _cg_td_list_cache = {"ts": now, "by_base": by_base}
+    except Exception as e:
+        logger.debug("[TD批次] list 異常: %s", e)
+
+
+def fetch_cg_td_map_for_interval(interval: str = "15m") -> Dict[str, Optional[float]]:
+    """回傳 {base: td_value}，供 enrichment 附加到訊號字典。"""
+    _refresh_cg_td_list_cache()
+    fk = _cg_td_list_field_key(interval)
+    out: Dict[str, Optional[float]] = {}
+    for symb, row in (_cg_td_list_cache.get("by_base") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        val = row.get(fk)
+        if val is None:
+            for a, b in row.items():
+                if isinstance(a, str) and a.lower() == fk.lower():
+                    val = b
+                    break
+        try:
+            out[symb] = float(val) if val is not None else None
+        except (TypeError, ValueError):
+            out[symb] = None
+    return out
+
+
+def _sniper_gk_symbol_key(s: str) -> str:
+    return str(s or "").replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+
+
+def sniper_coinglass_gatekeeper_allow(x: Dict[str, Any]) -> bool:
+    """規則式守門員（Skill 思路內化）：硬擋明顯矛盾／資料無效；與 enrichment FR 封鎖互補。
+    設 SNIPER_GATEKEEPER_DISABLED=1 可關閉。
+    """
+    raw = os.getenv("SNIPER_GATEKEEPER_DISABLED", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    sym = x.get("symbol") or ""
+    base = _sniper_gk_symbol_key(sym)
+    cat = (x.get("category") or "").strip()
+    try:
+        cp = float(x.get("current_price") or 0)
+    except (TypeError, ValueError):
+        cp = 0.0
+    if cp <= 0:
+        logger.info("[守門員🚫] %s: 無有效現價", sym or base or "?")
+        return False
+    fr = x.get("funding_rate")
+    try:
+        frf = float(fr) if fr is not None else None
+    except (TypeError, ValueError):
+        frf = None
+    if frf is not None:
+        _is_short_sig = cat in ("long_close", "short_open")
+        _is_long_sig = cat in ("long_open", "short_close")
+        if _is_short_sig and frf < -FR_SHORT_SQUEEZE_BLOCK:
+            logger.info("[守門員🚫] %s 做空類 費率≤%.2f%%（壅擠）", base, -FR_SHORT_SQUEEZE_BLOCK * 100)
+            return False
+        if _is_long_sig and frf > FR_LONG_LIQUIDATION_BLOCK:
+            logger.info("[守門員🚫] %s 做多類 費率≥%.2f%%（壅擠）", base, FR_LONG_LIQUIDATION_BLOCK * 100)
+            return False
+    try:
+        p15 = float(x.get("priceChange15m") or x.get("price_change_percent_15m") or 0)
+    except (TypeError, ValueError):
+        p15 = 0.0
+    try:
+        oi30 = float(x.get("oiChange_30m") or x.get("oiChange30m") or 0)
+    except (TypeError, ValueError):
+        oi30 = 0.0
+    if abs(p15) > 22 and abs(oi30) < 0.22:
+        logger.info(
+            "[守門員🚫] %s 15m 價格變化過大(%.1f%%) 但 30m OI 幾乎不動(%.2f%%)（疑似薄流動）",
+            base,
+            p15,
+            oi30,
+        )
+        return False
+    return True
+
+
 def fetch_buy_ratio(symbol: str) -> Optional[float]:
     """
     近似計算某幣種的 Buy Ratio（由聚合掛單深度近似，bids / (bids + asks)）
@@ -12668,6 +13149,22 @@ def run_crit_radar_once() -> None:
     tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.0)))
     sl_min_pct = max(0.01, min(0.2, _env_float("CRIT_RADAR_SL_MIN_PCT", 0.028)))
     sl_max_pct = max(sl_min_pct + 0.005, min(0.25, _env_float("CRIT_RADAR_SL_MAX_PCT", 0.075)))
+    log_pool_preview = max(5, min(30, _crit_radar_env_int("CRIT_RADAR_LOG_POOL_PREVIEW", 12)))
+
+    logger.info(
+        "[爆擊雷達·參數] pool=%d min_score=%d max_alerts=%d cooldown=%.1fh side_margin=%d "
+        "SL_ATR=%.2f TP_R=%.2f SL%%[%.3f~%.3f] log_pool_preview=%d",
+        pool_n,
+        min_score,
+        max_alerts,
+        cooldown_h,
+        margin,
+        sl_atr,
+        tp_r,
+        sl_min_pct,
+        sl_max_pct,
+        log_pool_preview,
+    )
 
     items = fetch_coinglass_coins_markets()
     if not items:
@@ -12681,7 +13178,39 @@ def run_crit_radar_once() -> None:
         logger.warning(f"[爆擊雷達] 資金費率表失敗（降級）: {e}")
         fr_map = {}
 
+    pool_lines: List[str] = []
+    for it in ranked[:log_pool_preview]:
+        sym = str(it.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        oik = _crit_radar_oi_sort_key(it)
+        oi15 = it.get("_cg_oi_change_15m")
+        p15 = it.get("price_change_percent_15m")
+        if p15 is None:
+            p15 = it.get("price_change_percent_30m")
+        try:
+            oi15s = f"{float(oi15):+.2f}" if oi15 is not None else "—"
+        except (TypeError, ValueError):
+            oi15s = "—"
+        try:
+            p15s = f"{float(p15):+.2f}" if p15 is not None else "—"
+        except (TypeError, ValueError):
+            p15s = "—"
+        pool_lines.append(f"{sym}|oiK={oik:.3f}|oi15%={oi15s}|p15%={p15s}")
+    if pool_lines:
+        logger.info(
+            "[爆擊雷達·OI池] 取前 %d 名（節錄前 %d）：%s",
+            pool_n,
+            len(pool_lines),
+            " / ".join(pool_lines),
+        )
+
     candidates: List[Dict[str, Any]] = []
+    n_ambiguous = 0
+    n_low_score = 0
+    sample_ambiguous: List[str] = []
+    sample_low: List[str] = []
+
     for it in ranked:
         sym = str(it.get("symbol") or "").strip().upper()
         if not sym:
@@ -12696,8 +13225,16 @@ def run_crit_radar_once() -> None:
         elif sh >= lo + margin:
             side, best = "SHORT", sh
         else:
+            n_ambiguous += 1
+            if len(sample_ambiguous) < 8:
+                sample_ambiguous.append(
+                    f"{sym}(L{lo}/S{sh},需勝方領先≥{margin}分)"
+                )
             continue
         if best < min_score:
+            n_low_score += 1
+            if len(sample_low) < 10:
+                sample_low.append(f"{sym}{side[0]}{best}<{min_score}")
             continue
         it2 = dict(it)
         it2["_crit_side"] = side
@@ -12706,18 +13243,74 @@ def run_crit_radar_once() -> None:
 
     candidates.sort(key=lambda x: int(x.get("_crit_score") or 0), reverse=True)
 
+    logger.info(
+        "[爆擊雷達·分數] 池內 %d 幣：達標候選=%d｜多空差不足=%d｜單邊但分數不足=%d",
+        len(ranked),
+        len(candidates),
+        n_ambiguous,
+        n_low_score,
+    )
+    if sample_ambiguous:
+        logger.info("[爆擊雷達·分數] 多空模糊範例：%s", "；".join(sample_ambiguous))
+    if sample_low:
+        logger.info("[爆擊雷達·分數] 分數不足範例：%s", "；".join(sample_low))
+    if candidates:
+        cap_list = candidates[:25]
+        cand_str = " | ".join(
+            f"{c.get('symbol')}{str(c.get('_crit_side') or '')[:1]}{int(c.get('_crit_score') or 0)}"
+            for c in cap_list
+        )
+        more = f" …（共{len(candidates)}筆）" if len(candidates) > len(cap_list) else ""
+        logger.info("[爆擊雷達·候選] 達標清單（依分數）：%s%s", cand_str, more)
+
     cd = _crit_radar_load_cooldown()
     now = time.time()
     cool_sec = cooldown_h * 3600.0
     filtered: List[Dict[str, Any]] = []
+    n_cool_skip = 0
+    cool_log_cap = 15
+    cand_evaluated = 0
+    queue_cap = max_alerts * 3
     for it in candidates:
+        cand_evaluated += 1
         sym = str(it.get("symbol") or "").strip().upper()
         last_ts = cd.get(sym, 0.0)
         if last_ts and (now - last_ts) < cool_sec:
+            n_cool_skip += 1
+            if n_cool_skip <= cool_log_cap:
+                remain_sec = cool_sec - (now - last_ts)
+                logger.info(
+                    "[爆擊雷達·冷卻] 略過 %s %s 分=%s｜約 %.2f 小時後可再發（上次 epoch=%.0f）",
+                    sym,
+                    it.get("_crit_side"),
+                    it.get("_crit_score"),
+                    remain_sec / 3600.0,
+                    last_ts,
+                )
             continue
         filtered.append(it)
-        if len(filtered) >= max_alerts * 3:
+        if len(filtered) >= queue_cap:
+            rest = len(candidates) - cand_evaluated
+            if rest > 0:
+                logger.info(
+                    "[爆擊雷達·隊列] 已集滿 ATR 驗證隊列上限（%d 名），其餘 %d 筆達標候選本輪不排入",
+                    queue_cap,
+                    rest,
+                )
             break
+
+    if n_cool_skip > cool_log_cap:
+        logger.info("[爆擊雷達·冷卻] 另略過 %d 筆（僅顯示前 %d 筆詳細）", n_cool_skip - cool_log_cap, cool_log_cap)
+    if filtered:
+        fq = " | ".join(
+            f"{x.get('symbol')}{str(x.get('_crit_side') or '')[:1]}{int(x.get('_crit_score') or 0)}"
+            for x in filtered
+        )
+        logger.info(
+            "[爆擊雷達·隊列] 冷卻後待驗 ATR/推播（最多取 %d 名）：%s",
+            max_alerts * 3,
+            fq,
+        )
 
     thread_id = int(TG_THREAD_IDS.get("crit_radar") or 0)
     if not thread_id:
@@ -12725,8 +13318,15 @@ def run_crit_radar_once() -> None:
         return
 
     sent = 0
+    n_no_price = 0
+    n_no_atr = 0
+    n_tg_fail = 0
     for it in filtered:
         if sent >= max_alerts:
+            logger.info(
+                "[爆擊雷達·上限] 已達本輪推播上限 max_alerts=%d，其餘留待下輪",
+                max_alerts,
+            )
             break
         sym = str(it.get("symbol") or "").strip().upper()
         side = str(it.get("_crit_side") or "")
@@ -12735,10 +13335,24 @@ def run_crit_radar_once() -> None:
 
         price = _crit_radar_price_from_item(it)
         if not price:
+            n_no_price += 1
+            logger.info(
+                "[爆擊雷達·現價] %s %s 分=%s 略過：_raw_cg 無可用現價欄位",
+                sym,
+                side,
+                score,
+            )
             continue
         atr_val = fetch_coinglass_indicator(sym, "atr", "15m")
         if not atr_val or float(atr_val) <= 0:
-            logger.info(f"[爆擊雷達] {sym} 無 ATR，略過")
+            n_no_atr += 1
+            logger.info(
+                "[爆擊雷達·ATR] %s %s 分=%s 略過：CoinGlass 15m ATR 無資料或<=0（atr=%r）",
+                sym,
+                side,
+                score,
+                atr_val,
+            )
             continue
         atr_f = float(atr_val)
         raw_sl_pct = (atr_f * sl_atr) / price
@@ -12794,16 +13408,46 @@ def run_crit_radar_once() -> None:
         if ok:
             cd[sym] = now
             sent += 1
-            logger.info(f"[爆擊雷達] 已推播 {sym} {side} 分={score}")
+            logger.info(
+                "[爆擊雷達·推播] 成功 %s %s 分=%s thread_id=%s",
+                sym,
+                side,
+                score,
+                thread_id,
+            )
         else:
-            logger.warning(f"[爆擊雷達] {sym} 推播失敗")
+            n_tg_fail += 1
+            logger.warning(
+                "[爆擊雷達·推播] 失敗 %s %s 分=%s thread_id=%s（TG/DC 其一失敗即 False）",
+                sym,
+                side,
+                score,
+                thread_id,
+            )
 
     if sent:
         _crit_radar_save_cooldown(cd)
-    elif candidates:
-        logger.info("[爆擊雷達] 本輪有候選但均未發送（冷卻／ATR／上限）")
-    else:
-        logger.info("[爆擊雷達] 本輪無達標候選（屬正常，訊號刻意偏少）")
+
+    logger.info(
+        "[爆擊雷達·小結] 發送=%d｜達標候選=%d｜冷卻略過=%d｜無現價=%d｜無ATR=%d｜推播失敗=%d｜"
+        "池內模糊=%d｜分數不足=%d｜冷卻檔=%s",
+        sent,
+        len(candidates),
+        n_cool_skip,
+        n_no_price,
+        n_no_atr,
+        n_tg_fail,
+        n_ambiguous,
+        n_low_score,
+        CRIT_RADAR_COOLDOWN_FILE,
+    )
+
+    if not sent and candidates:
+        logger.info(
+            "[爆擊雷達·說明] 本輪有達標候選但未發出推播：請對照小結中 冷卻／無現價／無ATR／推播失敗／上限 計數排查"
+        )
+    elif not candidates:
+        logger.info("[爆擊雷達·說明] 本輪無達標候選（門檻與多空差條件偏嚴，屬正常）")
 
 
 # ==================== 10. Hyperliquid 聰明錢監控 ====================
