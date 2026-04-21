@@ -1,0 +1,49 @@
+name: 爆擊雷達
+
+on:
+  schedule:
+    # 每 15 分鐘（UTC）錯峰 7 分，避免整點擁擠；若只用 Zeabur Cron 可關閉本 workflow
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: crit-radar
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run crit radar
+        env:
+          CG_API_KEY: ${{ secrets.CG_API_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
+          TG_THREAD_CRIT_RADAR: ${{ secrets.TG_THREAD_CRIT_RADAR }}
+          DC_TOKEN: ${{ secrets.DC_TOKEN }}
+          DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
+          DC_THREAD_IDS_CRIT_RADAR: ${{ secrets.DC_THREAD_IDS_CRIT_RADAR }}
+          DC_THREAD_IDScrit_radar: ${{ secrets.DC_THREAD_IDScrit_radar }}
+        run: |
+          timeout 600 python jackbot.py crit_radar || exit 0
+          echo "任務執行完成"
