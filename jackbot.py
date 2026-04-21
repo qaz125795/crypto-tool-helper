@@ -3768,7 +3768,7 @@ def _calc_indicators_from_ohlcv(
         logger.warning(f"[指標計算] {clean}: 有效 K 線根數 {len(closes)} < 20，無法計算")
         return None
 
-    # EMA20（同時保留逐根序列，供「EMA20 回踩結構低」計算）
+    # EMA20（同時保留逐根序列，供回踩位計算）
     ema20_close = None
     ema20_series: list = []   # index 對齊 closes[period:]
     period = 20
@@ -3779,9 +3779,12 @@ def _calc_indicators_from_ohlcv(
         ema20_series.append(ema)
     ema20_close = ema
     ema100_close = None
+    ema100_full: list = [None] * len(closes)
     if len(closes) >= 100:
         try:
-            ema100_close = float(pd.Series(closes, dtype=float).ewm(span=100, adjust=False).mean().iloc[-1])
+            _ema100_series = pd.Series(closes, dtype=float).ewm(span=100, adjust=False).mean()
+            ema100_close = float(_ema100_series.iloc[-1])
+            ema100_full = _ema100_series.tolist()
         except Exception:
             ema100_close = None
     # 還原成與 closes 等長的完整序列（前 period 根填 None）
@@ -3893,31 +3896,49 @@ def _calc_indicators_from_ohlcv(
     if len(highs) >= 4:
         out["pre_breakout_high"] = max(highs[-4:-1])
 
-    # ── EMA20 回踩結構低/高：往回最多掃 30 根，找最近一次 K 線低點觸碰 EMA20 的位置
+    # ── EMA20/EMA100 回踩結構低/高：往回最多掃 30 根，抓最近一次回踩位
     # 「市場驗證過 EMA20 守住的最低點」= 比靜態 EMA20-pad 更精準的 SL 錨點
     _scan_end = len(closes) - 1           # 排除訊號 K 線本身（最後一根）
     _scan_start = max(period, _scan_end - 30)
     ema20_touch_low = None   # 供做多 SL 用
     ema20_touch_high = None  # 供做空 SL 用
+    ema100_touch_low = None
+    ema100_touch_high = None
     for _i in range(_scan_end - 1, _scan_start - 1, -1):
         _ev = ema20_full[_i]
         if _ev is None:
+            _ev = None
+        _ev100 = ema100_full[_i] if _i < len(ema100_full) else None
+        try:
+            _lv = float(lows[_i])
+            _hv = float(highs[_i])
+        except (TypeError, ValueError):
             continue
-        _ev = float(_ev)
-        # 做多方向：找 K 線低點曾觸碰/略低於 EMA20（允差 1.5%），且收盤在 EMA20 附近或上方
-        if ema20_touch_low is None:
-            if float(lows[_i]) <= _ev * 1.015:
-                ema20_touch_low = float(lows[_i])
-        # 做空方向：找 K 線高點曾觸碰/略高於 EMA20
-        if ema20_touch_high is None:
-            if float(highs[_i]) >= _ev * 0.985:
-                ema20_touch_high = float(highs[_i])
-        if ema20_touch_low is not None and ema20_touch_high is not None:
+        if _ev is not None:
+            _ev = float(_ev)
+            if ema20_touch_low is None and _lv <= _ev * 1.015:
+                ema20_touch_low = _lv
+            if ema20_touch_high is None and _hv >= _ev * 0.985:
+                ema20_touch_high = _hv
+        if _ev100 is not None:
+            _ev100 = float(_ev100)
+            if ema100_touch_low is None and _lv <= _ev100 * 1.02:
+                ema100_touch_low = _lv
+            if ema100_touch_high is None and _hv >= _ev100 * 0.98:
+                ema100_touch_high = _hv
+        if (
+            ema20_touch_low is not None and ema20_touch_high is not None
+            and ema100_touch_low is not None and ema100_touch_high is not None
+        ):
             break
     if ema20_touch_low is not None:
         out["ema20_touch_low"] = ema20_touch_low
     if ema20_touch_high is not None:
         out["ema20_touch_high"] = ema20_touch_high
+    if ema100_touch_low is not None:
+        out["ema100_touch_low"] = ema100_touch_low
+    if ema100_touch_high is not None:
+        out["ema100_touch_high"] = ema100_touch_high
 
     # ── Plan C：從 K 線估算 24h USD 成交值（close × volume 加總後按比例推估至 24h）
     # 用於當 CoinGlass 與 Binance 備援均無成交值資料時的最後防線
@@ -4356,6 +4377,7 @@ SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
 MAX_SL_PERCENT = _env_float("SNIPER_MAX_SL_PCT", 0.055)  # 過寬止損上限（預設 5.5%），由 EMA20/EMA100（15m）優先收斂
 SL_EMA_GUARD_BUFFER_ATR = _env_float("SNIPER_SL_EMA_GUARD_BUFFER_ATR", 0.12)  # EMA 防守位外再留一點呼吸空間
+SL_TOUCH_BUFFER_ATR = _env_float("SNIPER_SL_TOUCH_BUFFER_ATR", 0.08)  # EMA 回踩點位防守緩衝
 MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.0))
 MAX_MARKET_VWAP_GAP_ATR = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_ATR", 1.5)    # 防追價：與 VWAP 偏離最多 1.5*ATR
 MARKET_ENTRY_ZONE_ATR = _env_float("SNIPER_ENTRY_ZONE_ATR", 0.2)                 # 市價可進場區：Entry ± 0.2*ATR
@@ -4391,6 +4413,8 @@ MIN_R_SIGNAL_PUSH_SCORE = int(round(_env_float("MIN_R_SIGNAL_PUSH_SCORE", 70))) 
 MIN_WEAK_POTENTIAL_PUSH_SCORE = 78
 # 1H 多平/空回補 + MTF≥3 + 成交值達標：逆勢 R 允許的最低分（避免 SIREN 類被 76 線砍成 B）
 MIN_R_STRUCT_TOUCH_SCORE = 64
+MIN_R_OI30_ABS = _env_float("MIN_R_OI30_ABS", 3.5)  # R 級至少要有足夠 30m OI 力道
+MIN_R_TRAP_STEPS = int(max(1, min(3, round(_env_float("MIN_R_TRAP_STEPS", 2)))))  # R 級最少陷阱步數
 SNIPER_STRUCT_MEGA_LIQUIDITY_USD = float(
     _env_float("SNIPER_STRUCT_MEGA_LIQUIDITY_USD", 80_000_000)
 )  # 預設 8000 萬 USD 等值成交額
@@ -4433,6 +4457,10 @@ def compute_structural_sl_tp(
     recent_low_2h: Optional[float],
     recent_high_2h: Optional[float],
     atr: Optional[float] = None,
+    ema20_touch_low: Optional[float] = None,
+    ema20_touch_high: Optional[float] = None,
+    ema100_touch_low: Optional[float] = None,
+    ema100_touch_high: Optional[float] = None,
 ) -> Tuple[Optional[float], Optional[float], Optional[float], float, float]:
     """
     以 K 線結構主力防守位定 SL，再套用最小距離保底，最後以 1R 映射 TP1/TP2。
@@ -4490,6 +4518,26 @@ def compute_structural_sl_tp(
         if one_r < min_sl_distance:
             one_r = min_sl_distance
             structural_sl = entry - one_r
+        # 回踩點優先：抓最近 EMA20/EMA100 回踩低點作防守（可明顯縮短持倉時間）
+        touch_lows = [
+            v for v in (
+                _num(ema20_touch_low),
+                _num(ema100_touch_low),
+            )
+            if v is not None and v < entry
+        ]
+        if touch_lows:
+            _touch_base = max(touch_lows)  # 最近、最貼近現價的回踩低點
+            _touch_buf = entry * 0.0008
+            if atr_num is not None and atr_num > 0:
+                _touch_buf = max(_touch_buf, atr_num * SL_TOUCH_BUFFER_ATR)
+            _touch_sl = _touch_base - _touch_buf
+            _touch_dist = entry - _touch_sl
+            if min_sl_distance <= _touch_dist and (
+                max_sl_distance is None or _touch_dist <= max_sl_distance * 1.02
+            ):
+                structural_sl = _touch_sl
+                one_r = _touch_dist
         if max_sl_distance is not None and one_r > max_sl_distance:
             guard_levels = [v for v in (ema, ema_100, vwap) if v is not None and v < entry]
             if guard_levels:
@@ -4514,6 +4562,26 @@ def compute_structural_sl_tp(
         if one_r < min_sl_distance:
             one_r = min_sl_distance
             structural_sl = entry + one_r
+        # 回踩點優先：抓最近 EMA20/EMA100 回踩高點作防守（縮短空單停損距離）
+        touch_highs = [
+            v for v in (
+                _num(ema20_touch_high),
+                _num(ema100_touch_high),
+            )
+            if v is not None and v > entry
+        ]
+        if touch_highs:
+            _touch_base = min(touch_highs)  # 最近、最貼近現價的回踩高點
+            _touch_buf = entry * 0.0008
+            if atr_num is not None and atr_num > 0:
+                _touch_buf = max(_touch_buf, atr_num * SL_TOUCH_BUFFER_ATR)
+            _touch_sl = _touch_base + _touch_buf
+            _touch_dist = _touch_sl - entry
+            if min_sl_distance <= _touch_dist and (
+                max_sl_distance is None or _touch_dist <= max_sl_distance * 1.02
+            ):
+                structural_sl = _touch_sl
+                one_r = _touch_dist
         if max_sl_distance is not None and one_r > max_sl_distance:
             guard_levels = [v for v in (ema, ema_100, vwap) if v is not None and v > entry]
             if guard_levels:
@@ -6094,6 +6162,8 @@ def build_report_message_tiered(
         rsi: Optional[float] = None,
         ema20_touch_low: Optional[float] = None,
         ema20_touch_high: Optional[float] = None,
+        ema100_touch_low: Optional[float] = None,
+        ema100_touch_high: Optional[float] = None,
         vwap_2h: Optional[float] = None,
     ):
         """
@@ -6103,7 +6173,8 @@ def build_report_message_tiered(
         if not price or price <= 0:
             return None, None, None, None, None, "—", "normal", TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
         sl, tp1, tp2, _one_r, sl_pct = compute_structural_sl_tp(
-            float(price), is_long, vwap_2h, ema20, ema100, recent_low_2h, recent_high_2h, atr
+            float(price), is_long, vwap_2h, ema20, ema100, recent_low_2h, recent_high_2h, atr,
+            ema20_touch_low, ema20_touch_high, ema100_touch_low, ema100_touch_high
         )
         if sl is None:
             return None, None, None, None, None, "—", "normal", TP1_R_MULTIPLIER, TP2_R_MULTIPLIER
@@ -6391,6 +6462,22 @@ def build_report_message_tiered(
                     "（且未符合結構+機構成交放行），略過推播"
                 )
                 continue
+        # R 級額外品質閥：逆勢單至少要有 OI 力道或陷阱步數，避免「輕微逆勢噪音單」
+        if _grade == "R":
+            try:
+                _r_oi30_abs = abs(float(x.get("oiChange30m") or 0))
+            except (TypeError, ValueError):
+                _r_oi30_abs = 0.0
+            try:
+                _r_trap_steps = int(x.get("_bull_trap_steps") or 0)
+            except (TypeError, ValueError):
+                _r_trap_steps = 0
+            if _r_oi30_abs < MIN_R_OI30_ABS and _r_trap_steps < MIN_R_TRAP_STEPS:
+                logger.info(
+                    f"[R品質過濾] {sym_base}: OI30m={_r_oi30_abs:.2f}% < {MIN_R_OI30_ABS:.2f}% "
+                    f"且陷阱步數 {_r_trap_steps}/3 < {MIN_R_TRAP_STEPS}，略過"
+                )
+                continue
 
         # 弱「潛在」訊號（非完美回踩）：須更高分才推，回踩型維持原門檻
         _sv_early = str(x.get("signal_version") or "")
@@ -6502,6 +6589,10 @@ def build_report_message_tiered(
                 _recent_lo,
                 _recent_hi,
                 atr_val,
+                x.get("ema20_touch_low"),
+                x.get("ema20_touch_high"),
+                x.get("ema100_touch_low"),
+                x.get("ema100_touch_high"),
             )
             if sl is None or tp1 is None:
                 logger.warning(f"[SL/TP] {sym_base} 結構計算失敗，跳過此訊號")
@@ -6651,7 +6742,7 @@ def build_report_message_tiered(
         # ══════════════════════════════════════════════════════════
         msg_lines: List[str] = []
 
-        # ─ 標題（讀者視角：市價進場，不堆製程／ATR 說明）────────────────────
+        # ─ 標題（回復可複製的舊版樣式）─────────────────────────────────────
         try:
             _score = int(round(float(x.get("score", 0))))
         except (TypeError, ValueError):
@@ -6659,6 +6750,23 @@ def build_report_message_tiered(
         _zone_now = x.get("zone") or ""
         _tactic_txt, _tactic_emo = _tactic_from_zone(_zone_now, is_bull_sig, _grade, category, x.get("priceChange24h"))
         _regime_txt, _ = _regime_from_grade_zone(_grade, _zone_now)
+        if _sig_version == "exhaustion_reversal":
+            _type_str, _badge_emo, _ver_short = (
+                ("衰竭反轉・抄底" if is_bull_sig else "衰竭反轉・摸頭"),
+                "🎯",
+                "🔥衰竭",
+            )
+        elif _sig_version == "confirmed":
+            _type_str, _badge_emo, _ver_short = ("確定籌碼・右側突破", "🚀", "✅確定")
+        elif _sig_version == "tier2":
+            _t2_sub = _sig_subtype or "弱共振"
+            _type_str, _badge_emo, _ver_short = (f"觀察名單・{_t2_sub}", "⚠️", "⚠️觀察")
+        else:
+            _type_str, _badge_emo, _ver_short = (
+                ("潛在機會・牛回頭低接" if is_bull_sig else "潛在機會・熊反彈做空"),
+                "🧲",
+                "🎯回踩",
+            )
 
         try:
             _anch_fit_stars = max(0, min(3, int(round(float(x.get("_anchor_fit_stars") or 0)))))
@@ -6666,23 +6774,14 @@ def build_report_message_tiered(
             _anch_fit_stars = 0
         _star_emoji = "⭐" * _anch_fit_stars
 
-        def _macro_badge_short_tv() -> str:
-            b = x.get("_macro_veto_badge")
-            if not b:
-                return ""
-            s = str(b).replace("*", "").strip()
-            if "（" in s:
-                s = s.split("（", 1)[0].strip()
-            return s
-
         _title_tail = f"{_score} {_grade}"
         if _star_emoji:
             _title_tail = f"{_title_tail} {_star_emoji}"
         msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` {_title_tail}")
-        msg_lines.append(f"{_tactic_emo}{_tactic_txt} · {_regime_txt}")
-        _menv_one = _macro_badge_short_tv()
-        if _menv_one:
-            msg_lines.append(_menv_one)
+        msg_lines.append(f"{_badge_emo} `{_ver_short}` {_type_str}｜{_tactic_emo}{_tactic_txt} · {_regime_txt}")
+        msg_lines.append(_grade_brief)
+        if x.get("_macro_veto_badge"):
+            msg_lines.append(str(x.get("_macro_veto_badge")))
         if _grade == "R":
             msg_lines.append("_⚠️ R級＝逆勢左側，小倉、嚴守止損。_")
         if x.get("cooldown_reverse_recent") and _grade == "S":
@@ -6746,40 +6845,37 @@ def build_report_message_tiered(
         except Exception:
             pass
 
-        # ── 點位（價格為主，不寫 R／ATR 教學）──────────────────────────────
-        msg_lines.append("*📌 點位*")
-        msg_lines.append(f"現在價格 {_entry_now_txt}")
+        # ── 點位（舊版樣式）──────────────────────────────────────────────
+        msg_lines.append("**📌 點位**")
+        msg_lines.append(f"進場 `{_entry_now_txt}`")
         _atr_zone = float(atr_val) * MARKET_ENTRY_ZONE_ATR if atr_val and isinstance(atr_val, (int, float)) else None
-        _entry_range_copy = "—"
+        _tp2_rr_msg = float(_calc_tp1_r_ratio(_entry_price, sl, tp2) or 0.0) if _entry_price and tp2 else 0.0
+        if _tp2_rr_msg <= 0:
+            _tp2_rr_msg = float(TP2_R_MULTIPLIER)
+        _tp2_compact = (
+            f" TP2 `{_tp2_txt}`（{_tp2_rr_msg:.1f}R 餘{int(TP2_EXIT_RATIO * 100)}%）"
+            if _tp2_txt
+            else ""
+        )
+        msg_lines.append(
+            f"TP1 `{_tp1_txt}`（{TP1_R_MULTIPLIER:.1f}R 平{int(TP1_EXIT_RATIO * 100)}% 移SL至進場）"
+            f"{_tp2_compact} ｜ SL `{_sl_txt}`"
+        )
         if _atr_zone and _atr_zone > 0:
             _ideal_lo = _entry_price - _atr_zone
             _ideal_hi = _entry_price + _atr_zone
-            msg_lines.append(f"進場範圍 {_fmt_price(_ideal_lo)}～{_fmt_price(_ideal_hi)}")
-            _entry_range_copy = f"{_fmt_price(_ideal_lo)}~{_fmt_price(_ideal_hi)}"
+            msg_lines.append(
+                f"市價帶 `{_fmt_price(_ideal_lo)}`～`{_fmt_price(_ideal_hi)}`（±{MARKET_ENTRY_ZONE_ATR:.2f}ATR）｜超區勿追"
+            )
         else:
-            msg_lines.append("進場範圍 —")
-        msg_lines.append(f"TP1 {_tp1_txt}")
-        if _tp2_txt:
-            _tp2_ln = f"TP2 {_tp2_txt}"
-            if str(x.get("_tp2_src") or "") == "box1:1":
-                _tp2_ln += "（箱體等幅）"
-            msg_lines.append(_tp2_ln)
-        msg_lines.append(f"SL {_sl_txt}")
-        _tp2_copy = _tp2_txt or "-"
-        _copy_line = (
-            f"{sym_base} | NOW {_entry_now_txt} | ENTRY {_entry_range_copy} | "
-            f"TP1 {_tp1_txt} | TP2 {_tp2_copy} | SL {_sl_txt}"
-        )
-        msg_lines.append("📋 複製版")
-        msg_lines.append(f"```{_copy_line}```")
+            msg_lines.append("市價帶 `—`")
 
-        # ── 均價（不附倉位教學長文）──────────────────────────────────────
-        msg_lines.append("主力均價")
-        msg_lines.append("*📊 均價*")
+        # ── 均價／錨（舊版樣式）────────────────────────────────────────
+        msg_lines.append("**📊 均價／錨**")
         if _vwap_show is not None:
-            _vwap_part = f"VWAP {_fmt_price(_vwap_show)}"
+            _vwap_part = f"2h VWAP `{_fmt_price(_vwap_show)}`"
         else:
-            _vwap_part = "VWAP —"
+            _vwap_part = "2h VWAP —"
         if _vwap_anchor_show is not None:
             _anchor_time_s = ""
             if _vwap_anchor_ts_show > 0:
@@ -6791,23 +6887,27 @@ def build_report_message_tiered(
                     _anchor_time_s = ""
             _stars_inline = ("⭐" * _anch_fit_stars) if _anch_fit_stars > 0 else ""
             msg_lines.append(
-                f"{_vwap_part} ｜ {_fmt_price(_vwap_anchor_show)}{_anchor_time_s}"
+                f"{_vwap_part} ｜ 錨 `{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
                 f"{(' ' + _stars_inline) if _stars_inline else ''}"
             )
+            _anchor_hint_disp = str(x.get("_anchor_sizing_hint") or "").strip()
+            if _anchor_hint_disp:
+                msg_lines.append(f"倉位：{_anchor_hint_disp}")
         else:
-            msg_lines.append(f"{_vwap_part} ｜ —")
+            msg_lines.append(f"{_vwap_part} ｜ 錨 —")
 
-        if _vol_line:
-            msg_lines.append(_vol_line)
-
-        # ── 環境 ──────────────────────────────────────────────────────
-        msg_lines.append("*🌍 環境*")
-        msg_lines.append(f"4H：{_macro_trend} · {_macro_ema_txt}{_rsi_4h_str if _rsi_4h_str else ''}")
+        # ── 環境（舊版）──────────────────────────────────────────────
+        msg_lines.append("**🌍 環境**")
+        msg_lines.append(f"4H：{_macro_trend} · {_macro_ema_txt}{_rsi_4h_str if _rsi_4h_str else ''} ｜ 模式 `市價`")
         _oi_story_line, _oi_risk_line = _build_oi_plain_lines()
         msg_lines.append(_oi_story_line)
         if "先看是否守住止損位" not in _oi_risk_line:
             msg_lines.append(_oi_risk_line)
-        msg_lines.append(_fr_line)
+        msg_lines.append(
+            _fr_line.replace("💸 費率： ", "💸 **費率：** `").replace("% ", "%` ", 1)
+            if _fr_line.startswith("💸 費率： ") and "無數據" not in _fr_line
+            else _fr_line.replace("💸 費率： 無數據", "💸 **費率：** 無數據")
+        )
         try:
             _btc_pen = float(_btc_1h_pct) if _btc_1h_pct is not None else None
         except (TypeError, ValueError):
@@ -6817,7 +6917,21 @@ def build_report_message_tiered(
         except (TypeError, ValueError):
             _btc_oi_txt_v = None
         for _macro_ln in format_btc_macro_1h_plain_lines(_btc_pen, _btc_oi_txt_v):
-            msg_lines.append(_macro_ln)
+            msg_lines.append(_macro_ln.replace("*BTC 大盤 1h*", "**BTC 大盤 1h（白話）**"))
+
+        def _strategy_comment(cat: str, ver: str) -> str:
+            if ver == "confirmed":
+                if cat == "long_open":
+                    return "主力三層共振建多倉，動能明確，右側追多機會！"
+                if cat == "short_open":
+                    return "主力三層共振建空倉，空頭動能確認，右側追空機會！"
+                if cat in ("short_cover", "short_close"):
+                    return "空方三層共振回補，軋空燃料充足，右側做多機會！"
+                return "多方三層共振平倉，看空動能聚積，右側做空機會！"
+            return "籌碼方向確認中，嚴守止損。"
+        msg_lines.append(f"**💡** {_strategy_comment(category, _sig_version)}")
+        if _vol_line:
+            msg_lines.append(_vol_line.replace("📊 成交值 ", "📊 成交值 `").replace("M ", "M` ", 1))
 
         # 機讀資料：不貼在 Telegram（避免群組出現 JSON）；寫入 log + item 供後台／審計讀取
         _fr_ai = (
@@ -8755,6 +8869,8 @@ def fetch_position_change():
             "ema100": tech.get("ema100_close") if tech else None,
             "ema20_touch_low": tech.get("ema20_touch_low") if tech else None,
             "ema20_touch_high": tech.get("ema20_touch_high") if tech else None,
+            "ema100_touch_low": tech.get("ema100_touch_low") if tech else None,
+            "ema100_touch_high": tech.get("ema100_touch_high") if tech else None,
             "last_kline_high_30m": tech.get("last_kline_high_30m") if tech else None,
             "last_kline_low_30m": tech.get("last_kline_low_30m") if tech else None,
             "last_kline_open_30m": tech.get("last_kline_open_30m") if tech else None,
@@ -9183,6 +9299,10 @@ def fetch_position_change():
             x.get("recent_low_2h"),
             x.get("recent_high_2h"),
             _atr_f,
+            x.get("ema20_touch_low"),
+            x.get("ema20_touch_high"),
+            x.get("ema100_touch_low"),
+            x.get("ema100_touch_high"),
         )
         if _sl is None or _tp1 is None:
             filtered_for_pending.append(x)
@@ -9337,6 +9457,10 @@ def fetch_position_change():
                         _x.get("recent_low_2h"),
                         _x.get("recent_high_2h"),
                         _x.get("atr"),
+                        _x.get("ema20_touch_low"),
+                        _x.get("ema20_touch_high"),
+                        _x.get("ema100_touch_low"),
+                        _x.get("ema100_touch_high"),
                     )
                     if _sl_i is None or _tp1_i is None:
                         continue
