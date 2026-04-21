@@ -275,7 +275,6 @@ def run_orb_signal(
     state = RangeState()
     state.trade_today = True
     new_trading_day_flag = True
-    last_signal = SIGNAL_NONE
     range_high, range_low = None, None
 
     for i in range(1, len(day_df)):
@@ -299,15 +298,12 @@ def run_orb_signal(
             # 區間已凍結：只推進計數器，讓 composition 條件可滿足，不更新高低點
             _update_flags(state, trades_per_day)
 
-        last_signal = _get_buy_sell_signal(state, prev, candle_composition, trades_per_day)
-        if last_signal != SIGNAL_NONE:
-            range_high = state.wick_high
-            range_low = state.wick_low
-            # 一旦出現有效訊號，立即中斷，避免後續 K 線將 last_signal 洗回 NONE
-            break
+        # 仍須每根呼叫以更新 long/short 旗標（MAX_TRADES_PER_DAY）；訊號結論改由「最後一根完成 K」決定
+        _ = _get_buy_sell_signal(state, prev, candle_composition, trades_per_day)
 
-    # 若迴圈尚未產生訊號，最後一根 K 也要參與突破判斷
-    if len(day_df) >= 2 and last_signal == SIGNAL_NONE:
+    # 一律以「最後一根完成 K 線」的突破結果為準，避免盤中早預跳出迴圈、晚盤已跌回箱體仍回報多單
+    last_signal = SIGNAL_NONE
+    if len(day_df) >= 2:
         last_row = day_df.iloc[-1]
         last_candle = _get_candle_info(last_row)
         atr_last = last_row.get("ATR", point * 500)

@@ -1021,6 +1021,8 @@ def send_ranking_to_tg(ranking: List[Dict]):
             [{"text": "🔥 查看族群熱力圖 (點我)", "url": "https://www.coingecko.com/zh-tw/categories#key-stats"}]
         ]
     }
+    if not jackbot_universal_pre_send_gatekeeper("sector_ranking", text=message):
+        return
     send_telegram_message(message, TG_THREAD_IDS["sector_ranking"], reply_markup=keyboard)
 
 
@@ -1820,6 +1822,8 @@ def buying_power_monitor():
     _dc_ping = _fuel_buying_power_dc_ping_everyone(
         fuel_score, headline, smart_money, mcap_1h, oi_1h_chg, premium_boost
     )
+    if not jackbot_universal_pre_send_gatekeeper("buying_power_monitor", text=msg):
+        return
     send_telegram_message(
         msg,
         TG_THREAD_IDS.get("buying_power_monitor", 246),
@@ -8426,7 +8430,9 @@ def fetch_position_change():
         if all_symbols_data:
             logger.info(f"[備援✅] coins-price-change 取得 {len(all_symbols_data)} 個幣種")
     if not all_symbols_data:
-        send_telegram_message("⚠️ 無法取得幣種漲跌資料，請稍後再試。", TG_THREAD_IDS['position_change'])
+        _pc_err = "⚠️ 無法取得幣種漲跌資料，請稍後再試。"
+        if jackbot_universal_pre_send_gatekeeper("position_change_error", text=_pc_err):
+            send_telegram_message(_pc_err, TG_THREAD_IDS['position_change'])
         return
     logger.info(f"📊 [漏斗 1] CoinGlass 全網 {len(all_symbols_data)} 幣種")
 
@@ -10535,6 +10541,8 @@ def send_today_preview():
         
         # 發送預告
         message = format_today_preview_message(today_events)
+        if not jackbot_universal_pre_send_gatekeeper("economic_data_preview", text=message):
+            return
         send_telegram_message(message, TG_THREAD_IDS['economic_data'], parse_mode="Markdown")
         logger.info("今日預告發送完成")
         
@@ -10599,6 +10607,8 @@ def fetch_and_push_economic_data():
         for idx, data in enumerate(new_data):
             try:
                 message = format_economic_data_message(data)
+                if not jackbot_universal_pre_send_gatekeeper("economic_data", text=message):
+                    continue
                 send_telegram_message(message, TG_THREAD_IDS['economic_data'], parse_mode="Markdown")
                 
                 data_id = generate_data_id(data)
@@ -10616,7 +10626,9 @@ def fetch_and_push_economic_data():
         
     except Exception as e:
         logger.error(f"經濟數據推播執行錯誤: {str(e)}")
-        send_telegram_message("⚠️ 經濟數據暫時無法取得，請稍後再試。", TG_THREAD_IDS['economic_data'])
+        _econ_err = "⚠️ 經濟數據暫時無法取得，請稍後再試。"
+        if jackbot_universal_pre_send_gatekeeper("economic_data_error", text=_econ_err):
+            send_telegram_message(_econ_err, TG_THREAD_IDS['economic_data'])
 
 
 # ==================== 5. 新聞快訊推特中文推播 ====================
@@ -10635,7 +10647,8 @@ def process_and_send(news: Dict, source: str):
     message += f"📄 原文：{news.get('title', '')}\n"
     message += f"🔗 [點擊查看原文]({news.get('url', '')})"
     
-    send_telegram_message(message, TG_THREAD_IDS['news'])
+    if jackbot_universal_pre_send_gatekeeper("news_tree", text=message):
+        send_telegram_message(message, TG_THREAD_IDS['news'])
 
 
 def process_and_send_coinglass(item: Dict, type_str: str):
@@ -10673,7 +10686,8 @@ def process_and_send_coinglass(item: Dict, type_str: str):
     if item.get('url') or item.get('link'):
         message += f"🔗 [點擊查看原文]({item.get('url') or item.get('link')})"
     
-    send_telegram_message(message, TG_THREAD_IDS['news'])
+    if jackbot_universal_pre_send_gatekeeper("news_coinglass", text=message):
+        send_telegram_message(message, TG_THREAD_IDS['news'])
 
 
 def fetch_all_news():
@@ -10746,7 +10760,8 @@ def fetch_all_news():
     lines.append(f"⏰ 更新時間：{time_str}")
     
     message = "\n".join(lines)
-    send_telegram_message(message, TG_THREAD_IDS['news'], parse_mode="Markdown")
+    if jackbot_universal_pre_send_gatekeeper("news_digest", text=message):
+        send_telegram_message(message, TG_THREAD_IDS['news'], parse_mode="Markdown")
     logger.info(f"新聞快訊推播完成，共 {len(all_news_items)} 條新聞")
 
 
@@ -10844,7 +10859,8 @@ def fetch_funding_fortune_list():
         now_taipei = get_taipei_time()
         message += f"⏰ 更新時間：{now_taipei.strftime('%Y-%m-%d %H:%M:%S')}"
         
-        send_telegram_message(message, TG_THREAD_IDS['funding_rate'])
+        if jackbot_universal_pre_send_gatekeeper("funding_rate", text=message):
+            send_telegram_message(message, TG_THREAD_IDS['funding_rate'])
         
     except Exception as e:
         logger.error(f"資費榜執行失敗: {str(e)}")
@@ -11166,7 +11182,8 @@ def run_long_term_monitor(interval_hours: int = 24):
             message = build_long_term_message()
             if message:
                 thread_id = TG_THREAD_IDS.get("long_term_index", 0)
-                send_telegram_message(message, thread_id, parse_mode="Markdown")
+                if jackbot_universal_pre_send_gatekeeper("long_term_index", text=message):
+                    send_telegram_message(message, thread_id, parse_mode="Markdown")
             else:
                 logger.warning("本輪長線指標分析失敗，未發送推播")
         except Exception as e:
@@ -11191,7 +11208,8 @@ def run_long_term_once():
             ]
         ]
     }
-    send_telegram_message(message, thread_id, parse_mode="Markdown", reply_markup=keyboard)
+    if jackbot_universal_pre_send_gatekeeper("long_term_index", text=message):
+        send_telegram_message(message, thread_id, parse_mode="Markdown", reply_markup=keyboard)
 
 
 # ==================== 8. 流動性獵取雷達（極端清算監控） ====================
@@ -11874,7 +11892,8 @@ def run_liquidity_radar_once():
     keyboard = {
         "inline_keyboard": [[{"text": "💀 查看詳細爆倉數據", "url": "https://www.coinglass.com/zh-TW/LiquidationData"}]]
     }
-    send_telegram_message(msg, thread_id, parse_mode="Markdown", reply_markup=keyboard)
+    if jackbot_universal_pre_send_gatekeeper("liquidity_radar", text=msg):
+        send_telegram_message(msg, thread_id, parse_mode="Markdown", reply_markup=keyboard)
 
     # 附圖：Binance 公開清算快照總覽（改編 liquidations-chart；資料非 CoinGlass 即時 API）
     if os.getenv("LIQ_CHART_DISABLED", "").strip().lower() not in ("1", "true", "yes"):
@@ -12654,6 +12673,29 @@ def sniper_coinglass_gatekeeper_allow(x: Dict[str, Any]) -> bool:
     return True
 
 
+def jackbot_universal_pre_send_gatekeeper(
+    channel: str,
+    *,
+    text: Optional[str] = None,
+    coinglass_trade: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    全頻道推播前守門員（非持倉狙擊的 digest／快訊亦適用）。
+    - JACKBOT_GATEKEEPER_ALL_DISABLED=1：略過本函數（維持舊行為）。
+    - 空字串訊息不發。
+    - 若傳入 coinglass_trade（與 sniper 相同欄位語意），再套用 sniper_coinglass_gatekeeper_allow。
+    """
+    if os.getenv("JACKBOT_GATEKEEPER_ALL_DISABLED", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if text is not None and not str(text).strip():
+        logger.info("[守門員·%s] 空訊息，不發送", channel)
+        return False
+    if coinglass_trade is not None and not sniper_coinglass_gatekeeper_allow(coinglass_trade):
+        logger.info("[守門員·%s] CoinGlass 交易向規則擋下", channel)
+        return False
+    return True
+
+
 def fetch_buy_ratio(symbol: str) -> Optional[float]:
     """
     近似計算某幣種的 Buy Ratio（由聚合掛單深度近似，bids / (bids + asks)）
@@ -13178,7 +13220,8 @@ def run_altseason_radar_once():
         return
     thread_id = TG_THREAD_IDS.get("altseason_radar", 0)
     keyboard = {"inline_keyboard": [[{"text": "🎢 查看山寨季指數", "url": "https://www.blockchaincenter.net/en/altcoin-season-index/"}]]}
-    send_telegram_message(msg, thread_id or int(CHAT_ID or 0), parse_mode="Markdown", reply_markup=keyboard)
+    if jackbot_universal_pre_send_gatekeeper("altseason_radar", text=msg):
+        send_telegram_message(msg, thread_id or int(CHAT_ID or 0), parse_mode="Markdown", reply_markup=keyboard)
     logger.info("山寨爆發雷達推播完成")
 
 
@@ -13698,6 +13741,8 @@ def run_crit_radar_once() -> None:
             RISK_DISCLAIMER_LINE,
         ]
         msg = "\n".join(msg_lines)
+        if not jackbot_universal_pre_send_gatekeeper("crit_radar", text=msg):
+            continue
         ok = send_telegram_message(msg, thread_id, parse_mode="Markdown")
         if ok:
             cd[sym] = now
@@ -14633,7 +14678,9 @@ def run_hyperliquid_monitor_once():
     sent_addr = 0
     if messages:
         for msg in messages[:20]:
-            if send_telegram_message(msg, thread_id, parse_mode="Markdown"):
+            if jackbot_universal_pre_send_gatekeeper("hyperliquid_wallet", text=msg) and send_telegram_message(
+                msg, thread_id, parse_mode="Markdown"
+            ):
                 sent_addr += 1
         logger.info("[鏈上巨鯨] ① 指定地址事件已發送 %s/%s 則", sent_addr, min(len(messages), 20))
     else:
@@ -14645,7 +14692,9 @@ def run_hyperliquid_monitor_once():
     except Exception as e:
         logger.warning("[鏈上巨鯨] ② CoinGlass 預警訊息構建失敗: %s", e)
     if cg_msg:
-        if send_telegram_message(cg_msg, thread_id, parse_mode="Markdown"):
+        if jackbot_universal_pre_send_gatekeeper("hyperliquid_whale_alert", text=cg_msg) and send_telegram_message(
+            cg_msg, thread_id, parse_mode="Markdown"
+        ):
             logger.info("[鏈上巨鯨] ② CoinGlass Whale Alert 已發送 1 則")
     else:
         logger.info("[鏈上巨鯨] ② 無新 Whale Alert 或未達內部過濾（見 fetch_hyperliquid_whale_alert 日誌）")
@@ -14656,7 +14705,9 @@ def run_hyperliquid_monitor_once():
     except Exception as e:
         logger.warning("[鏈上巨鯨] ③ 全市場快照構建失敗: %s", e)
     if digest:
-        if send_telegram_message(digest, thread_id, parse_mode="Markdown"):
+        if jackbot_universal_pre_send_gatekeeper("hyperliquid_digest", text=digest) and send_telegram_message(
+            digest, thread_id, parse_mode="Markdown"
+        ):
             logger.info("[鏈上巨鯨] ③ CoinGlass 全市場快照已發送 1 則")
 
     if sent_addr == 0 and not cg_msg and not digest:
@@ -14684,10 +14735,11 @@ def run_gold_signal():
         logger.info("[黃金訊號] 路徑不存在，跳過: %s", p)
     if gold_bot_dir is None:
         logger.error("[黃金訊號] 所有候選路徑皆不存在: %s", candidates)
-        send_telegram_message(
-            "⚠️ 黃金訊號：找不到 gold_signal_bot 目錄（已嘗試 黃金策略/gold_signal_bot 與 gold_signal_bot），請確認專案結構並部署該資料夾。",
-            TG_THREAD_IDS.get("gold_signal", 254),
+        _gmiss = (
+            "⚠️ 黃金訊號：找不到 gold_signal_bot 目錄（已嘗試 黃金策略/gold_signal_bot 與 gold_signal_bot），請確認專案結構並部署該資料夾。"
         )
+        if jackbot_universal_pre_send_gatekeeper("gold_signal_error", text=_gmiss):
+            send_telegram_message(_gmiss, TG_THREAD_IDS.get("gold_signal", 254))
         return
     _path_insert = str(gold_bot_dir)
     if _path_insert not in sys.path:
@@ -14705,10 +14757,9 @@ def run_gold_signal():
         logger.info("[黃金訊號] 模組 import 成功")
     except ImportError as e:
         logger.exception("[黃金訊號] 模組 import 失敗: %s", e)
-        send_telegram_message(
-            f"⚠️ 黃金訊號：依賴缺失（請確認已安裝 yfinance）。{str(e)}",
-            TG_THREAD_IDS.get("gold_signal", 254),
-        )
+        _gim = f"⚠️ 黃金訊號：依賴缺失（請確認已安裝 yfinance）。{str(e)}"
+        if jackbot_universal_pre_send_gatekeeper("gold_signal_error", text=_gim):
+            send_telegram_message(_gim, TG_THREAD_IDS.get("gold_signal", 254))
         return
     cfg = get_config()
     data_src = getattr(cfg, "DATA_SOURCE", "yfinance")
@@ -14810,7 +14861,8 @@ def run_gold_signal():
             msg_tpsl = format_tp_sl_hit_message(
                 hit, last_dir, last_entry, last_sl, _tp1_for_msg, _tp2_for_msg
             )
-            send_telegram_message(msg_tpsl, TG_THREAD_IDS.get("gold_signal", 254), parse_mode=None)
+            if jackbot_universal_pre_send_gatekeeper("gold_signal_tpsl", text=msg_tpsl):
+                send_telegram_message(msg_tpsl, TG_THREAD_IDS.get("gold_signal", 254), parse_mode=None)
 
             if hit == "tp1":
                 # 目標一達成：持倉繼續（追蹤 TP2），記錄 tp1 已通知，防止下輪重複推播
@@ -14881,7 +14933,9 @@ def run_gold_signal():
     thread_id = TG_THREAD_IDS.get("gold_signal", 254)
     msg = format_signal_message(signal, data_cutoff_utc=last_bar_utc)
     keyboard = get_gold_chart_keyboard()
-    sent = send_telegram_message(msg, thread_id, parse_mode=None, reply_markup=keyboard)
+    sent = False
+    if jackbot_universal_pre_send_gatekeeper("gold_signal", text=msg):
+        sent = send_telegram_message(msg, thread_id, parse_mode=None, reply_markup=keyboard)
     if sent:
         _save_gold_state({
             "last_direction": signal.direction,
@@ -15080,8 +15134,11 @@ def run_reset_data() -> None:
     )
     try:
         _thread = TG_THREAD_IDS.get("sniper", 0) or int(CHAT_ID or 0)
-        send_telegram_message(_msg, _thread, parse_mode="Markdown")
-        logger.info("【資料重置】Telegram 通知已發送")
+        if jackbot_universal_pre_send_gatekeeper("reset_data", text=_msg):
+            send_telegram_message(_msg, _thread, parse_mode="Markdown")
+            logger.info("【資料重置】Telegram 通知已發送")
+        else:
+            logger.info("【資料重置】Telegram 通知被守門員略過（空訊息等）")
     except Exception as e:
         logger.warning(f"【資料重置】Telegram 通知失敗（不影響重置結果）: {e}")
 
