@@ -256,7 +256,7 @@ else:
         'long_term_index': int(os.environ.get('TG_THREAD_LONG_TERM_INDEX', 248)),
         'liquidity_radar': int(os.environ.get('TG_THREAD_LIQUIDITY_RADAR', 3)),
         'altseason_radar': int(os.environ.get('TG_THREAD_ALTSEASON_RADAR', 11044)),
-        'crit_radar': int(os.environ.get('TG_THREAD_CRIT_RADAR', 11040)),
+        'crit_radar': int(os.environ.get('TG_THREAD_CRIT_RADAR') or 11040),
         'hyperliquid': int(os.environ.get('TG_THREAD_HYPERLIQUID', 252)),
         'gold_signal': int(os.environ.get('TG_THREAD_GOLD_SIGNAL') or 254),
     }
@@ -303,9 +303,9 @@ for _k in (
 try:
     _cr_tid = TG_THREAD_IDS.get("crit_radar")
     if _cr_tid is None or int(_cr_tid) <= 0:
-        TG_THREAD_IDS["crit_radar"] = int(os.environ.get("TG_THREAD_CRIT_RADAR", 11040))
+        TG_THREAD_IDS["crit_radar"] = int(os.environ.get("TG_THREAD_CRIT_RADAR") or 11040)
 except Exception:
-    TG_THREAD_IDS["crit_radar"] = int(os.environ.get("TG_THREAD_CRIT_RADAR", 11040))
+    TG_THREAD_IDS["crit_radar"] = int(os.environ.get("TG_THREAD_CRIT_RADAR") or 11040)
 
 # 其他配置
 EXCHANGE = "Binance"
