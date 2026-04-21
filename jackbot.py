@@ -12567,6 +12567,7 @@ def sniper_coinglass_gatekeeper_allow(x: Dict[str, Any]) -> bool:
     """規則式守門員（CoinGlass API Skills 思路內化）：硬擋明顯矛盾／資料無效；與 enrichment FR 封鎖互補。
     設 SNIPER_GATEKEEPER_DISABLED=1 可關閉整段守門員。
     爆倉單獨關閉：SNIPER_GK_LIQ_DISABLED=1；門檻：SNIPER_GK_LIQ_MIN_TOTAL_USD、SNIPER_GK_LIQ_DOM_RATIO。
+    薄流動（15m 價格暴走但 30m OI 不動）僅在 payload 含 oiChange_30m／oiChange30m 時檢查。
     """
     raw = os.getenv("SNIPER_GATEKEEPER_DISABLED", "").strip().lower()
     if raw in ("1", "true", "yes", "on"):
@@ -12599,18 +12600,23 @@ def sniper_coinglass_gatekeeper_allow(x: Dict[str, Any]) -> bool:
         p15 = float(x.get("priceChange15m") or x.get("price_change_percent_15m") or 0)
     except (TypeError, ValueError):
         p15 = 0.0
-    try:
-        oi30 = float(x.get("oiChange_30m") or x.get("oiChange30m") or 0)
-    except (TypeError, ValueError):
-        oi30 = 0.0
-    if abs(p15) > 22 and abs(oi30) < 0.22:
-        logger.info(
-            "[守門員🚫] %s 15m 價格變化過大(%.1f%%) 但 30m OI 幾乎不動(%.2f%%)（疑似薄流動）",
-            base,
-            p15,
-            oi30,
-        )
-        return False
+    # 僅在「有帶入 30m OI」時檢查薄流動；缺欄位時不推斷為 0（避免誤殺爆擊雷達等輕量 payload）
+    _oi30_raw = x.get("oiChange_30m")
+    if _oi30_raw is None:
+        _oi30_raw = x.get("oiChange30m")
+    if _oi30_raw is not None:
+        try:
+            oi30 = float(_oi30_raw)
+        except (TypeError, ValueError):
+            oi30 = 0.0
+        if abs(p15) > 22 and abs(oi30) < 0.22:
+            logger.info(
+                "[守門員🚫] %s 15m 價格變化過大(%.1f%%) 但 30m OI 幾乎不動(%.2f%%)（疑似薄流動）",
+                base,
+                p15,
+                oi30,
+            )
+            return False
 
     # 1h 爆倉邊（CoinGlass coin-list；Skills 欄位 long/short_liquidation_usd_1h）
     if os.getenv("SNIPER_GK_LIQ_DISABLED", "").strip().lower() not in ("1", "true", "yes", "on"):
@@ -13345,8 +13351,62 @@ def _crit_radar_save_cooldown(mp: Dict[str, float]) -> None:
         logger.warning(f"[爆擊雷達] 寫入冷卻失敗: {e}")
 
 
+def _crit_radar_extract_oi30_pct(it: Dict[str, Any]) -> Optional[float]:
+    """從 coins-markets 原始列讀 30m OI 變化%%（供守門員薄流動檢查；無則略過）。"""
+    raw = it.get("_raw_cg") or {}
+    if not isinstance(raw, dict):
+        return None
+    for k in (
+        "openInterestChangePercent30m",
+        "open_interest_change_percent_30m",
+        "oiChangePercent30m",
+        "oi_change_percent_30m",
+    ):
+        v = raw.get(k)
+        if v is None:
+            continue
+        try:
+            f = float(v)
+            if f == f:
+                return f
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _crit_radar_gatekeeper_payload(
+    it: Dict[str, Any],
+    sym: str,
+    price: float,
+    fr: Optional[float],
+    is_long: bool,
+    liq_map: Dict[str, Dict[str, float]],
+) -> Dict[str, Any]:
+    """組出與持倉狙擊共用的守門員 dict（category 對應 long_open / short_open）。"""
+    base = sym.replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+    row = liq_map.get(base)
+    if row is None and base.startswith("1000"):
+        row = liq_map.get(base[4:])
+    oi30 = _crit_radar_extract_oi30_pct(it)
+    p15 = it.get("price_change_percent_15m")
+    out: Dict[str, Any] = {
+        "symbol": sym,
+        "category": "long_open" if is_long else "short_open",
+        "current_price": price,
+        "funding_rate": fr,
+        "priceChange15m": p15,
+    }
+    if oi30 is not None:
+        out["oiChange_30m"] = oi30
+    if row:
+        out["cg_liq_long_1h_usd"] = row.get("long_1h")
+        out["cg_liq_short_1h_usd"] = row.get("short_1h")
+        out["cg_liq_total_1h_usd"] = row.get("total_1h")
+    return out
+
+
 def run_crit_radar_once() -> None:
-    """爆擊雷達：OI 變化排序候選池 → 多空共振分 → 少則精推（ATR SL/TP）。"""
+    """爆擊雷達：OI 變化排序候選池 → 多空共振分 → 持倉狙擊同款守門員 → 少則精推（ATR SL/TP）。"""
     logger.info("開始執行爆擊雷達…")
     if not CG_API_KEY:
         logger.warning("[爆擊雷達] 未設定 CG_API_KEY，結束")
@@ -13388,6 +13448,8 @@ def run_crit_radar_once() -> None:
     except Exception as e:
         logger.warning(f"[爆擊雷達] 資金費率表失敗（降級）: {e}")
         fr_map = {}
+    liq_map_cr: Dict[str, Dict[str, float]] = fetch_cg_liq_coin_map()
+    logger.info("[爆擊雷達] 爆倉 coin-list 預載 %d 幣（與持倉狙擊守門員同源）", len(liq_map_cr))
 
     pool_lines: List[str] = []
     for it in ranked[:log_pool_preview]:
@@ -13532,6 +13594,13 @@ def run_crit_radar_once() -> None:
     n_no_price = 0
     n_no_atr = 0
     n_tg_fail = 0
+    n_gk_skip = 0
+    _crit_use_gk = os.getenv("CRIT_RADAR_GATEKEEPER", "1").strip().lower() not in (
+        "0", "false", "off", "no",
+    )
+    _crit_gk_glob_off = os.getenv("SNIPER_GATEKEEPER_DISABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
     for it in filtered:
         if sent >= max_alerts:
             logger.info(
@@ -13543,6 +13612,7 @@ def run_crit_radar_once() -> None:
         side = str(it.get("_crit_side") or "")
         score = int(it.get("_crit_score") or 0)
         fr = fr_map.get(sym) or fr_map.get(sym.replace("1000", ""))
+        is_long = side == "LONG"
 
         price = _crit_radar_price_from_item(it)
         if not price:
@@ -13570,6 +13640,20 @@ def run_crit_radar_once() -> None:
         raw_sl_pct = max(sl_min_pct, min(sl_max_pct, raw_sl_pct))
         tp_pct = raw_sl_pct * tp_r
 
+        if _crit_use_gk and not _crit_gk_glob_off:
+            _gk_dict = _crit_radar_gatekeeper_payload(
+                it, sym, float(price), fr, is_long, liq_map_cr
+            )
+            if not sniper_coinglass_gatekeeper_allow(_gk_dict):
+                n_gk_skip += 1
+                logger.info(
+                    "[爆擊雷達·守門員] 略過 %s %s 分=%s（與持倉狙擊第二道規則同源）",
+                    sym,
+                    side,
+                    score,
+                )
+                continue
+
         p15 = it.get("price_change_percent_15m")
         if p15 is None:
             p15 = it.get("price_change_percent_30m")
@@ -13592,7 +13676,6 @@ def run_crit_radar_once() -> None:
         except (TypeError, ValueError):
             frs = "—"
 
-        is_long = side == "LONG"
         dir_zh = "做多 🟢" if is_long else "做空 🔴"
         dir_emoji = "💰 *方向*：" + dir_zh
         if fr is None:
@@ -13640,11 +13723,12 @@ def run_crit_radar_once() -> None:
         _crit_radar_save_cooldown(cd)
 
     logger.info(
-        "[爆擊雷達·小結] 發送=%d｜達標候選=%d｜冷卻略過=%d｜無現價=%d｜無ATR=%d｜推播失敗=%d｜"
+        "[爆擊雷達·小結] 發送=%d｜達標候選=%d｜冷卻略過=%d｜守門員略過=%d｜無現價=%d｜無ATR=%d｜推播失敗=%d｜"
         "池內模糊=%d｜分數不足=%d｜冷卻檔=%s",
         sent,
         len(candidates),
         n_cool_skip,
+        n_gk_skip,
         n_no_price,
         n_no_atr,
         n_tg_fail,
