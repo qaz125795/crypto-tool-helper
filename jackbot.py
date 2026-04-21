@@ -6031,6 +6031,19 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         except (TypeError, ValueError):
             pass
 
+    # ── 4b. CoinGlass rsi/list 與 K 線 RSI 交叉（Skills：多源一致較可信）──
+    _rsi_k_ref = x.get("rsi")
+    _rsi_cg_ref2 = x.get("cg_rsi_15m_ref")
+    if _rsi_k_ref is not None and _rsi_cg_ref2 is not None:
+        try:
+            _rk = float(_rsi_k_ref)
+            _rc = float(_rsi_cg_ref2)
+            if _rk == _rk and _rc == _rc and abs(_rk - _rc) >= 22:
+                score -= 4
+                reasons.append("CG RSI與K線RSI分歧")
+        except (TypeError, ValueError):
+            pass
+
     # ── 5. 1H OI 強度 ────────────────────────────────────────
     oi_1h = abs(x.get("oiChange1h") or 0)
     if oi_1h >= 8.0:
@@ -6239,6 +6252,34 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
                 elif mag >= 3:
                     score -= 2
                     reasons.append("TD15m偏多")
+
+    # ── 14. 1h 爆倉邊（liquidation/coin-list；與守門員同源）加／扣分 ─────
+    _l1w = x.get("cg_liq_long_1h_usd")
+    _s1w = x.get("cg_liq_short_1h_usd")
+    if _l1w is not None and _s1w is not None:
+        try:
+            _lfq = float(_l1w)
+            _sfq = float(_s1w)
+        except (TypeError, ValueError):
+            _lfq = _sfq = -1.0
+        if _lfq >= 0 and _sfq >= 0:
+            _totq = _lfq + _sfq
+            _min_sc = max(45_000.0, _env_float("SNIPER_SCORE_LIQ_MIN_USD", 78_000.0))
+            if _totq >= _min_sc:
+                if is_bull_sig:
+                    if _sfq >= 1.45 * max(_lfq, 500.0):
+                        score += 4
+                        reasons.append("1h空頭清算偏多")
+                    elif _lfq >= 2.05 * max(_sfq, 500.0):
+                        score -= 5
+                        reasons.append("1h多頭清算壓力")
+                else:
+                    if _lfq >= 1.45 * max(_sfq, 500.0):
+                        score += 4
+                        reasons.append("1h多頭清算偏多")
+                    elif _sfq >= 2.05 * max(_lfq, 500.0):
+                        score -= 5
+                        reasons.append("1h空頭清算壓力")
 
     # ── 評級（S / A / R / B；僅「車已發動」限制上限）────────────
     score = max(0, min(100, score))
@@ -8649,6 +8690,10 @@ def fetch_position_change():
     logger.info(f"[FR批次] CoinGlass Funding Rate 預載完成，共 {len(_cg_fr_map)} 個幣種")
     _cg_td15_map: Dict[str, Optional[float]] = fetch_cg_td_map_for_interval("15m")
     logger.info(f"[TD批次] CoinGlass TD list 15m 預載完成，共 {len(_cg_td15_map)} 個幣種")
+    _cg_liq_map: Dict[str, Dict[str, float]] = fetch_cg_liq_coin_map()
+    logger.info(f"[爆倉批次] CoinGlass liquidation coin-list 預載完成，共 {len(_cg_liq_map)} 個幣種")
+    _cg_rsi15_ref_map: Dict[str, Optional[float]] = fetch_cg_rsi_bulk("15m")
+    logger.info(f"[RSI批次] CoinGlass rsi/list 15m 預載完成，共 {len(_cg_rsi15_ref_map)} 個幣種（與 K 線 RSI 交叉驗證）")
 
     all_top = []
     for item, cat in [(x, "long_open") for x in top_long_open] + [(x, "long_close") for x in top_long_close] + [(x, "short_open") for x in top_short_open] + [(x, "short_close") for x in top_short_close]:
@@ -9041,6 +9086,13 @@ def fetch_position_change():
         if _td15_val is None and str(_base_fr).startswith("1000"):
             _td15_val = _cg_td15_map.get(str(_base_fr)[4:])
 
+        _liq_row = _cg_liq_map.get(_base_fr)
+        if _liq_row is None and str(_base_fr).startswith("1000"):
+            _liq_row = _cg_liq_map.get(str(_base_fr)[4:])
+        _rsi_cg_ref = _cg_rsi15_ref_map.get(_base_fr)
+        if _rsi_cg_ref is None and str(_base_fr).startswith("1000"):
+            _rsi_cg_ref = _cg_rsi15_ref_map.get(str(_base_fr)[4:])
+
         all_top.append({
             **item,
             "priceChange24h": price_24h,
@@ -9125,6 +9177,12 @@ def fetch_position_change():
             "_exhaustion_reversal_direction": _mtf_result.get("exhaustion_direction"),
             # TD Sequential（15m，list 批次）：供 _calc_signal_grade 加分／減分
             "cg_td_15m": _td15_val,
+            # CoinGlass 全市場爆倉（coin-list 1h）：守門員硬擋 + 評分加減
+            "cg_liq_long_1h_usd": (_liq_row or {}).get("long_1h"),
+            "cg_liq_short_1h_usd": (_liq_row or {}).get("short_1h"),
+            "cg_liq_total_1h_usd": (_liq_row or {}).get("total_1h"),
+            # CoinGlass rsi/list 15m：與 K 線 RSI 交叉驗證（資料來源分歧時降權）
+            "cg_rsi_15m_ref": _rsi_cg_ref,
         })
         _ver_tag = (
             "🔥衰竭反轉" if _effective_version == "exhaustion_reversal"
@@ -12383,13 +12441,132 @@ def fetch_cg_td_map_for_interval(interval: str = "15m") -> Dict[str, Optional[fl
     return out
 
 
+# ── CoinGlass liquidation coin-list（Binance 聚合；Skills: futures/liquidation/API.md）──
+# Hobbyist 方案文件標為不可用；403 時降級為空 dict，不影響主流程。
+_cg_liq_coin_cache: Dict[str, Any] = {"ts": 0.0, "by_base": {}}
+_CG_LIQ_COIN_TTL = 95.0
+_cg_liq_coin_plan_logged: bool = False
+
+
+def _cg_liq_pick_float(row: Dict[str, Any], *candidates: str) -> float:
+    for k in candidates:
+        if k in row and row[k] is not None:
+            try:
+                v = float(row[k])
+                if v == v and v >= 0:
+                    return v
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _cg_liq_row_from_api_item(item: Dict[str, Any]) -> Dict[str, float]:
+    """正規化 Skills 文件中的欄位名（蛇形／大小寫容錯）。"""
+    long_1h = _cg_liq_pick_float(
+        item,
+        "long_liquidation_usd_1h",
+        "longLiquidationUsd1h",
+        "long_liquidation_usd_1H",
+    )
+    short_1h = _cg_liq_pick_float(
+        item,
+        "short_liquidation_usd_1h",
+        "shortLiquidationUsd1h",
+        "short_liquidation_usd_1H",
+    )
+    long_4h = _cg_liq_pick_float(
+        item,
+        "long_liquidation_usd_4h",
+        "longLiquidationUsd4h",
+    )
+    short_4h = _cg_liq_pick_float(
+        item,
+        "short_liquidation_usd_4h",
+        "shortLiquidationUsd4h",
+    )
+    tot_1h = long_1h + short_1h
+    if tot_1h <= 0:
+        tot_1h = _cg_liq_pick_float(item, "liquidation_usd_1h", "liquidationUsd1h")
+    return {
+        "long_1h": float(long_1h),
+        "short_1h": float(short_1h),
+        "total_1h": float(tot_1h),
+        "long_4h": float(long_4h),
+        "short_4h": float(short_4h),
+    }
+
+
+def _refresh_cg_liq_coin_list_cache() -> None:
+    global _cg_liq_coin_cache, _cg_liq_coin_plan_logged
+    if not CG_API_KEY:
+        return
+    now = time.time()
+    if (
+        now - float(_cg_liq_coin_cache.get("ts") or 0) < _CG_LIQ_COIN_TTL
+        and _cg_liq_coin_cache.get("by_base")
+    ):
+        return
+    ep = CG_EP.get("liq_coin_list", "/api/futures/liquidation/coin-list")
+    try:
+        _respect_coinglass_rate_limit()
+        r = requests.get(
+            f"{CG_API_BASE}{ep}",
+            headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+            params={"exchange": "Binance"},
+            timeout=26,
+        )
+        if r.status_code in (401, 403):
+            if not _cg_liq_coin_plan_logged:
+                logger.info(
+                    "[爆倉批次] coin-list HTTP %s（常見：方案不含此端點），守門員／加分略過",
+                    r.status_code,
+                )
+                _cg_liq_coin_plan_logged = True
+            _cg_liq_coin_cache = {"ts": now, "by_base": {}}
+            return
+        if r.status_code != 200:
+            logger.debug("[爆倉批次] coin-list HTTP %s", r.status_code)
+            return
+        j = r.json()
+        if j.get("code") not in (0, "0", 200, "200", None):
+            logger.debug("[爆倉批次] coin-list code=%s", j.get("code"))
+            return
+        raw = j.get("data") or j.get("list") or []
+        by_base: Dict[str, Dict[str, float]] = {}
+        for item in (raw if isinstance(raw, list) else []):
+            if not isinstance(item, dict):
+                continue
+            sym_raw = item.get("symbol") or item.get("coin") or item.get("base_asset") or ""
+            sym = str(sym_raw).replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+            if not sym:
+                continue
+            row = _cg_liq_row_from_api_item(item)
+            if row["total_1h"] > 0 or row["long_1h"] > 0 or row["short_1h"] > 0:
+                by_base[sym] = row
+        logger.info("[爆倉批次] coin-list 載入 %d 幣種（Binance）", len(by_base))
+        _cg_liq_coin_cache = {"ts": now, "by_base": by_base}
+    except Exception as e:
+        logger.debug("[爆倉批次] coin-list 異常: %s", e)
+
+
+def fetch_cg_liq_coin_map() -> Dict[str, Dict[str, float]]:
+    """{base: {long_1h, short_1h, total_1h, long_4h, short_4h}}，供 enrichment／守門員／評分。"""
+    _refresh_cg_liq_coin_list_cache()
+    out: Dict[str, Dict[str, float]] = {}
+    for k, v in (_cg_liq_coin_cache.get("by_base") or {}).items():
+        if isinstance(v, dict):
+            out[k] = dict(v)
+    return out
+
+
 def _sniper_gk_symbol_key(s: str) -> str:
     return str(s or "").replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
 
 
 def sniper_coinglass_gatekeeper_allow(x: Dict[str, Any]) -> bool:
-    """規則式守門員（Skill 思路內化）：硬擋明顯矛盾／資料無效；與 enrichment FR 封鎖互補。
-    設 SNIPER_GATEKEEPER_DISABLED=1 可關閉。
+    """規則式守門員（CoinGlass API Skills 思路內化）：硬擋明顯矛盾／資料無效；與 enrichment FR 封鎖互補。
+    設 SNIPER_GATEKEEPER_DISABLED=1 可關閉整段守門員。
+    爆倉單獨關閉：SNIPER_GK_LIQ_DISABLED=1；門檻：SNIPER_GK_LIQ_MIN_TOTAL_USD、SNIPER_GK_LIQ_DOM_RATIO。
     """
     raw = os.getenv("SNIPER_GATEKEEPER_DISABLED", "").strip().lower()
     if raw in ("1", "true", "yes", "on"):
@@ -12434,6 +12611,40 @@ def sniper_coinglass_gatekeeper_allow(x: Dict[str, Any]) -> bool:
             oi30,
         )
         return False
+
+    # 1h 爆倉邊（CoinGlass coin-list；Skills 欄位 long/short_liquidation_usd_1h）
+    if os.getenv("SNIPER_GK_LIQ_DISABLED", "").strip().lower() not in ("1", "true", "yes", "on"):
+        _l1 = x.get("cg_liq_long_1h_usd")
+        _s1 = x.get("cg_liq_short_1h_usd")
+        if _l1 is not None and _s1 is not None:
+            try:
+                _lf = float(_l1)
+                _sf = float(_s1)
+            except (TypeError, ValueError):
+                _lf = _sf = -1.0
+            if _lf >= 0 and _sf >= 0:
+                _tot = _lf + _sf
+                _min_l = max(50_000.0, _env_float("SNIPER_GK_LIQ_MIN_TOTAL_USD", 120_000.0))
+                _dom = max(1.6, _env_float("SNIPER_GK_LIQ_DOM_RATIO", 2.75))
+                _is_bull = cat in ("long_open", "short_close")
+                _is_bear = cat in ("short_open", "long_close")
+                if _tot >= _min_l and _is_bull and _lf >= _dom * max(_sf, 1.0):
+                    logger.info(
+                        "[守門員🚫] %s 做多類：1h 多頭爆倉佔優(%.0f vs %.0f USD, 總%.0f)（左側接刀風險）",
+                        base,
+                        _lf,
+                        _sf,
+                        _tot,
+                    )
+                    return False
+                if _tot >= _min_l and _is_bear and _sf >= _dom * max(_lf, 1.0):
+                    logger.info(
+                        "[守門員🚫] %s 做空類：1h 空頭爆倉佔優(%.0f vs %.0f USD)（軋空風險）",
+                        base,
+                        _sf,
+                        _lf,
+                    )
+                    return False
     return True
 
 
