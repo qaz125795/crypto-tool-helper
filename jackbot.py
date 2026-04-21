@@ -13852,7 +13852,7 @@ def run_crit_radar_once() -> None:
     # 大社群：單輪預設少發一檔，降低「同一分鐘連三發」洗版感；要回 3 設 CRIT_RADAR_MAX_ALERTS=3
     max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 2)))
     cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 4.0)))
-    margin = max(0, _crit_radar_env_int("CRIT_RADAR_SIDE_MARGIN", 3))
+    margin = max(0, _crit_radar_env_int("CRIT_RADAR_SIDE_MARGIN", 5))
     # 大社群預設：略增 ATR 倍數、放寬 SL%% 上限、提高 TP_R（貼近常見 2.5～3R 風報敘述）
     sl_atr = max(0.6, min(3.0, _env_float("CRIT_RADAR_SL_ATR", 1.5)))
     tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.8)))
