@@ -13735,7 +13735,7 @@ def run_crit_radar_once() -> None:
     pool_n = max(20, min(200, _crit_radar_env_int("CRIT_RADAR_POOL", 100)))
     min_score = max(55, min(92, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 68)))
     max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 3)))
-    cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 6.0)))
+    cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 4.0)))
     margin = max(0, _crit_radar_env_int("CRIT_RADAR_SIDE_MARGIN", 3))
     sl_atr = max(0.6, min(3.0, _env_float("CRIT_RADAR_SL_ATR", 1.25)))
     tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.0)))
