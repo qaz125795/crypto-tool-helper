@@ -1,3 +1,0 @@
-# Zeabur/Docker 建置時強制 UTF-8，避免 jackbot.py 中文變亂碼導致 SyntaxError
-*.py text eol=lf encoding=utf-8
-*.json text eol=lf encoding=utf-8
