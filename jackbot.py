@@ -4514,6 +4514,8 @@ MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.0))
 MAX_MARKET_VWAP_GAP_ATR = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_ATR", 1.5)    # 防追價：與 VWAP 偏離最多 1.5*ATR
 MARKET_ENTRY_ZONE_ATR = _env_float("SNIPER_ENTRY_ZONE_ATR", 0.2)                 # 市價可進場區：Entry ± 0.2*ATR
 MIN_SL_ATR_MULTIPLIER = _env_float("SNIPER_MIN_SL_ATR", 1.0)                     # 最低 SL 距離：至少 1.0*ATR
+# EMA 回踩止損：允許比 SNIPER_MAX_SL_PCT 更寬，否則瘋狗幣「明顯回踩高」永遠進不了 if（例：1.528 vs 進場 1.28）
+SNIPER_TOUCH_MAX_SL_ATR = max(1.5, _env_float("SNIPER_TOUCH_MAX_SL_ATR", 3.5))
 PENDING_PUMP_ATR_MULTIPLIER = _env_float("SNIPER_PENDING_PUMP_ATR", 0.5)         # 已噴發待辦池判定
 # Tier2 推播至少需籌碼陷阱步數（0～3）；預設 1＝崩盤/弱共振日仍可有觀察單（設 2 恢復較嚴）
 SNIPER_TIER2_MIN_TRAP_STEPS = int(max(0, min(3, round(_env_float("SNIPER_TIER2_MIN_TRAP_STEPS", 1)))))
@@ -4650,6 +4652,7 @@ def compute_structural_sl_tp(
         if one_r < min_sl_distance:
             one_r = min_sl_distance
             structural_sl = entry - one_r
+        _touch_sl_applied = False
         # 回踩點優先：抓最近 EMA20/EMA100 回踩低點作防守（可明顯縮短持倉時間）
         touch_lows = [
             v for v in (
@@ -4665,12 +4668,14 @@ def compute_structural_sl_tp(
                 _touch_buf = max(_touch_buf, atr_num * SL_TOUCH_BUFFER_ATR)
             _touch_sl = _touch_base - _touch_buf
             _touch_dist = entry - _touch_sl
-            if min_sl_distance <= _touch_dist and (
-                max_sl_distance is None or _touch_dist <= max_sl_distance * 1.02
-            ):
+            _touch_allow = (max_sl_distance * 1.02) if max_sl_distance is not None else float("inf")
+            if atr_num is not None and atr_num > 0:
+                _touch_allow = max(_touch_allow, min_sl_distance, atr_num * SNIPER_TOUCH_MAX_SL_ATR)
+            if min_sl_distance <= _touch_dist and _touch_dist <= _touch_allow:
                 structural_sl = _touch_sl
                 one_r = _touch_dist
-        if max_sl_distance is not None and one_r > max_sl_distance:
+                _touch_sl_applied = True
+        if not _touch_sl_applied and max_sl_distance is not None and one_r > max_sl_distance:
             guard_levels = [v for v in (ema, ema_100, vwap) if v is not None and v < entry]
             if guard_levels:
                 guard_base = max(guard_levels)  # 最靠近進場的防守均線
@@ -4694,6 +4699,7 @@ def compute_structural_sl_tp(
         if one_r < min_sl_distance:
             one_r = min_sl_distance
             structural_sl = entry + one_r
+        _touch_sl_applied = False
         # 回踩點優先：抓最近 EMA20/EMA100 回踩高點作防守（縮短空單停損距離）
         touch_highs = [
             v for v in (
@@ -4709,12 +4715,15 @@ def compute_structural_sl_tp(
                 _touch_buf = max(_touch_buf, atr_num * SL_TOUCH_BUFFER_ATR)
             _touch_sl = _touch_base + _touch_buf
             _touch_dist = _touch_sl - entry
-            if min_sl_distance <= _touch_dist and (
-                max_sl_distance is None or _touch_dist <= max_sl_distance * 1.02
-            ):
+            # 舊版僅允許 ≤MAX_SL%%，高波動幣「回踩高」常 >5.5% 而被捨棄→改為 max(MAX_SL, min_sl, ATR×係數)
+            _touch_allow = (max_sl_distance * 1.02) if max_sl_distance is not None else float("inf")
+            if atr_num is not None and atr_num > 0:
+                _touch_allow = max(_touch_allow, min_sl_distance, atr_num * SNIPER_TOUCH_MAX_SL_ATR)
+            if min_sl_distance <= _touch_dist and _touch_dist <= _touch_allow:
                 structural_sl = _touch_sl
                 one_r = _touch_dist
-        if max_sl_distance is not None and one_r > max_sl_distance:
+                _touch_sl_applied = True
+        if not _touch_sl_applied and max_sl_distance is not None and one_r > max_sl_distance:
             guard_levels = [v for v in (ema, ema_100, vwap) if v is not None and v > entry]
             if guard_levels:
                 guard_base = min(guard_levels)  # 最靠近進場的防守均線
@@ -13485,6 +13494,8 @@ def run_altseason_radar_once():
 # ==================== 9b. 爆擊雷達（Crit Radar）OI 共振 ====================
 
 CRIT_RADAR_COOLDOWN_FILE = DATA_DIR / "crit_radar_cooldown.json"
+# 與持倉狙擊共用 GIST_ID + GITHUB_TOKEN 時，多一個 gist 檔名存爆擊冷卻（跨 GitHub Actions 不丟失）
+CRIT_RADAR_GIST_FILENAME = os.getenv("CRIT_RADAR_GIST_FILENAME", "crit_radar_cooldown.json").strip() or "crit_radar_cooldown.json"
 
 
 def _crit_radar_env_int(name: str, default: int) -> int:
@@ -13658,24 +13669,94 @@ def _crit_radar_score_components(
     return max(0, min(100, total))
 
 
+def _crit_radar_load_cooldown_from_gist() -> Dict[str, float]:
+    """與狙擊相同 Gist：讀取 CRIT_RADAR_GIST_FILENAME（預設 crit_radar_cooldown.json）。"""
+    gist_id = os.getenv("GIST_ID")
+    token = os.getenv("GITHUB_TOKEN")
+    if not gist_id or not token:
+        return {}
+    fn = CRIT_RADAR_GIST_FILENAME
+    try:
+        resp = requests.get(
+            f"https://api.github.com/gists/{gist_id}",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return {}
+        files = resp.json().get("files") or {}
+        fo = files.get(fn)
+        if not fo:
+            return {}
+        raw = fo.get("content") or "{}"
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return {}
+        out: Dict[str, float] = {}
+        for k, v in data.items():
+            try:
+                out[str(k).upper()] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if out:
+            logger.info("[爆擊雷達·Gist] 已合併冷卻 %d 幣（%s）", len(out), fn)
+        return out
+    except Exception as e:
+        logger.debug("[爆擊雷達·Gist] 讀取冷卻例外: %s", e)
+    return {}
+
+
+def _crit_radar_save_cooldown_to_gist(mp: Dict[str, float]) -> bool:
+    gist_id = os.getenv("GIST_ID")
+    token = os.getenv("GITHUB_TOKEN")
+    if not gist_id or not token:
+        return False
+    fn = CRIT_RADAR_GIST_FILENAME
+    try:
+        payload = {
+            "files": {
+                fn: {
+                    "content": json.dumps(mp, ensure_ascii=False, indent=2),
+                }
+            }
+        }
+        resp = requests.patch(
+            f"https://api.github.com/gists/{gist_id}",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+            json=payload,
+            timeout=12,
+        )
+        if resp.status_code == 200:
+            logger.info("[爆擊雷達·Gist] 冷卻已寫回 %s（%d 幣）", fn, len(mp))
+            return True
+        logger.warning("[爆擊雷達·Gist] 寫回失敗 HTTP %s", resp.status_code)
+    except Exception as e:
+        logger.warning("[爆擊雷達·Gist] 寫回例外: %s", e)
+    return False
+
+
 def _crit_radar_load_cooldown() -> Dict[str, float]:
     path = CRIT_RADAR_COOLDOWN_FILE
-    if not path.exists():
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            out: Dict[str, float] = {}
-            for k, v in data.items():
-                try:
-                    out[str(k).upper()] = float(v)
-                except (TypeError, ValueError):
-                    continue
-            return out
-    except Exception as e:
-        logger.warning(f"[爆擊雷達] 讀取冷卻失敗: {e}")
-    return {}
+    local: Dict[str, float] = {}
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    try:
+                        local[str(k).upper()] = float(v)
+                    except (TypeError, ValueError):
+                        continue
+        except Exception as e:
+            logger.warning(f"[爆擊雷達] 讀取本地冷卻失敗: {e}")
+    gist_cd = _crit_radar_load_cooldown_from_gist()
+    if not gist_cd:
+        return local
+    merged = dict(local)
+    for k, v in gist_cd.items():
+        merged[k] = max(merged.get(k, 0.0), v)
+    return merged
 
 
 def _crit_radar_save_cooldown(mp: Dict[str, float]) -> None:
@@ -13692,6 +13773,14 @@ def _crit_radar_save_cooldown(mp: Dict[str, float]) -> None:
         os.replace(tmp, path)
     except Exception as e:
         logger.warning(f"[爆擊雷達] 寫入冷卻失敗: {e}")
+    if not _crit_radar_save_cooldown_to_gist(mp):
+        if os.getenv("GITHUB_ACTIONS", "").strip() == "true" and (
+            not os.getenv("GIST_ID", "").strip() or not os.getenv("GITHUB_TOKEN", "").strip()
+        ):
+            logger.warning(
+                "[爆擊雷達·冷卻] GitHub Actions 未設定 GIST_ID+GITHUB_TOKEN 時，"
+                "每輪 runner 不保留 data/，下輪可能重複推播同幣；請與持倉狙擊共用 Gist 憑證。"
+            )
 
 
 def _crit_radar_extract_oi30_pct(it: Dict[str, Any]) -> Optional[float]:
