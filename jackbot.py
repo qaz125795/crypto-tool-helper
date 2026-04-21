@@ -13242,10 +13242,21 @@ def _crit_radar_env_int(name: str, default: int) -> int:
 
 def _crit_radar_price_from_item(item: Dict[str, Any]) -> Optional[float]:
     raw = item.get("_raw_cg") or {}
-    if not isinstance(raw, dict):
-        return None
-    for k in ("indexPrice", "lastPrice", "price", "close", "markPrice", "last"):
-        v = raw.get(k)
+    if isinstance(raw, dict):
+        for k in ("indexPrice", "lastPrice", "price", "close", "markPrice", "last"):
+            v = raw.get(k)
+            if v is None:
+                continue
+            try:
+                p = float(v)
+                if p > 0:
+                    return p
+            except (TypeError, ValueError):
+                continue
+
+    # coins-price-change 補入資料常不含 _raw_cg，可直接讀扁平欄位
+    for k in ("price", "markPrice", "mark_price", "lastPrice", "close", "current_price"):
+        v = item.get(k)
         if v is None:
             continue
         try:
@@ -13254,6 +13265,16 @@ def _crit_radar_price_from_item(item: Dict[str, Any]) -> Optional[float]:
                 return p
         except (TypeError, ValueError):
             continue
+
+    # 最後備援：Gate ticker 即時價（僅在達標候選缺價時才會觸發）
+    sym = str(item.get("symbol") or "").strip().upper()
+    if sym:
+        try:
+            p2 = _fetch_bingx_current_price(sym)
+            if p2 is not None and float(p2) > 0:
+                return float(p2)
+        except Exception:
+            pass
     return None
 
 
