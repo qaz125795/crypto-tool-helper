@@ -241,6 +241,7 @@ if thread_ids_str:
             'long_term_index': 248,
             'liquidity_radar': 3,
             'altseason_radar': 11044,
+            'crit_radar': 11040,
             'hyperliquid': 252,
             'gold_signal': 254,  # 黃金 XAUUSD 訊號（可改為專用 topic 的 thread_id）
         }
@@ -255,6 +256,7 @@ else:
         'long_term_index': int(os.environ.get('TG_THREAD_LONG_TERM_INDEX', 248)),
         'liquidity_radar': int(os.environ.get('TG_THREAD_LIQUIDITY_RADAR', 3)),
         'altseason_radar': int(os.environ.get('TG_THREAD_ALTSEASON_RADAR', 11044)),
+        'crit_radar': int(os.environ.get('TG_THREAD_CRIT_RADAR', 11040)),
         'hyperliquid': int(os.environ.get('TG_THREAD_HYPERLIQUID', 252)),
         'gold_signal': int(os.environ.get('TG_THREAD_GOLD_SIGNAL') or 254),
     }
@@ -285,6 +287,7 @@ for _k in (
     "long_term_index",
     "liquidity_radar",
     "altseason_radar",
+    "crit_radar",
     "hyperliquid",
     "gold_signal",
 ):
@@ -296,6 +299,13 @@ for _k in (
     _raw = str(_raw).strip()
     if _raw:
         DC_THREAD_IDS[_k] = _raw
+
+try:
+    _cr_tid = TG_THREAD_IDS.get("crit_radar")
+    if _cr_tid is None or int(_cr_tid) <= 0:
+        TG_THREAD_IDS["crit_radar"] = int(os.environ.get("TG_THREAD_CRIT_RADAR", 11040))
+except Exception:
+    TG_THREAD_IDS["crit_radar"] = int(os.environ.get("TG_THREAD_CRIT_RADAR", 11040))
 
 # 其他配置
 EXCHANGE = "Binance"
@@ -8485,7 +8495,7 @@ def fetch_position_change():
             logger.info(f"[黑名單🚫] {sym} 在 enrichment 前即封鎖，跳過 K 線抓取")
             continue
 
-        # 技術指標：CoinGlass K 線計算 RSI / ATR / 結構高低點
+        # 技術指標：主框架維持 1h；防守點另取 15m EMA 回踩位（縮短持倉時間）
         # （_fetch_cg_klines_and_calc 內部已有 _respect_coinglass_rate_limit 限速，無需額外 sleep）
         tech = calculate_technicals(sym)
         # K 線無效則立即結束本幣種 enrichment：不呼叫 OI 多週期 / CVD 背離，節省 API
@@ -8498,6 +8508,15 @@ def fetch_position_change():
                 f"跳過 enrichment（不呼叫 CVD/30m/15m/5m）"
             )
             continue
+        # 15m 技術快照（僅用於 SL 防守點：EMA20/EMA100 回踩位）
+        tech_15m = calculate_technicals(sym, interval="15m", limit=120)
+        _ema20_sl = (tech_15m or {}).get("ema20_close") or tech.get("ema20_close")
+        _ema100_sl = (tech_15m or {}).get("ema100_close") or tech.get("ema100_close")
+        _ema20_touch_low_sl = (tech_15m or {}).get("ema20_touch_low") or tech.get("ema20_touch_low")
+        _ema20_touch_high_sl = (tech_15m or {}).get("ema20_touch_high") or tech.get("ema20_touch_high")
+        _ema100_touch_low_sl = (tech_15m or {}).get("ema100_touch_low")
+        _ema100_touch_high_sl = (tech_15m or {}).get("ema100_touch_high")
+        _atr_sl = (tech_15m or {}).get("atr") or tech.get("atr")
 
         # ── Plan C：K 線估算成交值（補充 CoinGlass + Binance 均無資料的幣種）──────
         if item.get("_vol_need_planc") and tech:
@@ -8574,7 +8593,7 @@ def fetch_position_change():
             continue
         signal_label, zone, stars, rsi_desc, reason = classified
         rsi_val = tech.get("rsi") if tech else None
-        atr_val = tech.get("atr") if tech else None
+        atr_val = _atr_sl
 
         # ── 反畫門防護（Anti-Manipulation Gate）────────────────────────────
         # 放在分類後（已知是真實訊號候選）、推播前，封鎖莊家假突破/畫門特徵
@@ -8865,12 +8884,12 @@ def fetch_position_change():
             "recent_low_2h": tech.get("recent_low_2h") if tech else None,
             "pre_breakout_low": tech.get("pre_breakout_low") if tech else None,
             "pre_breakout_high": tech.get("pre_breakout_high") if tech else None,
-            "ema20": tech.get("ema20_close") if tech else None,
-            "ema100": tech.get("ema100_close") if tech else None,
-            "ema20_touch_low": tech.get("ema20_touch_low") if tech else None,
-            "ema20_touch_high": tech.get("ema20_touch_high") if tech else None,
-            "ema100_touch_low": tech.get("ema100_touch_low") if tech else None,
-            "ema100_touch_high": tech.get("ema100_touch_high") if tech else None,
+            "ema20": _ema20_sl,
+            "ema100": _ema100_sl,
+            "ema20_touch_low": _ema20_touch_low_sl,
+            "ema20_touch_high": _ema20_touch_high_sl,
+            "ema100_touch_low": _ema100_touch_low_sl,
+            "ema100_touch_high": _ema100_touch_high_sl,
             "last_kline_high_30m": tech.get("last_kline_high_30m") if tech else None,
             "last_kline_low_30m": tech.get("last_kline_low_30m") if tech else None,
             "last_kline_open_30m": tech.get("last_kline_open_30m") if tech else None,
@@ -12465,6 +12484,328 @@ def run_altseason_radar_once():
     logger.info("山寨爆發雷達推播完成")
 
 
+# ==================== 9b. 爆擊雷達（Crit Radar）OI 共振 ====================
+
+CRIT_RADAR_COOLDOWN_FILE = DATA_DIR / "crit_radar_cooldown.json"
+
+
+def _crit_radar_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return default
+
+
+def _crit_radar_price_from_item(item: Dict[str, Any]) -> Optional[float]:
+    raw = item.get("_raw_cg") or {}
+    if not isinstance(raw, dict):
+        return None
+    for k in ("indexPrice", "lastPrice", "price", "close", "markPrice", "last"):
+        v = raw.get(k)
+        if v is None:
+            continue
+        try:
+            p = float(v)
+            if p > 0:
+                return p
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _crit_radar_oi_sort_key(item: Dict[str, Any]) -> float:
+    oi15 = item.get("_cg_oi_change_15m")
+    oi1h = item.get("oiChange1h") or item.get("open_interest_change_percent_1h")
+    try:
+        a = abs(float(oi15)) if oi15 is not None else 0.0
+    except (TypeError, ValueError):
+        a = 0.0
+    try:
+        b = abs(float(oi1h)) if oi1h is not None else 0.0
+    except (TypeError, ValueError):
+        b = 0.0
+    return max(a, b * 0.65)
+
+
+def _crit_radar_score_components(
+    item: Dict[str, Any],
+    funding_rate: Optional[float],
+    is_long: bool,
+) -> int:
+    """0~100：OI 動能、價格 15m、主動買賣、資金費率（單邊）。"""
+    oi15 = item.get("_cg_oi_change_15m")
+    oi1h = item.get("oiChange1h") or item.get("open_interest_change_percent_1h")
+    try:
+        oi15f = float(oi15) if oi15 is not None else None
+    except (TypeError, ValueError):
+        oi15f = None
+    try:
+        oi1hf = float(oi1h) if oi1h is not None else None
+    except (TypeError, ValueError):
+        oi1hf = None
+    p15 = item.get("price_change_percent_15m")
+    if p15 is None:
+        p15 = item.get("price_change_percent_30m")
+    try:
+        p15f = float(p15) if p15 is not None else 0.0
+    except (TypeError, ValueError):
+        p15f = 0.0
+    taker = item.get("_taker_ratio_15m")
+    try:
+        tk = float(taker) if taker is not None else None
+    except (TypeError, ValueError):
+        tk = None
+
+    oi_mag = 0.0
+    if oi15f is not None:
+        oi_mag = abs(oi15f)
+    elif oi1hf is not None:
+        oi_mag = abs(oi1hf) * 0.85
+    else:
+        oi_mag = 0.0
+    oi_pts = min(38, oi_mag * 9.0)
+
+    if is_long:
+        price_pts = min(22, max(0.0, p15f) * 4.2)
+    else:
+        price_pts = min(22, max(0.0, -p15f) * 4.2)
+
+    if tk is None:
+        taker_pts = 8
+    elif is_long:
+        if tk >= 58:
+            taker_pts = 22
+        elif tk >= 52:
+            taker_pts = 14 + (tk - 52) * 1.3
+        else:
+            taker_pts = max(0, tk / 52.0 * 8)
+    else:
+        if tk <= 42:
+            taker_pts = 22
+        elif tk <= 48:
+            taker_pts = 14 + (48 - tk) * 1.3
+        else:
+            taker_pts = max(0, (100 - tk) / 52.0 * 8)
+
+    if funding_rate is None or (funding_rate != funding_rate):
+        fund_pts = 9
+    else:
+        fr = float(funding_rate)
+        if is_long:
+            if fr < -0.00003:
+                fund_pts = 18
+            elif fr < 0:
+                fund_pts = 14
+            elif fr < 0.00008:
+                fund_pts = 8
+            else:
+                fund_pts = 4
+        else:
+            if fr > 0.00003:
+                fund_pts = 18
+            elif fr > 0:
+                fund_pts = 14
+            elif fr > -0.00008:
+                fund_pts = 8
+            else:
+                fund_pts = 4
+
+    total = int(round(oi_pts + price_pts + taker_pts + fund_pts))
+    return max(0, min(100, total))
+
+
+def _crit_radar_load_cooldown() -> Dict[str, float]:
+    path = CRIT_RADAR_COOLDOWN_FILE
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            out: Dict[str, float] = {}
+            for k, v in data.items():
+                try:
+                    out[str(k).upper()] = float(v)
+                except (TypeError, ValueError):
+                    continue
+            return out
+    except Exception as e:
+        logger.warning(f"[爆擊雷達] 讀取冷卻失敗: {e}")
+    return {}
+
+
+def _crit_radar_save_cooldown(mp: Dict[str, float]) -> None:
+    path = CRIT_RADAR_COOLDOWN_FILE
+    try:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(mp, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except Exception as e:
+        logger.warning(f"[爆擊雷達] 寫入冷卻失敗: {e}")
+
+
+def run_crit_radar_once() -> None:
+    """爆擊雷達：OI 變化排序候選池 → 多空共振分 → 少則精推（ATR SL/TP）。"""
+    logger.info("開始執行爆擊雷達…")
+    if not CG_API_KEY:
+        logger.warning("[爆擊雷達] 未設定 CG_API_KEY，結束")
+        return
+    pool_n = max(20, min(200, _crit_radar_env_int("CRIT_RADAR_POOL", 100)))
+    min_score = max(55, min(92, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 68)))
+    max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 3)))
+    cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 6.0)))
+    margin = max(0, _crit_radar_env_int("CRIT_RADAR_SIDE_MARGIN", 3))
+    sl_atr = max(0.6, min(3.0, _env_float("CRIT_RADAR_SL_ATR", 1.25)))
+    tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.0)))
+    sl_min_pct = max(0.01, min(0.2, _env_float("CRIT_RADAR_SL_MIN_PCT", 0.028)))
+    sl_max_pct = max(sl_min_pct + 0.005, min(0.25, _env_float("CRIT_RADAR_SL_MAX_PCT", 0.075)))
+
+    items = fetch_coinglass_coins_markets()
+    if not items:
+        logger.warning("[爆擊雷達] 未取得市場列表")
+        return
+
+    ranked = sorted(items, key=_crit_radar_oi_sort_key, reverse=True)[:pool_n]
+    try:
+        fr_map = _fetch_funding_rate_map() or {}
+    except Exception as e:
+        logger.warning(f"[爆擊雷達] 資金費率表失敗（降級）: {e}")
+        fr_map = {}
+
+    candidates: List[Dict[str, Any]] = []
+    for it in ranked:
+        sym = str(it.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        fr = fr_map.get(sym)
+        if fr is None:
+            fr = fr_map.get(sym.replace("1000", ""))
+        lo = _crit_radar_score_components(it, fr, True)
+        sh = _crit_radar_score_components(it, fr, False)
+        if lo >= sh + margin:
+            side, best = "LONG", lo
+        elif sh >= lo + margin:
+            side, best = "SHORT", sh
+        else:
+            continue
+        if best < min_score:
+            continue
+        it2 = dict(it)
+        it2["_crit_side"] = side
+        it2["_crit_score"] = best
+        candidates.append(it2)
+
+    candidates.sort(key=lambda x: int(x.get("_crit_score") or 0), reverse=True)
+
+    cd = _crit_radar_load_cooldown()
+    now = time.time()
+    cool_sec = cooldown_h * 3600.0
+    filtered: List[Dict[str, Any]] = []
+    for it in candidates:
+        sym = str(it.get("symbol") or "").strip().upper()
+        last_ts = cd.get(sym, 0.0)
+        if last_ts and (now - last_ts) < cool_sec:
+            continue
+        filtered.append(it)
+        if len(filtered) >= max_alerts * 3:
+            break
+
+    thread_id = int(TG_THREAD_IDS.get("crit_radar") or 0)
+    if not thread_id:
+        logger.warning("[爆擊雷達] 未設定 crit_radar 話題 thread_id")
+        return
+
+    sent = 0
+    for it in filtered:
+        if sent >= max_alerts:
+            break
+        sym = str(it.get("symbol") or "").strip().upper()
+        side = str(it.get("_crit_side") or "")
+        score = int(it.get("_crit_score") or 0)
+        fr = fr_map.get(sym) or fr_map.get(sym.replace("1000", ""))
+
+        price = _crit_radar_price_from_item(it)
+        if not price:
+            continue
+        atr_val = fetch_coinglass_indicator(sym, "atr", "15m")
+        if not atr_val or float(atr_val) <= 0:
+            logger.info(f"[爆擊雷達] {sym} 無 ATR，略過")
+            continue
+        atr_f = float(atr_val)
+        raw_sl_pct = (atr_f * sl_atr) / price
+        raw_sl_pct = max(sl_min_pct, min(sl_max_pct, raw_sl_pct))
+        tp_pct = raw_sl_pct * tp_r
+
+        p15 = it.get("price_change_percent_15m")
+        if p15 is None:
+            p15 = it.get("price_change_percent_30m")
+        try:
+            p15s = f"{float(p15):+.2f}%" if p15 is not None else "—"
+        except (TypeError, ValueError):
+            p15s = "—"
+        oi15 = it.get("_cg_oi_change_15m")
+        try:
+            oi15s = f"{float(oi15):+.2f}%" if oi15 is not None else "—"
+        except (TypeError, ValueError):
+            oi15s = "—"
+        tk = it.get("_taker_ratio_15m")
+        try:
+            tks = f"{float(tk):.0f}%" if tk is not None else "—"
+        except (TypeError, ValueError):
+            tks = "—"
+        try:
+            frs = f"{float(fr) * 100:.4f}%" if fr is not None else "—"
+        except (TypeError, ValueError):
+            frs = "—"
+
+        is_long = side == "LONG"
+        dir_zh = "做多 🟢" if is_long else "做空 🔴"
+        dir_emoji = "💰 *方向*：" + dir_zh
+        if fr is None:
+            fr_note = "費率未取到（中性處理）"
+        elif fr > 0:
+            fr_note = "費率偏多（多付空）"
+        elif fr < 0:
+            fr_note = "費率偏空（空付多）"
+        else:
+            fr_note = "費率中性"
+
+        msg_lines = [
+            "💥 *爆擊雷達*｜`" + sym + "USDT` · `15m`",
+            dir_emoji,
+            f"🧠 *共振分*：{score} / 100",
+            f"🔍 *脈絡*：OI15m `{oi15s}`｜價15m `{p15s}`｜主動買比 `{tks}`｜資金 `{frs}`（{fr_note}）",
+            f"📊 *參考*：`SL` 約 `{'-' if is_long else '+'}{raw_sl_pct * 100:.2f}%`（ATR×{sl_atr:.2f}）｜`TP` 約 `{'+' if is_long else '-'}{tp_pct * 100:.2f}%`（{tp_r:.1f}R）",
+            f"💵 現價約 `{price:.6g}`｜ATR15m `{atr_f:.6g}`",
+            "",
+            RISK_DISCLAIMER_LINE,
+        ]
+        msg = "\n".join(msg_lines)
+        ok = send_telegram_message(msg, thread_id, parse_mode="Markdown")
+        if ok:
+            cd[sym] = now
+            sent += 1
+            logger.info(f"[爆擊雷達] 已推播 {sym} {side} 分={score}")
+        else:
+            logger.warning(f"[爆擊雷達] {sym} 推播失敗")
+
+    if sent:
+        _crit_radar_save_cooldown(cd)
+    elif candidates:
+        logger.info("[爆擊雷達] 本輪有候選但均未發送（冷卻／ATR／上限）")
+    else:
+        logger.info("[爆擊雷達] 本輪無達標候選（屬正常，訊號刻意偏少）")
+
+
 # ==================== 10. Hyperliquid 聰明錢監控 ====================
 
 HYPERLIQUID_SENT_ALERTS_FILE = DATA_DIR / "hyperliquid_sent_alerts.json"
@@ -13842,6 +14183,8 @@ if __name__ == "__main__":
             run_liquidity_radar_once()
         elif function_name == "altseason_radar":
             run_altseason_radar_once()
+        elif function_name == "crit_radar":
+            run_crit_radar_once()
         elif function_name == "hyperliquid":
             run_hyperliquid_monitor_once()
         elif function_name == "gold_signal":
@@ -13861,6 +14204,7 @@ if __name__ == "__main__":
             print("  long_term_index_once  - 長線牛熊導航儀（只執行一次，適合排程）")
             print("  liquidity_radar       - 流動性獵取雷達（極端爆倉彙整）")
             print("  altseason_radar       - 山寨爆發雷達（Altseason + RSI + Buy Ratio）")
+            print("  crit_radar            - 爆擊雷達（OI 變化池 + 多空共振 + ATR SL/TP）")
             print("  hyperliquid           - 鏈上巨鯨動向（地址追蹤+CoinGlass；見 WHALE_CG_MARKET_DIGEST）")
             print("  gold_signal           - 黃金 XAUUSD 多空訊號（ORB+MA）")
             print("  api_check             - API 健康檢查（驗證所有端點是否可用）")
