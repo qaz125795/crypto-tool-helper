@@ -48,6 +48,7 @@ from jackbot import (
     run_long_term_once,
     run_liquidity_radar_once,
     run_altseason_radar_once,
+    run_crit_radar_once,
     run_hyperliquid_monitor_once,
 )
 
@@ -71,6 +72,7 @@ def health_check():
             '/long_term_index': '長線牛熊導航儀',
             '/liquidity_radar': '流動性獵取雷達',
             '/altseason_radar': '山寨爆發雷達',
+            '/crit_radar': '爆擊雷達（OI 共振 + ATR）',
             '/hyperliquid': '大佬錢包動向追蹤（Discord）',
             '/run/<task>': '執行指定任務 (sector_ranking, whale_position, long_term_index_once, liquidity_radar, etc.)'
         }
@@ -158,6 +160,17 @@ def run_altseason_radar():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+
+@app.route('/crit_radar', methods=['GET', 'POST'])
+@require_cron_secret
+def run_crit_radar():
+    """執行爆擊雷達（OI 變化池、多空共振、ATR SL/TP）"""
+    try:
+        run_crit_radar_once()
+        return jsonify({'status': 'success', 'message': '爆擊雷達執行成功'}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/hyperliquid', methods=['GET', 'POST'])
 @require_cron_secret
 def run_hyperliquid():
@@ -192,6 +205,7 @@ def run_task(task):
         'long_term_index_once': run_long_term_once,
         'liquidity_radar': run_liquidity_radar_once,
         'altseason_radar': run_altseason_radar_once,
+        'crit_radar': run_crit_radar_once,
         'hyperliquid': run_hyperliquid_monitor_once,
     }
     
