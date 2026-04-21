@@ -13535,6 +13535,28 @@ def _crit_radar_price_from_item(item: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def _crit_radar_fmt_price_level(p: Optional[float]) -> str:
+    """爆擊雷達訊息用：絕對價字串（方便複製掛單／警報）。"""
+    if p is None:
+        return "—"
+    try:
+        x = float(p)
+    except (TypeError, ValueError):
+        return "—"
+    if x != x or x <= 0:
+        return "—"
+    ax = abs(x)
+    if ax >= 1000:
+        return f"{x:,.2f}"
+    if ax >= 1:
+        s = f"{x:.5f}".rstrip("0").rstrip(".")
+        return s if s else str(x)
+    if ax >= 0.0001:
+        s = f"{x:.6f}".rstrip("0").rstrip(".")
+        return s if s else str(x)
+    return f"{x:.6g}"
+
+
 def _crit_radar_oi_sort_key(item: Dict[str, Any]) -> float:
     oi15 = item.get("_cg_oi_change_15m")
     oi1h = item.get("oiChange1h") or item.get("open_interest_change_percent_1h")
@@ -13727,25 +13749,33 @@ def _crit_radar_gatekeeper_payload(
 
 
 def run_crit_radar_once() -> None:
-    """爆擊雷達：OI 變化排序候選池 → 多空共振分 → 持倉狙擊同款守門員 → 少則精推（ATR SL/TP）。"""
+    """爆擊雷達：OI 變化排序候選池 → 多空共振分 → 持倉狙擊同款守門員 → 少則精推（ATR SL/TP）。
+
+    預設（大社群適用）：SL 以 max(15m,1h) ATR×係數 再夾％上下限；TP_R 約 2.8R；SL 上限放寬，避免瘋狗幣
+    被 7.5% 天花板壓得比「真實波動」還窄。可用 CRIT_RADAR_ATR_BLEND=15m 還原僅 15m ATR。
+    """
     logger.info("開始執行爆擊雷達…")
     if not CG_API_KEY:
         logger.warning("[爆擊雷達] 未設定 CG_API_KEY，結束")
         return
     pool_n = max(20, min(200, _crit_radar_env_int("CRIT_RADAR_POOL", 100)))
     min_score = max(55, min(92, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 68)))
-    max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 3)))
+    # 大社群：單輪預設少發一檔，降低「同一分鐘連三發」洗版感；要回 3 設 CRIT_RADAR_MAX_ALERTS=3
+    max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 2)))
     cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 4.0)))
     margin = max(0, _crit_radar_env_int("CRIT_RADAR_SIDE_MARGIN", 3))
-    sl_atr = max(0.6, min(3.0, _env_float("CRIT_RADAR_SL_ATR", 1.25)))
-    tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.0)))
-    sl_min_pct = max(0.01, min(0.2, _env_float("CRIT_RADAR_SL_MIN_PCT", 0.028)))
-    sl_max_pct = max(sl_min_pct + 0.005, min(0.25, _env_float("CRIT_RADAR_SL_MAX_PCT", 0.075)))
+    # 大社群預設：略增 ATR 倍數、放寬 SL%% 上限、提高 TP_R（貼近常見 2.5～3R 風報敘述）
+    sl_atr = max(0.6, min(3.0, _env_float("CRIT_RADAR_SL_ATR", 1.5)))
+    tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.8)))
+    sl_min_pct = max(0.01, min(0.2, _env_float("CRIT_RADAR_SL_MIN_PCT", 0.032)))
+    sl_max_pct = max(sl_min_pct + 0.005, min(0.25, _env_float("CRIT_RADAR_SL_MAX_PCT", 0.11)))
     log_pool_preview = max(5, min(30, _crit_radar_env_int("CRIT_RADAR_LOG_POOL_PREVIEW", 12)))
+    _atr_blend_raw = (os.getenv("CRIT_RADAR_ATR_BLEND") or "max15m_1h").strip().lower()
+    _use_atr_max_1h = _atr_blend_raw not in ("15m", "legacy", "0", "false", "off", "no")
 
     logger.info(
         "[爆擊雷達·參數] pool=%d min_score=%d max_alerts=%d cooldown=%.1fh side_margin=%d "
-        "SL_ATR=%.2f TP_R=%.2f SL%%[%.3f~%.3f] log_pool_preview=%d",
+        "SL_ATR=%.2f TP_R=%.2f SL%%[%.3f~%.3f] atr_blend=%s log_pool_preview=%d",
         pool_n,
         min_score,
         max_alerts,
@@ -13755,6 +13785,7 @@ def run_crit_radar_once() -> None:
         tp_r,
         sl_min_pct,
         sl_max_pct,
+        "max15m_1h" if _use_atr_max_1h else "15m",
         log_pool_preview,
     )
 
@@ -13936,7 +13967,7 @@ def run_crit_radar_once() -> None:
         )
     else:
         logger.info(
-            "[爆擊雷達·守門員] 已啟用（與持倉狙擊同源）；僅在現價與 15m ATR 皆備妥後才檢查，"
+            "[爆擊雷達·守門員] 已啟用（與持倉狙擊同源）；僅在現價與 ATR 皆備妥後才檢查，"
             "無現價／無 ATR 略過者不計入「守門員略過」"
         )
     for it in filtered:
@@ -13974,9 +14005,29 @@ def run_crit_radar_once() -> None:
             )
             continue
         atr_f = float(atr_val)
+        atr_src_txt = "15m"
+        if _use_atr_max_1h:
+            time.sleep(0.08)
+            atr_1h = fetch_coinglass_indicator(sym, "atr", "1h")
+            if atr_1h and float(atr_1h) > 0:
+                atr_1h_f = float(atr_1h)
+                if atr_1h_f > atr_f:
+                    atr_f = atr_1h_f
+                atr_src_txt = "15m／1h 取大"
         raw_sl_pct = (atr_f * sl_atr) / price
         raw_sl_pct = max(sl_min_pct, min(sl_max_pct, raw_sl_pct))
         tp_pct = raw_sl_pct * tp_r
+        px_f = float(price)
+        if is_long:
+            sl_px = px_f * (1.0 - raw_sl_pct)
+            tp_px = px_f * (1.0 + tp_pct)
+        else:
+            sl_px = px_f * (1.0 + raw_sl_pct)
+            tp_px = px_f * (1.0 - tp_pct)
+        ent_s = _crit_radar_fmt_price_level(px_f)
+        sl_s = _crit_radar_fmt_price_level(sl_px)
+        tp_s = _crit_radar_fmt_price_level(tp_px)
+        atr_s = _crit_radar_fmt_price_level(atr_f)
 
         if _crit_use_gk and not _crit_gk_glob_off:
             _gk_dict = _crit_radar_gatekeeper_payload(
@@ -14036,8 +14087,14 @@ def run_crit_radar_once() -> None:
             dir_emoji,
             f"🧠 *共振分*：{score} / 100",
             f"🔍 *脈絡*：OI15m `{oi15s}`｜價15m `{p15s}`｜主動買比 `{tks}`｜資金 `{frs}`（{fr_note}）",
-            f"📊 *參考*：`SL` 約 `{'-' if is_long else '+'}{raw_sl_pct * 100:.2f}%`（ATR×{sl_atr:.2f}）｜`TP` 約 `{'+' if is_long else '-'}{tp_pct * 100:.2f}%`（{tp_r:.1f}R）",
-            f"💵 現價約 `{price:.6g}`｜ATR15m `{atr_f:.6g}`",
+            f"📊 *參考*：`SL` 約 `{'-' if is_long else '+'}{raw_sl_pct * 100:.2f}%`（{atr_src_txt} ATR×{sl_atr:.2f}）｜"
+            f"`TP` 約 `{'+' if is_long else '-'}{tp_pct * 100:.2f}%`（{tp_r:.1f}R）",
+            f"📌 *點位*（與上列％同一基準｜市價進場）：",
+            f"• 進場參考：`{ent_s}` USDT",
+            f"• 止損 SL：`{sl_s}` USDT",
+            f"• 止盈 TP：`{tp_s}` USDT",
+            f"📋 `進場 {ent_s}｜SL {sl_s}｜TP {tp_s}`",
+            f"📏 *ATR（止損帶基準）*：`{atr_s}`（{atr_src_txt}；與％推估同源）",
             "",
             RISK_DISCLAIMER_LINE,
         ]
