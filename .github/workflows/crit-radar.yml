@@ -44,6 +44,9 @@ jobs:
           DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
           DC_THREAD_IDS_CRIT_RADAR: ${{ secrets.DC_THREAD_IDS_CRIT_RADAR }}
           DC_THREAD_IDScrit_radar: ${{ secrets.DC_THREAD_IDScrit_radar }}
+          # 與持倉狙擊相同：跨 runner 保留爆擊冷卻，避免 15 分內重複推同幣
+          GIST_ID: ${{ secrets.GIST_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           timeout 600 python jackbot.py crit_radar || exit 0
           echo "任務執行完成"
