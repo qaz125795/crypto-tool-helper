@@ -8688,6 +8688,14 @@ def fetch_position_change():
     logger.info(
         f"📊 [TOP候選] 多開 {len(top_long_open)} 多平 {len(top_long_close)} 空開 {len(top_short_open)} 空平 {len(top_short_close)}（各取前3）→ 開始 enrichment"
     )
+    _top_total = (
+        len(top_long_open) + len(top_long_close) + len(top_short_open) + len(top_short_close)
+    )
+    if _top_total == 0:
+        logger.info(
+            "[守門員] 本輪不會檢查：1H OI 達門檻後 TOP 候選為 0 筆"
+            "（守門員在 enrichment 與版本篩選之後才執行，前面無標的則無守門員日誌）"
+        )
 
     # ════════════════════════════════════════════════════════
     # Enrichment：核心資料（CoinGlass 技術指標 + 資金費率）
@@ -9271,9 +9279,17 @@ def fetch_position_change():
 
     _gk_pre = len(all_top)
     all_top = [x for x in all_top if sniper_coinglass_gatekeeper_allow(x)]
-    if _gk_pre - len(all_top) > 0:
+    _gk_drop = _gk_pre - len(all_top)
+    if _gk_drop > 0:
         logger.info(
-            f"[守門員] CoinGlass 規則擋下 {_gk_pre - len(all_top)} 筆，剩餘 {len(all_top)} 筆"
+            f"[守門員] CoinGlass 規則擋下 {_gk_drop} 筆，剩餘 {len(all_top)} 筆"
+        )
+    elif _gk_pre > 0:
+        logger.info(f"[守門員] 檢查 {_gk_pre} 筆，0 筆擋下，全部通過")
+    else:
+        logger.info(
+            "[守門員] 本輪未檢查：進入守門員前列表為 0 筆"
+            "（訊號在更早的 MTF／OI／品質門／版本篩選已清空）"
         )
 
     _confirmed_cnt = sum(1 for x in all_top if x.get("signal_version") == "confirmed")
@@ -9785,12 +9801,33 @@ def fetch_position_change():
             _oi_cache: Dict[str, Optional[List[Dict]]] = {}
 
             sent_cnt = 0
+
+            def _gk_trade_payload_for_card_base(base: str) -> Optional[Dict[str, Any]]:
+                for _itm in cooled_top or []:
+                    if not _itm.get("selected_for_push"):
+                        continue
+                    if _cooldown_symbol(_itm.get("symbol") or "") != base:
+                        continue
+                    return sniper_coinglass_trade_payload_from_enriched_item(_itm)
+                return None
+
             for idx, payload in enumerate(cards_payload or []):
                 sym_b = payload.get("symbol_base") or ""
                 if not sym_b:
                     continue
                 caption_txt = payload.get("caption") or ""
                 if not caption_txt:
+                    continue
+                _gk_card = _gk_trade_payload_for_card_base(sym_b)
+                if _gk_card is not None:
+                    if not jackbot_universal_pre_send_gatekeeper(
+                        "position_change",
+                        text=caption_txt,
+                        coinglass_trade=_gk_card,
+                    ):
+                        logger.info("[守門員·position_change] 推播前覆核擋下 %s", sym_b)
+                        continue
+                elif not jackbot_universal_pre_send_gatekeeper("position_change", text=caption_txt):
                     continue
 
                 if sym_b not in _ohlc_cache:
@@ -12582,8 +12619,39 @@ def _sniper_gk_symbol_key(s: str) -> str:
     return str(s or "").replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
 
 
+def sniper_coinglass_trade_payload_from_enriched_item(x: Dict[str, Any]) -> Dict[str, Any]:
+    """持倉狙擊 enriched item → `sniper_coinglass_gatekeeper_allow` 所需欄位（推播前即時價覆核用）。"""
+    sym = x.get("symbol") or ""
+    cp = x.get("current_price")
+    if cp is None:
+        cp = x.get("price")
+    out: Dict[str, Any] = {
+        "symbol": sym,
+        "category": (x.get("category") or "").strip(),
+        "current_price": cp,
+        "funding_rate": x.get("funding_rate"),
+    }
+    p15 = x.get("price_change_percent_15m")
+    if p15 is None:
+        p15 = x.get("priceChange15m")
+    if p15 is not None:
+        out["price_change_percent_15m"] = p15
+    oi30 = x.get("oiChange30m")
+    if oi30 is None:
+        oi30 = x.get("oiChange_30m")
+    if oi30 is not None:
+        out["oiChange30m"] = oi30
+    for k in ("cg_liq_long_1h_usd", "cg_liq_short_1h_usd"):
+        v = x.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 def sniper_coinglass_gatekeeper_allow(x: Dict[str, Any]) -> bool:
     """規則式守門員（CoinGlass API Skills 思路內化）：硬擋明顯矛盾／資料無效；與 enrichment FR 封鎖互補。
+    持倉狙擊：all_top 篩選後一檢；推播前再以即時價帶入 `jackbot_universal_pre_send_gatekeeper(..., coinglass_trade=...)` 二檢。
+    爆擊雷達：ATR 後一檢；送出前 universal 再帶同一套 payload 覆核。
     設 SNIPER_GATEKEEPER_DISABLED=1 可關閉整段守門員。
     爆倉單獨關閉：SNIPER_GK_LIQ_DISABLED=1；門檻：SNIPER_GK_LIQ_MIN_TOTAL_USD、SNIPER_GK_LIQ_DOM_RATIO。
     薄流動（15m 價格暴走但 30m OI 不動）僅在 payload 含 oiChange_30m／oiChange30m 時檢查。
@@ -12684,6 +12752,7 @@ def jackbot_universal_pre_send_gatekeeper(
     - JACKBOT_GATEKEEPER_ALL_DISABLED=1：略過本函數（維持舊行為）。
     - 空字串訊息不發。
     - 若傳入 coinglass_trade（與 sniper 相同欄位語意），再套用 sniper_coinglass_gatekeeper_allow。
+      持倉狙擊／爆擊雷達建議一律傳入，以在「即時價更新後」仍擋掉壅擠費率／薄流動／爆倉邊等矛盾盤。
     """
     if os.getenv("JACKBOT_GATEKEEPER_ALL_DISABLED", "").strip().lower() in ("1", "true", "yes", "on"):
         return True
@@ -13154,8 +13223,91 @@ def detect_cvd_divergence(symbol: str) -> Optional[str]:
         return None
 
 
+def _altseason_normalize_base(sym: str) -> str:
+    s = str(sym or "").strip().upper()
+    for suf in ("USDT", "-PERP", "PERP"):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+    return s.replace("-", "").replace("_", "").strip()
+
+
+def _altseason_fmt_price_short(p: Optional[float]) -> str:
+    if p is None:
+        return "—"
+    try:
+        x = float(p)
+    except (TypeError, ValueError):
+        return "—"
+    if x != x or x <= 0:
+        return "—"
+    if x >= 1000:
+        return f"{x:,.2f}"
+    if x >= 1:
+        return f"{x:.4f}".rstrip("0").rstrip(".")
+    return f"{x:.6g}"
+
+
+def _altseason_cost_vwap_or_ema(tech: Optional[Dict[str, Any]]) -> Tuple[str, Optional[float]]:
+    if not tech:
+        return ("成本區", None)
+    v = tech.get("vwap_2h")
+    try:
+        vf = float(v) if v is not None else None
+    except (TypeError, ValueError):
+        vf = None
+    if vf is not None and vf > 0:
+        return ("4H 量能成本（VWAP）", vf)
+    em = tech.get("ema20_close")
+    try:
+        ef = float(em) if em is not None else None
+    except (TypeError, ValueError):
+        ef = None
+    if ef is not None and ef > 0:
+        return ("4H EMA20（均價）", ef)
+    return ("成本區", None)
+
+
+def _altseason_bull_story_zh(
+    br: float,
+    rsi: float,
+    px: float,
+    cost_px: Optional[float],
+    fr: Optional[float],
+    p24: Optional[float],
+) -> str:
+    parts: List[str] = []
+    if br >= 56:
+        parts.append(f"15m 主動買盤約 {br:.0f}%")
+    elif br >= 52:
+        parts.append("主動買盤略優")
+    if rsi >= 72:
+        parts.append("RSI 偏高、潮流強（易震盪）")
+    elif rsi >= 65:
+        parts.append("RSI 守在強勢區")
+    if cost_px is not None and cost_px > 0:
+        if px > cost_px * 1.003:
+            parts.append("價格在成本區之上，短線籌碼偏多頭")
+        elif px < cost_px * 0.997:
+            parts.append("價在成本區下，屬突破或假突破需再確認")
+        else:
+            parts.append("價與成本區接近，表態中")
+    if fr is not None and isinstance(fr, (int, float)) and fr == fr:
+        if fr < -0.0005:
+            parts.append("資金費率偏負，多頭持倉成本較友善")
+        elif fr > 0.0025:
+            parts.append("費率偏高、多頭略壅擠，宜控倉")
+    if p24 is not None and isinstance(p24, (int, float)):
+        if p24 > 8:
+            parts.append(f"24h 漲幅仍強（約 {p24:+.1f}%）")
+        elif p24 < -5:
+            parts.append(f"24h 弱勢反彈結構（約 {p24:+.1f}%）")
+    if not parts:
+        return "強勢權值＋資金輪動標的，宜分批並嚴守風控。"
+    return "；".join(parts[:4]) + "。"
+
+
 def build_altseason_message() -> Optional[str]:
-    """【山寨暴富列車】抓板塊輪動，強者恆強。"""
+    """【山寨暴富列車】抓板塊輪動，強者恆強；每檔經守門員與 4H 成本／ATR 參考強化。"""
     index_val = fetch_altseason_index()
     rsi_list = fetch_rsi_list()
     if not rsi_list:
@@ -13179,10 +13331,89 @@ def build_altseason_message() -> Optional[str]:
             time.sleep(0.3)
         return res
 
-    strong = [r for r in rsi_list if (r.get("rsi_4h") or r.get("rsi_base") or 0) >= 65]
-    if strong:
-        strong = attach_buy_ratio(strong[:8])
-        strong.sort(key=lambda x: x.get("buy_ratio", 0), reverse=True)
+    strong_src = [r for r in rsi_list if (r.get("rsi_4h") or r.get("rsi_base") or 0) >= 65][:12]
+    if strong_src:
+        strong_src = attach_buy_ratio(strong_src)
+        strong_src.sort(key=lambda x: x.get("buy_ratio", 0), reverse=True)
+
+    markets = fetch_coinglass_coins_markets() if CG_API_KEY else []
+    mkt_by_base = {str(m.get("symbol") or "").upper(): m for m in markets if m.get("symbol")}
+    fr_map: Dict[str, float] = {}
+    liq_map: Dict[str, Dict[str, float]] = {}
+    try:
+        fr_map = _fetch_funding_rate_map() or {}
+    except Exception:
+        fr_map = {}
+    try:
+        liq_map = fetch_cg_liq_coin_map()
+    except Exception:
+        liq_map = {}
+
+    leaders: List[Dict[str, Any]] = []
+    if strong_src:
+        for cand in strong_src:
+            if len(leaders) >= 5:
+                break
+            base = _altseason_normalize_base(cand.get("symbol") or "")
+            if not base:
+                continue
+            pair = f"{base}USDT"
+            mkt_row = mkt_by_base.get(base) or mkt_by_base.get(base[4:] if base.startswith("1000") else "")
+            px = _fetch_bingx_current_price(pair, preferred_symbol=None)
+            if px is None or float(px) <= 0:
+                logger.info("[山寨列車] 無即時價，略過候選 %s", base)
+                continue
+            px_f = float(px)
+            fr = fr_map.get(base)
+            if fr is None and base.startswith("1000"):
+                fr = fr_map.get(base[4:])
+            gk_dict = _crit_radar_gatekeeper_payload(
+                mkt_row if isinstance(mkt_row, dict) else {},
+                base,
+                px_f,
+                fr,
+                True,
+                liq_map,
+            )
+            if not sniper_coinglass_gatekeeper_allow(gk_dict):
+                logger.info("[守門員·山寨列車] 略過候選 %s（與持倉狙擊同源規則）", base)
+                continue
+            time.sleep(0.15)
+            tech = calculate_technicals(pair, interval="4h", limit=72)
+            cost_label, cost_px = _altseason_cost_vwap_or_ema(tech)
+            atr_v = None
+            if tech:
+                try:
+                    atr_v = float(tech.get("atr")) if tech.get("atr") is not None else None
+                except (TypeError, ValueError):
+                    atr_v = None
+            p24 = None
+            if isinstance(mkt_row, dict):
+                p24 = mkt_row.get("price_change_percent_24h")
+                try:
+                    p24 = float(p24) if p24 is not None else None
+                except (TypeError, ValueError):
+                    p24 = None
+            rsi_v = float(cand.get("rsi_4h") or cand.get("rsi_base") or 0)
+            br_v = float(cand.get("buy_ratio") or 50.0)
+            story = _altseason_bull_story_zh(br_v, rsi_v, px_f, cost_px, fr, p24)
+            t1 = t2 = None
+            if atr_v is not None and atr_v > 0 and px_f > 0:
+                t1 = px_f + 1.5 * atr_v
+                t2 = px_f + 3.0 * atr_v
+            leaders.append(
+                {
+                    "base": base,
+                    "buy_ratio": br_v,
+                    "rsi": rsi_v,
+                    "px": px_f,
+                    "cost_label": cost_label,
+                    "cost_px": cost_px,
+                    "story": story,
+                    "t1": t1,
+                    "t2": t2,
+                }
+            )
 
     lines = []
     lines.append("🎢 *【山寨暴富列車】*")
@@ -13196,18 +13427,44 @@ def build_altseason_message() -> Optional[str]:
     lines.append(f"📊 *山寨指數*：`{index_val:.0f}` / 100" if index_val is not None else "📊 *山寨指數*：—")
     lines.append("")
     lines.append("🔥 *強勢領頭羊 (資金正在炒)*")
-    if not strong:
-        lines.append("暫無強勢幣種，市場低迷。")
+    lines.append("_每檔已通過守門員（壅擠費率／薄流動／爆倉邊）＋4H 技術參考_")
+    if not leaders:
+        if strong_src:
+            lines.append("本輪候選皆未通過守門員或缺少即時價，暫不列名單。")
+        else:
+            lines.append("暫無強勢幣種，市場低迷。")
     else:
-        for i, item in enumerate(strong[:5], 1):
-            sym = item.get("symbol", "")
-            br = item.get("buy_ratio", 50)
-            rsi = item.get("rsi_4h") or item.get("rsi_base", 50)
-            lines.append(f"{i}. *{sym}* (買盤 {br:.0f}%)")
-            lines.append(f"   👉 RSI {rsi:.0f} ｜ 動能強勁，回調可接")
+        for i, L in enumerate(leaders, 1):
+            b = L["base"]
+            br = L["buy_ratio"]
+            rsi = L["rsi"]
+            px = L["px"]
+            clab = L["cost_label"]
+            cpx = L["cost_px"]
+            lines.append(f"{i}. *{b}* (買盤 {br:.0f}%)")
+            lines.append(
+                f"   💰 現價約 `{_altseason_fmt_price_short(px)}`"
+                + (
+                    f"｜💎 *{clab}* `{_altseason_fmt_price_short(cpx)}`"
+                    if cpx is not None
+                    else "｜💎 成本區資料不足"
+                )
+            )
+            lines.append(f"   🧭 *為何列入*：{L['story']}")
+            if L.get("t1") is not None and L.get("t2") is not None:
+                lines.append(
+                    "   🎯 *機械參考目標*（4H ATR 延伸，非保證）："
+                    f"`{_altseason_fmt_price_short(L['t1'])}` → `{_altseason_fmt_price_short(L['t2'])}`"
+                )
+            lines.append(f"   👉 RSI `{rsi:.0f}` ｜ 長線仍看資金輪動與龍頭延續，回檔分批優於追價")
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append("💡 *操作心法*：強者恆強。在山寨季，不要買落後補漲的垃圾，要買就買龍頭！")
+    lines.append("")
+    lines.append(
+        "⚠️ *風險提示：* 本頻道內容僅供研究與教育用途，非投資建議、非任何形式帶單；"
+        "目標價為波幅機械推算，請自行評估風險並嚴格控倉。"
+    )
     return "\n".join(lines)
 
 
@@ -13665,6 +13922,23 @@ def run_crit_radar_once() -> None:
     _crit_gk_glob_off = os.getenv("SNIPER_GATEKEEPER_DISABLED", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
+    if _crit_gk_glob_off:
+        logger.info(
+            "[爆擊雷達·守門員] 全域關閉 SNIPER_GATEKEEPER_DISABLED=1，本輪不套用 CoinGlass 守門員"
+        )
+    elif not _crit_use_gk:
+        logger.info(
+            "[爆擊雷達·守門員] 已關閉 CRIT_RADAR_GATEKEEPER=0，本輪不套用守門員"
+        )
+    elif not filtered:
+        logger.info(
+            "[爆擊雷達·守門員] 本輪無待驗隊列（達標候選為 0 或皆在冷卻），不執行守門員"
+        )
+    else:
+        logger.info(
+            "[爆擊雷達·守門員] 已啟用（與持倉狙擊同源）；僅在現價與 15m ATR 皆備妥後才檢查，"
+            "無現價／無 ATR 略過者不計入「守門員略過」"
+        )
     for it in filtered:
         if sent >= max_alerts:
             logger.info(
@@ -13682,7 +13956,7 @@ def run_crit_radar_once() -> None:
         if not price:
             n_no_price += 1
             logger.info(
-                "[爆擊雷達·現價] %s %s 分=%s 略過：_raw_cg 無可用現價欄位",
+                "[爆擊雷達·現價] %s %s 分=%s 略過：無可用現價（已嘗試 _raw_cg／平面欄位／備援）",
                 sym,
                 side,
                 score,
@@ -13717,6 +13991,12 @@ def run_crit_radar_once() -> None:
                     score,
                 )
                 continue
+            logger.info(
+                "[爆擊雷達·守門員] 通過 %s %s 分=%s",
+                sym,
+                side,
+                score,
+            )
 
         p15 = it.get("price_change_percent_15m")
         if p15 is None:
@@ -13762,7 +14042,12 @@ def run_crit_radar_once() -> None:
             RISK_DISCLAIMER_LINE,
         ]
         msg = "\n".join(msg_lines)
-        if not jackbot_universal_pre_send_gatekeeper("crit_radar", text=msg):
+        _gk_pre_send = _crit_radar_gatekeeper_payload(
+            it, sym, float(price), fr, is_long, liq_map_cr
+        )
+        if not jackbot_universal_pre_send_gatekeeper(
+            "crit_radar", text=msg, coinglass_trade=_gk_pre_send
+        ):
             continue
         ok = send_telegram_message(msg, thread_id, parse_mode="Markdown")
         if ok:
