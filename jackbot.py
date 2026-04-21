@@ -13508,6 +13508,33 @@ def _crit_radar_env_int(name: str, default: int) -> int:
         return default
 
 
+def _crit_radar_cooldown_symbol(sym: str) -> str:
+    """冷卻 dict 的 key：統一為基底幣大寫（與 coins-markets 一致），避免 CHIP / CHIPUSDT 各寫一支導致重複推播。"""
+    s = str(sym or "").strip().upper().replace("-", "").replace("_", "")
+    if s.endswith("USDT"):
+        s = s[:-4]
+    if s.endswith("PERP"):
+        s = s[:-4]
+    return s
+
+
+def _crit_radar_normalize_cooldown_map(mp: Optional[Dict[str, float]]) -> Dict[str, float]:
+    """合併別名 key，同一幣只保留最近一次的 epoch。"""
+    out: Dict[str, float] = {}
+    if not mp:
+        return out
+    for k, v in mp.items():
+        try:
+            ts = float(v)
+        except (TypeError, ValueError):
+            continue
+        nk = _crit_radar_cooldown_symbol(str(k))
+        if not nk:
+            continue
+        out[nk] = max(out.get(nk, 0.0), ts)
+    return out
+
+
 def _crit_radar_price_from_item(item: Dict[str, Any]) -> Optional[float]:
     raw = item.get("_raw_cg") or {}
     if isinstance(raw, dict):
@@ -13752,14 +13779,15 @@ def _crit_radar_load_cooldown() -> Dict[str, float]:
             logger.warning(f"[爆擊雷達] 讀取本地冷卻失敗: {e}")
     gist_cd = _crit_radar_load_cooldown_from_gist()
     if not gist_cd:
-        return local
+        return _crit_radar_normalize_cooldown_map(local)
     merged = dict(local)
     for k, v in gist_cd.items():
         merged[k] = max(merged.get(k, 0.0), v)
-    return merged
+    return _crit_radar_normalize_cooldown_map(merged)
 
 
 def _crit_radar_save_cooldown(mp: Dict[str, float]) -> None:
+    mp = _crit_radar_normalize_cooldown_map(mp)
     path = CRIT_RADAR_COOLDOWN_FILE
     try:
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -13988,7 +14016,8 @@ def run_crit_radar_once() -> None:
     for it in candidates:
         cand_evaluated += 1
         sym = str(it.get("symbol") or "").strip().upper()
-        last_ts = cd.get(sym, 0.0)
+        cd_key = _crit_radar_cooldown_symbol(sym)
+        last_ts = cd.get(cd_key, 0.0)
         if last_ts and (now - last_ts) < cool_sec:
             n_cool_skip += 1
             if n_cool_skip <= cool_log_cap:
@@ -14036,6 +14065,7 @@ def run_crit_radar_once() -> None:
     n_no_atr = 0
     n_tg_fail = 0
     n_gk_skip = 0
+    n_cool_reconfirm_skip = 0
     _crit_use_gk = os.getenv("CRIT_RADAR_GATEKEEPER", "1").strip().lower() not in (
         "0", "false", "off", "no",
     )
@@ -14067,6 +14097,7 @@ def run_crit_radar_once() -> None:
             )
             break
         sym = str(it.get("symbol") or "").strip().upper()
+        cd_key = _crit_radar_cooldown_symbol(sym)
         side = str(it.get("_crit_side") or "")
         score = int(it.get("_crit_score") or 0)
         fr = fr_map.get(sym) or fr_map.get(sym.replace("1000", ""))
@@ -14191,14 +14222,31 @@ def run_crit_radar_once() -> None:
         _gk_pre_send = _crit_radar_gatekeeper_payload(
             it, sym, float(price), fr, is_long, liq_map_cr
         )
+        # 發送前再讀冷卻（磁碟／Gist）：避免 Zeabur+GHA 雙排程或兩輪緊貼時，上一輪尚未寫入本機 map 就重複推同幣
+        for fk, fv in _crit_radar_load_cooldown().items():
+            cd[fk] = max(cd.get(fk, 0.0), fv)
+        now_pre = time.time()
+        last_push = cd.get(cd_key, 0.0)
+        if last_push and (now_pre - last_push) < cool_sec:
+            n_cool_reconfirm_skip += 1
+            logger.info(
+                "[爆擊雷達·冷卻·再確認] 略過 %s %s 分=%s｜約 %.1f 分鐘前已推（剩餘冷卻約 %.2f h，雙排程／併發防重）",
+                sym,
+                side,
+                score,
+                (now_pre - last_push) / 60.0,
+                (cool_sec - (now_pre - last_push)) / 3600.0,
+            )
+            continue
         if not jackbot_universal_pre_send_gatekeeper(
             "crit_radar", text=msg, coinglass_trade=_gk_pre_send
         ):
             continue
         ok = send_telegram_message(msg, thread_id, parse_mode="Markdown")
         if ok:
-            cd[sym] = now
+            cd[cd_key] = time.time()
             sent += 1
+            _crit_radar_save_cooldown(cd)
             logger.info(
                 "[爆擊雷達·推播] 成功 %s %s 分=%s thread_id=%s",
                 sym,
@@ -14220,11 +14268,12 @@ def run_crit_radar_once() -> None:
         _crit_radar_save_cooldown(cd)
 
     logger.info(
-        "[爆擊雷達·小結] 發送=%d｜達標候選=%d｜冷卻略過=%d｜守門員略過=%d｜無現價=%d｜無ATR=%d｜推播失敗=%d｜"
+        "[爆擊雷達·小結] 發送=%d｜達標候選=%d｜冷卻略過=%d｜冷卻再確認略過=%d｜守門員略過=%d｜無現價=%d｜無ATR=%d｜推播失敗=%d｜"
         "池內模糊=%d｜分數不足=%d｜冷卻檔=%s",
         sent,
         len(candidates),
         n_cool_skip,
+        n_cool_reconfirm_skip,
         n_gk_skip,
         n_no_price,
         n_no_atr,
