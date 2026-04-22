@@ -13881,6 +13881,11 @@ def run_crit_radar_once() -> None:
     max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 2)))
     cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 4.0)))
     margin = max(0, _crit_radar_env_int("CRIT_RADAR_SIDE_MARGIN", 5))
+    # 防翻向：要求 15m 至少有基本動能；可用環境變數覆寫（單位：%）
+    min_p15_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_MIN_P15_ABS", 0.8)))
+    # 防翻向：若 1h 與選邊方向明顯對沖，略過（0=關閉）
+    require_1h_confirm = (os.getenv("CRIT_RADAR_REQUIRE_1H_CONFIRM", "1").strip().lower() not in ("0", "false", "off", "no"))
+    p1h_oppose_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_1H_MAX_OPPOSE_PCT", 0.6)))
     # 大社群預設：略增 ATR 倍數、放寬 SL%% 上限、提高 TP_R（貼近常見 2.5～3R 風報敘述）
     sl_atr = max(0.6, min(3.0, _env_float("CRIT_RADAR_SL_ATR", 1.5)))
     tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.8)))
@@ -13892,12 +13897,16 @@ def run_crit_radar_once() -> None:
 
     logger.info(
         "[爆擊雷達·參數] pool=%d min_score=%d max_alerts=%d cooldown=%.1fh side_margin=%d "
+        "min_p15_abs=%.2f%% 1h_confirm=%s oppose_cap=%.2f%% "
         "SL_ATR=%.2f TP_R=%.2f SL%%[%.3f~%.3f] atr_blend=%s log_pool_preview=%d",
         pool_n,
         min_score,
         max_alerts,
         cooldown_h,
         margin,
+        min_p15_abs,
+        "on" if require_1h_confirm else "off",
+        p1h_oppose_abs,
         sl_atr,
         tp_r,
         sl_min_pct,
@@ -13950,8 +13959,12 @@ def run_crit_radar_once() -> None:
     candidates: List[Dict[str, Any]] = []
     n_ambiguous = 0
     n_low_score = 0
+    n_low_momentum = 0
+    n_1h_conflict = 0
     sample_ambiguous: List[str] = []
     sample_low: List[str] = []
+    sample_low_momentum: List[str] = []
+    sample_1h_conflict: List[str] = []
 
     for it in ranked:
         sym = str(it.get("symbol") or "").strip().upper()
@@ -13978,6 +13991,31 @@ def run_crit_radar_once() -> None:
             if len(sample_low) < 10:
                 sample_low.append(f"{sym}{side[0]}{best}<{min_score}")
             continue
+        p15 = it.get("price_change_percent_15m")
+        if p15 is None:
+            p15 = it.get("price_change_percent_30m")
+        try:
+            p15f = float(p15) if p15 is not None else 0.0
+        except (TypeError, ValueError):
+            p15f = 0.0
+        if abs(p15f) < min_p15_abs:
+            n_low_momentum += 1
+            if len(sample_low_momentum) < 8:
+                sample_low_momentum.append(f"{sym}{side[0]}|p15={p15f:+.2f}%<{min_p15_abs:.2f}%")
+            continue
+        if require_1h_confirm:
+            p1h = it.get("price_change_percent_1h")
+            try:
+                p1hf = float(p1h) if p1h is not None else 0.0
+            except (TypeError, ValueError):
+                p1hf = 0.0
+            if (side == "LONG" and p1hf <= -p1h_oppose_abs) or (side == "SHORT" and p1hf >= p1h_oppose_abs):
+                n_1h_conflict += 1
+                if len(sample_1h_conflict) < 8:
+                    sample_1h_conflict.append(
+                        f"{sym}{side[0]}|p15={p15f:+.2f}%|p1h={p1hf:+.2f}% 反向過大"
+                    )
+                continue
         it2 = dict(it)
         it2["_crit_side"] = side
         it2["_crit_score"] = best
@@ -13986,16 +14024,22 @@ def run_crit_radar_once() -> None:
     candidates.sort(key=lambda x: int(x.get("_crit_score") or 0), reverse=True)
 
     logger.info(
-        "[爆擊雷達·分數] 池內 %d 幣：達標候選=%d｜多空差不足=%d｜單邊但分數不足=%d",
+        "[爆擊雷達·分數] 池內 %d 幣：達標候選=%d｜多空差不足=%d｜單邊但分數不足=%d｜15m動能不足=%d｜1h反向衝突=%d",
         len(ranked),
         len(candidates),
         n_ambiguous,
         n_low_score,
+        n_low_momentum,
+        n_1h_conflict,
     )
     if sample_ambiguous:
         logger.info("[爆擊雷達·分數] 多空模糊範例：%s", "；".join(sample_ambiguous))
     if sample_low:
         logger.info("[爆擊雷達·分數] 分數不足範例：%s", "；".join(sample_low))
+    if sample_low_momentum:
+        logger.info("[爆擊雷達·分數] 15m動能不足範例：%s", "；".join(sample_low_momentum))
+    if sample_1h_conflict:
+        logger.info("[爆擊雷達·分數] 1h反向衝突範例：%s", "；".join(sample_1h_conflict))
     if candidates:
         cap_list = candidates[:25]
         cand_str = " | ".join(
