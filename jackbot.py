@@ -13876,7 +13876,7 @@ def run_crit_radar_once() -> None:
         logger.warning("[爆擊雷達] 未設定 CG_API_KEY，結束")
         return
     pool_n = max(20, min(200, _crit_radar_env_int("CRIT_RADAR_POOL", 100)))
-    min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 95)))
+    min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 90)))
     # 大社群：單輪預設少發一檔，降低「同一分鐘連三發」洗版感；要回 3 設 CRIT_RADAR_MAX_ALERTS=3
     max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 2)))
     cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 4.0)))
