@@ -13692,7 +13692,19 @@ def _crit_radar_score_components(
             else:
                 fund_pts = 4
 
-    total = int(round(oi_pts + price_pts + taker_pts + fund_pts))
+    # 早期啟動加權：OI 已擴張、價格尚未大幅走遠時加分（更接近起漲/起跌點）
+    timing_bonus = 0.0
+    if oi_mag >= 2.2:
+        if is_long and 0.15 <= p15f <= 1.6:
+            timing_bonus += 7.0
+        elif (not is_long) and -1.6 <= p15f <= -0.15:
+            timing_bonus += 7.0
+
+    # 過熱追價扣分：15m 已過大幅度時降低分數，避免「噴出後才報」
+    if abs(p15f) >= 4.8:
+        timing_bonus -= min(10.0, (abs(p15f) - 4.8) * 3.0 + 4.0)
+
+    total = int(round(oi_pts + price_pts + taker_pts + fund_pts + timing_bonus))
     return max(0, min(100, total))
 
 
@@ -13876,16 +13888,19 @@ def run_crit_radar_once() -> None:
         logger.warning("[爆擊雷達] 未設定 CG_API_KEY，結束")
         return
     pool_n = max(20, min(200, _crit_radar_env_int("CRIT_RADAR_POOL", 100)))
-    min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 90)))
+    # 早期啟動預設：分數門檻下修，配合下方過熱濾網，提早但不追高/追低
+    min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 82)))
     # 大社群：單輪預設少發一檔，降低「同一分鐘連三發」洗版感；要回 3 設 CRIT_RADAR_MAX_ALERTS=3
     max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 2)))
     cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 4.0)))
-    margin = max(0, _crit_radar_env_int("CRIT_RADAR_SIDE_MARGIN", 5))
+    margin = max(0, _crit_radar_env_int("CRIT_RADAR_SIDE_MARGIN", 4))
     # 防翻向：要求 15m 至少有基本動能；可用環境變數覆寫（單位：%）
-    min_p15_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_MIN_P15_ABS", 0.8)))
+    min_p15_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_MIN_P15_ABS", 0.35)))
+    # 防追價：15m 漲跌幅過大視為已噴出/已跌破，略過
+    max_p15_abs = max(min_p15_abs + 0.5, min(15.0, _env_float("CRIT_RADAR_MAX_P15_ABS", 5.8)))
     # 防翻向：若 1h 與選邊方向明顯對沖，略過（0=關閉）
     require_1h_confirm = (os.getenv("CRIT_RADAR_REQUIRE_1H_CONFIRM", "1").strip().lower() not in ("0", "false", "off", "no"))
-    p1h_oppose_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_1H_MAX_OPPOSE_PCT", 0.6)))
+    p1h_oppose_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_1H_MAX_OPPOSE_PCT", 0.9)))
     # 大社群預設：略增 ATR 倍數、放寬 SL%% 上限、提高 TP_R（貼近常見 2.5～3R 風報敘述）
     sl_atr = max(0.6, min(3.0, _env_float("CRIT_RADAR_SL_ATR", 1.5)))
     tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.8)))
@@ -13897,7 +13912,7 @@ def run_crit_radar_once() -> None:
 
     logger.info(
         "[爆擊雷達·參數] pool=%d min_score=%d max_alerts=%d cooldown=%.1fh side_margin=%d "
-        "min_p15_abs=%.2f%% 1h_confirm=%s oppose_cap=%.2f%% "
+        "min_p15_abs=%.2f%% max_p15_abs=%.2f%% 1h_confirm=%s oppose_cap=%.2f%% "
         "SL_ATR=%.2f TP_R=%.2f SL%%[%.3f~%.3f] atr_blend=%s log_pool_preview=%d",
         pool_n,
         min_score,
@@ -13905,6 +13920,7 @@ def run_crit_radar_once() -> None:
         cooldown_h,
         margin,
         min_p15_abs,
+        max_p15_abs,
         "on" if require_1h_confirm else "off",
         p1h_oppose_abs,
         sl_atr,
@@ -13960,10 +13976,12 @@ def run_crit_radar_once() -> None:
     n_ambiguous = 0
     n_low_score = 0
     n_low_momentum = 0
+    n_overextended = 0
     n_1h_conflict = 0
     sample_ambiguous: List[str] = []
     sample_low: List[str] = []
     sample_low_momentum: List[str] = []
+    sample_overextended: List[str] = []
     sample_1h_conflict: List[str] = []
 
     for it in ranked:
@@ -14003,6 +14021,11 @@ def run_crit_radar_once() -> None:
             if len(sample_low_momentum) < 8:
                 sample_low_momentum.append(f"{sym}{side[0]}|p15={p15f:+.2f}%<{min_p15_abs:.2f}%")
             continue
+        if abs(p15f) > max_p15_abs:
+            n_overextended += 1
+            if len(sample_overextended) < 8:
+                sample_overextended.append(f"{sym}{side[0]}|p15={p15f:+.2f}%>{max_p15_abs:.2f}%")
+            continue
         if require_1h_confirm:
             p1h = it.get("price_change_percent_1h")
             try:
@@ -14024,12 +14047,13 @@ def run_crit_radar_once() -> None:
     candidates.sort(key=lambda x: int(x.get("_crit_score") or 0), reverse=True)
 
     logger.info(
-        "[爆擊雷達·分數] 池內 %d 幣：達標候選=%d｜多空差不足=%d｜單邊但分數不足=%d｜15m動能不足=%d｜1h反向衝突=%d",
+        "[爆擊雷達·分數] 池內 %d 幣：達標候選=%d｜多空差不足=%d｜單邊但分數不足=%d｜15m動能不足=%d｜15m過熱=%d｜1h反向衝突=%d",
         len(ranked),
         len(candidates),
         n_ambiguous,
         n_low_score,
         n_low_momentum,
+        n_overextended,
         n_1h_conflict,
     )
     if sample_ambiguous:
@@ -14038,6 +14062,8 @@ def run_crit_radar_once() -> None:
         logger.info("[爆擊雷達·分數] 分數不足範例：%s", "；".join(sample_low))
     if sample_low_momentum:
         logger.info("[爆擊雷達·分數] 15m動能不足範例：%s", "；".join(sample_low_momentum))
+    if sample_overextended:
+        logger.info("[爆擊雷達·分數] 15m過熱範例：%s", "；".join(sample_overextended))
     if sample_1h_conflict:
         logger.info("[爆擊雷達·分數] 1h反向衝突範例：%s", "；".join(sample_1h_conflict))
     if candidates:
