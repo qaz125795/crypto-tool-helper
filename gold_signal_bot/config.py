@@ -22,7 +22,7 @@ class Config:
 
     # ORB 參數 (GOLD_ORB)
     SESSION_START_HOUR_UTC: int = 1   # 交易日起始小時 (UTC)，用於計算「今日日期」與全日 debug
-    CANDLE_COMPOSITION: int = 3       # 區間內至少幾根 K 才視為「確立」（收緊以降低假突破）
+    CANDLE_COMPOSITION: int = 2       # 區間內至少幾根 K 才視為「確立」（放寬以避免一週完全無突破）
     MAX_TRADES_PER_DAY: int = 2       # 每日最多 1 多 1 空
 
     # ── ORB 時段選擇：決定用哪個盤口的 K 線建立突破箱體 ──────────────────────
@@ -36,7 +36,7 @@ class Config:
     # 區間凍結：ORB 時段開盤後前 N 根 K 確立箱體後凍結，之後只偵測突破
     # 倫敦：lock=4 → 07-10 UTC 建立區間，11 UTC 起偵測突破
     # 紐約：lock=2 → 13-14 UTC 建立區間，15 UTC 起偵測突破（NY 盤較短，建議用 2）
-    RANGE_LOCK_CANDLES: int = 4
+    RANGE_LOCK_CANDLES: int = 3
 
     # 趨勢濾網 (GOLD_ORB MA100 + Gold-analysis SMA40/100)
     MA_TREND_PERIOD: int = 100       # 趨勢 MA 週期
@@ -50,12 +50,12 @@ class Config:
     RISK_PERCENT_PER_TRADE: float = 1.0
 
     # 突破強度：收盤需超過箱體實體邊至少「此倍數 × ATR」，過濾毛刺假突破（寧缺勿濫）
-    MIN_BREAKOUT_ATR_MULT: float = 0.20
+    MIN_BREAKOUT_ATR_MULT: float = 0.12
 
     # 濾網（偏勝率：流動主力時段 + 美元方向 + 波動/動能）
-    USE_SESSION_FILTER: bool = True   # 僅倫敦～紐約活躍時段（UTC）
-    SESSION_START_UTC: int = 8        # 略避倫敦開盤首小時雜訊
-    SESSION_END_UTC: int = 21        # 避開紐約尾盤流動轉薄
+    USE_SESSION_FILTER: bool = True   # 交易時段濾網（UTC）
+    SESSION_START_UTC: int = 7        # 放寬起點：讓倫敦開盤後更容易觸發
+    SESSION_END_UTC: int = 23        # 放寬終點：避免訊號都出現在 21:00 後被整段擋掉
     USE_VOLATILITY_FILTER: bool = True
     VOLATILITY_ATR_PERCENT_MIN: float = 0.00155  # ATR/Close 提高，盤整假突破少做
     USE_DXY_FILTER: bool = True      # 與 DXY 短期走勢負相關才出單
