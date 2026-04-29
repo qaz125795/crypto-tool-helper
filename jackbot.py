@@ -5941,6 +5941,17 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     except (TypeError, ValueError):
         pass
 
+    # 逆勢且車已發動：這種最容易變成「追漲追空」的晚段單
+    # 直接強制降級為 B（不推播），優先保護你不被連損。
+    if _counter_4h and _already_moving:
+        return (
+            "B",
+            0,
+            "🥈 *B 級* 逆勢且車已發動（追漲追空風險高），不推播",
+            _already_moving,
+            _motion_note,
+        )
+
     # ══════════════════════════════════════════════════════════════
     # 第四步：大盤方向提示（僅提示，不作為硬過濾）
     # 目的：保留 BTC/ETH 作為閱讀輔助，不再限制山寨訊號評級上限
