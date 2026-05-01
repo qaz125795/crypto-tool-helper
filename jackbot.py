@@ -1740,6 +1740,21 @@ def buying_power_monitor():
         advice = "方向還在裝死，先當吃瓜看戲，等大戶表態再跟也不遲。"
         bar_label = "低燃料"
 
+    # 推播規則：積分 <3 完全不推播（連文字都不要）；僅在「會對 Discord @everyone」
+    # 的同一條件成立時才發 Telegram／Discord（避免低燃料洗版）。
+    if fuel_score < 3:
+        logger.info("[牛市燃料] 燃料積分=%s < 3，不推播（無文字）", fuel_score)
+        return
+    _dc_ping = _fuel_buying_power_dc_ping_everyone(
+        fuel_score, headline, smart_money, mcap_1h, oi_1h_chg, premium_boost
+    )
+    if not _dc_ping:
+        logger.info(
+            "[牛市燃料] 未達 @everyone 條件（積分=%s），不推播",
+            fuel_score,
+        )
+        return
+
     lines = []
     lines.append("⛽ *【牛市燃料儀表板】*")
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} 台北｜CoinGlass")
@@ -1819,9 +1834,6 @@ def buying_power_monitor():
 
     msg = "\n".join(lines)
     keyboard = {"inline_keyboard": [[{"text": "💰 去 CoinGlass 看圖", "url": "https://www.coinglass.com/zh-TW/pro/futures/OpenInterest"}]]}
-    _dc_ping = _fuel_buying_power_dc_ping_everyone(
-        fuel_score, headline, smart_money, mcap_1h, oi_1h_chg, premium_boost
-    )
     if not jackbot_universal_pre_send_gatekeeper("buying_power_monitor", text=msg):
         return
     send_telegram_message(
@@ -1829,11 +1841,12 @@ def buying_power_monitor():
         TG_THREAD_IDS.get("buying_power_monitor", 246),
         parse_mode="Markdown",
         reply_markup=keyboard,
-        discord_force_everyone=_dc_ping,
+        discord_force_everyone=True,
     )
-    if _dc_ping:
-        logger.info("[牛市燃料] Discord 鏡像已帶 @everyone（中燃料以上且特殊買／空或風險情境）")
-    logger.info(f"牛市燃料監控推播完成（燃料積分={fuel_score}，顯示滿分={FUEL_DISPLAY_MAX}）")
+    logger.info(
+        "[牛市燃料] 推播完成（積分=%s，Discord 鏡像帶 @everyone）",
+        fuel_score,
+    )
 
 
 # 保留舊函數名稱以向後兼容
