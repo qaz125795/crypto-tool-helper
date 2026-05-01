@@ -1599,17 +1599,10 @@ def _fuel_buying_power_dc_ping_everyone(
     premium_boost: bool,
 ) -> bool:
     """
-    Discord 是否加 @everyone：須「中燃料以上」(>=4)，且出現偏買／偏空或風險的「特殊情境」，
-    避免一般盤整也一直全頻道提醒。
+    Discord 是否加 @everyone：
+    - 偏多特殊情境：維持中燃料以上(>=4)才提醒，避免一般盤整洗版。
+    - 偏空/風險特殊情境：放寬到 >=3 也提醒，避免空方警訊被低估。
     """
-    if fuel_score < 4:
-        return False
-    special_long = (
-        fuel_score >= 5
-        or smart_money is True
-        or premium_boost
-        or (mcap_1h > 0.04 and oi_1h_chg > 0.25)
-    )
     special_short_or_risk = (
         mcap_1h < -0.04
         or (smart_money is False and oi_1h_chg > 1.0)
@@ -1617,6 +1610,16 @@ def _fuel_buying_power_dc_ping_everyone(
             w in headline
             for w in ("抽離", "過熱", "散戶槓桿", "清洗", "撤退")
         )
+    )
+    if fuel_score >= 3 and special_short_or_risk:
+        return True
+    if fuel_score < 4:
+        return False
+    special_long = (
+        fuel_score >= 5
+        or smart_money is True
+        or premium_boost
+        or (mcap_1h > 0.04 and oi_1h_chg > 0.25)
     )
     return bool(special_long or special_short_or_risk)
 
