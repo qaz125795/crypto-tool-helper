@@ -530,14 +530,28 @@ def _respect_coinglass_rate_limit() -> None:
 RISK_DISCLAIMER_LINE = "⚠️ *風險提示：* 本頻道內容僅供研究與教育用途，非投資建議、非任何形式帶單；請自行評估風險並嚴格控倉。"
 
 
+def _append_push_taipei_timestamp(text: str) -> str:
+    """在訊息末端附加當下台北時間（推播當下時刻）；已含同類標記則不重複。"""
+    base = (text or "").rstrip()
+    if not base:
+        now_s = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+        return f"🕐 *推播時間：* {now_s}（台北）"
+    if "推播時間：" in base and "台北" in base:
+        return text
+    now_s = datetime.now(TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+    return f"{base}\n\n🕐 *推播時間：* {now_s}（台北）"
+
+
 def _append_risk_disclaimer(text: str) -> str:
-    """所有推播統一附上法規風險提示；若已包含則不重複附加。"""
+    """所有推播統一附上法規風險提示；若已包含則不重複附加。末端再附台北推播時間。"""
     base = (text or "").strip()
     if not base:
-        return RISK_DISCLAIMER_LINE
-    if ("非投資建議" in base) and ("帶單" in base):
-        return base
-    return f"{base}\n\n{RISK_DISCLAIMER_LINE}"
+        out = RISK_DISCLAIMER_LINE
+    elif ("非投資建議" in base) and ("帶單" in base):
+        out = base
+    else:
+        out = f"{base}\n\n{RISK_DISCLAIMER_LINE}"
+    return _append_push_taipei_timestamp(out)
 
 
 def send_telegram_message(
@@ -7475,6 +7489,8 @@ def build_report_message_tiered(
             f"(TP1={TP1_R_MULTIPLIER}R)"
         )
         x["selected_for_push"] = True
+        x["push_sl"] = float(sl) if sl is not None else None
+        x["push_entry"] = float(_entry_price) if _entry_price is not None else None
         x["_push_grade"] = _grade
         x["tier"]            = "train"
         x["stars"]           = 5
@@ -7811,6 +7827,19 @@ def build_report_message_tiered(
                 push_count = push_count + 1  # noqa: (defined below at init)
                 # 標記：此標的是「實際有推播」的訊號，供後續冷卻/倉位追蹤使用
                 x["selected_for_push"] = True
+                try:
+                    _ps = (
+                        float(str(sl_val).replace(",", ""))
+                        if sl_val not in (None, "", "-")
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    _ps = None
+                x["push_sl"] = _ps
+                try:
+                    x["push_entry"] = float(x.get("current_price")) if x.get("current_price") is not None else None
+                except (TypeError, ValueError):
+                    x["push_entry"] = None
                 price = x.get("current_price")
                 if price is not None and isinstance(price, (int, float)):
                     price_str = f"{price:.4f}" if price < 10 else f"{price:.2f}"
@@ -12935,6 +12964,11 @@ def sniper_coinglass_trade_payload_from_enriched_item(x: Dict[str, Any]) -> Dict
         v = x.get(k)
         if v is not None:
             out[k] = v
+    # 推播前結構停損覆核（與 compute_structural_sl_tp 末端一致）
+    for k in ("push_sl", "push_entry", "recent_low_2h", "recent_high_2h", "atr"):
+        v = x.get(k)
+        if v is not None:
+            out[k] = v
     return out
 
 
@@ -12945,6 +12979,7 @@ def sniper_coinglass_gatekeeper_allow(x: Dict[str, Any]) -> bool:
     設 SNIPER_GATEKEEPER_DISABLED=1 可關閉整段守門員。
     爆倉單獨關閉：SNIPER_GK_LIQ_DISABLED=1；門檻：SNIPER_GK_LIQ_MIN_TOTAL_USD、SNIPER_GK_LIQ_DOM_RATIO。
     薄流動（15m 價格暴走但 30m OI 不動）僅在 payload 含 oiChange_30m／oiChange30m 時檢查。
+    結構停損：payload 含 push_sl／recent_low_2h／recent_high_2h 時，與 SNIPER_SL_ENFORCE_SWING 對齊做最終覆核。
     """
     raw = os.getenv("SNIPER_GATEKEEPER_DISABLED", "").strip().lower()
     if raw in ("1", "true", "yes", "on"):
@@ -13028,7 +13063,239 @@ def sniper_coinglass_gatekeeper_allow(x: Dict[str, Any]) -> bool:
                         _lf,
                     )
                     return False
+
+    # 2H 結構停損複核（與 SNIPER_SL_ENFORCE_SWING／compute_structural_sl_tp 末端對齊；推播前即時價 cp 算緩衝）
+    _enf_sw_gk = os.getenv("SNIPER_SL_ENFORCE_SWING", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if _enf_sw_gk:
+        _ps = x.get("push_sl")
+        _pe = x.get("push_entry")
+        _lo2 = x.get("recent_low_2h")
+        _hi2 = x.get("recent_high_2h")
+        _atr_gk = x.get("atr")
+        try:
+            sl_f = float(_ps) if _ps is not None else None
+        except (TypeError, ValueError):
+            sl_f = None
+        if sl_f is not None and sl_f > 0:
+            try:
+                ent = float(_pe) if _pe is not None else float(cp)
+            except (TypeError, ValueError):
+                ent = float(cp)
+            try:
+                atr_num = float(_atr_gk) if _atr_gk is not None else None
+            except (TypeError, ValueError):
+                atr_num = None
+            sl_guard_buffer = cp * 0.0012
+            if atr_num is not None and atr_num > 0:
+                sl_guard_buffer = max(sl_guard_buffer, atr_num * SL_EMA_GUARD_BUFFER_ATR)
+            _eps = max(1e-12, abs(float(cp)) * 1e-9)
+            _is_long_sig = cat in ("long_open", "short_close")
+            _is_short_sig = cat in ("short_open", "long_close")
+            if _is_long_sig and _lo2 is not None:
+                try:
+                    lo2f = float(_lo2)
+                except (TypeError, ValueError):
+                    lo2f = None
+                if lo2f is not None and lo2f < ent:
+                    swing_floor = lo2f - sl_guard_buffer
+                    if sl_f > swing_floor + _eps:
+                        logger.info(
+                            "[守門員🚫] %s 多向：SL(%.8g) 未落在 2H 結構低之下（容許底≈%.8g，現價%.8g）",
+                            base,
+                            sl_f,
+                            swing_floor,
+                            cp,
+                        )
+                        return False
+            if _is_short_sig and _hi2 is not None:
+                try:
+                    hi2f = float(_hi2)
+                except (TypeError, ValueError):
+                    hi2f = None
+                if hi2f is not None and hi2f > ent:
+                    swing_ceil = hi2f + sl_guard_buffer
+                    if sl_f < swing_ceil - _eps:
+                        logger.info(
+                            "[守門員🚫] %s 空向：SL(%.8g) 未落在 2H 結構高之上（容許頂≈%.8g，現價%.8g）",
+                            base,
+                            sl_f,
+                            swing_ceil,
+                            cp,
+                        )
+                        return False
     return True
+
+
+def _sniper_llm_parse_json_allow(raw: str) -> Tuple[Optional[bool], str]:
+    """解析 LLM JSON：回傳 (是否擋下, 理由)。無法解析時第一個值為 None → 外層應放行。"""
+    if not (raw or "").strip():
+        return None, ""
+    s = raw.strip()
+    try:
+        p = json.loads(s)
+    except json.JSONDecodeError:
+        i, j = s.find("{"), s.rfind("}")
+        if i < 0 or j <= i:
+            return None, ""
+        try:
+            p = json.loads(s[i : j + 1])
+        except json.JSONDecodeError:
+            return None, ""
+    if not isinstance(p, dict):
+        return None, ""
+    if p.get("allow") is False:
+        return False, str(p.get("reason") or "").strip()
+    return True, ""
+
+
+def _sniper_llm_gatekeeper_build_payload(
+    channel: str,
+    text: Optional[str],
+    coinglass_trade: Optional[Dict[str, Any]],
+) -> str:
+    body_txt = (text or "")[:1200]
+    trade_compact = dict(coinglass_trade or {})
+    for _k in list(trade_compact.keys()):
+        if len(str(trade_compact.get(_k))) > 120:
+            trade_compact[_k] = str(trade_compact.get(_k))[:117] + "..."
+    return json.dumps(
+        {"channel": channel, "trade": trade_compact, "message_excerpt": body_txt},
+        ensure_ascii=False,
+    )
+
+
+def _sniper_llm_gatekeeper_system_prompt() -> str:
+    return (
+        "你是加密合約推播的風控審核。只輸出 JSON："
+        '{"allow":true或false,"reason":"一句中文"}。'
+        "若訊息與 trade 欄位明顯矛盾（例如做多但停損在結構低之上、費率與方向嚴重衝突），allow=false。"
+        "不確定或僅排版問題 → allow=true。"
+    )
+
+
+def _sniper_llm_gatekeeper_allow(
+    channel: str,
+    text: Optional[str],
+    coinglass_trade: Optional[Dict[str, Any]],
+) -> bool:
+    """選用：LLM 最後覆核。OpenAI 雲端或本機 Ollama（SNIPER_AI_LLM_BACKEND）。失敗時放行。"""
+    if os.getenv("SNIPER_AI_LLM_GATEKEEPER", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return True
+    if channel != "position_change":
+        return True
+
+    user_payload = _sniper_llm_gatekeeper_build_payload(channel, text, coinglass_trade)
+    sys_prompt = _sniper_llm_gatekeeper_system_prompt()
+
+    backend = (os.getenv("SNIPER_AI_LLM_BACKEND") or "").strip().lower()
+    if not backend:
+        backend = "openai" if (os.getenv("OPENAI_API_KEY") or "").strip() else "ollama"
+
+    if backend == "ollama":
+        ollama_base = (os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+        model = (
+            (os.getenv("OLLAMA_MODEL") or os.getenv("SNIPER_AI_LLM_MODEL") or "llama3.2").strip()
+        )
+        timeout_s = max(15.0, _env_float("OLLAMA_TIMEOUT_SEC", 120.0))
+        try:
+            resp = requests.post(
+                f"{ollama_base}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": user_payload},
+                    ],
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0},
+                },
+                timeout=timeout_s,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "[AI守門員] Ollama HTTP %s，放行推播",
+                    resp.status_code,
+                )
+                return True
+            data = resp.json() if resp.content else {}
+            raw = (data.get("message") or {}).get("content") or ""
+            verdict, reason = _sniper_llm_parse_json_allow(raw)
+            if verdict is None:
+                logger.warning("[AI守門員] Ollama 回傳無法解析 JSON，放行推播")
+                return True
+            if verdict is False:
+                logger.info(
+                    "[守門員🚫·AI·Ollama] %s",
+                    reason or "LLM 否決",
+                )
+                return False
+        except Exception as ex:
+            logger.warning("[AI守門員] Ollama 呼叫失敗（放行）：%s", ex)
+            return True
+        return True
+
+    if backend == "openai":
+        api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        if not api_key:
+            logger.warning(
+                "[AI守門員] SNIPER_AI_LLM_BACKEND=openai 但未設定 OPENAI_API_KEY，略過 LLM"
+            )
+            return True
+        model = (os.getenv("SNIPER_AI_LLM_MODEL") or "gpt-4o-mini").strip()
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "temperature": 0,
+                    "max_tokens": 120,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": user_payload},
+                    ],
+                },
+                timeout=18,
+            )
+            if resp.status_code != 200:
+                logger.warning("[AI守門員] OpenAI HTTP %s，放行推播", resp.status_code)
+                return True
+            data = resp.json()
+            raw = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+            verdict, reason = _sniper_llm_parse_json_allow(raw)
+            if verdict is None:
+                logger.warning("[AI守門員] OpenAI 回傳無法解析 JSON，放行推播")
+                return True
+            if verdict is False:
+                logger.info(
+                    "[守門員🚫·AI] %s",
+                    reason or "LLM 否決",
+                )
+                return False
+        except Exception as ex:
+            logger.warning("[AI守門員] OpenAI 呼叫失敗（放行）：%s", ex)
+            return True
+        return True
+
+    logger.warning("[AI守門員] 未知的 SNIPER_AI_LLM_BACKEND=%s，略過 LLM", backend)
+    return True
+
+
+def _sniper_openai_gatekeeper_allow(
+    channel: str,
+    text: Optional[str],
+    coinglass_trade: Optional[Dict[str, Any]],
+) -> bool:
+    """相容舊名稱，等同 _sniper_llm_gatekeeper_allow。"""
+    return _sniper_llm_gatekeeper_allow(channel, text, coinglass_trade)
+
 
 
 def jackbot_universal_pre_send_gatekeeper(
@@ -13043,6 +13310,8 @@ def jackbot_universal_pre_send_gatekeeper(
     - 空字串訊息不發。
     - 若傳入 coinglass_trade（與 sniper 相同欄位語意），再套用 sniper_coinglass_gatekeeper_allow。
       持倉狙擊／爆擊雷達建議一律傳入，以在「即時價更新後」仍擋掉壅擠費率／薄流動／爆倉邊等矛盾盤。
+    - 選用 LLM：SNIPER_AI_LLM_GATEKEEPER=1（僅 position_change）。預設無 OPENAI_API_KEY 時走本機 Ollama；
+      或設 SNIPER_AI_LLM_BACKEND=openai／ollama；Ollama 見 OLLAMA_HOST、OLLAMA_MODEL。
     """
     if os.getenv("JACKBOT_GATEKEEPER_ALL_DISABLED", "").strip().lower() in ("1", "true", "yes", "on"):
         return True
@@ -13051,6 +13320,9 @@ def jackbot_universal_pre_send_gatekeeper(
         return False
     if coinglass_trade is not None and not sniper_coinglass_gatekeeper_allow(coinglass_trade):
         logger.info("[守門員·%s] CoinGlass 交易向規則擋下", channel)
+        return False
+    if not _sniper_llm_gatekeeper_allow(channel, text, coinglass_trade):
+        logger.info("[守門員·%s] AI 覆核擋下", channel)
         return False
     return True
 
