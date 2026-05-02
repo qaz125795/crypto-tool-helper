@@ -1624,6 +1624,154 @@ def _fuel_buying_power_dc_ping_everyone(
     return bool(special_long or special_short_or_risk)
 
 
+def _fuel_direction_summary(
+    fuel_score: int,
+    mcap_1h: float,
+    mcap_15m: float,
+    oi_15m_chg: float,
+    oi_1h_chg: float,
+    stable_chg: Optional[float],
+    coin_chg: Optional[float],
+    smart_money: Optional[bool],
+    premium_boost: bool,
+    fg_val: Optional[int],
+    etf_direction: Optional[str],
+    cb_signal: Optional[str],
+) -> Tuple[str, str]:
+    """
+    綜合場外池子、OI、聰明錢／散戶、情緒與機構訊號，給使用者一眼懂的偏多／偏空／中性結論。
+    回傳 (標籤, 一句話理由)。
+    """
+    def _f(x: Any, default: float = 0.0) -> float:
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return default
+
+    b = 0  # 偏多權重
+    r = 0  # 偏空權重
+
+    mh = _f(mcap_1h)
+    m15 = _f(mcap_15m)
+    o15 = _f(oi_15m_chg)
+    o1h = _f(oi_1h_chg)
+
+    if mh > 0.02:
+        b += 2
+    elif mh < -0.02:
+        r += 2
+
+    if m15 > 0.02:
+        b += 1
+    elif m15 < -0.02:
+        r += 1
+
+    if smart_money is True:
+        b += 2
+    elif smart_money is False:
+        r += 2
+
+    if stable_chg is not None:
+        sc = _f(stable_chg)
+        if sc > 0.08:
+            b += 1
+        elif sc < -0.08:
+            r += 1
+
+    if coin_chg is not None and smart_money is False:
+        cc = _f(coin_chg)
+        if cc > 0.35:
+            r += 1
+
+    if o1h > 0.12:
+        b += 1
+    elif o1h < -0.12:
+        r += 1
+
+    if o15 > 0.12:
+        b += 1
+    elif o15 < -0.12:
+        r += 1
+
+    if premium_boost:
+        b += 2
+
+    if fg_val is not None:
+        try:
+            fv = int(fg_val)
+        except (TypeError, ValueError):
+            fv = 50
+        if fv >= 55:
+            b += 1
+        elif fv <= 35:
+            r += 1
+
+    ed = (etf_direction or "").strip().lower()
+    if ed == "inflow":
+        b += 2
+    elif ed == "outflow":
+        r += 1
+
+    cs = (cb_signal or "").strip().lower()
+    if cs == "bullish":
+        b += 1
+    elif cs == "bearish":
+        r += 1
+
+    if fuel_score >= 6:
+        b += 1
+    elif fuel_score <= 2:
+        r += 1
+
+    diff = b - r
+
+    def _bear_parts() -> List[str]:
+        parts: List[str] = []
+        if mh < -0.02:
+            parts.append("場外穩定幣池略縮")
+        if smart_money is False:
+            parts.append("結構偏散戶槓桿")
+        if stable_chg is not None and _f(stable_chg) < -0.08:
+            parts.append("機構端穩定幣 OI 回落")
+        if o1h < -0.12 or o15 < -0.12:
+            parts.append("全網合約槓桿在降")
+        if fg_val is not None:
+            try:
+                if int(fg_val) <= 35:
+                    parts.append("情緒偏防守（恐懼區）")
+            except (TypeError, ValueError):
+                pass
+        if not parts:
+            parts.append("綜合資金與槓桿訊號略偏空")
+        return parts[:3]
+
+    def _bull_parts() -> List[str]:
+        parts: List[str] = []
+        if mh > 0.02:
+            parts.append("場外穩定幣池在補")
+        if smart_money is True:
+            parts.append("結構偏機構買盤（穩定幣 OI）")
+        if premium_boost:
+            parts.append("USDT 溢價偏高（真實買盤）")
+        if o1h > 0.12 or o15 > 0.12:
+            parts.append("全網合約槓桿在擴")
+        if not parts:
+            parts.append("綜合資金與槓桿訊號略偏多")
+        return parts[:3]
+
+    if diff >= 2:
+        tag = "偏多（環境對風險資產相對友善）"
+        why = "、".join(_bull_parts()) + "。"
+    elif diff <= -2:
+        tag = "偏空（環境偏防守／去槓桿）"
+        why = "、".join(_bear_parts()) + "。"
+    else:
+        tag = "中性觀望（先看區間）"
+        why = "場外與場內訊號不同步或變化不大，不宜硬判單邊；等池子或槓桿明顯表態再跟。"
+
+    return tag, why
+
+
 def buying_power_monitor():
     """【牛市燃料監控】場外穩定幣 + 場內 OI + 情緒／機構輔助指標（CoinGlass 為主）。"""
     logger.info("開始執行牛市燃料監控（CoinGlass 聚合 + 聰明錢拆分）...")
@@ -1758,11 +1906,28 @@ def buying_power_monitor():
         )
         return
 
+    dir_tag, dir_why = _fuel_direction_summary(
+        fuel_score,
+        mcap_1h,
+        mcap_15m,
+        oi_15m_chg,
+        oi_1h_chg,
+        stable_chg,
+        coin_chg,
+        smart_money,
+        premium_boost,
+        fg_val,
+        etf_data.get("direction"),
+        cb_data.get("signal"),
+    )
+
     lines = []
     lines.append("⛽ *【牛市燃料儀表板】*")
     lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} 台北｜CoinGlass")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append(f"*{headline}*")
+    lines.append(f"*🧭 方向結論*：*{dir_tag}*")
+    lines.append(f"👉 {dir_why}")
     lines.append(f"燃料條：`{fuel_bar}` {min(fuel_score, FUEL_DISPLAY_MAX)}/{FUEL_DISPLAY_MAX}（{bar_label}）")
     lines.append("")
 
