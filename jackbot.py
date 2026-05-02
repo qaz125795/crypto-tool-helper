@@ -570,14 +570,17 @@ def send_telegram_message(
     避免「TG 失敗但 DC 成功」時外層誤判為成功而跳過 TG 備援（例如 K 線 caption 失敗）。
 
     mirror_discord=False：僅發 TG（用於已嘗試過 sendPhoto 且 DC 已收到圖時的文字備援，避免 DC 重複洗版）。
-    discord_force_everyone=True：Discord 鏡像訊息前綴 @everyone（須頻道允許 Bot mention everyone）。
+    discord_force_everyone=True：Telegram 正文與 Discord 鏡像皆於開頭加 @everyone（TG 須群組允許提及所有人；DC 須頻道允許 Bot）。
     """
     text = _append_risk_disclaimer(text)
+    tg_text = _telegram_content_with_mentions(
+        text, thread_id, force_everyone=discord_force_everyone
+    )
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
         "message_thread_id": thread_id,
-        "text": text,
+        "text": tg_text,
         "disable_web_page_preview": True
     }
     if parse_mode:
@@ -659,17 +662,22 @@ def send_telegram_photo(
     reply_markup: Optional[Dict] = None,
     *,
     mirror_discord: bool = True,
+    discord_force_everyone: bool = False,
 ) -> bool:
     """發送圖片到 Telegram（sendPhoto；caption 可能超出上限時，外層可改用 sendMessage 備援）
 
     回傳值僅代表 **Telegram sendPhoto 是否成功**。mirror_discord=False 時不發 DC。
+    discord_force_everyone：Telegram caption 與 Discord 鏡像皆於開頭加 @everyone（規則與 send_telegram_message 同源）。
     """
     caption = _append_risk_disclaimer(caption)
+    tg_caption = _telegram_content_with_mentions(
+        caption, thread_id, force_everyone=discord_force_everyone
+    )
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
     payload = {
         "chat_id": CHAT_ID,
         "message_thread_id": thread_id,
-        "caption": caption,
+        "caption": tg_caption,
         "disable_web_page_preview": True,
     }
     if parse_mode:
@@ -716,7 +724,9 @@ def send_telegram_photo(
                 "Authorization": f"Bot {DC_TOKEN}",
             }
             dc_payload = {
-                "content": _discord_content_with_mentions(caption or "", thread_id),
+                "content": _discord_content_with_mentions(
+                    caption or "", thread_id, force_everyone=discord_force_everyone
+                ),
                 "allowed_mentions": {"parse": ["everyone"]},
             }
             components = _convert_reply_markup_to_discord_components(reply_markup)
@@ -774,15 +784,35 @@ def _resolve_thread_key_by_id(thread_id: int) -> Optional[str]:
     return None
 
 
+def _notify_everyone_eligible(thread_id: int, force_everyone: bool) -> bool:
+    """是否對 Telegram／Discord 加上「所有人」提及（兩邊規則一致）。"""
+    if force_everyone:
+        return True
+    key = _resolve_thread_key_by_id(thread_id) or ""
+    return key == "position_change"
+
+
 def _discord_content_with_mentions(
     text: str, thread_id: int, *, force_everyone: bool = False
 ) -> str:
-    """特定主題或呼叫端指定時，在 Discord 訊息前加 @everyone。"""
+    """特定主題或呼叫端指定時，在 Discord 訊息前加 @everyone。
+    經濟數據／預告須由呼叫端傳入 discord_force_everyone（僅滿星級事件為 True），不在此自動 tag。"""
     base = _convert_text_for_discord(text)
-    key = _resolve_thread_key_by_id(thread_id) or ""
-    if force_everyone or key in {"position_change", "economic_data"}:
-        return f"@everyone\n{base}".strip()
-    return base
+    if not _notify_everyone_eligible(thread_id, force_everyone):
+        return base
+    return f"@everyone\n{base}".strip()
+
+
+def _telegram_content_with_mentions(
+    text: str, thread_id: int, *, force_everyone: bool = False
+) -> str:
+    """Telegram 超級群組／論壇話題：與 DC 相同條件時，在正文開頭加字面 `@everyone`。"""
+    if not _notify_everyone_eligible(thread_id, force_everyone):
+        return text or ""
+    base = text or ""
+    if not base.strip():
+        return "@everyone"
+    return f"@everyone\n{base}".strip()
 
 
 def _convert_text_for_discord(text: str) -> str:
@@ -1613,7 +1643,7 @@ def _fuel_buying_power_dc_ping_everyone(
     premium_boost: bool,
 ) -> bool:
     """
-    Discord 是否加 @everyone：
+    TG／Discord 是否加 @everyone（規則同源）：
     - 偏多特殊情境：維持中燃料以上(>=4)才提醒，避免一般盤整洗版。
     - 偏空/風險特殊情境：放寬到 >=3 也提醒，避免空方警訊被低估。
     """
@@ -1905,8 +1935,8 @@ def buying_power_monitor():
         advice = "方向還在裝死，先當吃瓜看戲，等大戶表態再跟也不遲。"
         bar_label = "低燃料"
 
-    # 推播規則：積分 <3 完全不推播（連文字都不要）；僅在「會對 Discord @everyone」
-    # 的同一條件成立時才發 Telegram／Discord（避免低燃料洗版）。
+    # 推播規則：積分 <3 完全不推播（連文字都不要）；僅在「會對 TG／Discord @everyone」
+    # 的同一條件成立時才發雙平台（避免低燃料洗版）。
     if fuel_score < 3:
         logger.info("[牛市燃料] 燃料積分=%s < 3，不推播（無文字）", fuel_score)
         return
@@ -2026,7 +2056,7 @@ def buying_power_monitor():
         discord_force_everyone=True,
     )
     logger.info(
-        "[牛市燃料] 推播完成（積分=%s，Discord 鏡像帶 @everyone）",
+        "[牛市燃料] 推播完成（積分=%s，TG／Discord 皆帶 @everyone）",
         fuel_score,
     )
 
@@ -10402,6 +10432,31 @@ def fetch_position_change():
 SENT_DATA_FILE = DATA_DIR / "sent_economic_data_ids.json"
 
 
+def _economic_raw_importance(item: Optional[Dict[str, Any]]) -> int:
+    """行事曆重要性數值（CoinGlass 常為 1～5 星級概念；缺省為 0）。"""
+    if not item:
+        return 0
+    for k in ("importance_level", "importance", "star", "stars", "level"):
+        v = item.get(k)
+        if v is None:
+            continue
+        try:
+            return int(round(float(v)))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _economic_dc_everyone_min_importance() -> int:
+    """Discord @everyone 門檻：預設 5（滿星）；可用 ECONOMIC_DC_EVERYONE_MIN_IMPORTANCE 覆寫（1～10）。"""
+    return int(max(1, min(10, round(_env_float("ECONOMIC_DC_EVERYONE_MIN_IMPORTANCE", 5.0)))))
+
+
+def _economic_should_discord_everyone(item: Optional[Dict[str, Any]]) -> bool:
+    """僅當重要性達設定之星級（預設 ≥5）時，TG／Discord 皆加 @everyone。"""
+    return _economic_raw_importance(item) >= _economic_dc_everyone_min_importance()
+
+
 def fetch_economic_data() -> List[Dict]:
     """從 CoinGlass API 抓取經濟數據"""
     url = "https://open-api-v4.coinglass.com/api/calendar/economic-data"
@@ -10969,12 +11024,22 @@ def send_today_preview():
             logger.info("今日無重要事件")
             return
         
-        # 發送預告
+        # 發送預告（TG／Discord @everyone 僅當今日清單含「滿星級」事件，預設 importance≥5）
         message = format_today_preview_message(today_events)
         if not jackbot_universal_pre_send_gatekeeper("economic_data_preview", text=message):
             return
-        send_telegram_message(message, TG_THREAD_IDS['economic_data'], parse_mode="Markdown")
-        logger.info("今日預告發送完成")
+        _dc_ping_preview = any(_economic_should_discord_everyone(e) for e in today_events)
+        send_telegram_message(
+            message,
+            TG_THREAD_IDS["economic_data"],
+            parse_mode="Markdown",
+            discord_force_everyone=_dc_ping_preview,
+        )
+        logger.info(
+            "今日預告發送完成（TG／Discord @everyone=%s，門檻≥%d 星）",
+            _dc_ping_preview,
+            _economic_dc_everyone_min_importance(),
+        )
         
     except Exception as e:
         logger.error(f"發送今日預告錯誤: {str(e)}")
@@ -11039,7 +11104,12 @@ def fetch_and_push_economic_data():
                 message = format_economic_data_message(data)
                 if not jackbot_universal_pre_send_gatekeeper("economic_data", text=message):
                     continue
-                send_telegram_message(message, TG_THREAD_IDS['economic_data'], parse_mode="Markdown")
+                send_telegram_message(
+                    message,
+                    TG_THREAD_IDS["economic_data"],
+                    parse_mode="Markdown",
+                    discord_force_everyone=_economic_should_discord_everyone(data),
+                )
                 
                 data_id = generate_data_id(data)
                 mark_as_sent(data_id)
@@ -11058,7 +11128,11 @@ def fetch_and_push_economic_data():
         logger.error(f"經濟數據推播執行錯誤: {str(e)}")
         _econ_err = "⚠️ 經濟數據暫時無法取得，請稍後再試。"
         if jackbot_universal_pre_send_gatekeeper("economic_data_error", text=_econ_err):
-            send_telegram_message(_econ_err, TG_THREAD_IDS['economic_data'])
+            send_telegram_message(
+                _econ_err,
+                TG_THREAD_IDS["economic_data"],
+                discord_force_everyone=False,
+            )
 
 
 # ==================== 5. 新聞快訊推特中文推播 ====================
@@ -11687,6 +11761,27 @@ LIQ_SYMBOLS = [
 ]
 LIQ_EXCHANGE_LIST = "Binance"
 LIQ_REQUEST_DELAY = 1.2  # 秒
+
+
+def _liquidity_radar_dc_everyone_min_usd() -> float:
+    """TG／Discord @everyone：單幣種近 1h「合計」爆倉量（USD）須達此值才算大額。
+    預設 3,000,000；環境變數 LIQUIDITY_RADAR_DC_EVERYONE_MIN_USD（設 0 則永不 @everyone）。"""
+    return max(0.0, _env_float("LIQUIDITY_RADAR_DC_EVERYONE_MIN_USD", 3_000_000.0))
+
+
+def _liquidity_radar_should_discord_everyone(events: List[Dict]) -> bool:
+    """本輪清單中任一品種 totalVolUsd1h 達大額門檻時，Discord 鏡像才加 @everyone。"""
+    floor_usd = _liquidity_radar_dc_everyone_min_usd()
+    if floor_usd <= 0:
+        return False
+    for ev in events or []:
+        try:
+            v = float(ev.get("totalVolUsd1h") or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v >= floor_usd:
+            return True
+    return False
 
 
 def _liq_threshold_usd_from_env(prefix: str, default_1h: float, default_24h: float) -> tuple:
@@ -12356,12 +12451,24 @@ def run_liquidity_radar_once():
         return
 
     msg = format_liquidity_consolidated_message(events)
+    _dc_liq_ping = _liquidity_radar_should_discord_everyone(events)
     thread_id = TG_THREAD_IDS.get("liquidity_radar", 3)
     keyboard = {
         "inline_keyboard": [[{"text": "💀 查看詳細爆倉數據", "url": "https://www.coinglass.com/zh-TW/LiquidationData"}]]
     }
     if jackbot_universal_pre_send_gatekeeper("liquidity_radar", text=msg):
-        send_telegram_message(msg, thread_id, parse_mode="Markdown", reply_markup=keyboard)
+        send_telegram_message(
+            msg,
+            thread_id,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+            discord_force_everyone=_dc_liq_ping,
+        )
+        logger.info(
+            "[撿屍雷達] TG／Discord @everyone=%s（單幣 1h 合計爆倉≥%.0f USD）",
+            _dc_liq_ping,
+            _liquidity_radar_dc_everyone_min_usd(),
+        )
 
     # 附圖：Binance 公開清算快照總覽（改編 liquidations-chart；資料非 CoinGlass 即時 API）
     if os.getenv("LIQ_CHART_DISABLED", "").strip().lower() not in ("1", "true", "yes"):
@@ -12388,6 +12495,7 @@ def run_liquidity_radar_once():
                     thread_id=thread_id,
                     parse_mode="Markdown",
                     reply_markup=None,
+                    discord_force_everyone=_dc_liq_ping,
                 )
             else:
                 fallback_path = _render_liquidity_event_fallback_chart(
@@ -12406,6 +12514,7 @@ def run_liquidity_radar_once():
                         thread_id=thread_id,
                         parse_mode="Markdown",
                         reply_markup=None,
+                        discord_force_everyone=_dc_liq_ping,
                     )
                 else:
                     logger.info("[撿屍雷達] 清算圖未產生（主圖與 fallback 皆失敗），僅推送文字")
