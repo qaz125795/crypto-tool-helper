@@ -11068,15 +11068,43 @@ COINGLASS_ARTICLE_IDS_FILE = DATA_DIR / "coinglass_article_ids.json"
 COINGLASS_NEWSFLASH_IDS_FILE = DATA_DIR / "coinglass_newsflash_ids.json"
 
 
+def _news_escape_md_light(s: Optional[str]) -> str:
+    """標題／內文若含 * _ ` 等字元會弄壞 Telegram Markdown，先做輕量替換。"""
+    if s is None:
+        return ""
+    x = str(s)
+    for a, b in (
+        ("\\", "／"),
+        ("*", "∗"),
+        ("_", "＿"),
+        ("`", "′"),
+        ("[", "［"),
+        ("]", "］"),
+    ):
+        x = x.replace(a, b)
+    return x
+
+
 def process_and_send(news: Dict, source: str):
     """翻譯並發送 Tree of Alpha 新聞到 Telegram"""
-    translated_title = translate_text(news.get('title', ''))
-    
-    message = "📰 *【全球幣圈即時快訊】*\n\n"
-    message += f"🔔 *{translated_title}*\n\n"
-    message += f"📄 原文：{news.get('title', '')}\n"
-    message += f"🔗 [點擊查看原文]({news.get('url', '')})"
-    
+    raw_title = news.get("title") or ""
+    translated_title = _news_escape_md_light(translate_text(raw_title))
+    url = (news.get("url") or "").strip()
+
+    lines = [
+        "📰 *【全球幣圈即時快訊】*",
+        "────────────────",
+        "📍 *來源* · `Tree of Alpha`",
+        "",
+        f"🔔 *{translated_title}*" if translated_title else "🔔 *（無標題）*",
+    ]
+    if raw_title:
+        lines.extend(["", "*〔英文原文〕*", _news_escape_md_light(raw_title)[:600]])
+    lines.append("")
+    if url:
+        lines.append(f"🔗 [開啟原文]({url})")
+
+    message = "\n".join(lines)
     if jackbot_universal_pre_send_gatekeeper("news_tree", text=message):
         send_telegram_message(message, TG_THREAD_IDS['news'])
 
@@ -11086,21 +11114,26 @@ def process_and_send_coinglass(item: Dict, type_str: str):
     is_newsflash = type_str == "newsflash"
     emoji = "⚡" if is_newsflash else "📰"
     type_name = "快訊" if is_newsflash else "新聞"
-    
-    translated_title = translate_text(item.get('title') or item.get('headline') or "")
-    translated_content = translate_text(item.get('content') or item.get('description') or "")
-    
-    message = f"{emoji} *【全球幣圈{type_name}】*\n\n"
-    
+
+    translated_title = _news_escape_md_light(translate_text(item.get("title") or item.get("headline") or ""))
+    translated_content = _news_escape_md_light(translate_text(item.get("content") or item.get("description") or ""))
+
+    lines = [
+        f"{emoji} *【全球幣圈{type_name}】*",
+        "────────────────",
+        "📍 *來源* · `CoinGlass`",
+        "",
+    ]
     if translated_title:
-        message += f"🔔 *{translated_title}*\n\n"
-    
+        lines.append(f"🔔 *{translated_title}*")
+        lines.append("")
     if translated_content:
-        if len(translated_content) > 500:
-            translated_content = translated_content[:500] + "..."
-        message += f"{translated_content}\n\n"
-    
-    time_val = item.get('time') or item.get('timestamp') or item.get('publishTime')
+        tc = translated_content[:520]
+        if len(translated_content) > 520:
+            tc += "…"
+        lines.extend(["*〔摘要〕*", tc, ""])
+
+    time_val = item.get("time") or item.get("timestamp") or item.get("publishTime")
     if time_val:
         if isinstance(time_val, (int, float)):
             if time_val > 1e12:
@@ -11109,13 +11142,15 @@ def process_and_send_coinglass(item: Dict, type_str: str):
                 date = datetime.fromtimestamp(time_val, tz=timezone.utc)
         else:
             date = get_taipei_time()
-        # 轉換為台灣時間
         date_taipei = get_taipei_time(date)
-        message += f"🕐 時間：{date_taipei.strftime('%Y-%m-%d %H:%M:%S')}\n"
-    
-    if item.get('url') or item.get('link'):
-        message += f"🔗 [點擊查看原文]({item.get('url') or item.get('link')})"
-    
+        lines.append(f"🕐 *時間（台北）* · `{date_taipei.strftime('%Y-%m-%d %H:%M')}`")
+        lines.append("")
+
+    link = (item.get("url") or item.get("link") or "").strip()
+    if link:
+        lines.append(f"🔗 [開啟原文]({link})")
+
+    message = "\n".join(lines)
     if jackbot_universal_pre_send_gatekeeper("news_coinglass", text=message):
         send_telegram_message(message, TG_THREAD_IDS['news'])
 
@@ -11174,20 +11209,23 @@ def fetch_all_news():
     now = get_taipei_time()
     time_str = format_datetime(now)
     
-    lines = []
-    lines.append("📰 *【全球幣圈即時快訊】*")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("")
-    
-    # 只顯示標題，簡短格式
-    for idx, item in enumerate(all_news_items[:8], 1):  # 最多8條
-        lines.append(f"{idx}. {item['title']}")
-        if item.get('url'):
-            lines.append(f"   🔗 [查看詳情]({item['url']})")
+    lines = [
+        "📰 *【全球幣圈即時快訊】*",
+        "────────────────",
+        "_精選標題 · Tree of Alpha／CoinGlass 合輯_",
+        "",
+    ]
+    for idx, item in enumerate(all_news_items[:8], 1):
+        title_safe = _news_escape_md_light(item.get("title") or "")
+        src = _news_escape_md_light(item.get("source") or "—")
+        lines.append(f"*#{idx}* · `{src}`")
+        lines.append(title_safe)
+        if item.get("url"):
+            lines.append(f"🔗 [開啟連結]({item['url']})")
         lines.append("")
-    
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"⏰ 更新時間：{time_str}")
+
+    lines.append("────────────────")
+    lines.append(f"⏰ *彙整時間（台北）* · `{time_str}`")
     
     message = "\n".join(lines)
     if jackbot_universal_pre_send_gatekeeper("news_digest", text=message):
