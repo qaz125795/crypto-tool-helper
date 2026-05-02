@@ -13911,39 +13911,40 @@ def _altseason_bull_story_zh(
     fr: Optional[float],
     p24: Optional[float],
 ) -> str:
+    """波段敘事：對齊 4H／日線視角，弱化分鐘級用語。"""
     parts: List[str] = []
     if br >= 56:
-        parts.append(f"15m 主動買盤約 {br:.0f}%")
+        parts.append(f"買方成交占比約 {br:.0f}%（全市場聚合近似）")
     elif br >= 52:
-        parts.append("主動買盤略優")
+        parts.append("買方成交略優於賣方")
     if rsi >= 72:
-        parts.append("RSI 偏高、潮流強（易震盪）")
+        parts.append("4H RSI 偏高、波段動能強（拉回宜分批）")
     elif rsi >= 65:
-        parts.append("RSI 守在強勢區")
+        parts.append("4H RSI 守在相對強勢區")
     if cost_px is not None and cost_px > 0:
         if px > cost_px * 1.003:
-            parts.append("價格在成本區之上，短線籌碼偏多頭")
+            parts.append("現價高於 4H 成本帶，籌碼成本偏多頭")
         elif px < cost_px * 0.997:
-            parts.append("價在成本區下，屬突破或假突破需再確認")
+            parts.append("現價在成本帶下方，突破／假突破須再確認")
         else:
-            parts.append("價與成本區接近，表態中")
+            parts.append("價格與 4H 成本帶接近，方向仍在表態")
     if fr is not None and isinstance(fr, (int, float)) and fr == fr:
         if fr < -0.0005:
-            parts.append("資金費率偏負，多頭持倉成本較友善")
+            parts.append("資金費率偏負，多頭持倉費用較友善")
         elif fr > 0.0025:
-            parts.append("費率偏高、多頭略壅擠，宜控倉")
+            parts.append("費率偏高、多頭略壅擠，波段宜控倉")
     if p24 is not None and isinstance(p24, (int, float)):
         if p24 > 8:
-            parts.append(f"24h 漲幅仍強（約 {p24:+.1f}%）")
+            parts.append(f"24h 漲幅仍偏強（約 {p24:+.1f}%），延續須守回撤")
         elif p24 < -5:
-            parts.append(f"24h 弱勢反彈結構（約 {p24:+.1f}%）")
+            parts.append(f"24h 仍偏弱（約 {p24:+.1f}%），反彈以短波段看待")
     if not parts:
-        return "強勢權值＋資金輪動標的，宜分批並嚴守風控。"
+        return "強勢權值＋資金輪動標的；波段以分批與守損為主。"
     return "；".join(parts[:4]) + "。"
 
 
 def build_altseason_message() -> Optional[str]:
-    """【山寨暴富列車】抓板塊輪動，強者恆強；每檔經守門員與 4H 成本／ATR 參考強化。"""
+    """【山寨暴富列車】板塊輪動；以 4H／日線波段為敘事主軸，4H 成本帶與 ATR 為機械參考。"""
     index_val = fetch_altseason_index()
     rsi_list = fetch_rsi_list()
     if not rsi_list:
@@ -13967,10 +13968,21 @@ def build_altseason_message() -> Optional[str]:
             time.sleep(0.3)
         return res
 
-    strong_src = [r for r in rsi_list if (r.get("rsi_4h") or r.get("rsi_base") or 0) >= 65][:12]
+    _min_rsi_4h = int(max(55, min(85, round(_env_float("ALTSEASON_MIN_RSI_4H", 65)))))
+    strong_src = [
+        r
+        for r in rsi_list
+        if (r.get("rsi_4h") or r.get("rsi_base") or 0) >= _min_rsi_4h
+    ][:16]
     if strong_src:
         strong_src = attach_buy_ratio(strong_src)
-        strong_src.sort(key=lambda x: x.get("buy_ratio", 0), reverse=True)
+        strong_src.sort(
+            key=lambda x: (
+                float(x.get("rsi_4h") or x.get("rsi_base") or 0),
+                float(x.get("buy_ratio") or 0),
+            ),
+            reverse=True,
+        )
 
     markets = fetch_coinglass_coins_markets() if CG_API_KEY else []
     mkt_by_base = {str(m.get("symbol") or "").upper(): m for m in markets if m.get("symbol")}
@@ -14048,27 +14060,34 @@ def build_altseason_message() -> Optional[str]:
                     "story": story,
                     "t1": t1,
                     "t2": t2,
+                    "p24": p24,
                 }
             )
 
     lines = []
     lines.append("🎢 *【山寨暴富列車】*")
-    lines.append("━━━━━━━━━━━━━━━━━━━")
-    season_status = "🛡️ 比特幣吸血中 (防守)"
+    lines.append("────────────────")
+    lines.append(
+        "📐 *時間軸* · 以 *4H／日線波段* 為主（非分鐘級進出）；"
+        "下列技術欄位以 *4H K* 計算。"
+    )
+    season_status = "🛡️ 比特幣吸血中（防守）"
     if index_val is not None and index_val > 70:
-        season_status = "🌋 群魔亂舞 (山寨季)"
+        season_status = "🌋 群魔亂舞（山寨季）"
     elif index_val is not None and index_val > 40:
-        season_status = "⚖️ 資金輪動中 (選幣)"
-    lines.append(f"🌍 *當前週期*：{season_status}")
-    lines.append(f"📊 *山寨指數*：`{index_val:.0f}` / 100" if index_val is not None else "📊 *山寨指數*：—")
+        season_status = "⚖️ 資金輪動（選幣）"
+    lines.append(f"🌍 *當前週期* · {season_status}")
+    lines.append(
+        f"📊 *山寨指數* · `{index_val:.0f}`／100" if index_val is not None else "📊 *山寨指數* · —"
+    )
     lines.append("")
-    lines.append("🔥 *強勢領頭羊 (資金正在炒)*")
-    lines.append("_每檔已通過守門員（壅擠費率／薄流動／爆倉邊）＋4H 技術參考_")
+    lines.append("*〔領頭羊〕* · 篩選：4H RSI ≥ `%d` · 排序：4H RSI → 買方占比" % _min_rsi_4h)
+    lines.append("_每檔已過守門員（費率／流動／爆倉邊）；成本與目標為 4H 機械參考_")
     if not leaders:
         if strong_src:
-            lines.append("本輪候選皆未通過守門員或缺少即時價，暫不列名單。")
+            lines.append("本輪候選未通過守門員或缺少即時價，暫不列名單。")
         else:
-            lines.append("暫無強勢幣種，市場低迷。")
+            lines.append("暫無達 4H RSI 門檻之標的，市場偏冷。")
     else:
         for i, L in enumerate(leaders, 1):
             b = L["base"]
@@ -14077,29 +14096,35 @@ def build_altseason_message() -> Optional[str]:
             px = L["px"]
             clab = L["cost_label"]
             cpx = L["cost_px"]
-            lines.append(f"{i}. *{b}* (買盤 {br:.0f}%)")
+            lines.append("")
+            lines.append(f"*#{i}* `{b}` · 買方占比約 `{br:.0f}%`")
             lines.append(
-                f"   💰 現價約 `{_altseason_fmt_price_short(px)}`"
+                "• 現價 · `{0}`".format(_altseason_fmt_price_short(px))
                 + (
-                    f"｜💎 *{clab}* `{_altseason_fmt_price_short(cpx)}`"
+                    " · 4H *{0}* · `{1}`".format(clab, _altseason_fmt_price_short(cpx))
                     if cpx is not None
-                    else "｜💎 成本區資料不足"
+                    else " · 4H 成本資料不足"
                 )
             )
-            lines.append(f"   🧭 *為何列入*：{L['story']}")
+            if L.get("p24") is not None and isinstance(L["p24"], (int, float)):
+                try:
+                    lines.append(f"• 24h 漲跌 · `{float(L['p24']):+.1f}%`（日內背景）")
+                except (TypeError, ValueError):
+                    pass
+            lines.append(f"• 列入理由 · {L['story']}")
             if L.get("t1") is not None and L.get("t2") is not None:
                 lines.append(
-                    "   🎯 *機械參考目標*（4H ATR 延伸，非保證）："
-                    f"`{_altseason_fmt_price_short(L['t1'])}` → `{_altseason_fmt_price_short(L['t2'])}`"
+                    "• 波段參考價（4H ATR×係數，非保證）· `{0}` → `{1}`".format(
+                        _altseason_fmt_price_short(L["t1"]),
+                        _altseason_fmt_price_short(L["t2"]),
+                    )
                 )
-            lines.append(f"   👉 RSI `{rsi:.0f}` ｜ 長線仍看資金輪動與龍頭延續，回檔分批優於追價")
+            lines.append(f"• 4H RSI · `{rsi:.0f}` · 策略偏回檔分批，避免追高")
     lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━")
-    lines.append("💡 *操作心法*：強者恆強。在山寨季，不要買落後補漲的垃圾，要買就買龍頭！")
-    lines.append("")
+    lines.append("────────────────")
     lines.append(
-        "⚠️ *風險提示：* 本頻道內容僅供研究與教育用途，非投資建議、非任何形式帶單；"
-        "目標價為波幅機械推算，請自行評估風險並嚴格控倉。"
+        "💡 *心法* · 波段跟強勢龍頭；落後補漲波動大、勝率常較差。"
+        "目標為機械推算，實際請依個人風控。"
     )
     return "\n".join(lines)
 
