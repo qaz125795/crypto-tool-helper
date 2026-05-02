@@ -529,6 +529,9 @@ def _respect_coinglass_rate_limit() -> None:
 
 RISK_DISCLAIMER_LINE = "⚠️ *風險提示：* 本頻道內容僅供研究與教育用途，非投資建議、非任何形式帶單；請自行評估風險並嚴格控倉。"
 
+# 含進場／SL／TP 等價位之推播，於點位段後附加（Telegram Markdown）
+_GATE_PRICE_SOURCE_NOTE = "_※ 點位以 Gate 交易所 USDT 永續為主（與其他報價來源可能有價差）。_"
+
 
 def _append_push_taipei_timestamp(text: str) -> str:
     """在訊息末端附加當下台北時間（推播當下時刻）；已含同類標記則不重複。"""
@@ -7505,6 +7508,8 @@ def build_report_message_tiered(
         else:
             msg_lines.append("市價帶 `—`")
 
+        msg_lines.append(_GATE_PRICE_SOURCE_NOTE)
+
         # ── 均價／錨（舊版樣式）────────────────────────────────────────
         msg_lines.append("**📊 均價／錨**")
         if _vwap_show is not None:
@@ -8176,6 +8181,9 @@ def build_report_message_tiered(
                     lines.append(f"✅ TP1(落袋{int(TP1_EXIT_RATIO*100)}%)：{_tp1_display}{r1}")
                     if _r2_val is not None:
                         lines.append(f"🎯 TP2({int(TP2_EXIT_RATIO*100)}%) 理論目標：`{_tp2_str}` (~{_r2_val:.1f}R)")
+
+                lines.append("")
+                lines.append(_GATE_PRICE_SOURCE_NOTE)
 
                 # ── 📊 訂單流分析（主動買賣比 + 淨倉位 + 腳步圖關鍵位）─────────
                 _flow_score = x.get("flow_score") or 0
@@ -14261,12 +14269,14 @@ def build_altseason_message() -> Optional[str]:
             lines.append(f"• 列入理由 · {L['story']}")
             if L.get("t1") is not None and L.get("t2") is not None:
                 lines.append(
-                    "• 波段參考價（4H ATR×係數，非保證）· `{0}` → `{1}`".format(
+                    "• 波段參考區間（4H 波動推算，非保證）· `{0}` → `{1}`".format(
                         _altseason_fmt_price_short(L["t1"]),
                         _altseason_fmt_price_short(L["t2"]),
                     )
                 )
             lines.append(f"• 4H RSI · `{rsi:.0f}` · 策略偏回檔分批，避免追高")
+    lines.append("")
+    lines.append(_GATE_PRICE_SOURCE_NOTE)
     lines.append("")
     lines.append("────────────────")
     lines.append(
@@ -14370,6 +14380,17 @@ def _crit_radar_price_from_item(item: Dict[str, Any]) -> Optional[float]:
         except Exception:
             pass
     return None
+
+
+def _crit_radar_reference_price_gate_first(sym: str, item: Dict[str, Any]) -> Optional[float]:
+    """推播點位用：優先 Gate USDT 永續 ticker，與用戶下單所對齊；失敗再用 CoinGlass／備援。"""
+    try:
+        gp = _fetch_bingx_current_price(sym)
+        if gp is not None and float(gp) > 0:
+            return float(gp)
+    except Exception:
+        pass
+    return _crit_radar_price_from_item(item)
 
 
 def _crit_radar_fmt_price_level(p: Optional[float]) -> str:
@@ -14978,11 +14999,11 @@ def run_crit_radar_once() -> None:
         fr = fr_map.get(sym) or fr_map.get(sym.replace("1000", ""))
         is_long = side == "LONG"
 
-        price = _crit_radar_price_from_item(it)
+        price = _crit_radar_reference_price_gate_first(sym, it)
         if not price:
             n_no_price += 1
             logger.info(
-                "[爆擊雷達·現價] %s %s 分=%s 略過：無可用現價（已嘗試 _raw_cg／平面欄位／備援）",
+                "[爆擊雷達·現價] %s %s 分=%s 略過：無可用現價（已嘗試 Gate→CoinGlass／備援）",
                 sym,
                 side,
                 score,
@@ -15000,7 +15021,6 @@ def run_crit_radar_once() -> None:
             )
             continue
         atr_f = float(atr_val)
-        atr_src_txt = "15m"
         if _use_atr_max_1h:
             time.sleep(0.08)
             atr_1h = fetch_coinglass_indicator(sym, "atr", "1h")
@@ -15008,7 +15028,6 @@ def run_crit_radar_once() -> None:
                 atr_1h_f = float(atr_1h)
                 if atr_1h_f > atr_f:
                     atr_f = atr_1h_f
-                atr_src_txt = "15m／1h 取大"
         raw_sl_pct = (atr_f * sl_atr) / price
         raw_sl_pct = max(sl_min_pct, min(sl_max_pct, raw_sl_pct))
         tp_pct = raw_sl_pct * tp_r
@@ -15022,7 +15041,6 @@ def run_crit_radar_once() -> None:
         ent_s = _crit_radar_fmt_price_level(px_f)
         sl_s = _crit_radar_fmt_price_level(sl_px)
         tp_s = _crit_radar_fmt_price_level(tp_px)
-        atr_s = _crit_radar_fmt_price_level(atr_f)
 
         if _crit_use_gk and not _crit_gk_glob_off:
             _gk_dict = _crit_radar_gatekeeper_payload(
@@ -15076,12 +15094,10 @@ def run_crit_radar_once() -> None:
         else:
             fr_note = "費率中性"
 
-        _sl_pct_txt = f"{'-' if is_long else '+'}{raw_sl_pct * 100:.2f}%"
-        _tp_pct_txt = f"{'+' if is_long else '-'}{tp_pct * 100:.2f}%"
         msg_lines = [
             "💥 *爆擊雷達*",
             "────────────────",
-            f"📍 *標的* · `{sym}USDT` · K線 `15m`",
+            f"📍 *標的* · `{sym}USDT` · 週期 `15m`",
             f"📍 *方向* · {dir_zh}",
             f"📍 *共振分* · `{score}`／100",
             "",
@@ -15091,13 +15107,10 @@ def run_crit_radar_once() -> None:
             f"• 主動買比：`{tks}`",
             f"• 資金費：`{frs}` · {fr_note}",
             "",
-            "*〔風控％〕* · {atr_src_txt}",
-            f"• SL 約 `{_sl_pct_txt}`（ATR×{sl_atr:.2f}）",
-            f"• TP 約 `{_tp_pct_txt}`（{tp_r:.1f}R）",
-            "",
-            "*〔參考價〕* · 市價基準",
+            "*〔參考價〕* · Gate USDT 永續",
             f"進場 `{ent_s}` ｜ SL `{sl_s}` ｜ TP `{tp_s}`",
-            f"ATR `{atr_s}`（與上列％同源）",
+            "",
+            _GATE_PRICE_SOURCE_NOTE,
         ]
         msg = "\n".join(msg_lines)
         _gk_pre_send = _crit_radar_gatekeeper_payload(
