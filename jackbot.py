@@ -4655,7 +4655,7 @@ FR_LONG_LIQUIDATION_BLOCK = 0.005  # +0.5%：多頭嚴重壅擠，爆倉風險�
 MAIN_COINS = {"BTC", "ETH", "SOL"}  # 主流幣：1H OI > 4% 即達標
 
 # ── 流動性門檻（24h 成交值，低於此深度不足）──────────────────────────
-MTF_VOLUME_MIN_USD  = 5_000_000    # 500 萬 USD（Classic 80%：提高訊號覆蓋，仍保留流動性底線）
+# MTF_VOLUME_MIN_USD 於 _env_float 定義後初始化（預設 9.9M USD）
 
 # ── OI 扳機門檻（動態分層，依幣種流動性調整）───────────────────────────
 # 微調版：改為「30m 主判斷 + 1H 保險閥」，避免訊號過少與過度滯後
@@ -4678,6 +4678,8 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         return default
 
+
+MTF_VOLUME_MIN_USD = int(max(100_000, round(_env_float("MTF_VOLUME_MIN_USD", 9_900_000))))  # 預設 9.9M
 
 SNIPER_FAST_MODE = os.getenv("SNIPER_FAST_MODE", "").strip().lower() in ("1", "true", "yes", "on")
 _default_tp1 = 1.2 if SNIPER_FAST_MODE else 1.5
@@ -7498,7 +7500,7 @@ def build_report_message_tiered(
     if not has_any:
         no_sig_msg = (
             f"🔍 *持倉異常狙擊鏡* 本輪無訊號\n"
-            f"🕐 {now_str}  條件：1H OI≥動態門檻(主流3%/高流動5%/小幣7%) & 量≥{MTF_VOLUME_MIN_USD/1e6:.0f}M & MTF共振\n"
+            f"🕐 {now_str}  條件：1H OI≥動態門檻(主流3%/高流動5%/小幣7%) & 量≥{MTF_VOLUME_MIN_USD/1e6:.1f}M & MTF共振\n"
             f"繼續監控中..."
         )
         return no_sig_msg, False, 0, [], []
@@ -8751,11 +8753,11 @@ def fetch_position_change():
     # ════════════════════════════════════════════════════════
     # 漏斗 Step 4：成交值預篩（三路來源：CoinGlass A → Binance B → 待 K 線估算 C）
     # 規則：
-    #   combined_vol ≥ MTF_VOLUME_MIN_USD → 放行（門檻由頂部常數控制，預設 5M）
+    #   combined_vol ≥ MTF_VOLUME_MIN_USD → 放行（門檻由頂部常數控制，預設 9.9M）
     #   combined_vol = 0                  → A+B 均無資料 → 放行，等 K 線估算（Plan C）
     #   0 < combined_vol < MTF_VOLUME_MIN_USD → 確認流動性不足 → 過濾
     # ════════════════════════════════════════════════════════
-    VOLUME_PREFILTER_MIN_USD = MTF_VOLUME_MIN_USD  # 從常數讀取（預設 5M，可在頂部常數區調整）
+    VOLUME_PREFILTER_MIN_USD = MTF_VOLUME_MIN_USD  # 從常數讀取（預設 9.9M，可用 MTF_VOLUME_MIN_USD 覆寫）
 
     active_above_volume: List[Dict[str, Any]] = []
     vol_cg = 0         # Plan A (CoinGlass) 有資料且 ≥ MTF_VOLUME_MIN_USD
@@ -9550,7 +9552,7 @@ def fetch_position_change():
         f"{' | ↩️回踩 ' + str(_pullback_cnt) if _pullback_cnt else ''}）"
     )
     if len(all_top) == 0:
-        logger.info(f"本輪無符合條件訊號（1H OI≥動態門檻 & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.0f}M USD & MTF共振未達標）")
+        logger.info(f"本輪無符合條件訊號（1H OI≥動態門檻 & 成交值≥{MTF_VOLUME_MIN_USD/1e6:.1f}M USD & MTF共振未達標）")
 
     # 冷卻規則：同幣同方向 N 小時內不重複推；反向訊號另設「最短間隔」避免短時間連發打架
     # 統一預設 2 小時冷卻（同幣同方向）；需其他值可設 SNIPER_COOLDOWN_HOURS
