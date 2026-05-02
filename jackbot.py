@@ -4733,6 +4733,51 @@ MIN_R_TRAP_STEPS = int(max(1, min(3, round(_env_float("MIN_R_TRAP_STEPS", 2)))))
 SNIPER_STRUCT_MEGA_LIQUIDITY_USD = float(
     _env_float("SNIPER_STRUCT_MEGA_LIQUIDITY_USD", 80_000_000)
 )  # 預設 8000 萬 USD 等值成交額
+# S 級至少要有此 24h 成交額（USDT），避免「7.9M 仍顯示 S」與 UI 流動性警告打架
+SNIPER_MIN_VOL_USD_FOR_S = _env_float("SNIPER_MIN_VOL_USD_FOR_S", 15_000_000)
+
+
+def _s_grade_brief_to_a(brief: str) -> str:
+    """將 _calc_signal_grade 產生的 S 級 brief 改為 A 級用語（不重算分數）。"""
+    br = brief
+    if "🏆 *S 級*" in br:
+        br = br.replace("🏆 *S 級*", "🥇 *A 級*", 1)
+    if "訊號極強・順勢" in br:
+        br = br.replace("訊號極強・順勢", "訊號強", 1)
+    elif "訊號極強" in br:
+        br = br.replace("訊號極強", "訊號強", 1)
+    return br
+
+
+def _apply_sniper_s_grade_guards(
+    grade: str, brief: str, x: dict, sym_base: str
+) -> Tuple[str, str]:
+    """
+    S 級額外守門：
+    - 24h 成交額未達門檻 → 降 A（與「流動性偏低」標籤一致）
+    - 待辦池價格觸發推播 → 降 A（payload 為較早掃描快照，避免過度樂觀 S）
+    可用 SNIPER_MIN_VOL_USD_FOR_S、SNIPER_PENDING_DOWNGRADE_S=0 覆寫。
+    """
+    if grade != "S":
+        return grade, brief
+    try:
+        vol_u = float(x.get("volume_usd") or x.get("_cg_volume_usd") or 0)
+    except (TypeError, ValueError):
+        vol_u = 0.0
+    reasons: List[str] = []
+    if vol_u > 0 and vol_u < float(SNIPER_MIN_VOL_USD_FOR_S):
+        reasons.append(
+            f"24h成交≈{vol_u/1e6:.1f}M < S門檻{float(SNIPER_MIN_VOL_USD_FOR_S)/1e6:.0f}M"
+        )
+    _pending_down = os.getenv("SNIPER_PENDING_DOWNGRADE_S", "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if bool(x.get("_triggered_from_pending")) and _pending_down:
+        reasons.append("待辦池觸發(非本輪即時掃描快照)")
+    if not reasons:
+        return grade, brief
+    logger.info(f"[S級降級→A] {sym_base}: " + "；".join(reasons))
+    return "A", _s_grade_brief_to_a(brief)
 
 
 def _sniper_structural_cascade_touch(x: dict, is_bull_sig: bool) -> bool:
@@ -6862,6 +6907,7 @@ def build_report_message_tiered(
             x["score"] = int(round(float(_grade_score)))
         except (TypeError, ValueError):
             x["score"] = 0
+        _grade, _grade_brief = _apply_sniper_s_grade_guards(_grade, _grade_brief, x, sym_base)
         if _grade == "B":
             continue
 
