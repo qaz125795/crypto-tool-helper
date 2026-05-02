@@ -14557,6 +14557,12 @@ def run_crit_radar_once() -> None:
         "max15m_1h" if _use_atr_max_1h else "15m",
         log_pool_preview,
     )
+    logger.info(
+        "[爆擊雷達·提示] 若長期「發送=0」：可下調 Secrets／環境變數 "
+        "`CRIT_RADAR_MIN_SCORE`（目前 %d）或 `CRIT_RADAR_SIDE_MARGIN`（目前 %d）以提高達標率",
+        min_score,
+        margin,
+    )
 
     items = fetch_coinglass_coins_markets()
     if not items:
@@ -14889,7 +14895,6 @@ def run_crit_radar_once() -> None:
             frs = "—"
 
         dir_zh = "做多 🟢" if is_long else "做空 🔴"
-        dir_emoji = "💰 *方向*：" + dir_zh
         if fr is None:
             fr_note = "費率未取到（中性處理）"
         elif fr > 0:
@@ -14899,21 +14904,28 @@ def run_crit_radar_once() -> None:
         else:
             fr_note = "費率中性"
 
+        _sl_pct_txt = f"{'-' if is_long else '+'}{raw_sl_pct * 100:.2f}%"
+        _tp_pct_txt = f"{'+' if is_long else '-'}{tp_pct * 100:.2f}%"
         msg_lines = [
-            "💥 *爆擊雷達*｜`" + sym + "USDT` · `15m`",
-            dir_emoji,
-            f"🧠 *共振分*：{score} / 100",
-            f"🔍 *脈絡*：OI15m `{oi15s}`｜價15m `{p15s}`｜主動買比 `{tks}`｜資金 `{frs}`（{fr_note}）",
-            f"📊 *參考*：`SL` 約 `{'-' if is_long else '+'}{raw_sl_pct * 100:.2f}%`（{atr_src_txt} ATR×{sl_atr:.2f}）｜"
-            f"`TP` 約 `{'+' if is_long else '-'}{tp_pct * 100:.2f}%`（{tp_r:.1f}R）",
-            f"📌 *點位*（與上列％同一基準｜市價進場）：",
-            f"• 進場參考：`{ent_s}` USDT",
-            f"• 止損 SL：`{sl_s}` USDT",
-            f"• 止盈 TP：`{tp_s}` USDT",
-            f"📋 `進場 {ent_s}｜SL {sl_s}｜TP {tp_s}`",
-            f"📏 *ATR（止損帶基準）*：`{atr_s}`（{atr_src_txt}；與％推估同源）",
+            "💥 *爆擊雷達*",
+            "────────────────",
+            f"📍 *標的* · `{sym}USDT` · K線 `15m`",
+            f"📍 *方向* · {dir_zh}",
+            f"📍 *共振分* · `{score}`／100",
             "",
-            RISK_DISCLAIMER_LINE,
+            "*〔籌碼／價格〕*",
+            f"• OI 15m：`{oi15s}`",
+            f"• 價 15m：`{p15s}`",
+            f"• 主動買比：`{tks}`",
+            f"• 資金費：`{frs}` · {fr_note}",
+            "",
+            "*〔風控％〕* · {atr_src_txt}",
+            f"• SL 約 `{_sl_pct_txt}`（ATR×{sl_atr:.2f}）",
+            f"• TP 約 `{_tp_pct_txt}`（{tp_r:.1f}R）",
+            "",
+            "*〔參考價〕* · 市價基準",
+            f"進場 `{ent_s}` ｜ SL `{sl_s}` ｜ TP `{tp_s}`",
+            f"ATR `{atr_s}`（與上列％同源）",
         ]
         msg = "\n".join(msg_lines)
         _gk_pre_send = _crit_radar_gatekeeper_payload(
