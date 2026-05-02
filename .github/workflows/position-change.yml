@@ -8,14 +8,16 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
+# 若為 true：新排程會「取消」尚未跑完的一輪 → enrichment 久時每 5 分鐘必被砍（The operation was canceled）。
+# false：同群組排隊，上一輪跑完才跑下一輪，避免狙擊鏡被中途取消。
 concurrency:
   group: position-change
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: write
@@ -74,7 +76,8 @@ jobs:
           echo "=============================================="
           echo " 持倉變化篩選 Action 開始（log 即時輸出）"
           echo "=============================================="
-          timeout 960 python -u jackbot.py position_change || exit 0
+          # 須 ≤ job timeout-minutes；過短會讓長輪掃描被 kill（與 concurrency 取消不同）
+          timeout 25m python -u jackbot.py position_change || exit 0
           echo "=============================================="
           echo " 任務執行完成"
           echo "=============================================="
