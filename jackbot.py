@@ -5464,10 +5464,15 @@ def _macro_regime_snapshot() -> Dict[str, Any]:
 
     bearish = (btc_1h is False or btc_4h is False) and (btc_cvd_15m is not None and btc_cvd_15m < 0)
     bullish = (btc_1h is True or btc_4h is True) and (btc_cvd_15m is not None and btc_cvd_15m > 0)
+    _mv_m = (os.getenv("SNIPER_MACRO_VETO_MODE") or "relaxed").strip().lower()
     if bullish:
-        badge = "🛡️ 大盤環境：BTC 趨勢向上，過濾通過"
+        badge = "🛡️ 大盤環境：BTC 趨勢向上（逆勢空單見 SNIPER_MACRO_VETO_MODE）"
     elif bearish:
-        badge = "🛡️ 大盤環境：BTC 趨勢向下，僅放行順勢空單"
+        badge = (
+            "🛡️ 大盤環境：BTC 趨勢向下（逆勢多單見 SNIPER_MACRO_VETO_MODE）"
+            if _mv_m != "strict"
+            else "🛡️ 大盤環境：BTC 趨勢向下，僅放行順勢空單"
+        )
     else:
         badge = "🛡️ 大盤環境：中性（EMA/CVD 未完全共振）"
     return {
@@ -5481,6 +5486,82 @@ def _macro_regime_snapshot() -> Dict[str, Any]:
         "eth_4h": eth_4h,
         "eth_cvd_15m": eth_cvd_15m,
     }
+
+
+def _macro_veto_should_skip_alt(
+    base: str,
+    x: Dict[str, Any],
+    macro_ctx: Dict[str, Any],
+    btc_1h_pct: Optional[float],
+) -> bool:
+    """
+    BTC/ETH 大盤環境與山寨訊號方向不一致時，是否略過該山寨。
+    - strict：舊版一律擋逆勢（BTC 空不做多、BTC 多不做空）。
+    - relaxed（預設）：確定籌碼／衰竭反轉／回踩仍放行；或 1H 相對強度優／劣於 BTC 時放行。
+    - off：不擋。
+    環境變數：SNIPER_MACRO_VETO_MODE、SNIPER_MACRO_RS_MIN_PCT。
+    """
+    mode = (os.getenv("SNIPER_MACRO_VETO_MODE") or "relaxed").strip().lower()
+    if mode in ("off", "0", "false", "none", "disabled", "no"):
+        return False
+    bearish = bool(macro_ctx.get("bearish"))
+    bullish = bool(macro_ctx.get("bullish"))
+    _cat = x.get("category") or ""
+    _is_long_sig = _cat in ("long_open", "short_close")
+    _is_short_sig = _cat in ("short_open", "long_close")
+    if not ((bearish and _is_long_sig) or (bullish and _is_short_sig)):
+        return False
+
+    if mode == "strict":
+        return True
+
+    sv = str(x.get("signal_version") or "").strip()
+    if sv in ("confirmed", "exhaustion_reversal", "pullback"):
+        logger.info(
+            "[MacroVeto] %s: 大盤逆勢但訊號類型=%s → 放行（確定／反轉／回踩通道）",
+            base,
+            sv,
+        )
+        return False
+
+    try:
+        alt_1h = float(
+            x.get("priceChange1h")
+            if x.get("priceChange1h") is not None
+            else (x.get("price_change_percent_1h") or 0)
+        )
+    except (TypeError, ValueError):
+        alt_1h = 0.0
+    btc_ref = btc_1h_pct
+    rs_min = max(0.1, _env_float("SNIPER_MACRO_RS_MIN_PCT", 1.25))
+
+    if bearish and _is_long_sig and btc_ref is not None:
+        rs = alt_1h - btc_ref
+        if rs >= rs_min:
+            logger.info(
+                "[MacroVeto] %s: BTC 偏空但山寨 1H 相對強度 %+0.2f%%（門檻 %+0.2f%%）→ 放行",
+                base,
+                rs,
+                rs_min,
+            )
+            return False
+
+    if bullish and _is_short_sig and btc_ref is not None:
+        rs = btc_ref - alt_1h
+        if rs >= rs_min:
+            logger.info(
+                "[MacroVeto] %s: BTC 偏多但山寨 1H 相對偏弱 %+0.2f%%（門檻 %+0.2f%%）→ 放行",
+                base,
+                rs,
+                rs_min,
+            )
+            return False
+
+    if bearish and _is_long_sig:
+        logger.info(f"[MacroVeto] {base}: BTC 空頭環境，略過做多訊號（觀察/弱共振且未達相對強度）")
+    else:
+        logger.info(f"[MacroVeto] {base}: BTC 多頭環境，略過做空訊號（觀察/弱共振且未達相對偏弱）")
+    return True
 
 
 # ── RSI 過熱/過冷阻斷（確定籌碼追高/追低保護）───────────────────────
@@ -9790,24 +9871,17 @@ def fetch_position_change():
     if _bl_removed > 0:
         logger.info(f"[黑名單🚫] 二道防線攔截 {_bl_removed} 個標的")
 
-    # ── Macro Veto：BTC 1H/4H EMA20 + 15m CVD 一票否決逆勢單 ───────────────────
+    # ── Macro Veto：大盤與山寨方向對撞時可略過（SNIPER_MACRO_VETO_MODE，預設 relaxed）──
     macro_ctx = _macro_regime_snapshot()
     _macro_filtered: List[Dict] = []
     for x in all_top:
         _base = _cooldown_symbol(x.get("symbol") or "")
-        _cat = x.get("category") or ""
-        _is_long_sig = _cat in ("long_open", "short_close")
-        _is_short_sig = _cat in ("short_open", "long_close")
         x["_macro_veto_badge"] = macro_ctx.get("badge")
         # BTC/ETH 訊號不做 veto，僅作環境提示
         if _base in ("BTC", "ETH"):
             _macro_filtered.append(x)
             continue
-        if macro_ctx.get("bearish") and _is_long_sig:
-            logger.info(f"[MacroVeto] {_base}: BTC 空頭環境，略過做多訊號")
-            continue
-        if macro_ctx.get("bullish") and _is_short_sig:
-            logger.info(f"[MacroVeto] {_base}: BTC 多頭環境，略過做空訊號")
+        if _macro_veto_should_skip_alt(_base, x, macro_ctx, _btc_1h_pct):
             continue
         _macro_filtered.append(x)
     all_top = _macro_filtered
