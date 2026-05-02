@@ -4915,6 +4915,27 @@ def compute_structural_sl_tp(
         sl = structural_sl
         tp1 = entry + one_r * TP1_R_MULTIPLIER
         tp2 = entry + one_r * TP2_R_MULTIPLIER
+
+        # 多單：停損必須在 2h 結構低點「之下」（含緩衝）。
+        # 否則 EMA/VWAP 回踩縮停損時，常把 SL 縮在「前低上方」形成真空區，容易被掃後再延續走勢。
+        _enf_sw = os.getenv("SNIPER_SL_ENFORCE_SWING", "1").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if _enf_sw and lo2 is not None and lo2 < entry:
+            _swing_floor = lo2 - sl_guard_buffer
+            if sl > _swing_floor:
+                sl = _swing_floor
+                one_r = entry - sl
+                if one_r < min_sl_distance:
+                    one_r = min_sl_distance
+                    sl = entry - one_r
+                if max_sl_distance is not None and one_r > max_sl_distance:
+                    _sl_cap = entry - max_sl_distance
+                    if _sl_cap <= _swing_floor:
+                        sl = _sl_cap
+                        one_r = max_sl_distance
+                tp1 = entry + one_r * TP1_R_MULTIPLIER
+                tp2 = entry + one_r * TP2_R_MULTIPLIER
     else:
         cands = [v for v in (hi2, ema, vwap) if v is not None]
         if cands:
@@ -4963,6 +4984,26 @@ def compute_structural_sl_tp(
         sl = structural_sl
         tp1 = entry - one_r * TP1_R_MULTIPLIER
         tp2 = entry - one_r * TP2_R_MULTIPLIER
+
+        # 空單：停損必須在 2h 結構高點「之上」（含緩衝），避免回踩縮在「前高下方」。
+        _enf_sw_s = os.getenv("SNIPER_SL_ENFORCE_SWING", "1").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if _enf_sw_s and hi2 is not None and hi2 > entry:
+            _swing_ceil = hi2 + sl_guard_buffer
+            if sl < _swing_ceil:
+                sl = _swing_ceil
+                one_r = sl - entry
+                if one_r < min_sl_distance:
+                    one_r = min_sl_distance
+                    sl = entry + one_r
+                if max_sl_distance is not None and one_r > max_sl_distance:
+                    _sl_cap = entry + max_sl_distance
+                    if _sl_cap >= _swing_ceil:
+                        sl = _sl_cap
+                        one_r = max_sl_distance
+                tp1 = entry - one_r * TP1_R_MULTIPLIER
+                tp2 = entry - one_r * TP2_R_MULTIPLIER
 
     sl_pct = (one_r / entry * 100.0) if entry > 0 else 0.0
     return sl, tp1, tp2, one_r, sl_pct
