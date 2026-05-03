@@ -10456,13 +10456,187 @@ def _economic_raw_importance(item: Optional[Dict[str, Any]]) -> int:
 
 
 def _economic_dc_everyone_min_importance() -> int:
-    """Discord @everyone 門檻：預設 5（滿星）；可用 ECONOMIC_DC_EVERYONE_MIN_IMPORTANCE 覆寫（1～10）。"""
+    """TG／DC @everyone 之星級門檻：預設 5（滿星）；可用 ECONOMIC_DC_EVERYONE_MIN_IMPORTANCE 覆寫（1～10）。
+    另見：重大總經關鍵字（CPI／PPI／聯準會／川普等）不受星級限制亦會 tag。"""
     return int(max(1, min(10, round(_env_float("ECONOMIC_DC_EVERYONE_MIN_IMPORTANCE", 5.0)))))
 
 
+def _economic_event_text_blob(item: Optional[Dict[str, Any]]) -> str:
+    """行事曆事件可搜尋文字（名稱為主）。"""
+    if not item:
+        return ""
+    parts: List[str] = []
+    for k in ("calendar_name", "name", "title"):
+        v = item.get(k)
+        if v:
+            parts.append(str(v))
+    return " ".join(parts).strip()
+
+
+def _economic_matches_macro_headline(item: Optional[Dict[str, Any]]) -> bool:
+    """CPI、PPI、聯準會／利率、非農、川普相關等：推播需 @everyone。"""
+    blob0 = _economic_event_text_blob(item)
+    if not blob0:
+        return False
+    blob = blob0.lower()
+    keys = (
+        "cpi",
+        "consumer price",
+        "消費者物價",
+        "核心消費",
+        "ppi",
+        "producer price",
+        "生產者物價",
+        "fomc",
+        "聯準會",
+        "美聯儲",
+        "美联储",
+        "鮑威爾",
+        "powell",
+        "聯邦基金",
+        "fed funds",
+        "ffr",
+        "利率決議",
+        "升息會議",
+        "降息預期",
+        "非農",
+        "non-farm",
+        "nonfarm",
+        "nfp",
+        "川普",
+        "特朗普",
+        "trump",
+    )
+    for k in keys:
+        if k in blob or k in blob0:
+            return True
+    return False
+
+
 def _economic_should_discord_everyone(item: Optional[Dict[str, Any]]) -> bool:
-    """僅當重要性達設定之星級（預設 ≥5）時，TG／Discord 皆加 @everyone。"""
+    """滿星級（預設 ≥5）或重大總經關鍵字事件 → TG／Discord 皆加 @everyone。"""
+    if item and _economic_matches_macro_headline(item):
+        return True
     return _economic_raw_importance(item) >= _economic_dc_everyone_min_importance()
+
+
+def _economic_preview_analysis_lines(events: List[Dict]) -> List[str]:
+    """今日預告文末：依清單關鍵字附加「情境速覽」（非投資建議）。"""
+    combined_raw = " ".join(_economic_event_text_blob(e) for e in events)
+    combined = combined_raw.lower()
+
+    def _has(*subs: str) -> bool:
+        for s in subs:
+            if s in combined or s in combined_raw:
+                return True
+        return False
+
+    out: List[str] = []
+
+    if _has(
+        "fomc",
+        "聯準會",
+        "美聯儲",
+        "聯邦基金",
+        "fed funds",
+        "利率決議",
+        "鮑威爾",
+        "powell",
+    ):
+        lo = _env_float("ECONOMIC_PREVIEW_FFR_DOVE_LT", 3.5)
+        mid = _env_float("ECONOMIC_PREVIEW_FFR_NEUTRAL", 3.75)
+        hi = _env_float("ECONOMIC_PREVIEW_FFR_HAWK_GT", 4.0)
+        out.append("")
+        out.append("*〔情境速覽｜聯邦基金利率〕* _（門檻為示意，請對照當日共識／點陣圖／主席談話）_")
+        out.append(f"• 若公布／路徑 **低於 {lo:.2f}%**（偏鴿）→ 風險資產常受激勵、波動易向上")
+        out.append(f"• 若 **約 {mid:.2f}%**（貼近共識）→ 走勢易區間整理")
+        out.append(f"• 若 **高於 {hi:.2f}%**（偏鷹）→ 美元／殖利率偏強，風險資產承壓")
+        out.append("_加密短線常隨股指與美元連動；非投資建議。_")
+
+    if _has("cpi", "consumer price", "消費者物價"):
+        out.append("")
+        out.append("*〔情境速覽｜CPI〕*")
+        out.append("• **低於預測** → 抗通膨預期降溫，風險資產偏多")
+        out.append("• **符合預測** → 解讀分歧小，波動可能收斂")
+        out.append("• **高於預測** → 黏性通膨疑慮，短線偏壓抑")
+
+    if _has("ppi", "producer price", "生產者物價"):
+        out.append("")
+        out.append("*〔情境速覽｜PPI〕*")
+        out.append("• **低於預測** → 上游成本壓力緩和，有利風險情緒")
+        out.append("• **高於預測** → 成本再燃疑慮，留意股債與美元連動")
+
+    if _has("川普", "特朗普", "trump"):
+        out.append("")
+        out.append("*〔情境速覽｜政策／言論〕*")
+        out.append("• 貿易、關稅或重大政治言論：美元與避險資金輪動快，加密短線波動常放大。")
+
+    return out
+
+
+def _economic_parse_scalar(val: Any) -> Optional[float]:
+    """把公布值／預測值字串試算成浮點數（支援逗號、%）。"""
+    if val is None:
+        return None
+    s = str(val).strip().replace(",", "").replace("%", "").strip()
+    if not s or s in ("-", "—", "N/A", "n/a"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _economic_has_published_figure(item: Dict) -> bool:
+    """API 是否已回填實際公布（避免空白也算已發）。"""
+    v = item.get("published_value")
+    if v is None or (isinstance(v, str) and not str(v).strip()):
+        v = item.get("actual")
+    if v is None:
+        return False
+    if isinstance(v, str) and str(v).strip() in ("-", "—", "N/A", "n/a", ""):
+        return False
+    return True
+
+
+def _economic_surprise_interpretation(data: Dict) -> Optional[str]:
+    """實際 vs 預測：風險資產／加密常見解讀（非投資建議）；失業率方向與多數物價指標相反。"""
+    if not _economic_has_published_figure(data):
+        return None
+    raw_a = data.get("published_value")
+    if raw_a is None or (isinstance(raw_a, str) and not str(raw_a).strip()):
+        raw_a = data.get("actual")
+    actual = _economic_parse_scalar(raw_a)
+    fc = _economic_parse_scalar(data.get("forecast_value") or data.get("forecast"))
+    if actual is None or fc is None:
+        return None
+    tol = max(abs(fc) * 1e-6, 1e-9)
+    diff = actual - fc
+    nu = str(data.get("calendar_name") or data.get("name") or data.get("title") or "").upper()
+
+    if abs(diff) <= tol:
+        return "📍 *對照預測*：大致符合共識 → 市場解讀分歧常較小。"
+
+    if any(k in nu for k in ("UNEMPLOYMENT RATE", "失業率")):
+        if diff > tol:
+            return (
+                "📍 *對照預測*：**高於預期**（失業偏高）→ 景氣偏弱／寬鬆預期易升温，"
+                "*風險資產短線常偏多頭情緒*。"
+            )
+        return (
+            "📍 *對照預測*：**低於預期**（失業偏低）→ 勞動市場偏強，"
+            "*緊縮疑慮易加重*（對風險資產常偏壓抑）。"
+        )
+
+    if diff > tol:
+        return (
+            "📍 *對照預測*：**高於預期** → 經濟／物價「偏熱」解讀易升温，"
+            "*緊縮預期*偏強時風險資產常承壓（偏空情緒）。"
+        )
+    return (
+        "📍 *對照預測*：**低於預期** → 經濟／物價「偏冷」解讀易升温，"
+        "*寬鬆預期*偏強時風險資產常受鼓舞（偏多頭情緒）。"
+    )
 
 
 def fetch_economic_data() -> List[Dict]:
@@ -10694,6 +10868,7 @@ def get_unsent_data(data_array: List[Dict]) -> List[Dict]:
     sent_ids = load_json_file(SENT_DATA_FILE, [])
     unsent = []
     now = get_taipei_time()
+    wait_actual_sec = max(60.0, _env_float("ECONOMIC_WAIT_ACTUAL_SEC", 7200.0))
     
     for item in data_array:
         data_id = generate_data_id(item)
@@ -10702,11 +10877,23 @@ def get_unsent_data(data_array: List[Dict]) -> List[Dict]:
         if data_id in sent_ids:
             continue
         
-        # 額外檢查：如果數據已發布超過 2 小時，且已有實際值，則跳過
-        # 這可以防止在 GitHub Actions 環境中重複推送
         publish_time = parse_publish_time(item)
         if publish_time:
-            time_diff = (now - publish_time).total_seconds()
+            pt_taipei = get_taipei_time(publish_time)
+            # 未到表定公布時間：不發即時推播（早上預告另計）
+            if pt_taipei > now:
+                continue
+            
+            # 已過表定時間但尚無實值：先等待 CoinGlass 回填（避免先推「只有預期」並標記已送）
+            if not _economic_has_published_figure(item):
+                age_sec = (now - pt_taipei).total_seconds()
+                if age_sec < wait_actual_sec:
+                    continue
+        
+        # 額外檢查：如果數據已發布超過 2 小時，且已有實際值，則跳過
+        # 這可以防止在 GitHub Actions 環境中重複推送
+        if publish_time:
+            time_diff = (now - get_taipei_time(publish_time)).total_seconds()
             published_value = item.get('published_value') or item.get('actual')
             
             # 如果已發布超過 2 小時且有實際值，視為已處理過（避免重複）
@@ -10922,6 +11109,11 @@ def format_economic_data_message(data: Dict) -> str:
     if has_data:
         lines.append("")
     
+    _surprise = _economic_surprise_interpretation(data)
+    if _surprise:
+        lines.append(_surprise)
+        lines.append("")
+    
     # 重要性與影響
     lines.append(f"{importance_badge}")
     if effect_text and effect_text != '待觀察':
@@ -10998,6 +11190,8 @@ def format_today_preview_message(events: List[Dict]) -> str:
         lines.append("今日無重要經濟數據事件")
         lines.append("")
     
+    lines.extend(_economic_preview_analysis_lines(events))
+    
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"⏰ 預告時間：{time_str}")
     
@@ -11032,11 +11226,12 @@ def send_today_preview():
             logger.info("今日無重要事件")
             return
         
-        # 發送預告（TG／Discord @everyone 僅當今日清單含「滿星級」事件，預設 importance≥5）
+        # 發送預告（TG／Discord @everyone：滿星級或 CPI／PPI／聯準會／川普等關鍵字）
         message = format_today_preview_message(today_events)
         if not jackbot_universal_pre_send_gatekeeper("economic_data_preview", text=message):
             return
         _dc_ping_preview = any(_economic_should_discord_everyone(e) for e in today_events)
+        _n_macro_kw = sum(1 for e in today_events if _economic_matches_macro_headline(e))
         send_telegram_message(
             message,
             TG_THREAD_IDS["economic_data"],
@@ -11044,9 +11239,10 @@ def send_today_preview():
             discord_force_everyone=_dc_ping_preview,
         )
         logger.info(
-            "今日預告發送完成（TG／Discord @everyone=%s，門檻≥%d 星）",
+            "今日預告發送完成（TG／Discord @everyone=%s，滿星門檻≥%d 星；總經關鍵字筆數=%d）",
             _dc_ping_preview,
             _economic_dc_everyone_min_importance(),
+            _n_macro_kw,
         )
         
     except Exception as e:
