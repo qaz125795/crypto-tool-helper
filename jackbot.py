@@ -14903,6 +14903,16 @@ def run_crit_radar_once() -> None:
     if not CG_API_KEY:
         logger.warning("[爆擊雷達] 未設定 CG_API_KEY，結束")
         return
+    # GitHub Actions：每輪全新 runner，若無 Gist 持久化，冷卻檔會遺失 → 短時間內易重複推同幣同方向
+    if os.getenv("GITHUB_ACTIONS", "").strip().lower() == "true":
+        _gist_ok = bool(os.getenv("GIST_ID", "").strip() and os.getenv("GITHUB_TOKEN", "").strip())
+        if not _gist_ok:
+            logger.warning(
+                "[爆擊雷達·持久化] GitHub Actions 偵測中，且未同時設定 GIST_ID + GITHUB_TOKEN："
+                "本輪結束後 crit_radar_cooldown.json 不會跨 job 保留，排程若每 15 分鐘跑一次，"
+                "可能在冷卻小時數內重複推播同一標的；請補 Secrets，或於 workflow 使用 actions/cache 快取 "
+                "`data/crit_radar_cooldown.json`（見 .github/workflows/crit-radar.yml）。"
+            )
     pool_n = max(20, min(200, _crit_radar_env_int("CRIT_RADAR_POOL", 100)))
     # 早期啟動預設：分數門檻下修，配合下方過熱濾網，提早但不追高/追低
     min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 82)))
