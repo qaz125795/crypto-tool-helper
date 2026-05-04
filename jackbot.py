@@ -10,6 +10,7 @@ import json
 import time
 import logging
 import sys
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple, Set, Union
 import os
@@ -45,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 # sendPhoto 最近一次 TG 失敗原因（供外層決定是否做文字備援，避免雙發）
 _LAST_TG_PHOTO_FAILURE_REASON = ""
+_TG_FLUSH_LOCK = threading.Lock()
 
 # ==================== 配置設定 ====================
 # 一律從環境變量讀取，避免在程式碼中硬編 API 金鑰等敏感資訊
@@ -528,6 +530,8 @@ def _respect_coinglass_rate_limit() -> None:
 # ==================== 工具函數 ====================
 
 RISK_DISCLAIMER_LINE = "⚠️ *風險提示：* 本頻道內容僅供研究與教育用途，非投資建議、非任何形式帶單；請自行評估風險並嚴格控倉。"
+TG_PENDING_QUEUE_FILE = DATA_DIR / "tg_pending_queue.json"
+TG_RECENT_SENT_FILE = DATA_DIR / "tg_recent_sent.json"
 
 # 含進場／SL／TP 等價位之推播，於點位段後附加（Telegram Markdown）
 _GATE_PRICE_SOURCE_NOTE = "_※ 點位以 Gate 交易所 USDT 永續為主（與其他報價來源可能有價差）。_"
@@ -557,6 +561,123 @@ def _append_risk_disclaimer(text: str) -> str:
     return _append_push_taipei_timestamp(out)
 
 
+def _push_trace_meta(text: str, thread_id: int, kind: str) -> Tuple[str, str]:
+    """為每則推播生成可追蹤 ID（跨 TG/DC 對齊同一筆訊號）。"""
+    try:
+        thread_key = "unknown"
+        for k, tg_tid in TG_THREAD_IDS.items():
+            if int(tg_tid) == int(thread_id):
+                thread_key = str(k)
+                break
+    except Exception:
+        thread_key = "unknown"
+
+    digest = hashlib.sha1((text or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
+    trace_id = f"{kind}-{thread_id}-{digest}"
+    return trace_id, thread_key
+
+
+def _tg_recent_should_skip(trace_id: str, thread_id: int, ttl_sec: int = 7200) -> bool:
+    """短時去重：同 thread + 同 trace 在 TTL 內只允許送一次。"""
+    try:
+        now = int(time.time())
+        rec = load_json_file(TG_RECENT_SENT_FILE, {})
+        if not isinstance(rec, dict):
+            rec = {}
+        # 清理過期
+        rec = {k: int(v) for k, v in rec.items() if isinstance(v, (int, float)) and (now - int(v)) <= ttl_sec}
+        key = f"{int(thread_id)}::{trace_id}"
+        last_ts = int(rec.get(key) or 0)
+        if last_ts > 0 and (now - last_ts) <= ttl_sec:
+            logger.warning("[TG去重] 命中短時去重，略過重複訊號 trace=%s thread_id=%s age=%ss", trace_id, thread_id, now - last_ts)
+            save_json_file(TG_RECENT_SENT_FILE, rec)
+            return True
+        save_json_file(TG_RECENT_SENT_FILE, rec)
+    except Exception as e:
+        logger.debug("[TG去重] 讀取去重狀態失敗: %s", e)
+    return False
+
+
+def _tg_recent_mark_sent(trace_id: str, thread_id: int, ttl_sec: int = 7200) -> None:
+    try:
+        now = int(time.time())
+        rec = load_json_file(TG_RECENT_SENT_FILE, {})
+        if not isinstance(rec, dict):
+            rec = {}
+        rec = {k: int(v) for k, v in rec.items() if isinstance(v, (int, float)) and (now - int(v)) <= ttl_sec}
+        rec[f"{int(thread_id)}::{trace_id}"] = now
+        save_json_file(TG_RECENT_SENT_FILE, rec)
+    except Exception as e:
+        logger.debug("[TG去重] 寫入去重狀態失敗: %s", e)
+
+
+def _tg_queue_push(item: Dict[str, Any]) -> None:
+    """TG 失敗時寫入補發佇列，避免瞬時故障造成漏發。"""
+    try:
+        q = load_json_file(TG_PENDING_QUEUE_FILE, [])
+        if not isinstance(q, list):
+            q = []
+        q.append(item)
+        # 保留最近 500 筆，避免無限制增長
+        if len(q) > 500:
+            q = q[-500:]
+        save_json_file(TG_PENDING_QUEUE_FILE, q)
+        logger.warning("[TG補發] 已加入待補發佇列，queue_size=%s trace=%s", len(q), item.get("trace_id"))
+    except Exception as e:
+        logger.error("[TG補發] 佇列寫入失敗: %s", e)
+
+
+def _tg_queue_flush(max_items: int = 10) -> None:
+    """每輪發送前嘗試補發先前 TG 失敗的文字訊號。"""
+    if not TG_TOKEN or not CHAT_ID:
+        return
+    if not _TG_FLUSH_LOCK.acquire(blocking=False):
+        return
+    try:
+        q = load_json_file(TG_PENDING_QUEUE_FILE, [])
+        if not isinstance(q, list) or not q:
+            return
+        remain: List[Dict[str, Any]] = []
+        flushed = 0
+        for it in q:
+            if flushed >= max_items:
+                remain.append(it)
+                continue
+            try:
+                payload = {
+                    "chat_id": CHAT_ID,
+                    "message_thread_id": int(it.get("thread_id") or 0),
+                    "text": str(it.get("tg_text") or ""),
+                    "disable_web_page_preview": True,
+                }
+                pm = it.get("parse_mode")
+                if pm:
+                    payload["parse_mode"] = pm
+                rm = it.get("reply_markup")
+                if isinstance(rm, dict) and rm:
+                    payload["reply_markup"] = rm
+                url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+                resp = requests.post(url, json=payload, timeout=10)
+                ok = (resp.status_code == 200 and bool((resp.json() or {}).get("ok")))
+                if ok:
+                    _tg_recent_mark_sent(str(it.get("trace_id") or ""), int(it.get("thread_id") or 0))
+                    flushed += 1
+                    logger.info("[TG補發] 補發成功 trace=%s", it.get("trace_id"))
+                else:
+                    it["retry_count"] = int(it.get("retry_count") or 0) + 1
+                    remain.append(it)
+                    logger.warning("[TG補發] 補發失敗保留 trace=%s status=%s", it.get("trace_id"), resp.status_code)
+            except Exception as e:
+                it["retry_count"] = int(it.get("retry_count") or 0) + 1
+                remain.append(it)
+                logger.warning("[TG補發] 補發異常保留 trace=%s err=%s", it.get("trace_id"), e)
+        if flushed > 0 or len(remain) != len(q):
+            save_json_file(TG_PENDING_QUEUE_FILE, remain)
+            logger.info("[TG補發] 本輪補發成功=%s 剩餘=%s", flushed, len(remain))
+    finally:
+        _TG_FLUSH_LOCK.release()
+
+
 def send_telegram_message(
     text: str,
     thread_id: int,
@@ -575,7 +696,27 @@ def send_telegram_message(
     mirror_discord=False：僅發 TG（用於已嘗試過 sendPhoto 且 DC 已收到圖時的文字備援，避免 DC 重複洗版）。
     discord_force_everyone=True：Telegram 正文與 Discord 鏡像皆於開頭加 @everyone（TG 須群組允許提及所有人；DC 須頻道允許 Bot）。
     """
+    # 每次新訊號發送前，先嘗試補發歷史失敗訊號（最多 10 筆，避免阻塞主流程）
+    _tg_queue_flush(max_items=10)
+
     text = _append_risk_disclaimer(text)
+    trace_id, thread_key = _push_trace_meta(text, thread_id, "msg")
+    try:
+        dedup_ttl_sec = int(float(os.getenv("TG_DEDUP_TTL_SEC", "7200")))
+    except Exception:
+        dedup_ttl_sec = 7200
+    dedup_ttl_sec = max(300, min(86400, dedup_ttl_sec))
+    if _tg_recent_should_skip(trace_id, thread_id, ttl_sec=dedup_ttl_sec):
+        return True
+    logger.info(
+        "[推播追蹤] trace=%s kind=text thread_id=%s key=%s mirror_dc=%s force_everyone=%s parse_mode=%s",
+        trace_id,
+        thread_id,
+        thread_key,
+        mirror_discord,
+        discord_force_everyone,
+        parse_mode or "None",
+    )
     tg_text = _telegram_content_with_mentions(
         text, thread_id, force_everyone=discord_force_everyone
     )
@@ -592,23 +733,52 @@ def send_telegram_message(
         payload["reply_markup"] = reply_markup
 
     tg_ok = False
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("ok"):
-                logger.info("Telegram 訊息發送成功")
-                tg_ok = True
+    tg_err = ""
+    tg_retry = max(1, min(5, int(_env_float("TG_SEND_RETRY_MAX", 3))))
+    tg_backoff = max(0.1, min(5.0, _env_float("TG_SEND_RETRY_BACKOFF_SEC", 0.8)))
+    payload_retry = dict(payload)
+    for i in range(1, tg_retry + 1):
+        try:
+            response = requests.post(url, json=payload_retry, timeout=10)
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("ok"):
+                    logger.info("[推播追蹤] trace=%s TG sendMessage 成功 attempt=%s/%s", trace_id, i, tg_retry)
+                    tg_ok = True
+                    _tg_recent_mark_sent(trace_id, thread_id, ttl_sec=dedup_ttl_sec)
+                    break
+                tg_err = str(result.get("description") or result)[:260]
+                logger.error("[推播追蹤] trace=%s Telegram API 錯誤 attempt=%s/%s: %s", trace_id, i, tg_retry, tg_err)
+                # 常見 Markdown entity 錯誤：降級為純文字重試
+                if ("parse" in tg_err.lower() and "entities" in tg_err.lower()) and payload_retry.get("parse_mode"):
+                    payload_retry.pop("parse_mode", None)
+                    logger.warning("[推播追蹤] trace=%s 解析錯誤，降級 parse_mode=None 重試", trace_id)
             else:
-                logger.error(f"Telegram API 錯誤: {result}")
-        else:
-            logger.error(f"Telegram HTTP 錯誤: {response.status_code} - {response.text}")
-    except Exception as e:
-        logger.error(f"發送 Telegram 訊息失敗: {str(e)}")
+                tg_err = f"HTTP {response.status_code}: {response.text[:260]}"
+                logger.error("[推播追蹤] trace=%s Telegram HTTP 錯誤 attempt=%s/%s: %s", trace_id, i, tg_retry, tg_err)
+        except Exception as e:
+            tg_err = str(e)
+            logger.error("[推播追蹤] trace=%s 發送 Telegram 訊息失敗 attempt=%s/%s: %s", trace_id, i, tg_retry, tg_err)
+        if i < tg_retry:
+            time.sleep(tg_backoff * i)
+
+    if not tg_ok:
+        _tg_queue_push(
+            {
+                "trace_id": trace_id,
+                "thread_id": int(thread_id),
+                "tg_text": tg_text,
+                "parse_mode": payload_retry.get("parse_mode"),
+                "reply_markup": reply_markup if isinstance(reply_markup, dict) else None,
+                "retry_count": 0,
+                "created_at": int(time.time()),
+            }
+        )
 
     if not tg_ok and mirror_discord:
         logger.warning(
-            "[推播] Telegram 文字發送失敗，仍將嘗試 Discord 鏡像（若已設定 DC）"
+            "[推播] trace=%s Telegram 文字發送失敗，仍將嘗試 Discord 鏡像（若已設定 DC）",
+            trace_id,
         )
 
     # Discord 同步推播（不影響 Telegram 回傳值）
@@ -638,22 +808,36 @@ def send_telegram_message(
             dc_resp = requests.post(dc_url, headers=dc_headers, json=dc_payload, timeout=10)
             if 200 <= dc_resp.status_code < 300:
                 dc_ok = True
-                logger.info("Discord 訊息發送成功")
+                logger.info("[推播追蹤] trace=%s Discord sendMessage 成功 channel_id=%s", trace_id, dc_channel_id)
             else:
-                logger.error(f"Discord sendMessage HTTP 錯誤: {dc_resp.status_code} - {dc_resp.text}")
+                logger.error(
+                    "[推播追蹤] trace=%s Discord sendMessage HTTP 錯誤: %s - %s",
+                    trace_id,
+                    dc_resp.status_code,
+                    dc_resp.text[:260],
+                )
         elif not DC_TOKEN:
-            logger.info("Discord 略過：未設定 DC_TOKEN")
+            logger.info("[推播追蹤] trace=%s Discord 略過：未設定 DC_TOKEN", trace_id)
         else:
-            logger.info(f"Discord 略過：找不到 thread_id={thread_id} 對應的 DC 頻道 ID")
+            logger.info("[推播追蹤] trace=%s Discord 略過：找不到 thread_id=%s 對應的 DC 頻道 ID", trace_id, thread_id)
     except Exception as e:
-        logger.error(f"發送 Discord 訊息失敗: {str(e)}")
+        logger.error("[推播追蹤] trace=%s 發送 Discord 訊息失敗: %s", trace_id, str(e))
 
     if not tg_ok and dc_ok:
         logger.warning(
             "[推播不一致] Telegram 失敗但 Discord 已成功：請檢查 TG 的 Markdown/caption 長度、"
-            "thread_id、或 Bot 權限；外層應以「回傳 False」觸發備援。"
+            "thread_id、或 Bot 權限；外層應以「回傳 False」觸發備援。 trace=%s tg_err=%s",
+            trace_id,
+            tg_err or "n/a",
         )
 
+    logger.info(
+        "[推播追蹤] trace=%s 發送結果：TG=%s DC=%s key=%s",
+        trace_id,
+        tg_ok,
+        dc_ok,
+        thread_key,
+    )
     return tg_ok
 
 
@@ -673,6 +857,16 @@ def send_telegram_photo(
     discord_force_everyone：Telegram caption 與 Discord 鏡像皆於開頭加 @everyone（規則與 send_telegram_message 同源）。
     """
     caption = _append_risk_disclaimer(caption)
+    trace_id, thread_key = _push_trace_meta(caption, thread_id, "photo")
+    logger.info(
+        "[推播追蹤] trace=%s kind=photo thread_id=%s key=%s mirror_dc=%s force_everyone=%s parse_mode=%s",
+        trace_id,
+        thread_id,
+        thread_key,
+        mirror_discord,
+        discord_force_everyone,
+        parse_mode or "None",
+    )
     tg_caption = _telegram_content_with_mentions(
         caption, thread_id, force_everyone=discord_force_everyone
     )
@@ -698,20 +892,24 @@ def send_telegram_photo(
         if resp.status_code == 200:
             result = resp.json()
             if result.get("ok"):
-                logger.info("Telegram 圖片發送成功")
+                logger.info("[推播追蹤] trace=%s TG sendPhoto 成功", trace_id)
                 tg_ok = True
             else:
                 _LAST_TG_PHOTO_FAILURE_REASON = str(result.get("description") or result)
-                logger.error(f"Telegram sendPhoto API 錯誤: {result}")
+                logger.error(
+                    "[推播追蹤] trace=%s Telegram sendPhoto API 錯誤: %s",
+                    trace_id,
+                    _LAST_TG_PHOTO_FAILURE_REASON[:260],
+                )
         else:
             _LAST_TG_PHOTO_FAILURE_REASON = f"HTTP {resp.status_code}: {resp.text[:240]}"
-            logger.error(f"Telegram sendPhoto HTTP 錯誤: {resp.status_code} - {resp.text}")
+            logger.error("[推播追蹤] trace=%s Telegram sendPhoto HTTP 錯誤: %s", trace_id, _LAST_TG_PHOTO_FAILURE_REASON)
     except Exception as e:
         _LAST_TG_PHOTO_FAILURE_REASON = str(e)
-        logger.error(f"發送 Telegram 圖片失敗: {str(e)}")
+        logger.error("[推播追蹤] trace=%s 發送 Telegram 圖片失敗: %s", trace_id, str(e))
 
     if not tg_ok and mirror_discord:
-        logger.warning("[推播] Telegram 圖片發送失敗，仍將嘗試 Discord 鏡像（若已設定 DC）")
+        logger.warning("[推播] trace=%s Telegram 圖片發送失敗，仍將嘗試 Discord 鏡像（若已設定 DC）", trace_id)
 
     # Discord 同步推播（不影響 Telegram 回傳值）
     dc_ok = False
@@ -744,21 +942,36 @@ def send_telegram_photo(
                 dc_resp = requests.post(dc_url, headers=dc_headers, files=files, timeout=30)
             if 200 <= dc_resp.status_code < 300:
                 dc_ok = True
-                logger.info("Discord 圖片發送成功")
+                logger.info("[推播追蹤] trace=%s Discord 圖片發送成功 channel_id=%s", trace_id, dc_channel_id)
             else:
-                logger.error(f"Discord sendPhoto HTTP 錯誤: {dc_resp.status_code} - {dc_resp.text}")
+                logger.error(
+                    "[推播追蹤] trace=%s Discord sendPhoto HTTP 錯誤: %s - %s",
+                    trace_id,
+                    dc_resp.status_code,
+                    dc_resp.text[:260],
+                )
         elif not DC_TOKEN:
-            logger.info("Discord 圖片略過：未設定 DC_TOKEN")
+            logger.info("[推播追蹤] trace=%s Discord 圖片略過：未設定 DC_TOKEN", trace_id)
         else:
-            logger.info(f"Discord 圖片略過：找不到 thread_id={thread_id} 對應的 DC 頻道 ID")
+            logger.info("[推播追蹤] trace=%s Discord 圖片略過：找不到 thread_id=%s 對應的 DC 頻道 ID", trace_id, thread_id)
     except Exception as e:
-        logger.error(f"發送 Discord 圖片失敗: {str(e)}")
+        logger.error("[推播追蹤] trace=%s 發送 Discord 圖片失敗: %s", trace_id, str(e))
 
     if not tg_ok and dc_ok:
         logger.warning(
-            "[推播不一致] Telegram 圖片失敗但 Discord 已成功：外層應以回傳 False 觸發純文字備援至 TG"
+            "[推播不一致] Telegram 圖片失敗但 Discord 已成功：外層應以回傳 False 觸發純文字備援至 TG。"
+            " trace=%s tg_err=%s",
+            trace_id,
+            _LAST_TG_PHOTO_FAILURE_REASON[:200],
         )
 
+    logger.info(
+        "[推播追蹤] trace=%s 發送結果：TG=%s DC=%s key=%s",
+        trace_id,
+        tg_ok,
+        dc_ok,
+        thread_key,
+    )
     return tg_ok
 
 
@@ -10432,7 +10645,7 @@ def fetch_position_change():
     except Exception as e:
         logger.warning(f"寫入冷卻狀態檔失敗: {e}")
 
-    logger.info("持倉變化篩選執行完成並已推播")
+    logger.info("持倉變化篩選執行完成（本輪可能為 0 則推播；請以上方『推播總結』與『未推播原因』為準）")
 
 
 # ==================== 4. 重要經濟數據推播 ====================
