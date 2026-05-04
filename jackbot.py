@@ -2032,6 +2032,54 @@ def _fuel_direction_summary(
     return tag, why
 
 
+def _fetch_major_p15_snapshot() -> Dict[str, float]:
+    """抓取 BTC/ETH 15m 漲跌幅快照（供高波動低燃料提醒）。"""
+    out: Dict[str, float] = {}
+    try:
+        rows = fetch_coinglass_coins_markets() or []
+    except Exception as e:
+        logger.debug("[牛市燃料·波動提醒] 取得 coins-markets 失敗: %s", e)
+        rows = []
+    if not rows:
+        return out
+    for r in rows:
+        sym = str(r.get("symbol") or "").upper().replace("-", "").replace("_", "")
+        if sym.endswith("USDT"):
+            sym = sym[:-4]
+        if sym not in ("BTC", "ETH"):
+            continue
+        raw = r.get("price_change_percent_15m")
+        try:
+            if raw is not None:
+                out[sym] = float(raw)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _buying_power_vol_alert_should_fire(now_ts: float, cool_min: int) -> bool:
+    """高波動低燃料提醒冷卻（避免每輪重複提醒）。"""
+    try:
+        path = DATA_DIR / "buying_power_vol_alert_state.json"
+        st = load_json_file(path, {})
+        if not isinstance(st, dict):
+            st = {}
+        last_ts = float(st.get("last_sent_ts") or 0)
+        if last_ts > 0 and (now_ts - last_ts) < max(60, cool_min * 60):
+            logger.info(
+                "[牛市燃料·波動提醒] 冷卻中，距上次 %.1f 分鐘 < %d 分鐘，略過提醒",
+                (now_ts - last_ts) / 60.0,
+                cool_min,
+            )
+            return False
+        st["last_sent_ts"] = int(now_ts)
+        save_json_file(path, st)
+        return True
+    except Exception as e:
+        logger.debug("[牛市燃料·波動提醒] 冷卻狀態檔異常，視為可發送: %s", e)
+        return True
+
+
 def buying_power_monitor():
     """【牛市燃料監控】場外穩定幣 + 場內 OI + 情緒／機構輔助指標（CoinGlass 為主）。"""
     logger.info("開始執行牛市燃料監控（CoinGlass 聚合 + 聰明錢拆分）...")
@@ -2151,9 +2199,53 @@ def buying_power_monitor():
         advice = "方向還在裝死，先當吃瓜看戲，等大戶表態再跟也不遲。"
         bar_label = "低燃料"
 
-    # 推播規則：積分 <3 完全不推播（連文字都不要）；僅在「會對 TG／Discord @everyone」
-    # 的同一條件成立時才發雙平台（避免低燃料洗版）。
+    # 推播規則：預設積分 <3 不推播；但可開啟「高波動低燃料提醒」避免行情劇烈時完全靜默。
+    _vol_alert_on = os.getenv("BUYING_POWER_VOL_ALERT_ENABLED", "1").strip().lower() not in (
+        "0", "false", "off", "no"
+    )
+    _vol_alert_min_abs = max(0.5, min(12.0, _env_float("BUYING_POWER_VOL_ALERT_MIN_P15_ABS", 2.2)))
+    _vol_alert_cool_min = max(15, min(360, _crit_radar_env_int("BUYING_POWER_VOL_ALERT_COOLDOWN_MIN", 120)))
+
     if fuel_score < 3:
+        if _vol_alert_on:
+            major = _fetch_major_p15_snapshot()
+            btc_p15 = major.get("BTC")
+            eth_p15 = major.get("ETH")
+            trigger = (
+                (btc_p15 is not None and abs(btc_p15) >= _vol_alert_min_abs) or
+                (eth_p15 is not None and abs(eth_p15) >= _vol_alert_min_abs)
+            )
+            if trigger:
+                now_ts = time.time()
+                if _buying_power_vol_alert_should_fire(now_ts, _vol_alert_cool_min):
+                    btxt = "—" if btc_p15 is None else f"{btc_p15:+.2f}%"
+                    etxt = "—" if eth_p15 is None else f"{eth_p15:+.2f}%"
+                    vol_msg = "\n".join([
+                        "⚠️ *【高波動提醒｜低燃料環境】*",
+                        f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} 台北｜CoinGlass",
+                        "━━━━━━━━━━━━━━━━━━━",
+                        f"BTC 15m：`{btxt}` ｜ ETH 15m：`{etxt}`",
+                        f"目前燃料分：`{fuel_score}/10`（< 3，增量資金不足）",
+                        "",
+                        "📌 *解讀*：盤面波動很大，但油箱不夠；這種盤常見急拉急殺、假突破與來回清算。",
+                        "👉 建議：降槓桿／縮倉／等燃料回升再追。",
+                        "_此提醒屬風險提示，非做多或做空訊號。_",
+                    ])
+                    if jackbot_universal_pre_send_gatekeeper("buying_power_monitor", text=vol_msg):
+                        send_telegram_message(
+                            vol_msg,
+                            TG_THREAD_IDS.get("buying_power_monitor", 246),
+                            parse_mode="Markdown",
+                            discord_force_everyone=False,
+                        )
+                    logger.info(
+                        "[牛市燃料·波動提醒] 已發送（fuel=%s, BTC15m=%s, ETH15m=%s, 門檻=%.2f%%）",
+                        fuel_score,
+                        btxt,
+                        etxt,
+                        _vol_alert_min_abs,
+                    )
+                    return
         logger.info("[牛市燃料] 燃料積分=%s < 3，不推播（無文字）", fuel_score)
         return
     _dc_ping = _fuel_buying_power_dc_ping_everyone(
