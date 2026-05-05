@@ -11141,7 +11141,7 @@ def run_position_screener_board_once():
         f1 = snap.get("futures_1h")
         s1 = snap.get("spot_1h")
         if not isinstance(f1, (int, float)) and not isinstance(s1, (int, float)):
-            return "Netflow1H —"
+            return "資金流向1H：—"
         tot = (float(f1) if isinstance(f1, (int, float)) else 0.0) + (float(s1) if isinstance(s1, (int, float)) else 0.0)
         if abs(tot) >= 1_000_000:
             n = f"{tot/1_000_000:+.2f}M"
@@ -11149,7 +11149,8 @@ def run_position_screener_board_once():
             n = f"{tot/1_000:+.1f}K"
         else:
             n = f"{tot:+.0f}"
-        return f"Netflow1H {n}"
+        tone = "流入" if tot > 0 else ("流出" if tot < 0 else "中性")
+        return f"資金流向1H：{n}（{tone}）"
 
     def _fmt_item(idx: int, r: Dict[str, Any]) -> str:
         base = r.get("base") or ""
@@ -11164,8 +11165,9 @@ def run_position_screener_board_once():
         oi4_txt = f"{float(oi4h):+.2f}%" if isinstance(oi4h, (int, float)) else "—"
         oi15_txt = f"{float(oi15m):+.2f}%" if isinstance(oi15m, (int, float)) else "—"
         return (
-            f"    {idx}) `{sym_copy}`｜價格 {p1h:+.2f}%｜持倉 {oi1h:+.2f}%｜{_fr_short(base)}\n"
-            f"       4H {st4} {oi4_txt}｜1H {st1} {oi1h:+.2f}%｜15m {st15} {oi15_txt}｜{_td_triplet(base)}｜{_fmt_netflow_short(base)}"
+            f"    {idx}) `{sym_copy}`｜價 {p1h:+.2f}%｜倉 {oi1h:+.2f}%｜{_fr_short(base)}\n"
+            f"       4H {st4} {oi4_txt}｜1H {st1} {oi1h:+.2f}%｜15m {st15} {oi15_txt}\n"
+            f"       {_td_triplet(base)}｜{_fmt_netflow_short(base)}"
         )
 
     def _section(title: str, items: List[Dict[str, Any]]) -> str:
@@ -11174,6 +11176,9 @@ def run_position_screener_board_once():
         lines = [f"  {title}"]
         for i, r in enumerate(items, start=1):
             lines.append(_fmt_item(i, r))
+            lines.append("")
+        if lines and lines[-1] == "":
+            lines.pop()
         return "\n".join(lines)
 
     def _major_block() -> str:
@@ -11195,11 +11200,13 @@ def run_position_screener_board_once():
             oi4_txt = f"{float(oi4h):+.2f}%" if isinstance(oi4h, (int, float)) else "—"
             oi15_txt = f"{float(oi15m):+.2f}%" if isinstance(oi15m, (int, float)) else "—"
             lines.append(
-                f"  - `{sym_copy}`｜價格 {p1h:+.2f}%｜持倉 {oi1h:+.2f}%｜{_fr_short(base)}"
+                f"  - `{sym_copy}`｜價 {p1h:+.2f}%｜倉 {oi1h:+.2f}%｜{_fr_short(base)}"
             )
             lines.append(
-                f"    4H {st4} {oi4_txt}｜1H {st1} {oi1h:+.2f}%｜15m {st15} {oi15_txt}｜{_td_triplet(base)}"
-                f"｜{_fmt_netflow_short(base)}"
+                f"    4H {st4} {oi4_txt}｜1H {st1} {oi1h:+.2f}%｜15m {st15} {oi15_txt}"
+            )
+            lines.append(
+                f"    {_td_triplet(base)}｜{_fmt_netflow_short(base)}"
             )
         return "\n".join(lines)
 
@@ -17225,6 +17232,7 @@ def run_gold_signal():
         state_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         state_path = gold_bot_dir / "gold_signal_state.json"
+    no_signal_state_path = state_dir / "no_signal_state.json"
 
     def _load_gold_state():
         try:
@@ -17241,6 +17249,23 @@ def run_gold_signal():
                 json.dump(s, f, ensure_ascii=False, indent=0)
         except Exception as e:
             logger.warning("[黃金訊號] 寫入狀態檔失敗: %s", e)
+
+    def _load_no_signal_state():
+        try:
+            if no_signal_state_path.exists():
+                with open(no_signal_state_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+        return {}
+
+    def _save_no_signal_state(s):
+        try:
+            with open(no_signal_state_path, "w", encoding="utf-8") as f:
+                json.dump(s, f, ensure_ascii=False, indent=0)
+        except Exception:
+            pass
 
     state = _load_gold_state()
     now_utc = datetime.now(timezone.utc)
@@ -17321,6 +17346,32 @@ def run_gold_signal():
     signal = compute_signal(df_1h, cfg)
     if signal is None:
         logger.info("[黃金訊號] 本輪無符合條件的 ORB+MA 訊號，跳過推播")
+        # 可選：無訊號也發「盤勢快報」，避免頻道長時間無動靜（預設開啟，帶冷卻避免洗版）
+        _no_sig_push_on = os.getenv("GOLD_SIGNAL_NO_SETUP_PUSH", "1").strip().lower() not in ("0", "false", "off", "no")
+        _no_sig_cd_min = max(30, min(720, int(round(_env_float("GOLD_SIGNAL_NO_SETUP_COOLDOWN_MIN", 180)))))
+        if _no_sig_push_on:
+            ns = _load_no_signal_state()
+            last_ts = float(ns.get("last_push_ts") or 0.0)
+            now_ts = time.time()
+            if (now_ts - last_ts) >= (_no_sig_cd_min * 60):
+                try:
+                    _last = df_1h.iloc[-1]
+                    _px = float(_last.get("close")) if _last is not None else None
+                    _ma40 = float(df_1h["close"].rolling(40).mean().iloc[-1]) if "close" in df_1h.columns else None
+                    _atr14 = float((df_1h["high"] - df_1h["low"]).rolling(14).mean().iloc[-1]) if set(("high", "low")).issubset(df_1h.columns) else None
+                except Exception:
+                    _px = _ma40 = _atr14 = None
+                _px_s = f"{_px:.2f}" if isinstance(_px, (int, float)) else "—"
+                _ma_s = f"{_ma40:.2f}" if isinstance(_ma40, (int, float)) else "—"
+                _atr_s = f"{_atr14:.2f}" if isinstance(_atr14, (int, float)) else "—"
+                _neutral_msg = (
+                    "🟡 黃金獵手｜盤勢快報（無進場）\n"
+                    f"現價 `{_px_s}` ｜ MA40 `{_ma_s}` ｜ ATR14 `{_atr_s}`\n"
+                    f"本輪 ORB+MA 未觸發進場條件，繼續等待破位訊號（冷卻 {_no_sig_cd_min} 分鐘）。"
+                )
+                if jackbot_universal_pre_send_gatekeeper("gold_signal_info", text=_neutral_msg):
+                    send_telegram_message(_neutral_msg, TG_THREAD_IDS.get("gold_signal", 254), parse_mode="Markdown")
+                    _save_no_signal_state({"last_push_ts": now_ts})
         return
     logger.info("[黃金訊號] 取得訊號: 方向=%s 進場=%s", signal.direction, signal.entry)
     # 數據過舊（例如週末休市）則不推播，避免「今天沒開盤卻收到訊號」
