@@ -42,8 +42,8 @@ jobs:
           TG_THREAD_IDS: ${{ secrets.TG_THREAD_IDS }}
           TG_THREAD_SCREENER_BOARD: 11584
           DC_TOKEN: ${{ secrets.DC_TOKEN }}
-          DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
-          DC_THREAD_IDSscreener_board: 1501259126741663799
+          # 直接指定：確保程式能找到 DC_THREAD_IDS['screener_board']
+          DC_THREAD_IDS: '{"screener_board":1501259126741663799}'
         run: |
           echo "=============================================="
           echo " Screener 看板推播啟動（每小時）"
