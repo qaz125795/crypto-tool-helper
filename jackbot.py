@@ -1052,9 +1052,12 @@ def _discord_content_with_mentions(
     """特定主題或呼叫端指定時，在 Discord 訊息前加 @everyone。
     經濟數據／預告須由呼叫端傳入 discord_force_everyone（僅滿星級事件為 True），不在此自動 tag。"""
     base = _convert_text_for_discord(text)
-    if not _notify_everyone_eligible(thread_id, force_everyone):
-        return base
-    return f"@everyone\n{base}".strip()
+    content = base if not _notify_everyone_eligible(thread_id, force_everyone) else f"@everyone\n{base}".strip()
+    # Discord content 最長 2000 字，過長時保留前段重點並提示至 TG 看完整版
+    if len(content) > 1950:
+        suffix = "\n\n...(Discord 精簡版，完整內容請看 Telegram)"
+        content = content[: max(0, 1950 - len(suffix))].rstrip() + suffix
+    return content
 
 
 def _telegram_content_with_mentions(
@@ -2312,41 +2315,48 @@ def buying_power_monitor():
     )
 
     lines = []
+    _newbie_text_mode = os.getenv("JACKBOT_NEWBIE_TEXT_MODE", "1").strip().lower() not in ("0", "false", "off", "no")
     lines.append("⛽ *【牛市燃料儀表板】*")
-    lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} 台北｜CoinGlass")
+    lines.append(f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} 台北")
     lines.append("━━━━━━━━━━━━━━━━━━━")
     lines.append(f"*{headline}*")
-    lines.append(f"*🧭 方向結論*：*{dir_tag}*")
+    lines.append(f"*🧭 市場方向*：*{dir_tag}*")
     lines.append(f"👉 {dir_why}")
-    lines.append(f"燃料條：`{fuel_bar}` {min(fuel_score, FUEL_DISPLAY_MAX)}/{FUEL_DISPLAY_MAX}（{bar_label}）")
+    if not _newbie_text_mode:
+        lines.append(f"燃料條：`{fuel_bar}` {min(fuel_score, FUEL_DISPLAY_MAX)}/{FUEL_DISPLAY_MAX}（{bar_label}）")
+    else:
+        lines.append(f"燃料溫度：{bar_label}")
     lines.append("")
 
     # USDT 溢價標籤
     if premium_boost:
-        lines.append(f"🔥 *USDT 真實買盤確認* (`+{usdt_premium:.3f}%`溢價)")
+        lines.append("🔥 USDT 狀態：真實買盤偏強")
     elif usdt_premium is not None and usdt_premium < -0.05:
-        lines.append(f"⚠️ USDT 折價 `{usdt_premium:+.3f}%`：疑似搬磚套利，非真實買盤")
+        lines.append("⚠️ USDT 狀態：偏折價，短線波動可能較亂")
     elif usdt_premium is not None:
-        lines.append(f"💱 USDT 溢價：`{usdt_premium:+.3f}%`（中性）")
+        lines.append("💱 USDT 狀態：中性")
 
     lines.append("")
     mcap_val = (mcap_change.get("latest_mcap") or 0) / 1_000_000_000
     mcap_emoji = "📈" if mcap_1h > 0 else "📉"
-    lines.append("💵 *場外：穩定幣池子（大概＝有多少彈藥在場邊）*")
-    lines.append(f"• 現在大概：`${mcap_val:.2f}B`")
-    lines.append(f"• 最近 1 小時：{mcap_emoji} `{mcap_1h:+.3f}%`（正的多半當好事看）")
+    lines.append("💵 *場外資金*")
+    if _newbie_text_mode:
+        lines.append("• 穩定幣池： " + ("增加中（場外彈藥變多）" if mcap_1h > 0 else "收縮中（場外彈藥變少）"))
+    else:
+        lines.append(f"• 現在大概：`${mcap_val:.2f}B`")
+        lines.append(f"• 最近 1 小時：{mcap_emoji} `{mcap_1h:+.3f}%`（正的多半當好事看）")
 
     # 聰明錢 OI 拆分區塊
     lines.append("")
-    lines.append("🧠 *誰在開倉？（粗分機構 vs 散戶槓桿）*")
+    lines.append("🧠 *誰在主導？*")
     if stable_chg is not None:
         _s_emoji = "🟢" if stable_chg > 0.1 else ("🔴" if stable_chg < -0.1 else "🟡")
-        lines.append(f"• 穩定幣保證金(機構)：{_s_emoji} `{stable_chg:+.3f}%`")
+        lines.append(f"• 機構側（穩定幣保證金）：{_s_emoji} " + ("偏積極" if stable_chg > 0.1 else ("偏保守" if stable_chg < -0.1 else "中性")))
     else:
         lines.append("• 穩定幣保證金：`暫無法拆分`（API 無回傳或限額；可參考下方全網 OI）")
     if coin_chg is not None:
         _c_emoji = "🟢" if coin_chg > 0.1 else ("🔴" if coin_chg < -0.1 else "🟡")
-        lines.append(f"• 幣本位保證金(散戶)：{_c_emoji} `{coin_chg:+.3f}%`")
+        lines.append(f"• 散戶側（幣本位保證金）：{_c_emoji} " + ("偏積極" if coin_chg > 0.1 else ("偏保守" if coin_chg < -0.1 else "中性")))
     else:
         lines.append("• 幣本位保證金：`暫無法拆分`（同上）")
     if smart_money is True:
@@ -2361,24 +2371,28 @@ def buying_power_monitor():
     oi_snap_1h = _format_oi_notional_billions((oi_change_1h or {}).get("latest_oi") if oi_change_1h else None)
     oi_emoji_15m = "🔥" if oi_15m_chg > 0 else "❄️"
     oi_emoji_1h = "🔥" if oi_1h_chg > 0 else "❄️"
-    lines.append("🎰 *場內：合約 OI（大家槓桿堆多少）*")
-    lines.append(
-        f"• 短一點（{_cg_interval('15m')}）：名目約 {oi_snap_15m} {oi_emoji_15m} "
-        f"這根跟前一根比 `{oi_15m_chg:+.2f}%`"
-    )
-    lines.append(
-        f"• 拉長看（{_cg_interval('1h')}）：名目約 {oi_snap_1h} {oi_emoji_1h} "
-        f"變化 `{oi_1h_chg:+.2f}%`"
-    )
+    lines.append("🎰 *場內槓桿*")
+    if _newbie_text_mode:
+        lines.append("• 短線槓桿： " + ("升溫中" if oi_15m_chg > 0 else "降溫中"))
+        lines.append("• 中線槓桿： " + ("升溫中" if oi_1h_chg > 0 else "降溫中"))
+    else:
+        lines.append(
+            f"• 短一點（{_cg_interval('15m')}）：名目約 {oi_snap_15m} {oi_emoji_15m} "
+            f"這根跟前一根比 `{oi_15m_chg:+.2f}%`"
+        )
+        lines.append(
+            f"• 拉長看（{_cg_interval('1h')}）：名目約 {oi_snap_1h} {oi_emoji_1h} "
+            f"變化 `{oi_1h_chg:+.2f}%`"
+        )
 
     # ── 機構資金區塊（Fear&Greed + BTC ETF + Coinbase溢價）──────────
     lines.append("")
-    lines.append("🏦 *情緒與美股那邊的錢（參考用）*")
+    lines.append("🏦 *外部情緒（參考）*")
     if fg_val is not None:
-        lines.append(f"• 恐懼貪婪：{fg_data.get('emoji','❓')} `{fg_val}` {fg_data.get('label','')}")
+        lines.append(f"• 恐懼貪婪：{fg_data.get('emoji','❓')} {fg_data.get('label','')}")
     if etf_data.get("label"):
         lines.append(f"• BTC ETF：{etf_data['label']}")
-    if etf_data.get("total_assets_usd"):
+    if etf_data.get("total_assets_usd") and not _newbie_text_mode:
         lines.append(f"• ETF總資產：`${etf_data['total_assets_usd']/1e9:.1f}B`")
     if cb_data.get("label"):
         lines.append(f"• {cb_data['label']}")
@@ -7276,6 +7290,8 @@ def build_report_message_tiered(
 
     sa_conflict_history：冷卻檔 history（含 grade），用於阻擋「先 S/A 順勢後又反向 R」。
     """
+    _newbie_text_mode = os.getenv("JACKBOT_NEWBIE_TEXT_MODE", "1").strip().lower() not in ("0", "false", "off", "no")
+
     def fmt_pct(num):
         if num is None or (isinstance(num, float) and (num != num)):
             return "0.00%"
@@ -7790,13 +7806,13 @@ def build_report_message_tiered(
                 return "• OI：30m OI 無法取得，先依價格結構與風控操作。", "• 注意：資料缺口時，倉位建議再降一級。"
 
             if oi_30 > 0 and (p_30 is None or p_30 >= 0):
-                oi_story = f"• OI：30m OI 增加 `{oi_30:+.2f}%`，代表新資金在進場偏多。"
+                oi_story = "• OI：新倉偏多在增加，代表買方有主動進場跡象。"
             elif oi_30 > 0 and p_30 < 0:
-                oi_story = f"• OI：30m OI 增加 `{oi_30:+.2f}%`，但價格下滑，偏向空方新倉在加碼。"
+                oi_story = "• OI：新倉在增加但價格偏弱，偏向空方加碼。"
             elif oi_30 < 0 and (p_30 is None or p_30 > 0):
-                oi_story = f"• OI：30m OI 減少 `{oi_30:+.2f}%`，價格走高，偏向空單回補推升。"
+                oi_story = "• OI：舊倉在減少且價格走高，偏向空單回補推升。"
             else:
-                oi_story = f"• OI：30m OI 減少 `{oi_30:+.2f}%`，偏向多單退場/止損，波動容易放大。"
+                oi_story = "• OI：舊倉在減少且價格偏弱，偏向多單退場／止損。"
 
             if _sig_subtype == "30m衝突":
                 oi_risk = "• 注意：30m 與 1H 方向衝突，屬逆勢訊號，請小倉、嚴守止損。"
@@ -7851,8 +7867,7 @@ def build_report_message_tiered(
             else:
                 _fr_desc = "略偏空"
             # 自動去尾零：0.0100% → 0.01%，-0.0500% → -0.05%
-            _fr_str = f"{_fr_val:+.4f}".rstrip('0').rstrip('.')
-            _fr_line = f"💸 費率： {_fr_str}% {_fr_desc}"
+            _fr_line = f"💸 費率： {_fr_desc}"
         else:
             _fr_line = "💸 費率： 無數據"
 
@@ -7861,13 +7876,13 @@ def build_report_message_tiered(
         _vol_src_tag = x.get("_vol_source", "CoinGlass")
         _src_note    = f" _{_vol_src_tag}_" if _vol_src_tag not in ("CoinGlass", "") else ""
         if vol_m_val >= 50:
-            _vol_line = f"📊 成交值 {vol_m_val:.0f}M ✅ 機構級"
+            _vol_line = "📊 流動性：機構級（很深）"
         elif vol_m_val >= 20:
-            _vol_line = f"📊 成交值 {vol_m_val:.0f}M ✅ 深度充足"
+            _vol_line = "📊 流動性：深度充足"
         elif vol_m_val >= 5:
-            _vol_line = f"📊 成交值 {vol_m_val:.1f}M{_src_note} ⚠️ 流動性偏低"
+            _vol_line = f"📊 流動性：偏低{_src_note}"
         elif vol_m_val > 0:
-            _vol_line = f"📊 成交值 {vol_m_val:.1f}M{_src_note} ⚠️ 極低流動性"
+            _vol_line = f"📊 流動性：極低{_src_note}"
         else:
             _vol_line = ""  # 無成交值資料時不顯示此行，避免誤導
 
@@ -7979,71 +7994,95 @@ def build_report_message_tiered(
         except Exception:
             pass
 
-        # ── 點位（舊版樣式）──────────────────────────────────────────────
-        msg_lines.append("**📌 點位**")
-        msg_lines.append(f"進場 `{_entry_now_txt}`")
-        _atr_zone = float(atr_val) * MARKET_ENTRY_ZONE_ATR if atr_val and isinstance(atr_val, (int, float)) else None
-        _tp2_rr_msg = float(_calc_tp1_r_ratio(_entry_price, sl, tp2) or 0.0) if _entry_price and tp2 else 0.0
-        if _tp2_rr_msg <= 0:
-            _tp2_rr_msg = float(TP2_R_MULTIPLIER)
-        _tp2_compact = (
-            f" TP2 `{_tp2_txt}`（{_tp2_rr_msg:.1f}R 餘{int(TP2_EXIT_RATIO * 100)}%）"
-            if _tp2_txt
-            else ""
-        )
-        msg_lines.append(
-            f"TP1 `{_tp1_txt}`（{TP1_R_MULTIPLIER:.1f}R 平{int(TP1_EXIT_RATIO * 100)}% 移SL至進場）"
-            f"{_tp2_compact} ｜ SL `{_sl_txt}`"
-        )
-        if _atr_zone and _atr_zone > 0:
-            _ideal_lo = _entry_price - _atr_zone
-            _ideal_hi = _entry_price + _atr_zone
-            msg_lines.append(
-                f"市價帶 `{_fmt_price(_ideal_lo)}`～`{_fmt_price(_ideal_hi)}`（±{MARKET_ENTRY_ZONE_ATR:.2f}ATR）｜超區勿追"
-            )
-        else:
-            msg_lines.append("市價帶 `—`")
+        def _strategy_comment(cat: str, ver: str) -> str:
+            if ver == "confirmed":
+                if cat == "long_open":
+                    return "主力共振偏多，順勢做多。"
+                if cat == "short_open":
+                    return "主力共振偏空，順勢做空。"
+                if cat in ("short_cover", "short_close"):
+                    return "空方回補，短線偏多。"
+                return "多方退場，短線偏空。"
+            return "目前偏觀察，先小倉。"
 
-        msg_lines.append(_GATE_PRICE_SOURCE_NOTE)
-
-        # ── 均價／錨（舊版樣式）────────────────────────────────────────
-        msg_lines.append("**📊 均價／錨**")
-        if _vwap_show is not None:
-            _vwap_part = f"2h VWAP `{_fmt_price(_vwap_show)}`"
-        else:
-            _vwap_part = "2h VWAP —"
-        if _vwap_anchor_show is not None:
-            _anchor_time_s = ""
-            if _vwap_anchor_ts_show > 0:
-                try:
-                    _anchor_time_s = " " + datetime.fromtimestamp(
-                        float(_vwap_anchor_ts_show), tz=TAIPEI_TZ
-                    ).strftime("%m-%d %H:%M")
-                except (OSError, ValueError, OverflowError):
-                    _anchor_time_s = ""
-            _stars_inline = ("⭐" * _anch_fit_stars) if _anch_fit_stars > 0 else ""
-            msg_lines.append(
-                f"{_vwap_part} ｜ 錨 `{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
-                f"{(' ' + _stars_inline) if _stars_inline else ''}"
-            )
-            _anchor_hint_disp = str(x.get("_anchor_sizing_hint") or "").strip()
-            if _anchor_hint_disp:
-                msg_lines.append(f"倉位：{_anchor_hint_disp}")
-        else:
-            msg_lines.append(f"{_vwap_part} ｜ 錨 —")
-
-        # ── 環境（舊版）──────────────────────────────────────────────
-        msg_lines.append("**🌍 環境**")
-        msg_lines.append(f"4H：{_macro_trend} · {_macro_ema_txt}{_rsi_4h_str if _rsi_4h_str else ''} ｜ 模式 `市價`")
         _oi_story_line, _oi_risk_line = _build_oi_plain_lines()
-        msg_lines.append(_oi_story_line)
-        if "先看是否守住止損位" not in _oi_risk_line:
-            msg_lines.append(_oi_risk_line)
-        msg_lines.append(
-            _fr_line.replace("💸 費率： ", "💸 **費率：** `").replace("% ", "%` ", 1)
-            if _fr_line.startswith("💸 費率： ") and "無數據" not in _fr_line
-            else _fr_line.replace("💸 費率： 無數據", "💸 **費率：** 無數據")
-        )
+        if _newbie_text_mode:
+            msg_lines.append("**📌 懶人操作**")
+            msg_lines.append(f"方向：{_dir_str}｜建議：{'可小倉跟單' if _grade in ('S', 'A') else '先觀察'}")
+            msg_lines.append(f"進場 `{_entry_now_txt}`｜SL `{_sl_txt}`｜TP `{_tp1_txt}`")
+            msg_lines.append(_oi_story_line.replace("• ", "🧠 "))
+            if "先看是否守住止損位" not in _oi_risk_line:
+                msg_lines.append(_oi_risk_line.replace("• ", "⚠️ "))
+            msg_lines.append(_fr_line)
+            if _vol_line:
+                msg_lines.append(_vol_line)
+            msg_lines.append(f"💡 {_strategy_comment(category, _sig_version)}")
+            msg_lines.append(_GATE_PRICE_SOURCE_NOTE)
+        else:
+            # ── 點位（舊版樣式）──────────────────────────────────────────────
+            msg_lines.append("**📌 點位**")
+            msg_lines.append(f"進場 `{_entry_now_txt}`")
+            _atr_zone = float(atr_val) * MARKET_ENTRY_ZONE_ATR if atr_val and isinstance(atr_val, (int, float)) else None
+            _tp2_rr_msg = float(_calc_tp1_r_ratio(_entry_price, sl, tp2) or 0.0) if _entry_price and tp2 else 0.0
+            if _tp2_rr_msg <= 0:
+                _tp2_rr_msg = float(TP2_R_MULTIPLIER)
+            _tp2_compact = (
+                f" TP2 `{_tp2_txt}`（{_tp2_rr_msg:.1f}R 餘{int(TP2_EXIT_RATIO * 100)}%）"
+                if _tp2_txt
+                else ""
+            )
+            msg_lines.append(
+                f"TP1 `{_tp1_txt}`（{TP1_R_MULTIPLIER:.1f}R 平{int(TP1_EXIT_RATIO * 100)}% 移SL至進場）"
+                f"{_tp2_compact} ｜ SL `{_sl_txt}`"
+            )
+            if _atr_zone and _atr_zone > 0:
+                _ideal_lo = _entry_price - _atr_zone
+                _ideal_hi = _entry_price + _atr_zone
+                msg_lines.append(
+                    f"市價帶 `{_fmt_price(_ideal_lo)}`～`{_fmt_price(_ideal_hi)}`（±{MARKET_ENTRY_ZONE_ATR:.2f}ATR）｜超區勿追"
+                )
+            else:
+                msg_lines.append("市價帶 `—`")
+
+            msg_lines.append(_GATE_PRICE_SOURCE_NOTE)
+
+            # ── 均價／錨（舊版樣式）────────────────────────────────────────
+            msg_lines.append("**📊 均價／錨**")
+            if _vwap_show is not None:
+                _vwap_part = f"2h VWAP `{_fmt_price(_vwap_show)}`"
+            else:
+                _vwap_part = "2h VWAP —"
+            if _vwap_anchor_show is not None:
+                _anchor_time_s = ""
+                if _vwap_anchor_ts_show > 0:
+                    try:
+                        _anchor_time_s = " " + datetime.fromtimestamp(
+                            float(_vwap_anchor_ts_show), tz=TAIPEI_TZ
+                        ).strftime("%m-%d %H:%M")
+                    except (OSError, ValueError, OverflowError):
+                        _anchor_time_s = ""
+                _stars_inline = ("⭐" * _anch_fit_stars) if _anch_fit_stars > 0 else ""
+                msg_lines.append(
+                    f"{_vwap_part} ｜ 錨 `{_fmt_price(_vwap_anchor_show)}`{_anchor_time_s}"
+                    f"{(' ' + _stars_inline) if _stars_inline else ''}"
+                )
+                _anchor_hint_disp = str(x.get("_anchor_sizing_hint") or "").strip()
+                if _anchor_hint_disp:
+                    msg_lines.append(f"倉位：{_anchor_hint_disp}")
+            else:
+                msg_lines.append(f"{_vwap_part} ｜ 錨 —")
+
+            # ── 環境（舊版）──────────────────────────────────────────────
+            msg_lines.append("**🌍 環境**")
+            msg_lines.append(f"4H：{_macro_trend} · {_macro_ema_txt}{_rsi_4h_str if _rsi_4h_str else ''} ｜ 模式 `市價`")
+            msg_lines.append(_oi_story_line)
+            if "先看是否守住止損位" not in _oi_risk_line:
+                msg_lines.append(_oi_risk_line)
+            msg_lines.append(
+                _fr_line.replace("💸 費率： ", "💸 **費率：** `").replace("% ", "%` ", 1)
+                if _fr_line.startswith("💸 費率： ") and "無數據" not in _fr_line
+                else _fr_line.replace("💸 費率： 無數據", "💸 **費率：** 無數據")
+            )
         try:
             _btc_pen = float(_btc_1h_pct) if _btc_1h_pct is not None else None
         except (TypeError, ValueError):
@@ -8055,19 +8094,10 @@ def build_report_message_tiered(
         for _macro_ln in format_btc_macro_1h_plain_lines(_btc_pen, _btc_oi_txt_v):
             msg_lines.append(_macro_ln.replace("*BTC 大盤 1h*", "**BTC 大盤 1h（白話）**"))
 
-        def _strategy_comment(cat: str, ver: str) -> str:
-            if ver == "confirmed":
-                if cat == "long_open":
-                    return "主力三層共振建多倉，動能明確，右側追多機會！"
-                if cat == "short_open":
-                    return "主力三層共振建空倉，空頭動能確認，右側追空機會！"
-                if cat in ("short_cover", "short_close"):
-                    return "空方三層共振回補，軋空燃料充足，右側做多機會！"
-                return "多方三層共振平倉，看空動能聚積，右側做空機會！"
-            return "籌碼方向確認中，嚴守止損。"
-        msg_lines.append(f"**💡** {_strategy_comment(category, _sig_version)}")
-        if _vol_line:
-            msg_lines.append(_vol_line.replace("📊 成交值 ", "📊 成交值 `").replace("M ", "M` ", 1))
+        if (not _newbie_text_mode):
+            msg_lines.append(f"**💡** {_strategy_comment(category, _sig_version)}")
+            if _vol_line:
+                msg_lines.append(_vol_line.replace("📊 成交值 ", "📊 成交值 `").replace("M ", "M` ", 1))
 
         # 機讀資料：不貼在 Telegram（避免群組出現 JSON）；寫入 log + item 供後台／審計讀取
         _fr_ai = (
@@ -11116,25 +11146,39 @@ def run_position_screener_board_once():
     def _fr_short(base: str) -> str:
         fr = funding_map.get(base)
         if fr is None:
-            return "費率 —"
-        fr_pct = fr * 100.0
+            return "費率：無資料"
         if fr > FUNDING_EXTREME:
-            fr_desc = "偏多"
+            fr_desc = "偏多（多頭略擁擠）"
         elif fr < -FUNDING_EXTREME:
-            fr_desc = "偏空"
+            fr_desc = "偏空（空頭略擁擠）"
         else:
             fr_desc = "中性"
-        fr_str = f"{fr_pct:+.4f}%".rstrip("0").rstrip(".")
-        return f"費率 {fr_str}（{fr_desc}）"
+        return f"費率：{fr_desc}"
 
     def _td_triplet(base: str) -> str:
-        def _fmt(v: Optional[float]) -> str:
-            if v is None:
-                return "-"
-            if float(v).is_integer():
-                return str(int(v))
-            return f"{float(v):.1f}"
-        return f"TD15m/1H/4H {_fmt(td15_map.get(base))}/{_fmt(td1h_map.get(base))}/{_fmt(td4h_map.get(base))}"
+        def _td_state(v: Optional[float]) -> str:
+            if not isinstance(v, (int, float)):
+                return "⚪無"
+            x = float(v)
+            if x >= 13:
+                return "⚠️多過熱"
+            if x >= 6:
+                return "🟢多延續"
+            if x >= 1:
+                return "🌱多啟動"
+            if x <= -13:
+                return "⚠️空過熱"
+            if x <= -6:
+                return "🔴空延續"
+            if x <= -1:
+                return "🍂空啟動"
+            return "⚪中性"
+        return (
+            "🧭TD："
+            f"15m{_td_state(td15_map.get(base))}｜"
+            f"1H{_td_state(td1h_map.get(base))}｜"
+            f"4H{_td_state(td4h_map.get(base))}"
+        )
 
     def _fmt_netflow_short(base: str) -> str:
         snap = netflow_map.get(base) or {}
@@ -11143,14 +11187,28 @@ def run_position_screener_board_once():
         if not isinstance(f1, (int, float)) and not isinstance(s1, (int, float)):
             return "資金流向1H：—"
         tot = (float(f1) if isinstance(f1, (int, float)) else 0.0) + (float(s1) if isinstance(s1, (int, float)) else 0.0)
-        if abs(tot) >= 1_000_000:
-            n = f"{tot/1_000_000:+.2f}M"
-        elif abs(tot) >= 1_000:
-            n = f"{tot/1_000:+.1f}K"
-        else:
-            n = f"{tot:+.0f}"
         tone = "流入" if tot > 0 else ("流出" if tot < 0 else "中性")
-        return f"資金流向1H：{n}（{tone}）"
+        return f"資金流向1H：{tone}"
+
+    def _price_tone(v: Optional[float]) -> str:
+        if not isinstance(v, (int, float)):
+            return "價格：無資料"
+        x = float(v)
+        if x >= 1.0:
+            return "價格：偏強"
+        if x <= -1.0:
+            return "價格：偏弱"
+        return "價格：盤整"
+
+    def _oi_tone(v: Optional[float]) -> str:
+        if not isinstance(v, (int, float)):
+            return "持倉：無資料"
+        x = float(v)
+        if x >= 0.8:
+            return "持倉：增倉"
+        if x <= -0.8:
+            return "持倉：減倉"
+        return "持倉：變化小"
 
     def _fmt_item(idx: int, r: Dict[str, Any]) -> str:
         base = r.get("base") or ""
@@ -11162,11 +11220,9 @@ def run_position_screener_board_once():
         st4 = r.get("state_4h") or "資料不足"
         st1 = r.get("state_1h") or "資料不足"
         st15 = r.get("state_15m") or "資料不足"
-        oi4_txt = f"{float(oi4h):+.2f}%" if isinstance(oi4h, (int, float)) else "—"
-        oi15_txt = f"{float(oi15m):+.2f}%" if isinstance(oi15m, (int, float)) else "—"
         return (
-            f"    {idx}) `{sym_copy}`｜價 {p1h:+.2f}%｜倉 {oi1h:+.2f}%｜{_fr_short(base)}\n"
-            f"       4H {st4} {oi4_txt}｜1H {st1} {oi1h:+.2f}%｜15m {st15} {oi15_txt}\n"
+            f"    {idx}) 🎯 `{sym_copy}`｜{_price_tone(p1h)}｜{_oi_tone(oi1h)}｜{_fr_short(base)}\n"
+            f"       ⏱ 4H {st4}｜1H {st1}｜15m {st15}\n"
             f"       {_td_triplet(base)}｜{_fmt_netflow_short(base)}"
         )
 
@@ -11197,13 +11253,11 @@ def run_position_screener_board_once():
             st4 = rr.get("state_4h") or "資料不足"
             st1 = rr.get("state_1h") or "資料不足"
             st15 = rr.get("state_15m") or "資料不足"
-            oi4_txt = f"{float(oi4h):+.2f}%" if isinstance(oi4h, (int, float)) else "—"
-            oi15_txt = f"{float(oi15m):+.2f}%" if isinstance(oi15m, (int, float)) else "—"
             lines.append(
-                f"  - `{sym_copy}`｜價 {p1h:+.2f}%｜倉 {oi1h:+.2f}%｜{_fr_short(base)}"
+                f"  - 🧱 `{sym_copy}`｜{_price_tone(p1h)}｜{_oi_tone(oi1h)}｜{_fr_short(base)}"
             )
             lines.append(
-                f"    4H {st4} {oi4_txt}｜1H {st1} {oi1h:+.2f}%｜15m {st15} {oi15_txt}"
+                f"    ⏱ 4H {st4}｜1H {st1}｜15m {st15}"
             )
             lines.append(
                 f"    {_td_triplet(base)}｜{_fmt_netflow_short(base)}"
@@ -11211,12 +11265,12 @@ def run_position_screener_board_once():
         return "\n".join(lines)
 
     msg = (
-        "看板｜市場地圖\n\n"
-        f"{_section('主力出貨獲利了結跡象 TOP 3', t_take_profit)}\n\n"
-        f"{_section('主力進場吸籌跡象 TOP 3', t_accumulate)}\n\n"
-        f"{_section('主力停損認賠跡象 TOP 3', t_stop_loss)}\n\n"
-        f"{_section('主力停損 新主力進場跡象 TOP 3', t_rotate)}\n\n"
-        f"{_major_block()}"
+        "🧭 看板｜市場地圖\n\n"
+        f"{_section('📤 主力出貨獲利了結跡象 TOP 3', t_take_profit)}\n\n"
+        f"{_section('📥 主力進場吸籌跡象 TOP 3', t_accumulate)}\n\n"
+        f"{_section('🩹 主力停損認賠跡象 TOP 3', t_stop_loss)}\n\n"
+        f"{_section('🔄 主力停損 新主力進場跡象 TOP 3', t_rotate)}\n\n"
+        f"⭐ {_major_block()}"
     )
     send_telegram_message(msg, target_thread)
     logger.info(
@@ -16098,11 +16152,19 @@ def run_crit_radar_once() -> None:
             oi15s = f"{float(oi15):+.2f}%" if oi15 is not None else "—"
         except (TypeError, ValueError):
             oi15s = "—"
+        try:
+            oi15f = float(oi15) if oi15 is not None else None
+        except (TypeError, ValueError):
+            oi15f = None
         tk = it.get("_taker_ratio_15m")
         try:
             tks = f"{float(tk):.0f}%" if tk is not None else "—"
         except (TypeError, ValueError):
             tks = "—"
+        try:
+            tkf = float(tk) if tk is not None else None
+        except (TypeError, ValueError):
+            tkf = None
         try:
             frs = f"{float(fr) * 100:.4f}%" if fr is not None else "—"
         except (TypeError, ValueError):
@@ -16117,6 +16179,24 @@ def run_crit_radar_once() -> None:
             fr_note = "費率偏空（空付多）"
         else:
             fr_note = "費率中性"
+        if oi15f is None:
+            oi_note = "持倉動能不明"
+        elif oi15f >= 2.0:
+            oi_note = "主力增倉明顯"
+        elif oi15f > 0:
+            oi_note = "主力小幅增倉"
+        elif oi15f <= -2.0:
+            oi_note = "主力明顯減倉"
+        else:
+            oi_note = "主力小幅減倉"
+        if tkf is None:
+            tk_note = "主動買賣不明"
+        elif tkf >= 58:
+            tk_note = "買盤主導"
+        elif tkf <= 42:
+            tk_note = "賣盤主導"
+        else:
+            tk_note = "多空拉鋸"
         nf_snap = fetch_coin_netflow_snapshot(sym)
         nf_f_1h = nf_snap.get("futures_1h")
         nf_s_1h = nf_snap.get("spot_1h")
@@ -16124,33 +16204,45 @@ def run_crit_radar_once() -> None:
             nf_total_1h = (float(nf_f_1h) if isinstance(nf_f_1h, (int, float)) else 0.0) + (
                 float(nf_s_1h) if isinstance(nf_s_1h, (int, float)) else 0.0
             )
-            if abs(nf_total_1h) >= 1_000_000:
-                nf_1h_s = f"{nf_total_1h/1_000_000:+.2f}M"
-            elif abs(nf_total_1h) >= 1_000:
-                nf_1h_s = f"{nf_total_1h/1_000:+.1f}K"
-            else:
-                nf_1h_s = f"{nf_total_1h:+.0f}"
+            nf_1h_s = "資金流入" if nf_total_1h > 0 else ("資金流出" if nf_total_1h < 0 else "資金中性")
         else:
-            nf_1h_s = "—"
+            nf_1h_s = "資金流向不明"
         td15_raw = it.get("_td15")
         try:
             td15_s = str(int(float(td15_raw))) if td15_raw is not None else "—"
         except (TypeError, ValueError):
             td15_s = "—"
+        try:
+            td15_v = float(td15_raw) if td15_raw is not None else None
+        except (TypeError, ValueError):
+            td15_v = None
+        if td15_v is None:
+            td_note = "中性/等待"
+        elif td15_v >= 6:
+            td_note = "多方延續"
+        elif td15_v <= -6:
+            td_note = "空方延續"
+        elif td15_v > 0:
+            td_note = "多方啟動"
+        elif td15_v < 0:
+            td_note = "空方啟動"
+        else:
+            td_note = "中性/等待"
 
         msg_lines = [
             "💥 *爆擊雷達*",
             "────────────────",
             f"📍 *標的* · `{sym}USDT` · 週期 `15m`",
             f"📍 *方向* · {dir_zh}",
-            f"📍 *共振分* · `{score}`／100",
+            "📍 *狀態* · 已達爆擊門檻",
             "",
             "*〔籌碼／價格〕*",
-            f"• OI 15m：`{oi15s}`",
-            f"• 價 15m：`{p15s}`",
-            f"• 主動買比：`{tks}`",
-            f"• 資金費：`{frs}` · {fr_note}",
-            f"• TD15m：`{td15_s}` ｜ Netflow 1H：`{nf_1h_s}`",
+            f"• 持倉動能：{oi_note}",
+            f"• 價格節奏：{'上行偏強' if p15f > 0 else ('下行偏弱' if p15f < 0 else '盤整')}",
+            f"• 盤口主導：{tk_note}",
+            f"• 費率氛圍：{fr_note}",
+            f"• TD節奏：{td_note}",
+            f"• 資金趨勢：{nf_1h_s}",
             "",
             "*〔參考價〕* · Gate USDT 永續",
             f"進場 `{ent_s}` ｜ SL `{sl_s}` ｜ TP `{tp_s}`",
