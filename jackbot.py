@@ -8158,23 +8158,22 @@ def build_report_message_tiered(
             _title_tail = f"{_title_tail} {_star_emoji}"
         if _newbie_text_mode:
             _grade_badge = {"S": "🏆S", "A": "🥇A", "R": "⚡R"}.get(_grade, f"🧪{_grade}")
-            msg_lines.append(f"{_dir_emoji} {sig_emoji} `{sym_base}` `{_grade_badge}`")
-            # 小白也要看得懂「這單是逆勢還是順勢、回調還是突破」
             if _grade == "R":
                 _style = "逆勢摸底" if is_bull_sig else "逆勢摸頭"
             elif _sig_subtype == "pullback" or "回踩" in str(_sig_subtype):
-                _style = "順勢回調完成"
+                _style = "回調完成"
             elif _zone_now == ZONE_BREAKOUT_LONG:
-                _style = "順勢追突破"
+                _style = "追突破"
             elif _zone_now == ZONE_BREAKOUT_SHORT:
-                _style = "順勢追跌破"
+                _style = "追跌破"
             elif _zone_now == ZONE_DIP:
-                _style = "回檔低接"
+                _style = "低接做多"
             elif _zone_now == ZONE_TOP:
-                _style = "反彈高空"
+                _style = "高空做空"
             else:
-                _style = "方向觀察"
-            msg_lines.append(f"📎 訊號型態：{_style}")
+                _style = "籌碼異動"
+            # 標題一行：方向 + 訊號類型 + 評級
+            msg_lines.append(f"{_dir_emoji} {sig_emoji} `{sym_base}` · {_style} · `{_grade_badge}`")
         else:
             msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` {_title_tail}")
             msg_lines.append(f"{_badge_emo} `{_ver_short}` {_type_str}｜{_tactic_emo}{_tactic_txt} · {_regime_txt}")
@@ -8291,19 +8290,15 @@ def build_report_message_tiered(
             _tp1_rr_newbie = float(_calc_tp1_r_ratio(_entry_price, sl, tp1) or TP1_R_MULTIPLIER)
 
             msg_lines.append("━━━━━━━━━━━━━━━━")
-            msg_lines.append("📋 *操作計畫*")
-            msg_lines.append(f"1️⃣ 主導方：{_lead}")
-            msg_lines.append(f"2️⃣ 可否跟單：{_can_follow}")
-            msg_lines.append("   （🏆S=3-5% · 🥇A=1-3% · ⚡R=≤1%）")
-            msg_lines.append("3️⃣ 點位（Gate USDT 永續）")
-            msg_lines.append(f"   🎯 進場  `{_entry_now_txt}`")
-            msg_lines.append(f"   🛑 止損  `{_sl_txt}` ← 守不住就出，不凹")
-            msg_lines.append(f"   🥇 停利1 `{_tp1_txt}`（{_tp1_rr_newbie:.1f}R）→ 先平一半，SL移到進場價")
+            msg_lines.append(f"🎯 進場  `{_entry_now_txt}`")
+            msg_lines.append(f"🛑 止損  `{_sl_txt}`")
+            msg_lines.append(f"🥇 停利1 `{_tp1_txt}`（{_tp1_rr_newbie:.1f}R）→ 先平一半，SL移成本")
             if _tp2_line_newbie:
                 msg_lines.append(_tp2_line_newbie)
-            msg_lines.append(f"4️⃣ 注意：{_risk_txt}")
-            msg_lines.append("")
+            msg_lines.append("━━━━━━━━━━━━━━━━")
             msg_lines.append(f"💡 {_conclusion}")
+            if _already_moving:
+                msg_lines.append("⚠️ 車已發動，分批進場")
             msg_lines.append(_GATE_PRICE_SOURCE_NOTE)
         else:
             # ── 點位（舊版樣式）──────────────────────────────────────────────
@@ -11558,45 +11553,45 @@ def run_position_screener_board_once():
         # ---------- bucket 結論 ----------
         if bucket == "主力出貨獲利了結跡象":
             if fr_heavy_long or td_long_exhaust:
-                return "💡 漲太快了，短線容易回落；有賺先收一點比較安全"
+                return "💡 偏空｜漲太快費率偏高，可試做空或先平多單"
             if fr_slight_long and nf_out:
-                return "💡 買盤變少了，短線可能先休息；先把利潤拿穩"
+                return "💡 偏弱｜買盤縮退，多單先獲利了結；可觀察空單機會"
             if nf_in:
-                return "💡 雖然有人先下車，但新錢還在進，拉回後還有機會再上"
-            return "💡 短線先休息，等跌勢放慢再考慮進場"
+                return "💡 偏多但有分歧｜仍有資金流入，拉回後還有機會再上"
+            return "💡 偏弱｜短線先休息，等方向再選邊"
 
         if bucket == "主力進場吸籌跡象":
             if fr_heavy_short or td_short_exhaust:
-                return "💡 做空的人太多，容易被反殺往上；偏多看待"
+                return "💡 偏多｜空方太擠，容易被軋；可做多"
             if fr_slight_short:
-                return "💡 空單有點擠，加上買盤在接，短線偏多但別追太急"
+                return "💡 偏多｜空單略擠+買盤進場，可試做多但別追高"
             if td_multi_long and nf_in:
-                return "💡 多個時間都偏多，資金也在流入，順著做多勝率較高"
+                return "💡 偏多｜多方共振+資金流入，可做多"
             if fr_heavy_long:
-                return "💡 雖然偏多，但追高風險大；等回落一點再進"
+                return "💡 偏多但過熱｜等回落再進，追高風險大"
             if nf_in:
-                return "💡 錢持續進場，整體還是偏多"
-            return "💡 整體偏多，等價格回落再上車更穩"
+                return "💡 偏多｜資金持續流入，可做多"
+            return "💡 偏多｜等回落再進場更穩"
 
         if bucket == "主力停損認賠跡象":
             if fr_heavy_long:
-                return "💡 多單在停損，賣壓還沒結束，先不要急著抄底"
+                return "💡 偏空｜多單停損未完，可試做空，止損設在近高點"
             if td_short_exhaust:
-                return "💡 跌勢可能快結束，留意短彈，但先小倉"
+                return "💡 偏弱但接近極端｜跌勢快結束了，空單留意反彈風險"
             if "空頭開倉" in st4 or "空頭開倉" in st1:
-                return "💡 新空單一直加，短線偏空，反彈也先當逃命"
+                return "💡 偏空｜空單持續加碼，可順空，反彈先當出逃機會"
             if nf_out and td_multi_short:
-                return "💡 錢在流出，方向偏弱，先等跌勢放慢再進"
-            return "💡 買方先退了，短線偏弱，先觀望"
+                return "💡 偏空｜資金外流，可做空，等跌勢停頓再評估"
+            return "💡 偏空｜買方在退場，可試做空或等方向更明確"
 
         if bucket == "主力停損 新主力進場跡象":
             if fr_heavy_short or td_short_exhaust:
-                return "💡 空單太擠，容易被拉爆，可能突然上衝，可小倉試多"
+                return "💡 偏多｜空方太擠，容易被軋，可試做多，止損守近低"
             if nf_in and st15 in ("多頭開倉", "空頭平倉"):
-                return "💡 新錢進場且短線轉強，偏多嘗試，先看能不能站穩"
+                return "💡 偏多｜新資金進場，短線轉強，可試做多"
             if nf_out and "空頭開倉" in st15:
-                return "💡 賣方接手，短線偏空，先別急著接多"
-            return "💡 還在拉扯盤，方向不清楚，先等一邊明確再跟"
+                return "💡 偏空｜賣方接手，可試做空，但確認方向後再進"
+            return "💡 觀望｜拉扯中，方向未明，等突破確認再選邊"
 
         # ---------- 主流幣通用邏輯 ----------
         long_opens   = sum(1 for s in (st4, st1, st15) if "多頭開倉" in s)
@@ -11606,25 +11601,25 @@ def run_position_screener_board_once():
 
         if long_opens >= 2 and nf_in:
             if td_long_exhaust or fr_heavy_long:
-                return "💡 雖然偏多，但已經有點過熱，別追高"
-            return "💡 各時間都偏多而且有資金進場，順勢做多為主"
+                return "💡 偏多但過熱｜可做多，但別追高；等回調再進更穩"
+            return "💡 偏多｜多方共振+資金流入，可做多"
         if long_opens >= 2:
-            return "💡 整體偏多，但資金有流出，容易震盪"
+            return "💡 偏多但資金弱｜整體多方向，但資金外流，謹慎追多"
         if long_closes >= 2 and nf_out:
             if fr_heavy_long:
-                return "💡 多單停損加上資金流出，短線偏空"
-            return "💡 買方退場又沒新錢進來，先觀望"
+                return "💡 偏空｜多單大量停損+資金外流，可試做空"
+            return "💡 偏空｜買方撤退，可試做空或觀望"
         if short_opens >= 2:
             if fr_heavy_short or td_short_exhaust:
-                return "💡 空單有點擠，容易突然反彈，空單要小心"
-            return "💡 各時間都偏空，整體向下"
+                return "💡 空方過熱｜空單擠，小心反彈，空單設好止損"
+            return "💡 偏空｜空方共振，可做空"
         if short_closes >= 2 and nf_in:
-            return "💡 空單在回補又有資金進來，可能反彈"
+            return "💡 可能反彈｜空單在回補+資金流入，可試做多"
         if p1h_v > 0.5:
-            return "💡 短線有力但意見分歧，先觀望"
+            return "💡 短線偏強但訊號分歧，觀望為主"
         if p1h_v < -0.5:
-            return "💡 短線偏弱但不一致，先保守"
-        return "💡 現在還在拉扯，等方向明確再出手"
+            return "💡 短線偏弱，觀望或輕試做空"
+        return "💡 觀望｜方向未明，等突破確認再選邊"
 
     _STATE_SHORT = {
         "多頭開倉": "多方加碼🟢",
@@ -11663,25 +11658,15 @@ def run_position_screener_board_once():
         base = r.get("base") or ""
         sym_copy = f"{base}USDT"
         oi1h = r.get("oi1h") or 0.0
-        st4 = r.get("state_4h") or "資料不足"
-        st1 = r.get("state_1h") or "資料不足"
+        st4  = r.get("state_4h")  or "資料不足"
+        st1  = r.get("state_1h")  or "資料不足"
         st15 = r.get("state_15m") or "資料不足"
         bucket = r.get("trend_bucket") or ""
         conclusion = _build_conclusion(base, bucket, r)
-        if bucket in ("主力進場吸籌跡象",):
-            follow = "可小倉跟"
-        elif bucket in ("主力停損認賠跡象",):
-            follow = "先觀望"
-        elif bucket in ("主力出貨獲利了結跡象",):
-            follow = "先別追"
-        else:
-            follow = "等方向明確再跟"
         return (
-            f"    {idx}) 🎯 `{sym_copy}`\n"
-            f"       1) 目前：{_oi_tone(oi1h)}｜{_fr_short(base)}\n"
-            f"       2) 可不可以跟：{follow}\n"
-            f"       3) 狀態：{_tf_line(st4, st1, st15)}｜{_fmt_netflow_short(base)}\n"
-            f"       4) 結論：{conclusion}"
+            f"    {idx}) 🎯 `{sym_copy}`｜{_oi_tone(oi1h)}｜{_fr_short(base)}\n"
+            f"       {_tf_line(st4, st1, st15)}｜{_fmt_netflow_short(base)}\n"
+            f"       {conclusion}"
         )
 
     def _section(title: str, items: List[Dict[str, Any]]) -> str:
@@ -11696,46 +11681,31 @@ def run_position_screener_board_once():
         return "\n".join(lines)
 
     def _major_block() -> str:
-        lines: List[str] = ["主流幣快看（BTC/ETH/SOL）"]
+        lines: List[str] = ["⭐ 主流幣（BTC/ETH/SOL）"]
         for m in ("BTC", "ETH", "SOL"):
             rr = major_rows.get(m)
             if not rr:
                 lines.append(f"  - {m}｜無資料")
                 continue
-            base = rr["base"]
+            base  = rr["base"]
             sym_copy = f"{base}USDT"
-            oi1h = rr["oi1h"]
-            st4 = rr.get("state_4h") or "資料不足"
-            st1 = rr.get("state_1h") or "資料不足"
-            st15 = rr.get("state_15m") or "資料不足"
+            oi1h  = rr["oi1h"]
+            st4   = rr.get("state_4h")  or "資料不足"
+            st1   = rr.get("state_1h")  or "資料不足"
+            st15  = rr.get("state_15m") or "資料不足"
             conclusion = _build_conclusion(base, "", rr)
-            follow = "等方向明確再跟"
-            lines.append(
-                f"  - 🧱 `{sym_copy}`"
-            )
-            lines.append(
-                f"    1) 目前：{_oi_tone(oi1h)}｜{_fr_short(base)}"
-            )
-            lines.append(
-                f"    2) 可不可以跟：{follow}"
-            )
-            lines.append(
-                f"    3) 狀態：{_tf_line(st4, st1, st15)}｜{_fmt_netflow_short(base)}"
-            )
-            lines.append(
-                f"    4) 結論：{conclusion}"
-            )
+            lines.append(f"  🧱 `{sym_copy}`｜{_oi_tone(oi1h)}｜{_fr_short(base)}")
+            lines.append(f"     {_tf_line(st4, st1, st15)}｜{_fmt_netflow_short(base)}")
+            lines.append(f"     {conclusion}")
         return "\n".join(lines)
 
-    _ts_str = datetime.now(TAIPEI_TZ).strftime("%H:%M")
     msg = (
-        "🧭 *看板｜市場地圖*\n"
-        "_📚 用來練習自主判斷：看主力在哪個方向佈局，自己決定要不要進場_\n\n"
+        "🧭 *看板｜市場地圖*\n\n"
         f"{_section('📤 可能先回落 TOP 3', t_take_profit)}\n\n"
         f"{_section('📥 可能續漲 TOP 3', t_accumulate)}\n\n"
         f"{_section('🩹 目前偏弱 TOP 3', t_stop_loss)}\n\n"
         f"{_section('🔄 拉扯盤 TOP 3', t_rotate)}\n\n"
-        f"⭐ {_major_block()}"
+        f"{_major_block()}"
     )
     send_telegram_message(msg, target_thread)
     logger.info(
@@ -16981,19 +16951,13 @@ def run_crit_radar_once() -> None:
             f"🥇 近目標 `{tp_s}`（{actual_r:.1f}R · {tp_src}）→ 先平 60%",
         ] + _tp2_block + [
             "━━━━━━━━━━━━━━━━",
-            f"📊 籌碼：{oi_note}｜買賣力道：{tk_note}｜資金：{nf_1h_s}",
+            f"📊 {oi_note}｜{tk_note}｜資金{nf_1h_s}",
         ]
         if _rsi_note:
-            msg_lines.append(f"• {_rsi_note}")
+            msg_lines.append(f"⚠️ {_rsi_note}")
         msg_lines += [
             "",
             verdict_line,
-            "━━━━━━━━━━━━━━━━",
-            "🎮 *爆擊操作心法*",
-            "  • 倉位 1% 起步（小賠大賺型，允許多次小虧）",
-            "  • 近目標先平 60%，剩下讓它繼續跑",
-            "  • 止損一到立刻出，不加倉攤平",
-            "",
             _GATE_PRICE_SOURCE_NOTE,
         ]
         msg = "\n".join(msg_lines)
