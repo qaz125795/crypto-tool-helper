@@ -10779,10 +10779,10 @@ def fetch_position_change():
 def run_position_screener_board_once():
     """
     Screener 看板推播（每小時固定）：
-    1) 市場地圖：四象限統計 + Top movers + BTC/ETH/SOL 座標（一定有內容）
-    2) 可交易訊號：輕量嚴格門檻（不取代 position_change 的完整四層漏斗）
+    1) 市場地圖：開倉/平倉（多方/空方）TOP3 + 主流幣座標（一定有內容）
+    2) 每個 TOP 條目都帶 OI 15m / 1H / 4H + 資金費率（僅作參考）
     """
-    logger.info("🧭 Screener 看板推播啟動（每小時固定市場地圖 + 可交易訊號）")
+    logger.info("🧭 Screener 看板推播啟動（每小時固定市場地圖 + OI/費率參考）")
     all_symbols_data = fetch_coinglass_coins_markets()
     if not all_symbols_data:
         all_symbols_data = fetch_coins_price_change()
@@ -10817,27 +10817,25 @@ def run_position_screener_board_once():
         send_telegram_message(msg, target_thread)
         return
 
-    def _f(v: Any, default: float = 0.0) -> float:
+    def _to_opt_float(v: Any) -> Optional[float]:
         try:
+            if v is None:
+                return None
             return float(v)
         except (TypeError, ValueError):
-            return default
+            return None
 
     rows: List[Dict[str, Any]] = []
-    quad = {"long_open": 0, "short_open": 0, "short_cover": 0, "long_close": 0}
-    cat_alias = {
-        "long_open": "多單開倉",
-        "long_close": "多單平倉",
-        "short_open": "空單開倉",
-        "short_cover": "空單平倉",
-    }
+    # 建立「看板資料」：OI 1H + 價格 1H 的正負，對應四分類（多/空、開/平）
     for coin in filtered:
         symbol = normalize_symbol(coin) or ""
         base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
-        p30 = _f(extract_price_change_30m(coin))
-        p1h = _f(coin.get("price_change_percent_1h"))
-        oi1h = _f(extract_oi_change_1h(coin))
-        vol = _f(coin.get("_cg_volume_usd"))
+
+        p1h = _to_opt_float(coin.get("price_change_percent_1h"))
+        oi1h = extract_oi_change_1h(coin)
+        if p1h is None or oi1h is None:
+            continue
+
         if oi1h >= 0 and p1h >= 0:
             cat = "long_open"
         elif oi1h >= 0 and p1h < 0:
@@ -10846,89 +10844,142 @@ def run_position_screener_board_once():
             cat = "short_cover"
         else:
             cat = "long_close"
-        quad[cat] += 1
+
         rows.append(
             {
                 "base": base,
                 "symbol": symbol,
-                "p30": p30,
-                "p1h": p1h,
-                "oi1h": oi1h,
-                "vol": vol,
+                "p1h": float(p1h),
+                "oi1h": float(oi1h),
                 "cat": cat,
             }
         )
 
-    oi_top = sorted(rows, key=lambda x: abs(x["oi1h"]), reverse=True)[:5]
-    price_top = sorted(rows, key=lambda x: abs(x["p1h"]), reverse=True)[:5]
+    def _top3(cat_name: str) -> List[Dict[str, Any]]:
+        items = [r for r in rows if r["cat"] == cat_name]
+        items.sort(key=lambda x: abs(x.get("oi1h") or 0.0), reverse=True)
+        return items[:3]
 
-    tradable: List[Dict[str, Any]] = []
-    for x in rows:
-        oi_abs = abs(x["oi1h"])
-        p_abs = abs(x["p1h"])
-        vol = x["vol"]
-        base = x["base"]
-        oi_min = OI_THRESHOLD_MAIN if base in MAIN_COINS else (
-            OI_THRESHOLD_HIGH_LIQ if vol >= HIGH_LIQ_VOLUME_USD else OI_THRESHOLD_SMALL
-        )
-        if (
-            x["cat"] in ("long_open", "short_open")
-            and oi_abs >= oi_min
-            and p_abs >= 0.8
-            and vol >= MTF_VOLUME_MIN_USD
-        ):
-            x["score"] = oi_abs * 0.7 + p_abs * 0.3
-            tradable.append(x)
-    tradable = sorted(tradable, key=lambda z: z.get("score", 0.0), reverse=True)[:5]
+    long_open_top = _top3("long_open")      # 多方開倉：OI↑ 價格↑
+    long_close_top = _top3("long_close")    # 多方平倉：OI↓ 價格↓
+    short_open_top = _top3("short_open")    # 空方開倉：OI↑ 價格↓
+    short_cover_top = _top3("short_cover")  # 空方平倉：OI↓ 價格↑
 
-    major_lines: List[str] = []
+    major_rows: Dict[str, Dict[str, Any]] = {}
     for m in ("BTC", "ETH", "SOL"):
-        row = next((r for r in rows if r["base"] == m), None)
-        if row is None:
-            major_lines.append(f"- {m}: 無資料")
-            continue
-        major_lines.append(
-            f"- {m}: OI1H `{row['oi1h']:+.2f}%` | 價格30m `{row['p30']:+.2f}%` / 1H `{row['p1h']:+.2f}%` | {cat_alias.get(row['cat'], row['cat'])}"
-        )
+        mr = next((r for r in rows if r["base"] == m), None)
+        if mr is not None:
+            major_rows[m] = mr
 
-    def _fmt(items: List[Dict[str, Any]], field: str) -> str:
+    # 一次拉資金費率（做參考，不參與篩選）
+    funding_map = _fetch_funding_rate_map()
+
+    # 只對需要展示的幣種補取 OI 15m / 4H，避免全市場爆 API
+    need_bases: Set[str] = set()
+    for rr in (long_open_top + long_close_top + short_open_top + short_cover_top):
+        need_bases.add(rr["base"])
+    for k in major_rows.keys():
+        need_bases.add(k)
+
+    oi15m_map: Dict[str, Optional[float]] = {}
+    oi4h_map: Dict[str, Optional[float]] = {}
+    base_to_row: Dict[str, Dict[str, Any]] = {}
+    for rr in (long_open_top + long_close_top + short_open_top + short_cover_top):
+        base_to_row[rr["base"]] = rr
+    for k, rr in major_rows.items():
+        base_to_row[k] = rr
+
+    for base in need_bases:
+        rr = base_to_row.get(base)
+        if not rr:
+            continue
+        sym = rr.get("symbol") or (base + "USDT")
+        try:
+            oi15m_map[base] = fetch_oi_change_tf(sym, "15m")
+        except Exception:
+            oi15m_map[base] = None
+        try:
+            _oi_tf = _fetch_oi_multi_tf(sym)
+            oi4h_map[base] = _oi_tf.get("4h")
+        except Exception:
+            oi4h_map[base] = None
+
+    def _fr_short(base: str) -> str:
+        fr = funding_map.get(base)
+        if fr is None:
+            return "費率 —"
+        fr_pct = fr * 100.0
+        if fr > FUNDING_EXTREME:
+            fr_desc = "偏多"
+        elif fr < -FUNDING_EXTREME:
+            fr_desc = "偏空"
+        else:
+            fr_desc = "中性"
+        fr_str = f"{fr_pct:+.4f}%".rstrip("0").rstrip(".")
+        return f"費率 {fr_str}（{fr_desc}）"
+
+    def _fmt_item(idx: int, r: Dict[str, Any]) -> str:
+        base = r.get("base") or ""
+        p1h = r.get("p1h") or 0.0
+        oi1h = r.get("oi1h") or 0.0
+        oi15m = oi15m_map.get(base)
+        oi4h = oi4h_map.get(base)
+        extra_parts: List[str] = []
+        if isinstance(oi15m, (int, float)):
+            extra_parts.append(f"15m {float(oi15m):+.2f}%")
+        if isinstance(oi4h, (int, float)):
+            extra_parts.append(f"4H {float(oi4h):+.2f}%")
+        extra = f"（{' / '.join(extra_parts)}）" if extra_parts else ""
+        return f"    {idx}) {base}｜價格 {p1h:+.2f}%｜持倉 {oi1h:+.2f}%{extra}｜{_fr_short(base)}"
+
+    def _section(title: str, items: List[Dict[str, Any]]) -> str:
         if not items:
-            return "- 無"
-        lines = []
+            return f"  {title}\n    - 無"
+        lines = [f"  {title}"]
         for i, r in enumerate(items, start=1):
-            lines.append(f"- {i}. {r['base']} `{r[field]:+.2f}%` (OI `{r['oi1h']:+.2f}%`, 1H `{r['p1h']:+.2f}%`)")
+            lines.append(_fmt_item(i, r))
         return "\n".join(lines)
 
-    if tradable:
-        tradable_lines = []
-        for i, r in enumerate(tradable, start=1):
-            tradable_lines.append(
-                f"- {i}. {r['base']} | {cat_alias.get(r['cat'], r['cat'])} | OI1H `{r['oi1h']:+.2f}%` | 1H `{r['p1h']:+.2f}%` | 24h量 `{r['vol']/1e6:.1f}M`"
+    def _major_block() -> str:
+        lines: List[str] = ["主流幣座標（BTC/ETH/SOL）"]
+        for m in ("BTC", "ETH", "SOL"):
+            rr = major_rows.get(m)
+            if not rr:
+                lines.append(f"  - {m}｜無資料")
+                continue
+            base = rr["base"]
+            p1h = rr["p1h"]
+            oi1h = rr["oi1h"]
+            oi15m = oi15m_map.get(base)
+            oi4h = oi4h_map.get(base)
+            extra_parts: List[str] = []
+            if isinstance(oi15m, (int, float)):
+                extra_parts.append(f"15m {float(oi15m):+.2f}%")
+            if isinstance(oi4h, (int, float)):
+                extra_parts.append(f"4H {float(oi4h):+.2f}%")
+            extra = f"（{' / '.join(extra_parts)}）" if extra_parts else ""
+            lines.append(
+                f"  - {m}｜價格 {p1h:+.2f}%｜持倉 {oi1h:+.2f}%{extra}｜{_fr_short(base)}"
             )
-        tradable_text = "\n".join(tradable_lines)
-    else:
-        tradable_text = "- 本輪 0 檔（嚴格門檻下無合格標的）"
+        return "\n".join(lines)
 
     msg = (
-        "🧭 *Screener 看板｜市場地圖（每小時）*\n"
-        f"樣本數：`{len(rows)}`（Gate 可交易白名單）\n\n"
-        "*四象限統計（白話版）*\n"
-        "- 判讀口訣：OI↑代表「開倉變多」，OI↓代表「平倉變多」\n"
-        f"- 🟢 多單開倉（OI↑ 價格↑）：`{quad['long_open']}`\n"
-        f"- 🟥 多單平倉（OI↓ 價格↓）：`{quad['long_close']}`\n"
-        f"- 🔴 空單開倉（OI↑ 價格↓）：`{quad['short_open']}`\n"
-        f"- 🟩 空單平倉（OI↓ 價格↑）：`{quad['short_cover']}`\n\n"
-        "*Top movers（OI 變化最大）*\n"
-        f"{_fmt(oi_top, 'oi1h')}\n\n"
-        "*Top movers（價格 1H 變化最大）*\n"
-        f"{_fmt(price_top, 'p1h')}\n\n"
-        "*主流幣座標（BTC/ETH/SOL）*\n"
-        f"{chr(10).join(major_lines)}\n\n"
-        "*可交易訊號（嚴格篩選）*\n"
-        f"{tradable_text}"
+        "看板｜市場地圖（每小時）\n"
+        "費率參考：費率>0 偏多、費率<0 偏空（靠近 0 視為中性）\n\n"
+        "OI怎麼看（1句話）：OI↑=開倉、OI↓=平倉；OI↑搭價格↑=多單開倉、OI↑搭價格↓=空單開倉、OI↓搭價格↓=多單平倉、OI↓搭價格↑=空單平倉\n\n"
+        "📈 開倉（新建立倉位）\n\n"
+        f"{_section('多方開倉 TOP 3', long_open_top)}\n\n"
+        f"{_section('空方開倉 TOP 3', short_open_top)}\n\n"
+        "📉 平倉\n\n"
+        f"{_section('多方平倉 TOP 3', long_close_top)}\n\n"
+        f"{_section('空方平倉 TOP 3', short_cover_top)}\n\n"
+        f"{_major_block()}"
     )
     send_telegram_message(msg, target_thread)
-    logger.info("[Screener看板] 發送完成 samples=%s quad=%s tradable=%s", len(rows), quad, len(tradable))
+    logger.info(
+        "[Screener看板] 發送完成 open_long=%s open_short=%s close_long=%s close_short=%s",
+        len(long_open_top), len(short_open_top), len(long_close_top), len(short_cover_top),
+    )
 
 
 # ==================== 4. 重要經濟數據推播 ====================
