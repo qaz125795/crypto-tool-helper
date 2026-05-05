@@ -1052,10 +1052,66 @@ def _discord_content_with_mentions(
     """特定主題或呼叫端指定時，在 Discord 訊息前加 @everyone。
     經濟數據／預告須由呼叫端傳入 discord_force_everyone（僅滿星級事件為 True），不在此自動 tag。"""
     base = _convert_text_for_discord(text)
+    thread_key = _resolve_thread_key_by_id(thread_id) or ""
+
+    def _compact_screener_for_discord(msg: str) -> str:
+        """screener_board 的 Discord 專屬短版：
+        每區僅保留 1 檔代表 + 一句結論，避免超過 2000 字導致被硬截斷。"""
+        lines = [ln.rstrip() for ln in (msg or "").splitlines()]
+        out: List[str] = []
+        section_titles = (
+            "📤", "📥", "🩹", "🔄", "⭐",
+        )
+        i = 0
+        while i < len(lines):
+            ln = lines[i].strip()
+            if not ln:
+                i += 1
+                continue
+            if ln.startswith("🧭"):
+                out.append(ln)
+                out.append("")
+                i += 1
+                continue
+            if any(ln.startswith(x) for x in section_titles):
+                out.append(ln)
+                # 取此區第一檔（含結論），其餘略
+                j = i + 1
+                picked_item = ""
+                picked_conclusion = ""
+                while j < len(lines):
+                    cur = lines[j].strip()
+                    if any(cur.startswith(x) for x in section_titles):
+                        break
+                    if (not picked_item) and ("🎯" in cur or "🧱" in cur):
+                        picked_item = cur
+                    if (not picked_conclusion) and ("4) 結論：" in cur or cur.startswith("💡")):
+                        picked_conclusion = cur
+                    j += 1
+                if picked_item:
+                    out.append(f"  {picked_item}")
+                if picked_conclusion:
+                    out.append(f"  {picked_conclusion}")
+                out.append("")
+                i = j
+                continue
+            if ln.startswith("⚠️") or ln.startswith("🕐"):
+                out.append(ln)
+            i += 1
+
+        if not out:
+            return msg[:1800]
+        compact = "\n".join(out).strip()
+        return compact[:1800]
+
+    if thread_key == "screener_board":
+        base = _compact_screener_for_discord(base)
+
     content = base if not _notify_everyone_eligible(thread_id, force_everyone) else f"@everyone\n{base}".strip()
     # Discord content 最長 2000 字，過長時保留前段重點並提示至 TG 看完整版
     if len(content) > 1950:
-        suffix = "\n\n...(Discord 精簡版，完整內容請看 Telegram)"
+        # 一般訊息仍保留保底截斷；screener_board 已先走專屬短版，理論上不會到這裡
+        suffix = "\n\n...(訊息過長已截短)"
         content = content[: max(0, 1950 - len(suffix))].rstrip() + suffix
     return content
 
