@@ -187,6 +187,8 @@ CG_EP = {
     "rsi_list":              "/api/futures/rsi/list",                               # RSI列表
     "ema_list":              "/api/futures/ema/list",                               # 全市場 EMA（Standard+）🆕
     "td_list":               "/api/futures/td/list",                                # 全市場 TD Sequential（Standard+）🆕
+    "futures_coin_netflow":  "/api/futures/coin/netflow",                           # 合約單幣種淨流入流出 🆕
+    "spot_coin_netflow":     "/api/spot/coin/netflow",                              # 現貨單幣種淨流入流出 🆕
     "atr_list":              "/api/futures/avg-true-range/list",                    # 全市場 ATR（Standard+；見 docs）🆕
     "contract_basis":        "/api/futures/basis/history",                          # 合約基差歷史 🆕
     "borrow_rate":           "/api/borrow-interest-rate/history",                   # 借貸利率歷史 🆕
@@ -4061,6 +4063,147 @@ def fetch_funding_rate_trend(symbol: str, interval: str = "8h", limit: int = 2) 
     return (None, None)
 
 
+def _netflow_interval_tokens(interval: str) -> List[str]:
+    s = (interval or "1h").strip().lower()
+    if s in ("15m", "m15"):
+        return ["15m", "m15", "15min", "15_min"]
+    if s in ("4h", "h4"):
+        return ["4h", "h4", "240m", "240min", "4hr"]
+    return ["1h", "h1", "60m", "60min", "1hr"]
+
+
+def _extract_netflow_value(node: Any, interval_tokens: List[str]) -> Optional[float]:
+    """從 CoinGlass netflow 回應中盡可能萃取「淨流值」。
+    支援不同欄位命名：netflow / net_inflow / inflow-outflow / snake/camel。
+    """
+    if isinstance(node, list):
+        for it in reversed(node):
+            v = _extract_netflow_value(it, interval_tokens)
+            if v is not None:
+                return v
+        return None
+    if not isinstance(node, dict):
+        return None
+
+    keys = {str(k): k for k in node.keys()}
+
+    def _pick(keys_want: List[str]) -> Optional[float]:
+        for kw in keys_want:
+            lk = kw.lower()
+            for s, raw_k in keys.items():
+                ls = s.lower()
+                if lk == ls:
+                    try:
+                        return float(node.get(raw_k))
+                    except (TypeError, ValueError):
+                        pass
+        return None
+
+    # 1) 直接找 netflow 欄位（優先帶 interval）
+    for s, raw_k in keys.items():
+        ls = s.lower()
+        has_interval = any(tok in ls for tok in interval_tokens)
+        if "net" in ls and "flow" in ls and (has_interval or ("_h" not in ls and "_m" not in ls)):
+            try:
+                return float(node.get(raw_k))
+            except (TypeError, ValueError):
+                continue
+
+    # 2) inflow - outflow 回推出 netflow
+    inflow_keys = []
+    outflow_keys = []
+    for tok in interval_tokens:
+        inflow_keys.extend([f"inflow_{tok}", f"{tok}_inflow", f"in_flow_{tok}", f"{tok}_in_flow"])
+        outflow_keys.extend([f"outflow_{tok}", f"{tok}_outflow", f"out_flow_{tok}", f"{tok}_out_flow"])
+    inflow = _pick(inflow_keys)
+    outflow = _pick(outflow_keys)
+    if isinstance(inflow, (int, float)) and isinstance(outflow, (int, float)):
+        return float(inflow) - float(outflow)
+
+    # 3) 常見包裝層遞迴
+    for k in ("data", "list", "result", "items", "rows"):
+        v = node.get(k)
+        out = _extract_netflow_value(v, interval_tokens)
+        if out is not None:
+            return out
+    return None
+
+
+def fetch_coin_netflow_snapshot(symbol: str) -> Dict[str, Optional[float]]:
+    """
+    讀取單幣種 netflow（合約 + 現貨，15m/1h/4h）。
+    回傳數值單位依 CoinGlass 原始欄位（通常為金額），僅作方向與相對強弱參考。
+    """
+    base = str(symbol or "").replace("USDT", "").replace("-", "").replace("_", "").strip().upper()
+    if not base or not CG_API_KEY:
+        return {
+            "futures_15m": None, "futures_1h": None, "futures_4h": None,
+            "spot_15m": None, "spot_1h": None, "spot_4h": None,
+        }
+
+    cache_key = f"netflow:{base}"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 300:  # 5 分鐘快取
+            return val if isinstance(val, dict) else {
+                "futures_15m": None, "futures_1h": None, "futures_4h": None,
+                "spot_15m": None, "spot_1h": None, "spot_4h": None,
+            }
+
+    out = {
+        "futures_15m": None, "futures_1h": None, "futures_4h": None,
+        "spot_15m": None, "spot_1h": None, "spot_4h": None,
+    }
+    for prefix, ep_key in (("futures", "futures_coin_netflow"), ("spot", "spot_coin_netflow")):
+        ep = CG_EP.get(ep_key)
+        if not ep:
+            continue
+        for tf in ("15m", "1h", "4h"):
+            tf_key = f"{prefix}_{tf}"
+            j = _cg_get(ep, {"symbol": base, "interval": _cg_interval(tf), "limit": 3})
+            if not j:
+                j = _cg_get(ep, {"symbol": base, "interval": tf, "limit": 3})
+            if not j:
+                continue
+            val = _extract_netflow_value(j, _netflow_interval_tokens(tf))
+            out[tf_key] = val
+
+    _flow_cache[cache_key] = (out, now)
+    return out
+
+
+def _netflow_signal_bias(symbol: str, is_bull: bool) -> Tuple[int, str]:
+    """
+    netflow 對訊號的輕量加分/扣分：
+    - 合約與現貨 1H 同向流入/流出時加權較高
+    - 資料缺失時保持中性，不阻塞訊號
+    """
+    snap = fetch_coin_netflow_snapshot(symbol)
+    f1 = snap.get("futures_1h")
+    s1 = snap.get("spot_1h")
+    if f1 is None and s1 is None:
+        return 0, ""
+
+    score = 0
+    total = 0.0
+    if isinstance(f1, (int, float)):
+        total += float(f1)
+        score += 1
+    if isinstance(s1, (int, float)):
+        total += float(s1)
+        score += 1
+    if score == 0:
+        return 0, ""
+
+    align = total > 0 if is_bull else total < 0
+    if align:
+        delta = 7 if score == 2 else 4
+        return delta, "Netflow同向"
+    delta = -5 if score == 2 else -3
+    return delta, "Netflow反向"
+
+
 def fetch_accumulated_funding_score(symbol: str) -> Dict[str, Any]:
     """累積資金費率極端值偵測。
     用途：判斷市場是否已「費率過熱」或「費率極度負值（嘎空潛力）」。
@@ -6920,7 +7063,19 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
                 score += 5
                 reasons.append(f"費率偏正({_fr*100:+.2f}%)")
 
-    # ── 8. 跨類別互確認獎勵 ──────────────────────────────────────
+    # ── 8. Netflow 同向加分（合約+現貨 1H，資料缺失時中性）────────────────
+    try:
+        _sym_nf = str(x.get("symbol") or "").strip().upper()
+        if _sym_nf:
+            _nf_delta, _nf_note = _netflow_signal_bias(_sym_nf, is_bull_sig)
+            if _nf_delta:
+                score += _nf_delta
+                if _nf_note:
+                    reasons.append(_nf_note)
+    except Exception:
+        pass
+
+    # ── 9. 跨類別互確認獎勵 ──────────────────────────────────────
     # 同輪推播中，如果互補訊號都出現，代表兩股力量同時確認同一方向
     # long_open + short_close = 多方建倉 + 空方回補 = 雙重做多確認（完美多單）
     # long_close + short_open = 多方出貨 + 空方建倉 = 雙重做空確認（完美空單）
@@ -6928,13 +7083,13 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         score += 20
         reasons.append("雙向互確認")
 
-    # ── 9. 聰明錢真實建倉加分 ─────────────────────────────────────
+    # ── 10. 聰明錢真實建倉加分 ─────────────────────────────────────
     # 僅在 smart_money=True 時加分；None（無資料）保持中性
     if _smart_money is True:
         score += 15
         reasons.append("🧠聰明錢真實建倉")
 
-    # ── 10. 籌碼三步驟陷阱偵測加分（short_open 摸頭 / long_open 摸底）───
+    # ── 11. 籌碼三步驟陷阱偵測加分（short_open 摸頭 / long_open 摸底）───
     # 完整三步驟吻合 → +25 分（直接衝 S 級）
     # 部分吻合（2 步）→ +12 分（訊號有結構支撐）
     _trap_detected = x.get("_bull_trap_detected", False)
@@ -6946,7 +7101,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         score += 12
         reasons.append(f"籌碼陷阱跡象({_trap_steps}/3步)")
 
-    # ── 11. BTC OI 1H 信心加分（僅作輔助，不作硬過濾）───────────────
+    # ── 12. BTC OI 1H 信心加分（僅作輔助，不作硬過濾）───────────────
     try:
         _btc_oi_ref = float(_btc_oi_1h_pct) if _btc_oi_1h_pct is not None else None
     except (TypeError, ValueError):
@@ -6959,7 +7114,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
             score += 2
             reasons.append(f"BTC_OI輔助({_btc_oi_ref:+.2f}%)")
 
-    # ── 12. 錨定 VWAP 貼合度（現價 vs 5m 發動加權成本）──────────────────
+    # ── 13. 錨定 VWAP 貼合度（現價 vs 5m 發動加權成本）──────────────────
     _ab, _ast, _ar_snip, _ahint = _anchor_vwap_fit_bonus(x)
     x["_anchor_fit_stars"] = int(max(0, min(3, _ast)))
     x["_anchor_sizing_hint"] = _ahint or ""
@@ -6968,7 +7123,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         if _ar_snip:
             reasons.append(_ar_snip)
 
-    # ── 13. TD Sequential（15m；CoinGlass td/list 預載）加／扣分 ───────────
+    # ── 14. TD Sequential（15m；CoinGlass td/list 預載）加／扣分 ───────────
     _td_raw = x.get("cg_td_15m")
     td: Optional[float] = None
     if _td_raw is not None:
@@ -10826,83 +10981,137 @@ def run_position_screener_board_once():
             return None
 
     rows: List[Dict[str, Any]] = []
-    # 建立「看板資料」：OI 1H + 價格 1H 的正負，對應四分類（多/空、開/平）
     for coin in filtered:
         symbol = normalize_symbol(coin) or ""
         base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
 
+        p15m = _to_opt_float(coin.get("price_change_percent_15m"))
         p1h = _to_opt_float(coin.get("price_change_percent_1h"))
-        oi1h = extract_oi_change_1h(coin)
+        p4h = _to_opt_float(coin.get("price_change_percent_4h"))
+        oi1h = _to_opt_float(extract_oi_change_1h(coin))
         if p1h is None or oi1h is None:
             continue
-
-        if oi1h >= 0 and p1h >= 0:
-            cat = "long_open"
-        elif oi1h >= 0 and p1h < 0:
-            cat = "short_open"
-        elif oi1h < 0 and p1h >= 0:
-            cat = "short_cover"
-        else:
-            cat = "long_close"
 
         rows.append(
             {
                 "base": base,
                 "symbol": symbol,
+                "p15m": p15m,
                 "p1h": float(p1h),
+                "p4h": p4h,
                 "oi1h": float(oi1h),
-                "cat": cat,
             }
         )
 
-    def _top3(cat_name: str) -> List[Dict[str, Any]]:
-        items = [r for r in rows if r["cat"] == cat_name]
-        items.sort(key=lambda x: abs(x.get("oi1h") or 0.0), reverse=True)
-        return items[:3]
-
-    long_open_top = _top3("long_open")      # 多方開倉：OI↑ 價格↑
-    long_close_top = _top3("long_close")    # 多方平倉：OI↓ 價格↓
-    short_open_top = _top3("short_open")    # 空方開倉：OI↑ 價格↓
-    short_cover_top = _top3("short_cover")  # 空方平倉：OI↓ 價格↑
-
+    # 主流幣一定要展示
     major_rows: Dict[str, Dict[str, Any]] = {}
     for m in ("BTC", "ETH", "SOL"):
         mr = next((r for r in rows if r["base"] == m), None)
         if mr is not None:
             major_rows[m] = mr
 
+    # 候選池：先用 1H OI 震幅選前段，再補 15m/4H OI 做趨勢語意判讀，避免全市場 API 過重
+    candidates = sorted(rows, key=lambda x: abs(x.get("oi1h") or 0.0), reverse=True)[:28]
+    base_to_row: Dict[str, Dict[str, Any]] = {r["base"]: r for r in candidates}
+    for _m, _r in major_rows.items():
+        base_to_row[_m] = _r
+
     # 一次拉資金費率（做參考，不參與篩選）
     funding_map = _fetch_funding_rate_map()
-
-    # 只對需要展示的幣種補取 OI 15m / 4H，避免全市場爆 API
-    need_bases: Set[str] = set()
-    for rr in (long_open_top + long_close_top + short_open_top + short_cover_top):
-        need_bases.add(rr["base"])
-    for k in major_rows.keys():
-        need_bases.add(k)
+    td15_map = fetch_cg_td_map_for_interval("15m")
+    td1h_map = fetch_cg_td_map_for_interval("1h")
+    td4h_map = fetch_cg_td_map_for_interval("4h")
 
     oi15m_map: Dict[str, Optional[float]] = {}
     oi4h_map: Dict[str, Optional[float]] = {}
-    base_to_row: Dict[str, Dict[str, Any]] = {}
-    for rr in (long_open_top + long_close_top + short_open_top + short_cover_top):
-        base_to_row[rr["base"]] = rr
-    for k, rr in major_rows.items():
-        base_to_row[k] = rr
-
-    for base in need_bases:
-        rr = base_to_row.get(base)
-        if not rr:
-            continue
+    netflow_map: Dict[str, Dict[str, Optional[float]]] = {}
+    for base, rr in base_to_row.items():
         sym = rr.get("symbol") or (base + "USDT")
         try:
-            oi15m_map[base] = fetch_oi_change_tf(sym, "15m")
+            oi15m_map[base] = _to_opt_float(fetch_oi_change_tf(sym, "15m"))
         except Exception:
             oi15m_map[base] = None
         try:
             _oi_tf = _fetch_oi_multi_tf(sym)
-            oi4h_map[base] = _oi_tf.get("4h")
+            oi4h_map[base] = _to_opt_float((_oi_tf or {}).get("4h"))
         except Exception:
             oi4h_map[base] = None
+        try:
+            netflow_map[base] = fetch_coin_netflow_snapshot(sym)
+        except Exception:
+            netflow_map[base] = {
+                "futures_15m": None, "futures_1h": None, "futures_4h": None,
+                "spot_15m": None, "spot_1h": None, "spot_4h": None,
+            }
+
+    def _state_label(oi_pct: Optional[float], price_pct: Optional[float]) -> str:
+        if oi_pct is None or price_pct is None:
+            return "資料不足"
+        if oi_pct >= 0 and price_pct >= 0:
+            return "多頭開倉"
+        if oi_pct >= 0 and price_pct < 0:
+            return "空頭開倉"
+        if oi_pct < 0 and price_pct < 0:
+            return "多頭平倉"
+        return "空頭平倉"
+
+    def _trend_bucket(state_4h: str, state_1h: str, state_15m: str) -> str:
+        # 你指定的趨勢語意（優先吃「高週期延續 + 低週期反應」）
+        if state_4h == "多頭開倉" and state_1h == "多頭開倉" and state_15m == "多頭平倉":
+            return "主力出貨獲利了結跡象"
+        if state_4h == "多頭開倉" and state_1h == "多頭開倉":
+            return "主力進場吸籌跡象"
+        if state_1h == "多頭平倉" and state_15m in ("多頭平倉", "空頭開倉"):
+            return "主力停損認賠跡象"
+        if state_1h in ("空頭平倉", "多頭平倉") and state_15m == "多頭開倉":
+            return "主力停損 新主力進場跡象"
+        # fallback：依 1H 主狀態歸類，避免空桶
+        if state_1h == "多頭開倉":
+            return "主力進場吸籌跡象"
+        if state_1h == "空頭開倉":
+            return "主力出貨獲利了結跡象"
+        if state_1h == "多頭平倉":
+            return "主力停損認賠跡象"
+        return "主力停損 新主力進場跡象"
+
+    buckets: Dict[str, List[Dict[str, Any]]] = {
+        "主力出貨獲利了結跡象": [],
+        "主力進場吸籌跡象": [],
+        "主力停損認賠跡象": [],
+        "主力停損 新主力進場跡象": [],
+    }
+    for base, rr in base_to_row.items():
+        oi4h = oi4h_map.get(base)
+        oi1h = rr.get("oi1h")
+        oi15m = oi15m_map.get(base)
+        p4h = rr.get("p4h")
+        p1h = rr.get("p1h")
+        p15m = rr.get("p15m")
+        # 4H 價格欄位若缺，先用 1H 方向代理（看板用途）
+        p4h_eff = p4h if isinstance(p4h, (int, float)) else p1h
+        st4 = _state_label(_to_opt_float(oi4h), _to_opt_float(p4h_eff))
+        st1 = _state_label(_to_opt_float(oi1h), _to_opt_float(p1h))
+        st15 = _state_label(_to_opt_float(oi15m), _to_opt_float(p15m if p15m is not None else p1h))
+        rr["state_4h"] = st4
+        rr["state_1h"] = st1
+        rr["state_15m"] = st15
+        rr["trend_bucket"] = _trend_bucket(st4, st1, st15)
+        rr["trend_score"] = (
+            abs(_to_opt_float(oi4h) or 0.0) * 0.6
+            + abs(_to_opt_float(oi1h) or 0.0) * 1.0
+            + abs(_to_opt_float(oi15m) or 0.0) * 0.8
+        )
+        buckets[rr["trend_bucket"]].append(rr)
+
+    def _top3(bucket_name: str) -> List[Dict[str, Any]]:
+        items = buckets.get(bucket_name, [])
+        items.sort(key=lambda x: x.get("trend_score", 0.0), reverse=True)
+        return items[:3]
+
+    t_take_profit = _top3("主力出貨獲利了結跡象")
+    t_accumulate = _top3("主力進場吸籌跡象")
+    t_stop_loss = _top3("主力停損認賠跡象")
+    t_rotate = _top3("主力停損 新主力進場跡象")
 
     def _fr_short(base: str) -> str:
         fr = funding_map.get(base)
@@ -10918,19 +11127,46 @@ def run_position_screener_board_once():
         fr_str = f"{fr_pct:+.4f}%".rstrip("0").rstrip(".")
         return f"費率 {fr_str}（{fr_desc}）"
 
+    def _td_triplet(base: str) -> str:
+        def _fmt(v: Optional[float]) -> str:
+            if v is None:
+                return "-"
+            if float(v).is_integer():
+                return str(int(v))
+            return f"{float(v):.1f}"
+        return f"TD15m/1H/4H {_fmt(td15_map.get(base))}/{_fmt(td1h_map.get(base))}/{_fmt(td4h_map.get(base))}"
+
+    def _fmt_netflow_short(base: str) -> str:
+        snap = netflow_map.get(base) or {}
+        f1 = snap.get("futures_1h")
+        s1 = snap.get("spot_1h")
+        if not isinstance(f1, (int, float)) and not isinstance(s1, (int, float)):
+            return "Netflow1H —"
+        tot = (float(f1) if isinstance(f1, (int, float)) else 0.0) + (float(s1) if isinstance(s1, (int, float)) else 0.0)
+        if abs(tot) >= 1_000_000:
+            n = f"{tot/1_000_000:+.2f}M"
+        elif abs(tot) >= 1_000:
+            n = f"{tot/1_000:+.1f}K"
+        else:
+            n = f"{tot:+.0f}"
+        return f"Netflow1H {n}"
+
     def _fmt_item(idx: int, r: Dict[str, Any]) -> str:
         base = r.get("base") or ""
+        sym_copy = f"{base}USDT"
         p1h = r.get("p1h") or 0.0
         oi1h = r.get("oi1h") or 0.0
         oi15m = oi15m_map.get(base)
         oi4h = oi4h_map.get(base)
-        extra_parts: List[str] = []
-        if isinstance(oi15m, (int, float)):
-            extra_parts.append(f"15m {float(oi15m):+.2f}%")
-        if isinstance(oi4h, (int, float)):
-            extra_parts.append(f"4H {float(oi4h):+.2f}%")
-        extra = f"（{' / '.join(extra_parts)}）" if extra_parts else ""
-        return f"    {idx}) {base}｜價格 {p1h:+.2f}%｜持倉 {oi1h:+.2f}%{extra}｜{_fr_short(base)}"
+        st4 = r.get("state_4h") or "資料不足"
+        st1 = r.get("state_1h") or "資料不足"
+        st15 = r.get("state_15m") or "資料不足"
+        oi4_txt = f"{float(oi4h):+.2f}%" if isinstance(oi4h, (int, float)) else "—"
+        oi15_txt = f"{float(oi15m):+.2f}%" if isinstance(oi15m, (int, float)) else "—"
+        return (
+            f"    {idx}) `{sym_copy}`｜價格 {p1h:+.2f}%｜持倉 {oi1h:+.2f}%｜{_fr_short(base)}\n"
+            f"       4H {st4} {oi4_txt}｜1H {st1} {oi1h:+.2f}%｜15m {st15} {oi15_txt}｜{_td_triplet(base)}｜{_fmt_netflow_short(base)}"
+        )
 
     def _section(title: str, items: List[Dict[str, Any]]) -> str:
         if not items:
@@ -10948,37 +11184,37 @@ def run_position_screener_board_once():
                 lines.append(f"  - {m}｜無資料")
                 continue
             base = rr["base"]
+            sym_copy = f"{base}USDT"
             p1h = rr["p1h"]
             oi1h = rr["oi1h"]
             oi15m = oi15m_map.get(base)
             oi4h = oi4h_map.get(base)
-            extra_parts: List[str] = []
-            if isinstance(oi15m, (int, float)):
-                extra_parts.append(f"15m {float(oi15m):+.2f}%")
-            if isinstance(oi4h, (int, float)):
-                extra_parts.append(f"4H {float(oi4h):+.2f}%")
-            extra = f"（{' / '.join(extra_parts)}）" if extra_parts else ""
+            st4 = rr.get("state_4h") or "資料不足"
+            st1 = rr.get("state_1h") or "資料不足"
+            st15 = rr.get("state_15m") or "資料不足"
+            oi4_txt = f"{float(oi4h):+.2f}%" if isinstance(oi4h, (int, float)) else "—"
+            oi15_txt = f"{float(oi15m):+.2f}%" if isinstance(oi15m, (int, float)) else "—"
             lines.append(
-                f"  - {m}｜價格 {p1h:+.2f}%｜持倉 {oi1h:+.2f}%{extra}｜{_fr_short(base)}"
+                f"  - `{sym_copy}`｜價格 {p1h:+.2f}%｜持倉 {oi1h:+.2f}%｜{_fr_short(base)}"
+            )
+            lines.append(
+                f"    4H {st4} {oi4_txt}｜1H {st1} {oi1h:+.2f}%｜15m {st15} {oi15_txt}｜{_td_triplet(base)}"
+                f"｜{_fmt_netflow_short(base)}"
             )
         return "\n".join(lines)
 
     msg = (
-        "看板｜市場地圖（每小時）\n"
-        "費率參考：費率>0 偏多、費率<0 偏空（靠近 0 視為中性）\n\n"
-        "OI怎麼看（1句話）：OI↑=開倉、OI↓=平倉；OI↑搭價格↑=多單開倉、OI↑搭價格↓=空單開倉、OI↓搭價格↓=多單平倉、OI↓搭價格↑=空單平倉\n\n"
-        "📈 開倉（新建立倉位）\n\n"
-        f"{_section('多方開倉 TOP 3', long_open_top)}\n\n"
-        f"{_section('空方開倉 TOP 3', short_open_top)}\n\n"
-        "📉 平倉\n\n"
-        f"{_section('多方平倉 TOP 3', long_close_top)}\n\n"
-        f"{_section('空方平倉 TOP 3', short_cover_top)}\n\n"
+        "看板｜市場地圖\n\n"
+        f"{_section('主力出貨獲利了結跡象 TOP 3', t_take_profit)}\n\n"
+        f"{_section('主力進場吸籌跡象 TOP 3', t_accumulate)}\n\n"
+        f"{_section('主力停損認賠跡象 TOP 3', t_stop_loss)}\n\n"
+        f"{_section('主力停損 新主力進場跡象 TOP 3', t_rotate)}\n\n"
         f"{_major_block()}"
     )
     send_telegram_message(msg, target_thread)
     logger.info(
-        "[Screener看板] 發送完成 open_long=%s open_short=%s close_long=%s close_short=%s",
-        len(long_open_top), len(short_open_top), len(long_close_top), len(short_cover_top),
+        "[Screener看板] 發送完成 出貨=%s 吸籌=%s 認賠=%s 轉折=%s",
+        len(t_take_profit), len(t_accumulate), len(t_stop_loss), len(t_rotate),
     )
 
 
@@ -15177,7 +15413,7 @@ def _crit_radar_score_components(
     funding_rate: Optional[float],
     is_long: bool,
 ) -> int:
-    """0~100：OI 動能、價格 15m、主動買賣、資金費率（單邊）。"""
+    """0~100：OI 動能、價格 15m、主動買賣、資金費率、TD15m（單邊）。"""
     oi15 = item.get("_cg_oi_change_15m")
     oi1h = item.get("oiChange1h") or item.get("open_interest_change_percent_1h")
     try:
@@ -15267,7 +15503,25 @@ def _crit_radar_score_components(
     if abs(p15f) >= 4.8:
         timing_bonus -= min(10.0, (abs(p15f) - 4.8) * 3.0 + 4.0)
 
-    total = int(round(oi_pts + price_pts + taker_pts + fund_pts + timing_bonus))
+    td_bonus = 0.0
+    td_raw = item.get("_td15")
+    try:
+        td_v = float(td_raw) if td_raw is not None else None
+    except (TypeError, ValueError):
+        td_v = None
+    if td_v is not None:
+        if is_long:
+            if 6 <= td_v <= 9:
+                td_bonus += 5.0
+            elif td_v >= 12:
+                td_bonus -= 4.0  # 買計數過高，追多風險
+        else:
+            if -9 <= td_v <= -6:
+                td_bonus += 5.0
+            elif td_v <= -12:
+                td_bonus -= 4.0  # 賣計數過高，追空風險
+
+    total = int(round(oi_pts + price_pts + taker_pts + fund_pts + timing_bonus + td_bonus))
     return max(0, min(100, total))
 
 
@@ -15521,6 +15775,12 @@ def run_crit_radar_once() -> None:
     except Exception as e:
         logger.warning(f"[爆擊雷達] 資金費率表失敗（降級）: {e}")
         fr_map = {}
+    td15_map: Dict[str, Optional[float]] = {}
+    try:
+        td15_map = fetch_cg_td_map_for_interval("15m") or {}
+    except Exception as e:
+        logger.warning(f"[爆擊雷達] TD15m 批次失敗（降級）: {e}")
+        td15_map = {}
     liq_map_cr: Dict[str, Dict[str, float]] = fetch_cg_liq_coin_map()
     logger.info("[爆擊雷達] 爆倉 coin-list 預載 %d 幣（與持倉狙擊守門員同源）", len(liq_map_cr))
 
@@ -15567,6 +15827,10 @@ def run_crit_radar_once() -> None:
         sym = str(it.get("symbol") or "").strip().upper()
         if not sym:
             continue
+        _td = td15_map.get(sym)
+        if _td is None and sym.startswith("1000"):
+            _td = td15_map.get(sym.replace("1000", ""))
+        it["_td15"] = _td
         fr = fr_map.get(sym)
         if fr is None:
             fr = fr_map.get(sym.replace("1000", ""))
@@ -15846,6 +16110,26 @@ def run_crit_radar_once() -> None:
             fr_note = "費率偏空（空付多）"
         else:
             fr_note = "費率中性"
+        nf_snap = fetch_coin_netflow_snapshot(sym)
+        nf_f_1h = nf_snap.get("futures_1h")
+        nf_s_1h = nf_snap.get("spot_1h")
+        if isinstance(nf_f_1h, (int, float)) or isinstance(nf_s_1h, (int, float)):
+            nf_total_1h = (float(nf_f_1h) if isinstance(nf_f_1h, (int, float)) else 0.0) + (
+                float(nf_s_1h) if isinstance(nf_s_1h, (int, float)) else 0.0
+            )
+            if abs(nf_total_1h) >= 1_000_000:
+                nf_1h_s = f"{nf_total_1h/1_000_000:+.2f}M"
+            elif abs(nf_total_1h) >= 1_000:
+                nf_1h_s = f"{nf_total_1h/1_000:+.1f}K"
+            else:
+                nf_1h_s = f"{nf_total_1h:+.0f}"
+        else:
+            nf_1h_s = "—"
+        td15_raw = it.get("_td15")
+        try:
+            td15_s = str(int(float(td15_raw))) if td15_raw is not None else "—"
+        except (TypeError, ValueError):
+            td15_s = "—"
 
         msg_lines = [
             "💥 *爆擊雷達*",
@@ -15859,6 +16143,7 @@ def run_crit_radar_once() -> None:
             f"• 價 15m：`{p15s}`",
             f"• 主動買比：`{tks}`",
             f"• 資金費：`{frs}` · {fr_note}",
+            f"• TD15m：`{td15_s}` ｜ Netflow 1H：`{nf_1h_s}`",
             "",
             "*〔參考價〕* · Gate USDT 永續",
             f"進場 `{ent_s}` ｜ SL `{sl_s}` ｜ TP `{tp_s}`",
