@@ -13092,17 +13092,33 @@ def build_long_term_message() -> Optional[str]:
     if ahr is None:
         return None
 
-    status = "😐 尷尬區 (持有)"
-    action = "多看少動，拿住現貨"
+    status = "😐 中性區（持有觀望）"
+    action = "現在大級別偏中性，不適合重押任一方向，保持現有部位即可"
     color = "🟡"
     if ahr < 0.45:
-        status, action, color = "💎 鑽石底 (大抄底)", "砸鍋賣鐵買進去！兩年後你會感謝自己！", "🟢"
+        status, action, color = (
+            "💎 大級別深底",
+            "歷史上這個區間是長線好時機，但仍要分批；切勿用槓桿、切勿借錢、切勿一次梭哈",
+            "🟢",
+        )
     elif ahr < 1.2:
-        status, action, color = "📥 定投區 (累積)", "薪水發了就買，不要管價格。", "🔵"
+        status, action, color = (
+            "📥 累積區",
+            "適合長線分批定投（每月固定金額），不要看短期漲跌；用閒錢，不用槓桿",
+            "🔵",
+        )
     elif ahr > 5.0:
-        status, action, color = "☠️ 世紀頂部 (逃命)", "清倉！刪APP！去旅遊！", "🔴"
+        status, action, color = (
+            "☠️ 大級別頂部風險區",
+            "歷史上這個區間長線風險偏高，可分批減倉、保留現金；不建議追高加倉",
+            "🔴",
+        )
     elif ahr > 1.2 and fg is not None and fg > 80:
-        status, action, color = "🔥 泡沫區 (減倉)", "人聲鼎沸時離場，分批賣出。", "🟠"
+        status, action, color = (
+            "🔥 過熱區",
+            "市場偏貪婪，長線視角建議分批降槓桿、止盈一部分；不建議在這裡新建長線多單",
+            "🟠",
+        )
 
     fg_str = str(int(fg)) if fg is not None else "—"
     lines = []
@@ -13415,14 +13431,18 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
 
         if "多" in side:
             icon = "🟢"
-            title = "結構上：多側爆倉較重（價格下殺時多單被清算）"
-            ref_note = "📎 解讀：短線情緒偏恐慌／籌碼出清，僅作多空情緒參考，請自行判斷。"
-            entry_action = "價格參考區間（對照用）"
+            title = "📉 多單被砸下車（短線情緒恐慌）"
+            ref_note = (
+                "💡 解讀：很多人做多被打掉了，短線可能跌過頭、有反彈機會；\n"
+                "   但別急著抄底，等止跌訊號（K 線翻紅、有量承接）再考慮"
+            )
         else:
             icon = "🔴"
-            title = "結構上：空側爆倉較重（價格上沖時空單被清算）"
-            ref_note = "📎 解讀：短線情緒偏擁擠／軋空力道，僅作多空情緒參考，請自行判斷。"
-            entry_action = "價格參考區間（對照用）"
+            title = "📈 空單被軋上去（短線情緒過熱）"
+            ref_note = (
+                "💡 解讀：很多人做空被軋掉了，短線漲幅可能透支、要小心拉回；\n"
+                "   不要追高做多，也不要硬空，等明顯轉弱再考慮空單"
+            )
 
         lines.append(f"{icon} *{sym}* 💥 爆倉 *${amt:.1f}萬*")
         lines.append(f"💀 {title}")
@@ -13434,7 +13454,7 @@ def format_liquidity_consolidated_message(events: List[Dict]) -> str:
             lines.append(f"✅ 技術面輔助：{confirm}")
         if entry_low and entry_high and cur_price:
             lines.append(
-                f"🎯 *{entry_action}*：`${entry_low}` ~ `${entry_high}`（現價 `${cur_price:.4f}`）"
+                f"🎯 *參考價位區間*：`${entry_low}` ~ `${entry_high}`（現價 `${cur_price:.4f}`）"
             )
         lines.append(ref_note)
         lines.append("")
@@ -15620,22 +15640,24 @@ def build_altseason_message() -> Optional[str]:
     lines = []
     lines.append("🎢 *【山寨暴富列車】*")
     lines.append("────────────────")
-    lines.append(
-        "📐 *時間軸* · 以 *4H／日線波段* 為主（非分鐘級進出）；"
-        "下列技術欄位以 *4H K* 計算。"
-    )
-    season_status = "🛡️ 比特幣吸血中（防守）"
+    lines.append("📐 *用法* · 看 1~3 天的波段，不是分鐘級操作")
+    # 大盤白話判讀（一句話告訴小白現在該不該玩山寨）
     if index_val is not None and index_val > 70:
-        season_status = "🌋 群魔亂舞（山寨季）"
+        season_status = "🌋 山寨季（資金樂觀，但已偏熱）"
+        season_action = "💡 適合分批做波段，不要一次梭哈；山寨季尾聲常有急殺"
     elif index_val is not None and index_val > 40:
-        season_status = "⚖️ 資金輪動（選幣）"
+        season_status = "⚖️ 資金輪動（選幣為王）"
+        season_action = "💡 適合挑強勢領頭羊，避開落後補漲；輕倉慢慢累積"
+    else:
+        season_status = "🛡️ BTC 吸血（山寨偏弱）"
+        season_action = "💡 現在不是山寨季，建議降低山寨曝險，等待輪動再進場"
     lines.append(f"🌍 *當前週期* · {season_status}")
     lines.append(
         f"📊 *山寨指數* · `{index_val:.0f}`／100" if index_val is not None else "📊 *山寨指數* · —"
     )
+    lines.append(season_action)
     lines.append("")
-    lines.append("*〔領頭羊〕* · 篩選：4H RSI ≥ `%d` · 排序：4H RSI → 買方占比" % _min_rsi_4h)
-    lines.append("_每檔已過守門員（費率／流動／爆倉邊）；成本與目標為 4H 機械參考_")
+    lines.append("*〔領頭羊清單〕* · 4H 強勢、買方主導、已過守門員")
     if not leaders:
         if strong_src:
             lines.append("本輪候選未通過守門員或缺少即時價，暫不列名單。")
@@ -15667,20 +15689,22 @@ def build_altseason_message() -> Optional[str]:
             lines.append(f"• 列入理由 · {L['story']}")
             if L.get("t1") is not None and L.get("t2") is not None:
                 lines.append(
-                    "• 波段參考區間（4H 波動推算，非保證）· `{0}` → `{1}`".format(
+                    "• 波段空間（參考用）· `{0}` → `{1}`".format(
                         _altseason_fmt_price_short(L["t1"]),
                         _altseason_fmt_price_short(L["t2"]),
                     )
                 )
-            lines.append(f"• 4H RSI · `{rsi:.0f}` · 策略偏回檔分批，避免追高")
+            lines.append(
+                "• 怎麼跟：等回落到 4H 成本帶附近再分批進，不追高；倉位 1-3% 為主"
+            )
     lines.append("")
     lines.append(_GATE_PRICE_SOURCE_NOTE)
     lines.append("")
     lines.append("────────────────")
-    lines.append(
-        "💡 *心法* · 波段跟強勢龍頭；落後補漲波動大、勝率常較差。"
-        "目標為機械推算，實際請依個人風控。"
-    )
+    lines.append("💡 *小白要記住*：")
+    lines.append("• 跟強勢領頭羊，別追落後補漲幣（漲也漲少、跌起來特別兇）")
+    lines.append("• 等回落再分批進，不要看到漲就 FOMO 追高")
+    lines.append("• 山寨幣波動大，倉位永遠比主流幣再小一半")
     return "\n".join(lines)
 
 
