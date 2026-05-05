@@ -8157,7 +8157,24 @@ def build_report_message_tiered(
         if _star_emoji:
             _title_tail = f"{_title_tail} {_star_emoji}"
         if _newbie_text_mode:
-            msg_lines.append(f"🎯 `{sym_base}`")
+            _grade_badge = {"S": "🏆S", "A": "🥇A", "R": "⚡R"}.get(_grade, f"🧪{_grade}")
+            msg_lines.append(f"{_dir_emoji} {sig_emoji} `{sym_base}` `{_grade_badge}`")
+            # 小白也要看得懂「這單是逆勢還是順勢、回調還是突破」
+            if _grade == "R":
+                _style = "逆勢摸底" if is_bull_sig else "逆勢摸頭"
+            elif _sig_subtype == "pullback" or "回踩" in str(_sig_subtype):
+                _style = "順勢回調完成"
+            elif _zone_now == ZONE_BREAKOUT_LONG:
+                _style = "順勢追突破"
+            elif _zone_now == ZONE_BREAKOUT_SHORT:
+                _style = "順勢追跌破"
+            elif _zone_now == ZONE_DIP:
+                _style = "回檔低接"
+            elif _zone_now == ZONE_TOP:
+                _style = "反彈高空"
+            else:
+                _style = "方向觀察"
+            msg_lines.append(f"📎 訊號型態：{_style}")
         else:
             msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` {_title_tail}")
             msg_lines.append(f"{_badge_emo} `{_ver_short}` {_type_str}｜{_tactic_emo}{_tactic_txt} · {_regime_txt}")
@@ -8264,11 +8281,28 @@ def build_report_message_tiered(
             else:
                 _conclusion = "訊號剛形成，建議按點位小倉進場"
 
-            msg_lines.append("**📌 新手四步**")
-            msg_lines.append(f"1) 現在誰主導：{_lead}")
-            msg_lines.append(f"2) 可不可以跟：{_can_follow}")
-            msg_lines.append(f"3) 點位：進場 `{_entry_now_txt}`｜止損 `{_sl_txt}`｜停利 `{_tp1_txt}`")
-            msg_lines.append(f"4) 風險提醒：{_risk_txt}")
+            _tp2_rr_newbie = float(_calc_tp1_r_ratio(_entry_price, sl, tp2) or 0.0) if _entry_price and tp2 else 0.0
+            if _tp2_rr_newbie <= 0:
+                _tp2_rr_newbie = float(TP2_R_MULTIPLIER)
+            _tp2_line_newbie = (
+                f"   🏆 停利2  `{_tp2_txt}`（{_tp2_rr_newbie:.1f}R）→ 剩下繼續持有"
+                if _tp2_txt else ""
+            )
+            _tp1_rr_newbie = float(_calc_tp1_r_ratio(_entry_price, sl, tp1) or TP1_R_MULTIPLIER)
+
+            msg_lines.append("━━━━━━━━━━━━━━━━")
+            msg_lines.append("📋 *操作計畫*")
+            msg_lines.append(f"1️⃣ 主導方：{_lead}")
+            msg_lines.append(f"2️⃣ 可否跟單：{_can_follow}")
+            msg_lines.append("   （🏆S=3-5% · 🥇A=1-3% · ⚡R=≤1%）")
+            msg_lines.append("3️⃣ 點位（Gate USDT 永續）")
+            msg_lines.append(f"   🎯 進場  `{_entry_now_txt}`")
+            msg_lines.append(f"   🛑 止損  `{_sl_txt}` ← 守不住就出，不凹")
+            msg_lines.append(f"   🥇 停利1 `{_tp1_txt}`（{_tp1_rr_newbie:.1f}R）→ 先平一半，SL移到進場價")
+            if _tp2_line_newbie:
+                msg_lines.append(_tp2_line_newbie)
+            msg_lines.append(f"4️⃣ 注意：{_risk_txt}")
+            msg_lines.append("")
             msg_lines.append(f"💡 {_conclusion}")
             msg_lines.append(_GATE_PRICE_SOURCE_NOTE)
         else:
@@ -8344,8 +8378,23 @@ def build_report_message_tiered(
             _btc_oi_txt_v = float(_btc_oi_1h_pct) if _btc_oi_1h_pct is not None else None
         except (TypeError, ValueError):
             _btc_oi_txt_v = None
-        for _macro_ln in format_btc_macro_1h_plain_lines(_btc_pen, _btc_oi_txt_v):
-            msg_lines.append(_macro_ln.replace("*BTC 大盤 1h*", "**BTC 大盤 1h（白話）**"))
+        if _newbie_text_mode:
+            # newbie 模式：把長段 BTC 敘述濃縮成一行方向判讀
+            if _btc_pen is not None:
+                try:
+                    _btc_p = float(_btc_pen)
+                    if _btc_p >= 0.3:
+                        _btc_simple = f"🌐 BTC大盤：偏強 +{_btc_p:.2f}% ✅（偏多環境）"
+                    elif _btc_p <= -0.3:
+                        _btc_simple = f"🌐 BTC大盤：偏弱 {_btc_p:.2f}% ⚠️（偏空環境，多單謹慎）"
+                    else:
+                        _btc_simple = f"🌐 BTC大盤：中性（方向不明，控制倉位）"
+                    msg_lines.append(_btc_simple)
+                except (TypeError, ValueError):
+                    pass
+        else:
+            for _macro_ln in format_btc_macro_1h_plain_lines(_btc_pen, _btc_oi_txt_v):
+                msg_lines.append(_macro_ln.replace("*BTC 大盤 1h*", "**BTC 大盤 1h（白話）**"))
 
         if (not _newbie_text_mode):
             msg_lines.append(f"**💡** {_strategy_comment(category, _sig_version)}")
@@ -11678,8 +11727,10 @@ def run_position_screener_board_once():
             )
         return "\n".join(lines)
 
+    _ts_str = datetime.now(TAIPEI_TZ).strftime("%H:%M")
     msg = (
-        "🧭 看板｜市場地圖\n\n"
+        "🧭 *看板｜市場地圖*\n"
+        "_📚 用來練習自主判斷：看主力在哪個方向佈局，自己決定要不要進場_\n\n"
         f"{_section('📤 可能先回落 TOP 3', t_take_profit)}\n\n"
         f"{_section('📥 可能續漲 TOP 3', t_accumulate)}\n\n"
         f"{_section('🩹 目前偏弱 TOP 3', t_stop_loss)}\n\n"
@@ -16708,29 +16759,41 @@ def run_crit_radar_once() -> None:
         else:
             sl_px = px_f * (1.0 + raw_sl_pct)
 
-        # ── TP：結構位（最近 24h swing；對 15m 訊號太遠的 48h 易產生不切實際的 4.5R 上限） ─────
-        swing_levels = _crit_radar_fetch_swing_levels(sym, interval="1h", limit=24)
+        # ── TP1：1H 近期結構位（24h swing，近目標先平 60%） ───────────────
+        swing_near = _crit_radar_fetch_swing_levels(sym, interval="1h", limit=24)
         tp_px, tp_src = _crit_radar_compute_tp_with_structure(
-            entry=px_f,
-            sl_px=sl_px,
-            is_long=is_long,
-            swing=swing_levels,
-            tp_r_default=tp_r,
-            min_r=2.0,
-            max_r=4.5,
-            buffer_pct=0.0025,
+            entry=px_f, sl_px=sl_px, is_long=is_long, swing=swing_near,
+            tp_r_default=tp_r, min_r=2.0, max_r=4.5, buffer_pct=0.0025,
         )
-        # 計算實際 R 倍數，供日誌與訊息顯示
         try:
             actual_r = abs(tp_px - px_f) / abs(px_f - sl_px) if px_f != sl_px else 0.0
         except (TypeError, ValueError, ZeroDivisionError):
             actual_r = 0.0
+
+        # ── TP2：4H 結構位（大週期阻力/支撐，遠目標留 40% 讓利潤奔跑） ──
+        # 現實 R 範圍：4H swing 通常可達 5-10R；極端大行情啟動段理論上更高
+        # 超過 10R 設為上限（避免目標過遠反而讓用戶不知何時退場）
+        swing_far = _crit_radar_fetch_swing_levels(sym, interval="4h", limit=20)
+        _tp2_min_r = max(actual_r + 0.8, 3.0)   # TP2 至少比 TP1 更遠 0.8R
+        tp2_px, tp2_src = _crit_radar_compute_tp_with_structure(
+            entry=px_f, sl_px=sl_px, is_long=is_long, swing=swing_far,
+            tp_r_default=max(tp_r + 1.5, 4.0), min_r=_tp2_min_r, max_r=10.0,
+            buffer_pct=0.002,
+        )
+        try:
+            tp2_r = abs(tp2_px - px_f) / abs(px_f - sl_px) if px_f != sl_px else 0.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            tp2_r = 0.0
+        # 如果 TP2 和 TP1 幾乎一樣（差距<0.5R），取消 TP2 顯示
+        _show_tp2 = tp2_r > actual_r + 0.4
+
         ent_s = _crit_radar_fmt_price_level(px_f)
-        sl_s = _crit_radar_fmt_price_level(sl_px)
-        tp_s = _crit_radar_fmt_price_level(tp_px)
+        sl_s  = _crit_radar_fmt_price_level(sl_px)
+        tp_s  = _crit_radar_fmt_price_level(tp_px)
+        tp2_s = _crit_radar_fmt_price_level(tp2_px)
         logger.info(
-            "[爆擊雷達·TP] %s %s entry=%s sl=%s tp=%s 來源=%s 實際=%.2fR",
-            sym, side, ent_s, sl_s, tp_s, tp_src, actual_r,
+            "[爆擊雷達·TP] %s %s entry=%s sl=%s tp1=%s(%.2fR·%s) tp2=%s(%.2fR·%s)",
+            sym, side, ent_s, sl_s, tp_s, actual_r, tp_src, tp2_s, tp2_r, tp2_src,
         )
 
         if _crit_use_gk and not _crit_gk_glob_off:
@@ -16890,25 +16953,46 @@ def run_crit_radar_once() -> None:
 
         verdict_line = _crit_verdict()
 
-        _lead = "多方" if is_long else "空方"
-        _follow = "可小倉跟" if score >= (min_score + 4) else "先小單試"
-        _risk = "波動大，止損一定要帶" if rsi_warn else "不要重倉，分批進出"
-        msg_lines = [
-            "💥 *快節奏訊號*",
-            "────────────────",
-            f"🎯 `{sym}USDT`（15m）",
-            f"1) 現在誰主導：{_lead}",
-            f"2) 可不可以跟：{_follow}",
-            f"3) 點位：進場 `{ent_s}` ｜止損 `{sl_s}` ｜停利 `{tp_s}`（{actual_r:.1f}R · {tp_src}）",
-            f"4) 風險提醒：{_risk}",
-            "",
-            f"補充：持倉{oi_note}｜買賣力道{tk_note}｜資金{nf_1h_s}",
-        ]
+        _dir_emoji_cr = "🟢" if is_long else "🔴"
+        _dir_zh_cr = "做多" if is_long else "做空"
+        if score >= min_score + 8:
+            _crit_conf_tag = "🔥高信心"
+        elif score >= min_score + 4:
+            _crit_conf_tag = "⚡中等"
+        else:
+            _crit_conf_tag = "🧪初現"
+        _rsi_note = ""
         if rsi_warn:
-            msg_lines.append("⚠️ 目前價格太熱，容易急拉急殺")
+            _rsi_note = f"⚠️ {rsi_warn.replace('⚠️ ', '').replace('🔸 ', '')}，倉位再砍半"
+
+        _tp2_block: List[str] = []
+        if _show_tp2:
+            _tp2_block = [
+                f"🏆 遠目標 `{tp2_s}`（{tp2_r:.1f}R · {tp2_src}）→ 剩 40% 讓利潤奔跑",
+            ]
+
+        msg_lines = [
+            f"💥 *爆擊訊號* {_dir_emoji_cr} `{sym}USDT`",
+            f"週期：15m ｜ 方向：*{_dir_zh_cr}* ｜ 評分：{score}（{_crit_conf_tag}）",
+            "━━━━━━━━━━━━━━━━",
+            f"💰 盈虧比：*{actual_r:.1f}R*（近）" + (f" / *{tp2_r:.1f}R*（遠）" if _show_tp2 else ""),
+            f"🎯 進場  `{ent_s}`",
+            f"🛑 止損  `{sl_s}` ← 觸及立刻出，不凹",
+            f"🥇 近目標 `{tp_s}`（{actual_r:.1f}R · {tp_src}）→ 先平 60%",
+        ] + _tp2_block + [
+            "━━━━━━━━━━━━━━━━",
+            f"📊 籌碼：{oi_note}｜買賣力道：{tk_note}｜資金：{nf_1h_s}",
+        ]
+        if _rsi_note:
+            msg_lines.append(f"• {_rsi_note}")
         msg_lines += [
             "",
             verdict_line,
+            "━━━━━━━━━━━━━━━━",
+            "🎮 *爆擊操作心法*",
+            "  • 倉位 1% 起步（小賠大賺型，允許多次小虧）",
+            "  • 近目標先平 60%，剩下讓它繼續跑",
+            "  • 止損一到立刻出，不加倉攤平",
             "",
             _GATE_PRICE_SOURCE_NOTE,
         ]
