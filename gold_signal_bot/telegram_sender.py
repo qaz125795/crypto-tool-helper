@@ -50,29 +50,26 @@ def format_signal_message(
         data_line = f"📅 依據 K 線至：{cutoff_str}\n"
 
     return (
-        f"{side_emoji} XAUUSD {side_text}  [{signal.source}]\n"
+        f"{side_emoji} *XAUUSD 黃金 {side_text}*  [{signal.source}]\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 參考進場區：{signal.entry:,.2f}\n"
-        f"📐 波動參考 (ATR)：{signal.atr:.2f}\n"
+        f"📌 進場價：`{signal.entry:,.2f}`\n"
+        f"🛑 止損：`{signal.sl:,.2f}`（{arrow_sl} {sl_diff:.2f}）\n"
+        f"🥇 停利1：`{signal.tp1:,.2f}`（{arrow_tp} +{tp1_diff:.2f}，1R）\n"
+        f"🏆 停利2：`{signal.tp2:,.2f}`（{arrow_tp} +{tp2_diff:.2f}，2R）\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "📋 交易計畫\n"
-        f"🛑 防守點  (SL) ：{signal.sl:,.2f}  "
-        f"{arrow_sl} {sl_diff:.2f}  (-1.5 ATR)\n"
-        f"🥇 目標一 (TP1)：{signal.tp1:,.2f}  "
-        f"{arrow_tp} +{tp1_diff:.2f}  (+1.5 ATR | R:R 1:1)\n"
-        f"🏆 目標二 (TP2)：{signal.tp2:,.2f}  "
-        f"{arrow_tp} +{tp2_diff:.2f}  (+3.0 ATR | R:R 1:2)\n"
+        "📋 *新手怎麼跟（4 步）*\n"
+        "1) 倉位：本金的 1~3%（黃金波動雖小但槓桿放大會傷）\n"
+        "2) 進場：在進場價附近掛限價，超過 0.3% 就放棄這支\n"
+        "3) 停利1：到 TP1 先平一半，剩下移動止損到進場價（保本）\n"
+        "4) 停利2：到 TP2 全平；中間任何時候止損觸及就出場，不要凹\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 {signal.trend_strength}\n"
-        f"⏰ 訊號時間：{time_str}\n"
+        f"⏰ {time_str}\n"
         f"{data_line}"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "⚠️ 重要提醒\n"
-        "以上為系統計算的參考價格，請務必開啟 Gate 走勢圖，\n"
-        "對照實際K線結構確認防守點與目標位，\n"
-        "Gate報價與參考價可能有價差，請以圖表為準。\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "#XAUUSD #黃金 #訊號"
+        "⚠️ 為避免價差，請對照 Gate 實際走勢確認點位。\n"
+        "本訊息僅供研究參考，非投資建議。\n"
+        "#XAUUSD #黃金"
     )
 
 
@@ -93,35 +90,35 @@ def format_tp_sl_hit_message(
     time_str   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     if hit_type == "tp2":
-        title   = "🏆 目標二達成 (TP2)"
-        result  = "✅ 完整盈利出場"
+        title   = "🏆 停利 2 達成"
+        result  = "✅ 全平倉，本單收工"
         pnl_pts = abs(tp2 - entry)
-        pnl_str = f"+{pnl_pts:.2f} pts (+3.0 ATR | R:R 1:2)"
+        pnl_str = f"+{pnl_pts:.2f} 點（2R）"
     elif hit_type == "tp1":
-        title   = "🥇 目標一達成 (TP1)"
-        result  = "✅ 部分獲利，可考慮移動止損至成本"
+        title   = "🥇 停利 1 達成"
+        result  = "✅ 平一半倉位，剩下移動止損到進場價（保本）"
         pnl_pts = abs(tp1 - entry)
-        pnl_str = f"+{pnl_pts:.2f} pts (+1.5 ATR | R:R 1:1)"
+        pnl_str = f"+{pnl_pts:.2f} 點（1R）"
     else:  # sl
-        title   = "🛑 止損觸及 (SL)"
-        result  = "❌ 本單出場"
+        title   = "🛑 止損出場"
+        result  = "❌ 本單虧損出場（這次先學經驗，下次再來）"
         pnl_pts = abs(entry - sl)
-        pnl_str = f"-{pnl_pts:.2f} pts (-1.5 ATR)"
+        pnl_str = f"-{pnl_pts:.2f} 點（-1R）"
 
     return (
-        f"{side_emoji} XAUUSD {side_text}  {title}\n"
+        f"{side_emoji} *XAUUSD 黃金 {side_text}*  {title}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 原參考進場：{entry:,.2f}\n"
-        f"🛑 防守點 (SL) ：{sl:,.2f}\n"
-        f"🥇 目標一 (TP1)：{tp1:,.2f}\n"
-        f"🏆 目標二 (TP2)：{tp2:,.2f}\n"
+        f"📌 進場：`{entry:,.2f}`\n"
+        f"🛑 止損：`{sl:,.2f}`\n"
+        f"🥇 停利1：`{tp1:,.2f}`\n"
+        f"🏆 停利2：`{tp2:,.2f}`\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 結果：{result}\n"
         f"💰 損益：{pnl_str}\n"
-        f"⏰ 時間：{time_str}\n"
+        f"⏰ {time_str}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "提醒：請以 Gate 圖表實際點位為準。\n"
-        "#XAUUSD #黃金 #平倉"
+        "提醒：以 Gate 實際點位為準。\n"
+        "#XAUUSD #黃金"
     )
 
 
