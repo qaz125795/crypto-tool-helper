@@ -230,41 +230,76 @@ TG_TOKEN = os.getenv('TG_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
 DC_TOKEN = os.getenv('DC_TOKEN')
 
-# Telegram Thread IDs (從環境變量讀取 JSON，或使用預設值)
-thread_ids_str = os.environ.get('TG_THREAD_IDS', '')
+# Telegram Thread IDs：
+# 1) 先以各 TG_THREAD_* 環境變數組成預設表（與舊版一致）
+# 2) 若另有 TG_THREAD_IDS JSON，則「覆寫」同名鍵（方便一次管理多 topic）
+# 3) 再套用各 TG_THREAD_*（與 DC_THREAD_IDS_* 相同），讓 GitHub Actions / Zeabur 單獨指定的 topic **優先生效**
+#    ※ 若不進行第 3 步，會出現「workflow 已設 TG_THREAD_POSITION_CHANGE，但整包 JSON 把它蓋掉／JSON 缺鍵」→ 訊息進錯討論串，看起來像 TG 漏單。
+def _default_tg_thread_ids() -> Dict[str, int]:
+    return {
+        "sector_ranking": int(os.environ.get("TG_THREAD_SECTOR_RANKING", 5)),
+        "buying_power_monitor": int(os.environ.get("TG_THREAD_WHALE_POSITION", 246)),
+        "position_change": int(os.environ.get("TG_THREAD_POSITION_CHANGE", 250)),
+        "screener_board": int(os.environ.get("TG_THREAD_SCREENER_BOARD", 256)),
+        "economic_data": int(os.environ.get("TG_THREAD_ECONOMIC_DATA", 13)),
+        "news": int(os.environ.get("TG_THREAD_NEWS", 7)),
+        "funding_rate": int(os.environ.get("TG_THREAD_FUNDING_RATE", 244)),
+        "long_term_index": int(os.environ.get("TG_THREAD_LONG_TERM_INDEX", 248)),
+        "liquidity_radar": int(os.environ.get("TG_THREAD_LIQUIDITY_RADAR", 3)),
+        "altseason_radar": int(os.environ.get("TG_THREAD_ALTSEASON_RADAR", 11044)),
+        "crit_radar": int(os.environ.get("TG_THREAD_CRIT_RADAR") or 11040),
+        "hyperliquid": int(os.environ.get("TG_THREAD_HYPERLIQUID", 252)),
+        "gold_signal": int(os.environ.get("TG_THREAD_GOLD_SIGNAL") or 254),
+    }
+
+
+TG_THREAD_IDS = _default_tg_thread_ids()
+thread_ids_str = os.environ.get("TG_THREAD_IDS", "").strip()
 if thread_ids_str:
     try:
-        TG_THREAD_IDS = json.loads(thread_ids_str)
-    except:
-        TG_THREAD_IDS = {
-            'sector_ranking': 5,
-            'buying_power_monitor': 246,  # 原 whale_position，已替換為購買力監控
-            'position_change': 250,
-            'economic_data': 13,
-            'news': 7,
-            'funding_rate': 244,
-            'long_term_index': 248,
-            'liquidity_radar': 3,
-            'altseason_radar': 11044,
-            'crit_radar': 11040,
-            'hyperliquid': 252,
-            'gold_signal': 254,  # 黃金 XAUUSD 訊號（可改為專用 topic 的 thread_id）
-        }
-else:
-    TG_THREAD_IDS = {
-        'sector_ranking': int(os.environ.get('TG_THREAD_SECTOR_RANKING', 5)),
-        'buying_power_monitor': int(os.environ.get('TG_THREAD_WHALE_POSITION', 246)),  # 使用原 whale_position 的 thread ID
-        'position_change': int(os.environ.get('TG_THREAD_POSITION_CHANGE', 250)),
-        'economic_data': int(os.environ.get('TG_THREAD_ECONOMIC_DATA', 13)),
-        'news': int(os.environ.get('TG_THREAD_NEWS', 7)),
-        'funding_rate': int(os.environ.get('TG_THREAD_FUNDING_RATE', 244)),
-        'long_term_index': int(os.environ.get('TG_THREAD_LONG_TERM_INDEX', 248)),
-        'liquidity_radar': int(os.environ.get('TG_THREAD_LIQUIDITY_RADAR', 3)),
-        'altseason_radar': int(os.environ.get('TG_THREAD_ALTSEASON_RADAR', 11044)),
-        'crit_radar': int(os.environ.get('TG_THREAD_CRIT_RADAR') or 11040),
-        'hyperliquid': int(os.environ.get('TG_THREAD_HYPERLIQUID', 252)),
-        'gold_signal': int(os.environ.get('TG_THREAD_GOLD_SIGNAL') or 254),
-    }
+        loaded = json.loads(thread_ids_str)
+        if isinstance(loaded, dict):
+            for _k, _v in loaded.items():
+                if _v is None:
+                    continue
+                _s = str(_v).strip()
+                if not _s:
+                    continue
+                try:
+                    TG_THREAD_IDS[_k] = int(_s)
+                except (TypeError, ValueError):
+                    logger.warning("TG_THREAD_IDS 鍵 %s 值無法轉為整數，略過：%r", _k, _v)
+        else:
+            logger.warning("TG_THREAD_IDS JSON 必須為物件，已忽略並保留環境預設")
+    except Exception as e:
+        logger.warning("TG_THREAD_IDS JSON 解析失敗，保留環境預設：%s", e)
+
+_TG_THREAD_ENV_OVERRIDES = (
+    ("sector_ranking", "TG_THREAD_SECTOR_RANKING"),
+    ("buying_power_monitor", "TG_THREAD_WHALE_POSITION"),
+    ("position_change", "TG_THREAD_POSITION_CHANGE"),
+    ("screener_board", "TG_THREAD_SCREENER_BOARD"),
+    ("economic_data", "TG_THREAD_ECONOMIC_DATA"),
+    ("news", "TG_THREAD_NEWS"),
+    ("funding_rate", "TG_THREAD_FUNDING_RATE"),
+    ("long_term_index", "TG_THREAD_LONG_TERM_INDEX"),
+    ("liquidity_radar", "TG_THREAD_LIQUIDITY_RADAR"),
+    ("altseason_radar", "TG_THREAD_ALTSEASON_RADAR"),
+    ("crit_radar", "TG_THREAD_CRIT_RADAR"),
+    ("hyperliquid", "TG_THREAD_HYPERLIQUID"),
+    ("gold_signal", "TG_THREAD_GOLD_SIGNAL"),
+)
+for _tg_k, _tg_env in _TG_THREAD_ENV_OVERRIDES:
+    _raw = os.getenv(_tg_env)
+    if _raw is None:
+        continue
+    _s = str(_raw).strip()
+    if not _s:
+        continue
+    try:
+        TG_THREAD_IDS[_tg_k] = int(_s)
+    except ValueError:
+        logger.warning("環境變數 %s 無法轉為整數，略過：%r", _tg_env, _raw)
 
 # Discord Thread/Channel IDs（可選）
 # 建議使用 JSON 一次設定，例如：
@@ -286,6 +321,7 @@ for _k in (
     "sector_ranking",
     "buying_power_monitor",
     "position_change",
+    "screener_board",
     "economic_data",
     "news",
     "funding_rate",
@@ -10740,6 +10776,161 @@ def fetch_position_change():
     logger.info("持倉變化篩選執行完成（本輪可能為 0 則推播；請以上方『推播總結』與『未推播原因』為準）")
 
 
+def run_position_screener_board_once():
+    """
+    Screener 看板推播（每小時固定）：
+    1) 市場地圖：四象限統計 + Top movers + BTC/ETH/SOL 座標（一定有內容）
+    2) 可交易訊號：輕量嚴格門檻（不取代 position_change 的完整四層漏斗）
+    """
+    logger.info("🧭 Screener 看板推播啟動（每小時固定市場地圖 + 可交易訊號）")
+    all_symbols_data = fetch_coinglass_coins_markets()
+    if not all_symbols_data:
+        all_symbols_data = fetch_coins_price_change()
+
+    target_thread = TG_THREAD_IDS.get("screener_board", TG_THREAD_IDS.get("position_change", 250))
+    if not all_symbols_data:
+        msg = (
+            "🧭 *Screener 看板｜市場地圖*\\n"
+            "目前無法取得 CoinGlass 市場資料，請下一輪再試。"
+        )
+        send_telegram_message(msg, target_thread)
+        return
+
+    gate_bases = fetch_gate_usdt_contract_bases()
+    filtered: List[Dict[str, Any]] = []
+    for coin in all_symbols_data:
+        symbol = normalize_symbol(coin) or ""
+        base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+        if not base:
+            continue
+        if gate_bases and base not in gate_bases:
+            continue
+        if base in SYMBOL_BLACKLIST or base.endswith("STOCK") or base.endswith("TOKEN"):
+            continue
+        filtered.append(coin)
+
+    if not filtered:
+        msg = (
+            "🧭 *Screener 看板｜市場地圖*\\n"
+            "市場樣本為 0（白名單/黑名單過濾後），請檢查資料源。"
+        )
+        send_telegram_message(msg, target_thread)
+        return
+
+    def _f(v: Any, default: float = 0.0) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    rows: List[Dict[str, Any]] = []
+    quad = {"long_open": 0, "short_open": 0, "short_cover": 0, "long_close": 0}
+    cat_alias = {
+        "long_open": "多單開倉",
+        "long_close": "多單平倉",
+        "short_open": "空單開倉",
+        "short_cover": "空單平倉",
+    }
+    for coin in filtered:
+        symbol = normalize_symbol(coin) or ""
+        base = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
+        p30 = _f(extract_price_change_30m(coin))
+        p1h = _f(coin.get("price_change_percent_1h"))
+        oi1h = _f(extract_oi_change_1h(coin))
+        vol = _f(coin.get("_cg_volume_usd"))
+        if oi1h >= 0 and p1h >= 0:
+            cat = "long_open"
+        elif oi1h >= 0 and p1h < 0:
+            cat = "short_open"
+        elif oi1h < 0 and p1h >= 0:
+            cat = "short_cover"
+        else:
+            cat = "long_close"
+        quad[cat] += 1
+        rows.append(
+            {
+                "base": base,
+                "symbol": symbol,
+                "p30": p30,
+                "p1h": p1h,
+                "oi1h": oi1h,
+                "vol": vol,
+                "cat": cat,
+            }
+        )
+
+    oi_top = sorted(rows, key=lambda x: abs(x["oi1h"]), reverse=True)[:5]
+    price_top = sorted(rows, key=lambda x: abs(x["p1h"]), reverse=True)[:5]
+
+    tradable: List[Dict[str, Any]] = []
+    for x in rows:
+        oi_abs = abs(x["oi1h"])
+        p_abs = abs(x["p1h"])
+        vol = x["vol"]
+        base = x["base"]
+        oi_min = OI_THRESHOLD_MAIN if base in MAIN_COINS else (
+            OI_THRESHOLD_HIGH_LIQ if vol >= HIGH_LIQ_VOLUME_USD else OI_THRESHOLD_SMALL
+        )
+        if (
+            x["cat"] in ("long_open", "short_open")
+            and oi_abs >= oi_min
+            and p_abs >= 0.8
+            and vol >= MTF_VOLUME_MIN_USD
+        ):
+            x["score"] = oi_abs * 0.7 + p_abs * 0.3
+            tradable.append(x)
+    tradable = sorted(tradable, key=lambda z: z.get("score", 0.0), reverse=True)[:5]
+
+    major_lines: List[str] = []
+    for m in ("BTC", "ETH", "SOL"):
+        row = next((r for r in rows if r["base"] == m), None)
+        if row is None:
+            major_lines.append(f"- {m}: 無資料")
+            continue
+        major_lines.append(
+            f"- {m}: OI1H `{row['oi1h']:+.2f}%` | 價格30m `{row['p30']:+.2f}%` / 1H `{row['p1h']:+.2f}%` | {cat_alias.get(row['cat'], row['cat'])}"
+        )
+
+    def _fmt(items: List[Dict[str, Any]], field: str) -> str:
+        if not items:
+            return "- 無"
+        lines = []
+        for i, r in enumerate(items, start=1):
+            lines.append(f"- {i}. {r['base']} `{r[field]:+.2f}%` (OI `{r['oi1h']:+.2f}%`, 1H `{r['p1h']:+.2f}%`)")
+        return "\n".join(lines)
+
+    if tradable:
+        tradable_lines = []
+        for i, r in enumerate(tradable, start=1):
+            tradable_lines.append(
+                f"- {i}. {r['base']} | {cat_alias.get(r['cat'], r['cat'])} | OI1H `{r['oi1h']:+.2f}%` | 1H `{r['p1h']:+.2f}%` | 24h量 `{r['vol']/1e6:.1f}M`"
+            )
+        tradable_text = "\n".join(tradable_lines)
+    else:
+        tradable_text = "- 本輪 0 檔（嚴格門檻下無合格標的）"
+
+    msg = (
+        "🧭 *Screener 看板｜市場地圖（每小時）*\n"
+        f"樣本數：`{len(rows)}`（Gate 可交易白名單）\n\n"
+        "*四象限統計（白話版）*\n"
+        "- 判讀口訣：OI↑代表「開倉變多」，OI↓代表「平倉變多」\n"
+        f"- 🟢 多單開倉（OI↑ 價格↑）：`{quad['long_open']}`\n"
+        f"- 🟥 多單平倉（OI↓ 價格↓）：`{quad['long_close']}`\n"
+        f"- 🔴 空單開倉（OI↑ 價格↓）：`{quad['short_open']}`\n"
+        f"- 🟩 空單平倉（OI↓ 價格↑）：`{quad['short_cover']}`\n\n"
+        "*Top movers（OI 變化最大）*\n"
+        f"{_fmt(oi_top, 'oi1h')}\n\n"
+        "*Top movers（價格 1H 變化最大）*\n"
+        f"{_fmt(price_top, 'p1h')}\n\n"
+        "*主流幣座標（BTC/ETH/SOL）*\n"
+        f"{chr(10).join(major_lines)}\n\n"
+        "*可交易訊號（嚴格篩選）*\n"
+        f"{tradable_text}"
+    )
+    send_telegram_message(msg, target_thread)
+    logger.info("[Screener看板] 發送完成 samples=%s quad=%s tradable=%s", len(rows), quad, len(tradable))
+
+
 # ==================== 4. 重要經濟數據推播 ====================
 
 SENT_DATA_FILE = DATA_DIR / "sent_economic_data_ids.json"
@@ -17069,6 +17260,8 @@ if __name__ == "__main__":
             run_api_health_check("BTC")
         elif function_name == "position_change":
             fetch_position_change()
+        elif function_name == "screener_board":
+            run_position_screener_board_once()
         elif function_name == "economic_data":
             fetch_and_push_economic_data()
         elif function_name == "economic_data_preview":
@@ -17099,6 +17292,7 @@ if __name__ == "__main__":
             print("  buying_power_monitor - 購買力監控（穩定幣市值 + OI 監控）")
             print("  whale_position       - 已廢棄，請使用 buying_power_monitor")
             print("  position_change  - 持倉變化篩選")
+            print("  screener_board   - Screener 看板（每小時市場地圖 + 嚴格訊號）")
             print("  economic_data    - 重要經濟數據推播")
             print("  news             - 新聞快訊推播")
             print("  funding_rate     - 資金費率排行榜")
