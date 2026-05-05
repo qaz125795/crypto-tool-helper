@@ -5315,7 +5315,7 @@ MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快�
 MAX_SL_PERCENT = _env_float("SNIPER_MAX_SL_PCT", 0.055)  # 過寬止損上限（預設 5.5%），由 EMA20/EMA100（15m）優先收斂
 SL_EMA_GUARD_BUFFER_ATR = _env_float("SNIPER_SL_EMA_GUARD_BUFFER_ATR", 0.12)  # EMA 防守位外再留一點呼吸空間
 SL_TOUCH_BUFFER_ATR = _env_float("SNIPER_SL_TOUCH_BUFFER_ATR", 0.08)  # EMA 回踩點位防守緩衝
-MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.0))
+MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.2))  # 預設 1.2R（手續費+滑點後仍有正報酬）
 MAX_MARKET_VWAP_GAP_ATR = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_ATR", 1.5)    # 防追價：與 VWAP 偏離最多 1.5*ATR
 MARKET_ENTRY_ZONE_ATR = _env_float("SNIPER_ENTRY_ZONE_ATR", 0.2)                 # 市價可進場區：Entry ± 0.2*ATR
 MIN_SL_ATR_MULTIPLIER = _env_float("SNIPER_MIN_SL_ATR", 1.0)                     # 最低 SL 距離：至少 1.0*ATR
@@ -5674,6 +5674,81 @@ def _fetch_15m_hlc_arrays(symbol_base: str, limit: int) -> Optional[Tuple[List[f
         except Exception:
             continue
     return None
+
+
+def refine_tp1_with_resistance(
+    entry: float,
+    sl: float,
+    tp1: float,
+    is_long: bool,
+    atr: Optional[float],
+    recent_high_2h: Optional[float] = None,
+    recent_low_2h: Optional[float] = None,
+    ema100: Optional[float] = None,
+    min_r: float = 1.0,
+    buffer_atr_mult: float = 0.15,
+) -> Tuple[float, str]:
+    """TP1 結構修正：若 entry → tp1 之間有明顯阻力（前高/EMA100），把 TP1 收斂到阻力前。
+
+    觸發條件：
+    - 多單：找 entry < level < tp1 的最近阻力 → TP1' = level - buffer
+    - 空單：找 tp1 < level < entry 的最近支撐 → TP1' = level + buffer
+    - 收斂後 TP1 仍須 ≥ min_r * |entry-sl|，否則保持原 TP1
+
+    回傳 (new_tp1, source_label)
+    """
+    try:
+        e = float(entry)
+        s = float(sl)
+        t = float(tp1)
+    except (TypeError, ValueError):
+        return tp1, "tp1_r"
+    if e <= 0 or t == e or s == e:
+        return tp1, "tp1_r"
+
+    one_r_dist = abs(e - s)
+    min_dist = one_r_dist * min_r
+    try:
+        atr_f = float(atr) if atr is not None else None
+        if atr_f is not None and (atr_f != atr_f or atr_f <= 0):
+            atr_f = None
+    except (TypeError, ValueError):
+        atr_f = None
+    buf = (atr_f * buffer_atr_mult) if atr_f else (e * 0.0008)
+
+    def _num(v):
+        if v is None:
+            return None
+        try:
+            x = float(v)
+            return x if x > 0 and x == x else None
+        except (TypeError, ValueError):
+            return None
+
+    if is_long:
+        candidates = []
+        for lvl in (_num(recent_high_2h), _num(ema100)):
+            if lvl is not None and e < lvl < t:
+                candidates.append(lvl)
+        if not candidates:
+            return tp1, "tp1_r"
+        nearest = min(candidates)  # 最先碰到的阻力
+        new_tp1 = nearest - buf
+        if (new_tp1 - e) >= min_dist:
+            return new_tp1, "前高/EMA100阻力前"
+        return tp1, "tp1_r"
+    else:
+        candidates = []
+        for lvl in (_num(recent_low_2h), _num(ema100)):
+            if lvl is not None and t < lvl < e:
+                candidates.append(lvl)
+        if not candidates:
+            return tp1, "tp1_r"
+        nearest = max(candidates)  # 最先碰到的支撐
+        new_tp1 = nearest + buf
+        if (e - new_tp1) >= min_dist:
+            return new_tp1, "前低/EMA100支撐前"
+        return tp1, "tp1_r"
 
 
 def refine_tp2_box_measured_move(
@@ -7824,6 +7899,27 @@ def build_report_message_tiered(
             if sl is None or tp1 is None:
                 logger.warning(f"[SL/TP] {sym_base} 結構計算失敗，跳過此訊號")
                 continue
+
+            # ── TP1 結構修正：若 entry → TP1 間有 2h 前高/EMA100 阻力，收斂到阻力前 ──
+            tp1_orig = float(tp1)
+            tp1, _tp1_src = refine_tp1_with_resistance(
+                entry=float(_entry_price),
+                sl=float(sl),
+                tp1=tp1_orig,
+                is_long=is_bull_sig,
+                atr=atr_val,
+                recent_high_2h=_recent_hi,
+                recent_low_2h=_recent_lo,
+                ema100=ema100_val,
+                min_r=max(1.0, float(MIN_TP1_R_FOR_PUSH)),
+                buffer_atr_mult=0.15,
+            )
+            x["_tp1_src"] = _tp1_src
+            if abs(tp1 - tp1_orig) > 0:
+                logger.info(
+                    f"[TP1結構修正] {sym_base}: 原 TP1={tp1_orig:.6f} → 收斂={tp1:.6f}（{_tp1_src}）"
+                )
+
             _tp2_raw = float(tp2)
             tp2, _tp2_src = refine_tp2_box_measured_move(
                 sym_base,
@@ -7837,7 +7933,8 @@ def build_report_message_tiered(
             x["_tp2_src"] = _tp2_src
             logger.info(
                 f"[SL/TP結構計算] 幣種: {sym_base}, 方向: {'多' if is_bull_sig else '空'}, "
-                f"進場: {_entry_price}, 結構SL: {sl} (距離 {sl_pct_val:.2f}%), TP1: {tp1}, TP2({_tp2_src}): {tp2}"
+                f"進場: {_entry_price}, 結構SL: {sl} (距離 {sl_pct_val:.2f}%), "
+                f"TP1({_tp1_src}): {tp1}, TP2({_tp2_src}): {tp2}"
             )
             _rr_real = _calc_tp1_r_ratio(_entry_price, sl, tp1)
             if _rr_real is None or _rr_real < MIN_TP1_R_FOR_PUSH:
@@ -8003,15 +8100,18 @@ def build_report_message_tiered(
         _title_tail = f"{_score} {_grade}"
         if _star_emoji:
             _title_tail = f"{_title_tail} {_star_emoji}"
-        msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` {_title_tail}")
-        msg_lines.append(f"{_badge_emo} `{_ver_short}` {_type_str}｜{_tactic_emo}{_tactic_txt} · {_regime_txt}")
-        msg_lines.append(_grade_brief)
-        if x.get("_macro_veto_badge"):
-            msg_lines.append(str(x.get("_macro_veto_badge")))
-        if _grade == "R":
-            msg_lines.append("_⚠️ R級＝逆勢左側，小倉、嚴守止損。_")
-        if x.get("cooldown_reverse_recent") and _grade == "S":
-            msg_lines.append("🧠 冷卻期內曾反向，本次仍放行。")
+        if _newbie_text_mode:
+            msg_lines.append(f"🎯 `{sym_base}`")
+        else:
+            msg_lines.append(f"{_dir_emoji} *{_dir_str}* `{sym_base}` {_title_tail}")
+            msg_lines.append(f"{_badge_emo} `{_ver_short}` {_type_str}｜{_tactic_emo}{_tactic_txt} · {_regime_txt}")
+            msg_lines.append(_grade_brief)
+            if x.get("_macro_veto_badge"):
+                msg_lines.append(str(x.get("_macro_veto_badge")))
+            if _grade == "R":
+                msg_lines.append("_⚠️ R級＝逆勢左側，小倉、嚴守止損。_")
+            if x.get("cooldown_reverse_recent") and _grade == "S":
+                msg_lines.append("🧠 冷卻期內曾反向，本次仍放行。")
 
         # 2h VWAP + 錨定（供均價區）
         try:
@@ -8084,16 +8184,36 @@ def build_report_message_tiered(
 
         _oi_story_line, _oi_risk_line = _build_oi_plain_lines()
         if _newbie_text_mode:
-            msg_lines.append("**📌 懶人操作**")
-            msg_lines.append(f"方向：{_dir_str}｜建議：{'可小倉跟單' if _grade in ('S', 'A') else '先觀察'}")
-            msg_lines.append(f"進場 `{_entry_now_txt}`｜SL `{_sl_txt}`｜TP `{_tp1_txt}`")
-            msg_lines.append(_oi_story_line.replace("• ", "🧠 "))
-            if "先看是否守住止損位" not in _oi_risk_line:
-                msg_lines.append(_oi_risk_line.replace("• ", "⚠️ "))
-            msg_lines.append(_fr_line)
-            if _vol_line:
-                msg_lines.append(_vol_line)
-            msg_lines.append(f"💡 {_strategy_comment(category, _sig_version)}")
+            _lead = "多方（看漲）" if is_bull_sig else "空方（看跌）"
+            if _grade == "S":
+                _can_follow = "可跟單，建議倉位 3-5%"
+            elif _grade == "A":
+                _can_follow = "可小倉跟，建議倉位 1-3%"
+            elif _grade == "R":
+                _can_follow = "逆勢單，極小倉嘗試（≤1%）"
+            else:
+                _can_follow = "先觀望"
+            # 風險提醒（避免空泛口號）
+            if _grade == "R":
+                _risk_txt = "逆勢單只試 1%，止損絕對守好"
+            elif _already_moving:
+                _risk_txt = "已啟動段，分批進場，不要一次梭哈"
+            else:
+                _risk_txt = "看到止損就出，不要凹單"
+            # 結論句根據訊號版本給更具體的話
+            if _sig_version == "exhaustion_reversal":
+                _conclusion = "目前是反轉訊號，可能短期走勢轉換，照點位執行"
+            elif _sig_version == "confirmed":
+                _conclusion = "多重訊號確認，方向較明確，照點位執行"
+            else:
+                _conclusion = "訊號剛形成，建議按點位小倉進場"
+
+            msg_lines.append("**📌 新手四步**")
+            msg_lines.append(f"1) 現在誰主導：{_lead}")
+            msg_lines.append(f"2) 可不可以跟：{_can_follow}")
+            msg_lines.append(f"3) 點位：進場 `{_entry_now_txt}`｜止損 `{_sl_txt}`｜停利 `{_tp1_txt}`")
+            msg_lines.append(f"4) 風險提醒：{_risk_txt}")
+            msg_lines.append(f"💡 {_conclusion}")
             msg_lines.append(_GATE_PRICE_SOURCE_NOTE)
         else:
             # ── 點位（舊版樣式）──────────────────────────────────────────────
@@ -8275,7 +8395,7 @@ def build_report_message_tiered(
 
     if not has_any:
         no_sig_msg = (
-            f"🔍 *持倉異常狙擊鏡* 本輪無訊號\n"
+            f"🔍 *跟單快訊* 本輪無訊號\n"
             f"🕐 {now_str}  條件：1H OI≥動態門檻(主流3%/高流動5%/小幣7%) & 量≥{MTF_VOLUME_MIN_USD/1e6:.1f}M & MTF共振\n"
             f"繼續監控中..."
         )
@@ -8318,7 +8438,7 @@ def build_report_message_tiered(
     _grade_tag = "  ".join(_grade_parts) if _grade_parts else "─"
 
     header = (
-        f"🔍 *持倉異常狙擊鏡*  本輪 {push_count} 個訊號\n"
+        f"🔍 *跟單快訊*  本輪 {push_count} 個訊號\n"
         f"🕐 {now_str} 台北  |  {_grade_tag}\n"
         f"{'─' * 20}\n"
     )
@@ -11154,6 +11274,9 @@ def run_position_screener_board_once():
     def _state_label(oi_pct: Optional[float], price_pct: Optional[float]) -> str:
         if oi_pct is None or price_pct is None:
             return "資料不足"
+        # 中性區間：|OI| < 0.3% 且 |Price| < 0.15% 視為盤整，避免被武斷分類
+        if abs(oi_pct) < 0.3 and abs(price_pct) < 0.15:
+            return "盤整"
         if oi_pct >= 0 and price_pct >= 0:
             return "多頭開倉"
         if oi_pct >= 0 and price_pct < 0:
@@ -11194,11 +11317,11 @@ def run_position_screener_board_once():
         p4h = rr.get("p4h")
         p1h = rr.get("p1h")
         p15m = rr.get("p15m")
-        # 4H 價格欄位若缺，先用 1H 方向代理（看板用途）
-        p4h_eff = p4h if isinstance(p4h, (int, float)) else p1h
-        st4 = _state_label(_to_opt_float(oi4h), _to_opt_float(p4h_eff))
+        # 4H 與 15m 缺資料時不再用 1H 代理（避免誤導用戶以為 4H/15m 與 1H 一致）
+        # 缺資料 → 「資料不足」，⚠️ 高亮邏輯也不會誤標
+        st4 = _state_label(_to_opt_float(oi4h), _to_opt_float(p4h))
         st1 = _state_label(_to_opt_float(oi1h), _to_opt_float(p1h))
-        st15 = _state_label(_to_opt_float(oi15m), _to_opt_float(p15m if p15m is not None else p1h))
+        st15 = _state_label(_to_opt_float(oi15m), _to_opt_float(p15m))
         rr["state_4h"] = st4
         rr["state_1h"] = st1
         rr["state_15m"] = st15
@@ -11223,14 +11346,14 @@ def run_position_screener_board_once():
     def _fr_short(base: str) -> str:
         fr = funding_map.get(base)
         if fr is None:
-            return "費率：無資料"
+            return "市場擁擠：無資料"
         if fr > FUNDING_EXTREME:
-            fr_desc = "偏多（多頭略擁擠）"
+            fr_desc = "多方偏擠"
         elif fr < -FUNDING_EXTREME:
-            fr_desc = "偏空（空頭略擁擠）"
+            fr_desc = "空方偏擠"
         else:
             fr_desc = "中性"
-        return f"費率：{fr_desc}"
+        return f"市場擁擠：{fr_desc}"
 
     def _td_triplet(base: str) -> str:
         def _td_state(v: Optional[float]) -> str:
@@ -11262,10 +11385,10 @@ def run_position_screener_board_once():
         f1 = snap.get("futures_1h")
         s1 = snap.get("spot_1h")
         if not isinstance(f1, (int, float)) and not isinstance(s1, (int, float)):
-            return "資金流向1H：—"
+            return "資金方向：—"
         tot = (float(f1) if isinstance(f1, (int, float)) else 0.0) + (float(s1) if isinstance(s1, (int, float)) else 0.0)
         tone = "流入" if tot > 0 else ("流出" if tot < 0 else "中性")
-        return f"資金流向1H：{tone}"
+        return f"資金方向：{tone}"
 
     def _price_tone(v: Optional[float]) -> str:
         if not isinstance(v, (int, float)):
@@ -11330,45 +11453,45 @@ def run_position_screener_board_once():
         # ---------- bucket 結論 ----------
         if bucket == "主力出貨獲利了結跡象":
             if fr_heavy_long or td_long_exhaust:
-                return "💡 多頭嚴重擁擠，出貨訊號明顯，短線回調風險高，注意止盈"
+                return "💡 漲太快了，短線容易回落；有賺先收一點比較安全"
             if fr_slight_long and nf_out:
-                return "💡 多頭略擁擠＋資金外流，漲勢可能趨緩，建議鎖定獲利"
+                return "💡 買盤變少了，短線可能先休息；先把利潤拿穩"
             if nf_in:
-                return "💡 短線雖有平倉，仍有資金流入，小幅回調後可能繼續偏多"
-            return "💡 多方短線獲利了結，等回調確認支撐後再決策"
+                return "💡 雖然有人先下車，但新錢還在進，拉回後還有機會再上"
+            return "💡 短線先休息，等跌勢放慢再考慮進場"
 
         if bucket == "主力進場吸籌跡象":
             if fr_heavy_short or td_short_exhaust:
-                return "💡 空方嚴重擁擠，主力逆勢吸籌，軋空反彈機率高，偏多操作"
+                return "💡 做空的人太多，容易被反殺往上；偏多看待"
             if fr_slight_short:
-                return "💡 空方略擁擠＋主力吸籌，有反彈動能，偏多但注意假突破"
+                return "💡 空單有點擠，加上買盤在接，短線偏多但別追太急"
             if td_multi_long and nf_in:
-                return "💡 多週期共振偏多＋資金流入，趨勢向上，可考慮順勢做多"
+                return "💡 多個時間都偏多，資金也在流入，順著做多勝率較高"
             if fr_heavy_long:
-                return "💡 多頭擁擠＋吸籌跡象，追高風險偏高，等回調後再介入"
+                return "💡 雖然偏多，但追高風險大；等回落一點再進"
             if nf_in:
-                return "💡 資金持續流入，主力吸籌中，趨勢偏多"
-            return "💡 主力持續吸籌，趨勢偏多，可等回調低點佈局"
+                return "💡 錢持續進場，整體還是偏多"
+            return "💡 整體偏多，等價格回落再上車更穩"
 
         if bucket == "主力停損認賠跡象":
             if fr_heavy_long:
-                return "💡 多頭大量止損＋費率仍偏多，賣壓可能持續，勿接刀"
+                return "💡 多單在停損，賣壓還沒結束，先不要急著抄底"
             if td_short_exhaust:
-                return "💡 空頭動能趨近飽和，止跌訊號可能臨近，謹慎觀察反彈"
+                return "💡 跌勢可能快結束，留意短彈，但先小倉"
             if "空頭開倉" in st4 or "空頭開倉" in st1:
-                return "💡 新空單明顯增加，空頭格局確立，偏空操作，謹防反彈騙線"
+                return "💡 新空單一直加，短線偏空，反彈也先當逃命"
             if nf_out and td_multi_short:
-                return "💡 資金外流＋多週期偏空，下跌趨勢確立，等止跌再介入"
-            return "💡 多方撤退，短線偏弱，觀望等待止跌訊號"
+                return "💡 錢在流出，方向偏弱，先等跌勢放慢再進"
+            return "💡 買方先退了，短線偏弱，先觀望"
 
         if bucket == "主力停損 新主力進場跡象":
             if fr_heavy_short or td_short_exhaust:
-                return "💡 空方嚴重擁擠，換手跡象明顯，軋空反彈機率高，可小倉試多"
+                return "💡 空單太擠，容易被拉爆，可能突然上衝，可小倉試多"
             if nf_in and st15 in ("多頭開倉", "空頭平倉"):
-                return "💡 新資金流入＋短線多頭開倉，換手偏多方向，關注能否站穩"
+                return "💡 新錢進場且短線轉強，偏多嘗試，先看能不能站穩"
             if nf_out and "空頭開倉" in st15:
-                return "💡 換手後空頭接力，偏空格局轉換中，謹慎觀察方向"
-            return "💡 換手整理中，趨勢尚未明朗，等方向確認後再跟進"
+                return "💡 賣方接手，短線偏空，先別急著接多"
+            return "💡 還在拉扯盤，方向不清楚，先等一邊明確再跟"
 
         # ---------- 主流幣通用邏輯 ----------
         long_opens   = sum(1 for s in (st4, st1, st15) if "多頭開倉" in s)
@@ -11378,31 +11501,32 @@ def run_position_screener_board_once():
 
         if long_opens >= 2 and nf_in:
             if td_long_exhaust or fr_heavy_long:
-                return "💡 短線多頭動能過熱，整體偏多但謹慎追高，注意獲利了結"
-            return "💡 多週期偏多＋資金流入，市場偏強，可隨趨勢操作"
+                return "💡 雖然偏多，但已經有點過熱，別追高"
+            return "💡 各時間都偏多而且有資金進場，順勢做多為主"
         if long_opens >= 2:
-            return "💡 多週期增倉偏多，但資金外流需注意，整體偏多震盪"
+            return "💡 整體偏多，但資金有流出，容易震盪"
         if long_closes >= 2 and nf_out:
             if fr_heavy_long:
-                return "💡 多頭大幅止損＋資金外流，短線偏空，謹慎操作"
-            return "💡 多方撤退＋資金外流，整體偏弱，觀望為主"
+                return "💡 多單停損加上資金流出，短線偏空"
+            return "💡 買方退場又沒新錢進來，先觀望"
         if short_opens >= 2:
             if fr_heavy_short or td_short_exhaust:
-                return "💡 空頭擁擠，軋空反彈機率提升，謹慎持空"
-            return "💡 多週期空頭增倉，整體偏空，等確認再操作"
+                return "💡 空單有點擠，容易突然反彈，空單要小心"
+            return "💡 各時間都偏空，整體向下"
         if short_closes >= 2 and nf_in:
-            return "💡 空單回補＋資金流入，可能出現反彈，觀察能否突破壓力"
+            return "💡 空單在回補又有資金進來，可能反彈"
         if p1h_v > 0.5:
-            return "💡 短線偏強但訊號分歧，多空交戰中，觀望為主"
+            return "💡 短線有力但意見分歧，先觀望"
         if p1h_v < -0.5:
-            return "💡 短線偏弱，多空訊號分歧，謹慎操作"
-        return "💡 多空訊號分歧，整體震盪格局，等方向確認"
+            return "💡 短線偏弱但不一致，先保守"
+        return "💡 現在還在拉扯，等方向明確再出手"
 
     _STATE_SHORT = {
         "多頭開倉": "多方加碼🟢",
         "空頭平倉": "空方退場🟢",
         "空頭開倉": "空方加碼🔴",
         "多頭平倉": "多方退場🔴",
+        "盤整": "盤整⚪",
         "資料不足": "—",
     }
     _BULL_STATES = {"多頭開倉", "空頭平倉"}
@@ -11439,11 +11563,20 @@ def run_position_screener_board_once():
         st15 = r.get("state_15m") or "資料不足"
         bucket = r.get("trend_bucket") or ""
         conclusion = _build_conclusion(base, bucket, r)
+        if bucket in ("主力進場吸籌跡象",):
+            follow = "可小倉跟"
+        elif bucket in ("主力停損認賠跡象",):
+            follow = "先觀望"
+        elif bucket in ("主力出貨獲利了結跡象",):
+            follow = "先別追"
+        else:
+            follow = "等方向明確再跟"
         return (
-            f"    {idx}) 🎯 `{sym_copy}`｜{_oi_tone(oi1h)}｜{_fr_short(base)}\n"
-            f"       {_tf_line(st4, st1, st15)}\n"
-            f"       {_fmt_netflow_short(base)}\n"
-            f"       {conclusion}"
+            f"    {idx}) 🎯 `{sym_copy}`\n"
+            f"       1) 目前：{_oi_tone(oi1h)}｜{_fr_short(base)}\n"
+            f"       2) 可不可以跟：{follow}\n"
+            f"       3) 狀態：{_tf_line(st4, st1, st15)}｜{_fmt_netflow_short(base)}\n"
+            f"       4) 結論：{conclusion}"
         )
 
     def _section(title: str, items: List[Dict[str, Any]]) -> str:
@@ -11458,7 +11591,7 @@ def run_position_screener_board_once():
         return "\n".join(lines)
 
     def _major_block() -> str:
-        lines: List[str] = ["主流幣座標（BTC/ETH/SOL）"]
+        lines: List[str] = ["主流幣快看（BTC/ETH/SOL）"]
         for m in ("BTC", "ETH", "SOL"):
             rr = major_rows.get(m)
             if not rr:
@@ -11471,26 +11604,30 @@ def run_position_screener_board_once():
             st1 = rr.get("state_1h") or "資料不足"
             st15 = rr.get("state_15m") or "資料不足"
             conclusion = _build_conclusion(base, "", rr)
+            follow = "等方向明確再跟"
             lines.append(
-                f"  - 🧱 `{sym_copy}`｜{_oi_tone(oi1h)}｜{_fr_short(base)}"
+                f"  - 🧱 `{sym_copy}`"
             )
             lines.append(
-                f"    {_tf_line(st4, st1, st15)}"
+                f"    1) 目前：{_oi_tone(oi1h)}｜{_fr_short(base)}"
             )
             lines.append(
-                f"    {_fmt_netflow_short(base)}"
+                f"    2) 可不可以跟：{follow}"
             )
             lines.append(
-                f"    {conclusion}"
+                f"    3) 狀態：{_tf_line(st4, st1, st15)}｜{_fmt_netflow_short(base)}"
+            )
+            lines.append(
+                f"    4) 結論：{conclusion}"
             )
         return "\n".join(lines)
 
     msg = (
         "🧭 看板｜市場地圖\n\n"
-        f"{_section('📤 主力出貨獲利了結跡象 TOP 3', t_take_profit)}\n\n"
-        f"{_section('📥 主力進場吸籌跡象 TOP 3', t_accumulate)}\n\n"
-        f"{_section('🩹 主力停損認賠跡象 TOP 3', t_stop_loss)}\n\n"
-        f"{_section('🔄 主力停損 新主力進場跡象 TOP 3', t_rotate)}\n\n"
+        f"{_section('📤 可能先回落 TOP 3', t_take_profit)}\n\n"
+        f"{_section('📥 可能續漲 TOP 3', t_accumulate)}\n\n"
+        f"{_section('🩹 目前偏弱 TOP 3', t_stop_loss)}\n\n"
+        f"{_section('🔄 拉扯盤 TOP 3', t_rotate)}\n\n"
         f"⭐ {_major_block()}"
     )
     send_telegram_message(msg, target_thread)
@@ -15676,6 +15813,119 @@ def _crit_radar_fmt_price_level(p: Optional[float]) -> str:
     return f"{x:.6g}"
 
 
+def _crit_radar_fetch_swing_levels(
+    symbol: str,
+    interval: str = "1h",
+    limit: int = 48,
+) -> Optional[Dict[str, float]]:
+    """爆擊雷達 TP 結構位：取最近 N 根 K 線的 swing high / swing low（不含最新一根）。
+
+    回傳 {"high": float, "low": float, "lookback": int} 或 None。
+    用於把 TP 對齊到「附近真正的阻力／支撐」，避免單純 SL×倍率產生不切實際的 TP。
+    """
+    if not CG_API_KEY:
+        return None
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None
+    candidates = [sym]
+    if not sym.endswith("USDT"):
+        candidates.append(f"{sym}USDT")
+    seen = set()
+    for s in candidates:
+        if s in seen:
+            continue
+        seen.add(s)
+        try:
+            r = requests.get(
+                f"{CG_API_BASE}/api/futures/price/history",
+                params={"exchange": "Binance", "symbol": s, "interval": interval, "limit": int(limit)},
+                headers={"CG-API-KEY": CG_API_KEY, "accept": "application/json"},
+                timeout=8,
+            )
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            if j.get("code") not in (0, "0", 200, "200", None):
+                continue
+            data = j.get("data") or j.get("list") or []
+            if not isinstance(data, list) or len(data) < 6:
+                continue
+            highs: List[float] = []
+            lows: List[float] = []
+            # 不含最新一根（避免直接用「正在形成的 K 線」當阻力）
+            for bar in data[:-1]:
+                try:
+                    h = float(bar.get("high") or bar.get("h") or bar.get("highPrice") or 0)
+                    l = float(bar.get("low") or bar.get("l") or bar.get("lowPrice") or 0)
+                    if h > 0:
+                        highs.append(h)
+                    if l > 0:
+                        lows.append(l)
+                except (TypeError, ValueError):
+                    continue
+            if not highs or not lows:
+                continue
+            return {"high": max(highs), "low": min(lows), "lookback": len(highs)}
+        except Exception:
+            continue
+    return None
+
+
+def _crit_radar_compute_tp_with_structure(
+    entry: float,
+    sl_px: float,
+    is_long: bool,
+    swing: Optional[Dict[str, float]],
+    *,
+    tp_r_default: float = 2.8,
+    min_r: float = 2.0,
+    max_r: float = 4.5,
+    buffer_pct: float = 0.0025,
+) -> Tuple[float, str]:
+    """以「結構位 + ≥2R 保底 / ≤4.5R 上限」回推 TP 點位。
+
+    - sl_dist = |entry - sl_px|
+    - tp_2r_floor = entry ± sl_dist * min_r
+    - tp_max_cap  = entry ± sl_dist * max_r
+    - 若 swing high/low 存在且方向正確：
+        多單 → tp_struct = swing.high * (1 - buffer)
+        空單 → tp_struct = swing.low  * (1 + buffer)
+        最終 TP = clamp(tp_struct, [tp_2r_floor, tp_max_cap])
+    - 若沒有結構位資料：fallback 為 entry ± sl_dist * tp_r_default
+    回傳 (tp_price, source_label)
+    """
+    sl_dist = abs(float(entry) - float(sl_px))
+    if sl_dist <= 0:
+        return float(entry), "no_sl_dist"
+    if is_long:
+        tp_2r = entry + sl_dist * min_r
+        tp_cap = entry + sl_dist * max_r
+        if swing and swing.get("high") and swing["high"] > entry:
+            tp_struct = float(swing["high"]) * (1.0 - buffer_pct)
+            struct_r = (tp_struct - entry) / sl_dist if sl_dist > 0 else 0.0
+            # 結構過近：使用預設 R 倍數（保證至少有 tp_r_default R）
+            if struct_r < min_r:
+                return entry + sl_dist * tp_r_default, f"{tp_r_default:.1f}R(結構過近)"
+            # 結構過遠：使用 max_r 上限而非貼到 swing（避免不切實際的目標）
+            if struct_r > max_r:
+                return tp_cap, f"{max_r:.1f}R上限(結構過遠)"
+            return tp_struct, f"結構阻力({struct_r:.1f}R)"
+        return entry + sl_dist * tp_r_default, f"{tp_r_default:.1f}R(無結構)"
+    else:
+        tp_2r = entry - sl_dist * min_r
+        tp_cap = entry - sl_dist * max_r
+        if swing and swing.get("low") and swing["low"] < entry:
+            tp_struct = float(swing["low"]) * (1.0 + buffer_pct)
+            struct_r = (entry - tp_struct) / sl_dist if sl_dist > 0 else 0.0
+            if struct_r < min_r:
+                return entry - sl_dist * tp_r_default, f"{tp_r_default:.1f}R(結構過近)"
+            if struct_r > max_r:
+                return tp_cap, f"{max_r:.1f}R上限(結構過遠)"
+            return tp_struct, f"結構支撐({struct_r:.1f}R)"
+        return entry - sl_dist * tp_r_default, f"{tp_r_default:.1f}R(無結構)"
+
+
 def _crit_radar_oi_sort_key(item: Dict[str, Any]) -> float:
     oi15 = item.get("_cg_oi_change_15m")
     oi1h = item.get("oiChange1h") or item.get("open_interest_change_percent_1h")
@@ -16193,6 +16443,15 @@ def run_crit_radar_once() -> None:
                         f"{sym}{side[0]}|p15={p15f:+.2f}%|p1h={p1hf:+.2f}% 反向過大"
                     )
                 continue
+            # 1H 同向過熱：避免「LONG 訊號出現時 1h 已漲 +6%」的追高情境
+            _max_1h_same = max(2.5, min(12.0, _env_float("CRIT_RADAR_1H_MAX_SAME_PCT", 6.0)))
+            if (side == "LONG" and p1hf >= _max_1h_same) or (side == "SHORT" and p1hf <= -_max_1h_same):
+                n_overextended += 1
+                if len(sample_overextended) < 8:
+                    sample_overextended.append(
+                        f"{sym}{side[0]}|p1h={p1hf:+.2f}%>{_max_1h_same:.1f}% 同向過熱(追高/追空)"
+                    )
+                continue
         it2 = dict(it)
         it2["_crit_side"] = side
         it2["_crit_score"] = best
@@ -16357,18 +16616,42 @@ def run_crit_radar_once() -> None:
                 if atr_1h_f > atr_f:
                     atr_f = atr_1h_f
         raw_sl_pct = (atr_f * sl_atr) / price
-        raw_sl_pct = max(sl_min_pct, min(sl_max_pct, raw_sl_pct))
-        tp_pct = raw_sl_pct * tp_r
+        # 動態 SL 下限：BTC/ETH/SOL 等主流幣波動低，3.2% 過寬 → 自動縮到 1.5%
+        # 其餘山寨幣維持原本 sl_min_pct（避免設太緊被 wick 掃）
+        _sym_clean = sym.replace("USDT", "")
+        _is_major = _sym_clean in ("BTC", "ETH", "SOL", "BNB")
+        _sl_min_eff = max(0.012, min(sl_min_pct, 0.018)) if _is_major else sl_min_pct
+        raw_sl_pct = max(_sl_min_eff, min(sl_max_pct, raw_sl_pct))
         px_f = float(price)
         if is_long:
             sl_px = px_f * (1.0 - raw_sl_pct)
-            tp_px = px_f * (1.0 + tp_pct)
         else:
             sl_px = px_f * (1.0 + raw_sl_pct)
-            tp_px = px_f * (1.0 - tp_pct)
+
+        # ── TP：結構位（最近 24h swing；對 15m 訊號太遠的 48h 易產生不切實際的 4.5R 上限） ─────
+        swing_levels = _crit_radar_fetch_swing_levels(sym, interval="1h", limit=24)
+        tp_px, tp_src = _crit_radar_compute_tp_with_structure(
+            entry=px_f,
+            sl_px=sl_px,
+            is_long=is_long,
+            swing=swing_levels,
+            tp_r_default=tp_r,
+            min_r=2.0,
+            max_r=4.5,
+            buffer_pct=0.0025,
+        )
+        # 計算實際 R 倍數，供日誌與訊息顯示
+        try:
+            actual_r = abs(tp_px - px_f) / abs(px_f - sl_px) if px_f != sl_px else 0.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            actual_r = 0.0
         ent_s = _crit_radar_fmt_price_level(px_f)
         sl_s = _crit_radar_fmt_price_level(sl_px)
         tp_s = _crit_radar_fmt_price_level(tp_px)
+        logger.info(
+            "[爆擊雷達·TP] %s %s entry=%s sl=%s tp=%s 來源=%s 實際=%.2fR",
+            sym, side, ent_s, sl_s, tp_s, tp_src, actual_r,
+        )
 
         if _crit_use_gk and not _crit_gk_glob_off:
             _gk_dict = _crit_radar_gatekeeper_payload(
@@ -16463,17 +16746,17 @@ def run_crit_radar_once() -> None:
         except (TypeError, ValueError):
             td15_v = None
         if td15_v is None:
-            td_note = "中性/等待"
+            td_note = "中性"
         elif td15_v >= 6:
-            td_note = "多方延續"
+            td_note = "偏多"
         elif td15_v <= -6:
-            td_note = "空方延續"
+            td_note = "偏空"
         elif td15_v > 0:
-            td_note = "多方啟動"
+            td_note = "微多"
         elif td15_v < 0:
-            td_note = "空方啟動"
+            td_note = "微空"
         else:
-            td_note = "中性/等待"
+            td_note = "中性"
 
         # RSI 警示
         rsi_v = it.get("_rsi15")
@@ -16516,40 +16799,36 @@ def run_crit_radar_once() -> None:
             dir_verb = "做多" if is_long else "做空"
 
             if _rv is not None and ((is_long and _rv > 75) or (not is_long and _rv < 25)):
-                return f"💡 訊號達標但 RSI 已到極端位，屬高風險{dir_verb}，建議輕倉並嚴守 SL"
+                return f"💡 可以試單，但風險偏高；只用小倉，止損一定要帶"
             if aligned >= 3 and opposed == 0:
-                return f"💡 多訊號完全共振，{dir_verb}條件強，可跟單並設好止損"
+                return f"💡 方向一致，現在可跟，照點位執行"
             if aligned >= 2 and opposed <= 1:
-                return f"💡 訊號偏{dir_verb}方向，可小倉跟進，SL 守好再加碼"
+                return f"💡 大方向偏{dir_verb}，可小倉跟"
             if opposed >= 2:
-                return f"💡 訊號分歧，市場有雜音，輕倉試探即可，嚴守止損"
-            return f"💡 條件初步符合，{dir_verb}機率偏高，建議輕倉操作"
+                return f"💡 訊號打架，先觀望或極小倉試單"
+            return f"💡 有機會但不夠穩，先小倉"
 
         verdict_line = _crit_verdict()
 
+        _lead = "多方" if is_long else "空方"
+        _follow = "可小倉跟" if score >= (min_score + 4) else "先小單試"
+        _risk = "波動大，止損一定要帶" if rsi_warn else "不要重倉，分批進出"
         msg_lines = [
-            "💥 *爆擊雷達*",
+            "💥 *快節奏訊號*",
             "────────────────",
-            f"📍 *標的* · `{sym}USDT` · 週期 `15m`",
-            f"📍 *方向* · {dir_zh}",
-            "📍 *狀態* · 已達爆擊門檻",
+            f"🎯 `{sym}USDT`（15m）",
+            f"1) 現在誰主導：{_lead}",
+            f"2) 可不可以跟：{_follow}",
+            f"3) 點位：進場 `{ent_s}` ｜止損 `{sl_s}` ｜停利 `{tp_s}`（{actual_r:.1f}R · {tp_src}）",
+            f"4) 風險提醒：{_risk}",
             "",
-            "*〔籌碼分析〕*",
-            f"• 持倉動能：{oi_note}",
-            f"• 價格節奏：{'上行偏強' if p15f > 0 else ('下行偏弱' if p15f < 0 else '盤整')}",
-            f"• 盤口主導：{tk_note}",
-            f"• 費率氛圍：{fr_note}",
-            f"• TD節奏：{td_note}",
-            f"• 資金趨勢：{nf_1h_s}",
+            f"補充：持倉{oi_note}｜買賣力道{tk_note}｜資金{nf_1h_s}",
         ]
         if rsi_warn:
-            msg_lines.append(f"• {rsi_warn}")
+            msg_lines.append("⚠️ 目前價格太熱，容易急拉急殺")
         msg_lines += [
             "",
             verdict_line,
-            "",
-            "*〔參考價〕* · Gate USDT 永續",
-            f"進場 `{ent_s}` ｜ SL `{sl_s}` ｜ TP `{tp_s}`",
             "",
             _GATE_PRICE_SOURCE_NOTE,
         ]
@@ -17750,20 +18029,66 @@ def run_gold_signal():
             last_ts = float(ns.get("last_push_ts") or 0.0)
             now_ts = time.time()
             if (now_ts - last_ts) >= (_no_sig_cd_min * 60):
+                _px = _ma40 = _atr14 = None
                 try:
                     _last = df_1h.iloc[-1]
-                    _px = float(_last.get("close")) if _last is not None else None
-                    _ma40 = float(df_1h["close"].rolling(40).mean().iloc[-1]) if "close" in df_1h.columns else None
-                    _atr14 = float((df_1h["high"] - df_1h["low"]).rolling(14).mean().iloc[-1]) if set(("high", "low")).issubset(df_1h.columns) else None
-                except Exception:
-                    _px = _ma40 = _atr14 = None
-                _px_s = f"{_px:.2f}" if isinstance(_px, (int, float)) else "—"
-                _ma_s = f"{_ma40:.2f}" if isinstance(_ma40, (int, float)) else "—"
+                    # add_indicators 產生大寫欄位（Close / High / Low / SMA_40 / ATR）
+                    # 兼容兩種命名方式，避免日後 data_provider 改動就失效
+                    def _pick(row, *names):
+                        for n in names:
+                            if n in row.index:
+                                v = row[n]
+                                try:
+                                    fv = float(v)
+                                    if fv == fv:  # not NaN
+                                        return fv
+                                except (TypeError, ValueError):
+                                    continue
+                        return None
+
+                    _px = _pick(_last, "Close", "close")
+                    _ma40 = _pick(_last, "SMA_40", "sma_40")
+                    if _ma40 is None and "Close" in df_1h.columns:
+                        _ma40 = float(df_1h["Close"].rolling(40, min_periods=1).mean().iloc[-1])
+                    _atr14 = _pick(_last, "ATR", "atr")
+                    if _atr14 is None:
+                        _h_col = "High" if "High" in df_1h.columns else ("high" if "high" in df_1h.columns else None)
+                        _l_col = "Low"  if "Low"  in df_1h.columns else ("low"  if "low"  in df_1h.columns else None)
+                        _c_col = "Close" if "Close" in df_1h.columns else ("close" if "close" in df_1h.columns else None)
+                        if _h_col and _l_col and _c_col:
+                            tr1 = df_1h[_h_col] - df_1h[_l_col]
+                            tr2 = (df_1h[_h_col] - df_1h[_c_col].shift(1)).abs()
+                            tr3 = (df_1h[_l_col] - df_1h[_c_col].shift(1)).abs()
+                            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+                            _atr14 = float(tr.rolling(14, min_periods=1).mean().iloc[-1])
+                except Exception as _e:
+                    logger.warning("[黃金訊號·無進場] 讀取 Close/MA40/ATR14 失敗：%s", _e)
+
+                _px_s  = f"{_px:.2f}"  if isinstance(_px, (int, float))  else "—"
+                _ma_s  = f"{_ma40:.2f}" if isinstance(_ma40, (int, float)) else "—"
                 _atr_s = f"{_atr14:.2f}" if isinstance(_atr14, (int, float)) else "—"
+
+                # 多一行白話判讀：依現價 vs MA40、ATR14 規模給出方向暗示
+                if isinstance(_px, (int, float)) and isinstance(_ma40, (int, float)):
+                    diff = _px - _ma40
+                    if isinstance(_atr14, (int, float)) and _atr14 > 0:
+                        rel = diff / _atr14
+                        if rel > 0.5:
+                            _bias = "🟢 現價在均線上方，短線偏多，等回落到 MA40 附近再考慮多單"
+                        elif rel < -0.5:
+                            _bias = "🔴 現價在均線下方，短線偏空，等反彈到 MA40 附近再考慮空單"
+                        else:
+                            _bias = "⚪ 現價貼近 MA40，方向不明，等突破破位再進場"
+                    else:
+                        _bias = "⚪ 等突破今日箱體上下緣再進場"
+                else:
+                    _bias = "⚪ 數據暫不完整，先觀望"
+
                 _neutral_msg = (
-                    "🟡 黃金獵手｜盤勢快報（無進場）\n"
+                    "🟡 *黃金獵手｜盤勢快報（無進場）*\n"
                     f"現價 `{_px_s}` ｜ MA40 `{_ma_s}` ｜ ATR14 `{_atr_s}`\n"
-                    f"本輪 ORB+MA 未觸發進場條件，繼續等待破位訊號（冷卻 {_no_sig_cd_min} 分鐘）。"
+                    f"{_bias}\n"
+                    f"_本輪 ORB 未觸發進場條件，繼續等待破位（冷卻 {_no_sig_cd_min} 分鐘）_"
                 )
                 if jackbot_universal_pre_send_gatekeeper("gold_signal_info", text=_neutral_msg):
                     send_telegram_message(_neutral_msg, TG_THREAD_IDS.get("gold_signal", 254), parse_mode="Markdown")
