@@ -2146,7 +2146,12 @@ def buying_power_monitor():
     fg_data = fetch_fear_greed_index()
     etf_data = fetch_btc_etf_flow()
     cb_data = fetch_coinbase_premium()
-    logger.info(f"[牛市燃料] 恐懼貪婪={fg_data.get('value')} ETF流={etf_data.get('direction')} CB溢價={cb_data.get('premium')}")
+    ls_data = fetch_global_ls_ratio()
+    logger.info(
+        "[牛市燃料] 恐懼貪婪=%s ETF流=%s CB溢價=%s L/S比=%.2f",
+        fg_data.get("value"), etf_data.get("direction"), cb_data.get("premium"),
+        ls_data.get("ratio") or 0,
+    )
 
     if not mcap_change:
         logger.warning("牛市燃料監控：無法取得市值數據，跳過推播")
@@ -2198,6 +2203,9 @@ def buying_power_monitor():
         fuel_score += 1    # ETF機構流入=強力買盤
     if cb_data.get("signal") == "bullish":
         fuel_score += 1    # Coinbase溢價=美國機構買入
+    # L/S ratio 調整：擁擠多頭扣分（防過熱），擁擠空頭加分（軋空機會）
+    _ls_adj = int(ls_data.get("score_adj") or 0)
+    fuel_score += _ls_adj
     # 基礎分最高 7，加上情緒／ETF／CB 後可 >7；進度條與顯示統一用 10 格滿分
     FUEL_DISPLAY_MAX = 10
     fuel_bar = _make_fuel_bar(min(fuel_score, FUEL_DISPLAY_MAX), max_score=FUEL_DISPLAY_MAX)
@@ -2396,7 +2404,9 @@ def buying_power_monitor():
         lines.append(f"• ETF總資產：`${etf_data['total_assets_usd']/1e9:.1f}B`")
     if cb_data.get("label"):
         lines.append(f"• {cb_data['label']}")
-    if not any([fg_val, etf_data.get("label"), cb_data.get("label")]):
+    if ls_data.get("label"):
+        lines.append(f"• 全網多空：{ls_data['label']}")
+    if not any([fg_val, etf_data.get("label"), cb_data.get("label"), ls_data.get("label")]):
         lines.append("• 這塊今天沒撈到資料，略過")
 
     lines.append("")
@@ -4462,6 +4472,73 @@ def fetch_coinbase_premium() -> Dict[str, Any]:
         return result
     except Exception as e:
         logger.debug(f"[Coinbase溢價] 異常: {e}")
+        _flow_cache[cache_key] = (empty, now)
+        return empty
+
+
+def fetch_global_ls_ratio() -> Dict[str, Any]:
+    """全網帳戶多空比（Long/Short Ratio）。
+    L/S > 1.5 → 多頭嚴重擁擠，容易被掃（逆勢看跌）
+    L/S < 0.8 → 空頭嚴重擁擠，容易被軋（逆勢看漲）
+    L/S 0.9~1.3 → 中性
+    endpoint: /api/futures/global-long-short-account-ratio/history
+    快取 10 分鐘。
+    """
+    cache_key = "global_ls_ratio"
+    now = time.time()
+    if cache_key in _flow_cache:
+        val, ts = _flow_cache[cache_key]
+        if now - ts < 600:
+            return val if val else {}
+
+    empty: Dict[str, Any] = {"ratio": None, "label": "", "signal": "neutral", "score_adj": 0}
+    try:
+        j = _coinglass_simple_get(
+            "/api/futures/global-long-short-account-ratio/history",
+            {"symbol": "BTC", "interval": "1h", "limit": 1},
+        )
+        if not j:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+        data = j.get("data") or j.get("list") or j
+        if isinstance(data, list) and data:
+            data = data[-1]
+        if not isinstance(data, dict):
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+        ratio = None
+        for k in ("longShortRatio", "ratio", "longAccount", "long_short_ratio", "value"):
+            v = data.get(k)
+            if v is not None:
+                try:
+                    ratio = float(v)
+                    break
+                except (TypeError, ValueError):
+                    pass
+        if ratio is None:
+            _flow_cache[cache_key] = (empty, now)
+            return empty
+        if ratio > 1.6:
+            signal, label = "crowded_long",  f"😱 多空比 {ratio:.2f}（多頭嚴重擁擠，小心反轉）"
+            score_adj = -1
+        elif ratio > 1.3:
+            signal, label = "slightly_long",  f"⚠️ 多空比 {ratio:.2f}（偏多頭擁擠）"
+            score_adj = 0
+        elif ratio < 0.7:
+            signal, label = "crowded_short", f"🚨 多空比 {ratio:.2f}（空頭嚴重擁擠，軋空風險偏高）"
+            score_adj = 1
+        elif ratio < 0.9:
+            signal, label = "slightly_short", f"🔸 多空比 {ratio:.2f}（偏空頭擁擠）"
+            score_adj = 1
+        else:
+            signal, label = "neutral", f"🟡 多空比 {ratio:.2f}（多空均衡）"
+            score_adj = 0
+        result = {"ratio": ratio, "label": label, "signal": signal, "score_adj": score_adj}
+        logger.info("[多空比✅] ratio=%.3f signal=%s", ratio, signal)
+        _flow_cache[cache_key] = (result, now)
+        return result
+    except Exception as e:
+        logger.debug("[多空比] 異常: %s", e)
         _flow_cache[cache_key] = (empty, now)
         return empty
 
@@ -11210,20 +11287,163 @@ def run_position_screener_board_once():
             return "持倉：減倉"
         return "持倉：變化小"
 
+    def _build_conclusion(base: str, bucket: str, r: Dict[str, Any]) -> str:
+        """把費率 + 持倉方向 + TD + Netflow 收斂成一句話趨勢結論。"""
+        st4 = r.get("state_4h") or ""
+        st1 = r.get("state_1h") or ""
+        st15 = r.get("state_15m") or ""
+        p1h_v = float(r.get("p1h") or 0.0)
+
+        fr = funding_map.get(base)
+        _fr_v = float(fr) if isinstance(fr, (int, float)) else None
+        fr_heavy_long  = _fr_v is not None and _fr_v > 0.003
+        fr_slight_long = _fr_v is not None and _fr_v > FUNDING_EXTREME
+        fr_heavy_short = _fr_v is not None and _fr_v < -0.003
+        fr_slight_short = _fr_v is not None and _fr_v < -FUNDING_EXTREME
+
+        td15v = td15_map.get(base)
+        td1hv = td1h_map.get(base)
+        td4hv = td4h_map.get(base)
+        td_long_exhaust  = any(
+            isinstance(v, (int, float)) and float(v) >= 13
+            for v in (td15v, td1hv, td4hv)
+        )
+        td_short_exhaust = any(
+            isinstance(v, (int, float)) and float(v) <= -13
+            for v in (td15v, td1hv, td4hv)
+        )
+        td_multi_long  = (isinstance(td1hv, (int, float)) and float(td1hv) >= 1
+                          and isinstance(td4hv, (int, float)) and float(td4hv) >= 1)
+        td_multi_short = (isinstance(td1hv, (int, float)) and float(td1hv) <= -1
+                          and isinstance(td4hv, (int, float)) and float(td4hv) <= -1)
+
+        snap = netflow_map.get(base) or {}
+        f1, s1 = snap.get("futures_1h"), snap.get("spot_1h")
+        if isinstance(f1, (int, float)) or isinstance(s1, (int, float)):
+            nf_tot = (float(f1) if isinstance(f1, (int, float)) else 0.0) \
+                   + (float(s1) if isinstance(s1, (int, float)) else 0.0)
+            nf_in  = nf_tot > 0
+            nf_out = nf_tot < 0
+        else:
+            nf_in = nf_out = False
+
+        # ---------- bucket 結論 ----------
+        if bucket == "主力出貨獲利了結跡象":
+            if fr_heavy_long or td_long_exhaust:
+                return "💡 多頭嚴重擁擠，出貨訊號明顯，短線回調風險高，注意止盈"
+            if fr_slight_long and nf_out:
+                return "💡 多頭略擁擠＋資金外流，漲勢可能趨緩，建議鎖定獲利"
+            if nf_in:
+                return "💡 短線雖有平倉，仍有資金流入，小幅回調後可能繼續偏多"
+            return "💡 多方短線獲利了結，等回調確認支撐後再決策"
+
+        if bucket == "主力進場吸籌跡象":
+            if fr_heavy_short or td_short_exhaust:
+                return "💡 空方嚴重擁擠，主力逆勢吸籌，軋空反彈機率高，偏多操作"
+            if fr_slight_short:
+                return "💡 空方略擁擠＋主力吸籌，有反彈動能，偏多但注意假突破"
+            if td_multi_long and nf_in:
+                return "💡 多週期共振偏多＋資金流入，趨勢向上，可考慮順勢做多"
+            if fr_heavy_long:
+                return "💡 多頭擁擠＋吸籌跡象，追高風險偏高，等回調後再介入"
+            if nf_in:
+                return "💡 資金持續流入，主力吸籌中，趨勢偏多"
+            return "💡 主力持續吸籌，趨勢偏多，可等回調低點佈局"
+
+        if bucket == "主力停損認賠跡象":
+            if fr_heavy_long:
+                return "💡 多頭大量止損＋費率仍偏多，賣壓可能持續，勿接刀"
+            if td_short_exhaust:
+                return "💡 空頭動能趨近飽和，止跌訊號可能臨近，謹慎觀察反彈"
+            if "空頭開倉" in st4 or "空頭開倉" in st1:
+                return "💡 新空單明顯增加，空頭格局確立，偏空操作，謹防反彈騙線"
+            if nf_out and td_multi_short:
+                return "💡 資金外流＋多週期偏空，下跌趨勢確立，等止跌再介入"
+            return "💡 多方撤退，短線偏弱，觀望等待止跌訊號"
+
+        if bucket == "主力停損 新主力進場跡象":
+            if fr_heavy_short or td_short_exhaust:
+                return "💡 空方嚴重擁擠，換手跡象明顯，軋空反彈機率高，可小倉試多"
+            if nf_in and st15 in ("多頭開倉", "空頭平倉"):
+                return "💡 新資金流入＋短線多頭開倉，換手偏多方向，關注能否站穩"
+            if nf_out and "空頭開倉" in st15:
+                return "💡 換手後空頭接力，偏空格局轉換中，謹慎觀察方向"
+            return "💡 換手整理中，趨勢尚未明朗，等方向確認後再跟進"
+
+        # ---------- 主流幣通用邏輯 ----------
+        long_opens   = sum(1 for s in (st4, st1, st15) if "多頭開倉" in s)
+        short_opens  = sum(1 for s in (st4, st1, st15) if "空頭開倉" in s)
+        long_closes  = sum(1 for s in (st4, st1, st15) if "多頭平倉" in s)
+        short_closes = sum(1 for s in (st4, st1, st15) if "空頭平倉" in s)
+
+        if long_opens >= 2 and nf_in:
+            if td_long_exhaust or fr_heavy_long:
+                return "💡 短線多頭動能過熱，整體偏多但謹慎追高，注意獲利了結"
+            return "💡 多週期偏多＋資金流入，市場偏強，可隨趨勢操作"
+        if long_opens >= 2:
+            return "💡 多週期增倉偏多，但資金外流需注意，整體偏多震盪"
+        if long_closes >= 2 and nf_out:
+            if fr_heavy_long:
+                return "💡 多頭大幅止損＋資金外流，短線偏空，謹慎操作"
+            return "💡 多方撤退＋資金外流，整體偏弱，觀望為主"
+        if short_opens >= 2:
+            if fr_heavy_short or td_short_exhaust:
+                return "💡 空頭擁擠，軋空反彈機率提升，謹慎持空"
+            return "💡 多週期空頭增倉，整體偏空，等確認再操作"
+        if short_closes >= 2 and nf_in:
+            return "💡 空單回補＋資金流入，可能出現反彈，觀察能否突破壓力"
+        if p1h_v > 0.5:
+            return "💡 短線偏強但訊號分歧，多空交戰中，觀望為主"
+        if p1h_v < -0.5:
+            return "💡 短線偏弱，多空訊號分歧，謹慎操作"
+        return "💡 多空訊號分歧，整體震盪格局，等方向確認"
+
+    _STATE_SHORT = {
+        "多頭開倉": "多方加碼🟢",
+        "空頭平倉": "空方退場🟢",
+        "空頭開倉": "空方加碼🔴",
+        "多頭平倉": "多方退場🔴",
+        "資料不足": "—",
+    }
+    _BULL_STATES = {"多頭開倉", "空頭平倉"}
+    _BEAR_STATES = {"空頭開倉", "多頭平倉"}
+
+    def _tf_line(st4: str, st1: str, st15: str) -> str:
+        """三個時間框的狀態列，自動標示「少數派」時間框（⚠️ 高亮）。"""
+        def _dir(s: str) -> str:
+            if s in _BULL_STATES: return "bull"
+            if s in _BEAR_STATES: return "bear"
+            return "neutral"
+        dirs = [_dir(st4), _dir(st1), _dir(st15)]
+        bull_n = dirs.count("bull")
+        bear_n = dirs.count("bear")
+        majority = "bull" if bull_n > bear_n else ("bear" if bear_n > bull_n else None)
+
+        def _label(s: str, d: str) -> str:
+            short = _STATE_SHORT.get(s, s)
+            if majority and d != "neutral" and d != majority:
+                return f"⚠️{short}"
+            return short
+
+        s4  = _label(st4,  dirs[0])
+        s1  = _label(st1,  dirs[1])
+        s15 = _label(st15, dirs[2])
+        return f"4H {s4} · 1H {s1} · 15m {s15}"
+
     def _fmt_item(idx: int, r: Dict[str, Any]) -> str:
         base = r.get("base") or ""
         sym_copy = f"{base}USDT"
-        p1h = r.get("p1h") or 0.0
         oi1h = r.get("oi1h") or 0.0
-        oi15m = oi15m_map.get(base)
-        oi4h = oi4h_map.get(base)
         st4 = r.get("state_4h") or "資料不足"
         st1 = r.get("state_1h") or "資料不足"
         st15 = r.get("state_15m") or "資料不足"
+        bucket = r.get("trend_bucket") or ""
+        conclusion = _build_conclusion(base, bucket, r)
         return (
-            f"    {idx}) 🎯 `{sym_copy}`｜{_price_tone(p1h)}｜{_oi_tone(oi1h)}｜{_fr_short(base)}\n"
-            f"       ⏱ 4H {st4}｜1H {st1}｜15m {st15}\n"
-            f"       {_td_triplet(base)}｜{_fmt_netflow_short(base)}"
+            f"    {idx}) 🎯 `{sym_copy}`｜{_oi_tone(oi1h)}｜{_fr_short(base)}\n"
+            f"       {_tf_line(st4, st1, st15)}\n"
+            f"       {_fmt_netflow_short(base)}\n"
+            f"       {conclusion}"
         )
 
     def _section(title: str, items: List[Dict[str, Any]]) -> str:
@@ -11246,21 +11466,22 @@ def run_position_screener_board_once():
                 continue
             base = rr["base"]
             sym_copy = f"{base}USDT"
-            p1h = rr["p1h"]
             oi1h = rr["oi1h"]
-            oi15m = oi15m_map.get(base)
-            oi4h = oi4h_map.get(base)
             st4 = rr.get("state_4h") or "資料不足"
             st1 = rr.get("state_1h") or "資料不足"
             st15 = rr.get("state_15m") or "資料不足"
+            conclusion = _build_conclusion(base, "", rr)
             lines.append(
-                f"  - 🧱 `{sym_copy}`｜{_price_tone(p1h)}｜{_oi_tone(oi1h)}｜{_fr_short(base)}"
+                f"  - 🧱 `{sym_copy}`｜{_oi_tone(oi1h)}｜{_fr_short(base)}"
             )
             lines.append(
-                f"    ⏱ 4H {st4}｜1H {st1}｜15m {st15}"
+                f"    {_tf_line(st4, st1, st15)}"
             )
             lines.append(
-                f"    {_td_triplet(base)}｜{_fmt_netflow_short(base)}"
+                f"    {_fmt_netflow_short(base)}"
+            )
+            lines.append(
+                f"    {conclusion}"
             )
         return "\n".join(lines)
 
@@ -15473,8 +15694,9 @@ def _crit_radar_score_components(
     item: Dict[str, Any],
     funding_rate: Optional[float],
     is_long: bool,
+    rsi_val: Optional[float] = None,
 ) -> int:
-    """0~100：OI 動能、價格 15m、主動買賣、資金費率、TD15m（單邊）。"""
+    """0~100：OI 動能、價格 15m、主動買賣、資金費率、TD15m、RSI 位置（單邊）。"""
     oi15 = item.get("_cg_oi_change_15m")
     oi1h = item.get("oiChange1h") or item.get("open_interest_change_percent_1h")
     try:
@@ -15582,7 +15804,26 @@ def _crit_radar_score_components(
             elif td_v <= -12:
                 td_bonus -= 4.0  # 賣計數過高，追空風險
 
-    total = int(round(oi_pts + price_pts + taker_pts + fund_pts + timing_bonus + td_bonus))
+    # RSI 位置評分：超買追多 / 超賣追空 均扣分；理想位置加分
+    rsi_bonus = 0.0
+    if rsi_val is not None:
+        r = float(rsi_val)
+        if is_long:
+            if r > 78:
+                rsi_bonus -= 9.0    # 嚴重超買，追多失敗率大
+            elif r > 70:
+                rsi_bonus -= 5.0    # 偏超買
+            elif 32 <= r <= 55:
+                rsi_bonus += 5.0    # 理想做多起點
+        else:
+            if r < 22:
+                rsi_bonus -= 9.0    # 嚴重超賣，追空易被軋
+            elif r < 30:
+                rsi_bonus -= 5.0    # 偏超賣
+            elif 45 <= r <= 68:
+                rsi_bonus += 5.0    # 理想做空起點
+
+    total = int(round(oi_pts + price_pts + taker_pts + fund_pts + timing_bonus + td_bonus + rsi_bonus))
     return max(0, min(100, total))
 
 
@@ -15842,6 +16083,12 @@ def run_crit_radar_once() -> None:
     except Exception as e:
         logger.warning(f"[爆擊雷達] TD15m 批次失敗（降級）: {e}")
         td15_map = {}
+    rsi15_map: Dict[str, Optional[float]] = {}
+    try:
+        rsi15_map = fetch_cg_rsi_bulk("15m") or {}
+        logger.info("[爆擊雷達] RSI15m 批次預載 %d 幣", len(rsi15_map))
+    except Exception as e:
+        logger.warning(f"[爆擊雷達] RSI15m 批次失敗（降級）: {e}")
     liq_map_cr: Dict[str, Dict[str, float]] = fetch_cg_liq_coin_map()
     logger.info("[爆擊雷達] 爆倉 coin-list 預載 %d 幣（與持倉狙擊守門員同源）", len(liq_map_cr))
 
@@ -15892,11 +16139,14 @@ def run_crit_radar_once() -> None:
         if _td is None and sym.startswith("1000"):
             _td = td15_map.get(sym.replace("1000", ""))
         it["_td15"] = _td
+        _sym_base = sym.replace("USDT", "").rstrip()
+        _rsi = rsi15_map.get(_sym_base) or rsi15_map.get(_sym_base.replace("1000", ""))
+        it["_rsi15"] = _rsi
         fr = fr_map.get(sym)
         if fr is None:
             fr = fr_map.get(sym.replace("1000", ""))
-        lo = _crit_radar_score_components(it, fr, True)
-        sh = _crit_radar_score_components(it, fr, False)
+        lo = _crit_radar_score_components(it, fr, True, _rsi)
+        sh = _crit_radar_score_components(it, fr, False, _rsi)
         if lo >= sh + margin:
             side, best = "LONG", lo
         elif sh >= lo + margin:
@@ -16209,10 +16459,6 @@ def run_crit_radar_once() -> None:
             nf_1h_s = "資金流向不明"
         td15_raw = it.get("_td15")
         try:
-            td15_s = str(int(float(td15_raw))) if td15_raw is not None else "—"
-        except (TypeError, ValueError):
-            td15_s = "—"
-        try:
             td15_v = float(td15_raw) if td15_raw is not None else None
         except (TypeError, ValueError):
             td15_v = None
@@ -16229,6 +16475,58 @@ def run_crit_radar_once() -> None:
         else:
             td_note = "中性/等待"
 
+        # RSI 警示
+        rsi_v = it.get("_rsi15")
+        rsi_warn = ""
+        try:
+            _rv = float(rsi_v) if rsi_v is not None else None
+        except (TypeError, ValueError):
+            _rv = None
+        if _rv is not None:
+            if is_long and _rv > 75:
+                rsi_warn = f"⚠️ RSI {_rv:.0f}（超買區，追多風險偏高）"
+            elif not is_long and _rv < 25:
+                rsi_warn = f"⚠️ RSI {_rv:.0f}（超賣區，軋空風險偏高）"
+            elif is_long and _rv > 68:
+                rsi_warn = f"🔸 RSI {_rv:.0f}（偏熱，適度謹慎）"
+            elif not is_long and _rv < 32:
+                rsi_warn = f"🔸 RSI {_rv:.0f}（偏冷，注意反彈）"
+
+        # 綜合趨勢結論
+        def _crit_verdict() -> str:
+            bull_pts = 0
+            bear_pts = 0
+            if "增倉" in oi_note:      bull_pts += 1
+            elif "減倉" in oi_note:    bear_pts += 1
+            if tk_note == "買盤主導":   bull_pts += 1
+            elif tk_note == "賣盤主導": bear_pts += 1
+            if is_long:
+                if "偏空" in fr_note:  bull_pts += 1
+                elif "偏多" in fr_note and fr is not None and float(fr) > 0.001: bear_pts += 1
+            else:
+                if "偏多" in fr_note:  bull_pts += 1
+                elif "偏空" in fr_note and fr is not None and float(fr) < -0.001: bear_pts += 1
+            if "流入" in nf_1h_s:      bull_pts += 1
+            elif "流出" in nf_1h_s:    bear_pts += 1
+            if "多方" in td_note:      bull_pts += 1
+            elif "空方" in td_note:    bear_pts += 1
+
+            aligned  = bull_pts if is_long else bear_pts
+            opposed  = bear_pts if is_long else bull_pts
+            dir_verb = "做多" if is_long else "做空"
+
+            if _rv is not None and ((is_long and _rv > 75) or (not is_long and _rv < 25)):
+                return f"💡 訊號達標但 RSI 已到極端位，屬高風險{dir_verb}，建議輕倉並嚴守 SL"
+            if aligned >= 3 and opposed == 0:
+                return f"💡 多訊號完全共振，{dir_verb}條件強，可跟單並設好止損"
+            if aligned >= 2 and opposed <= 1:
+                return f"💡 訊號偏{dir_verb}方向，可小倉跟進，SL 守好再加碼"
+            if opposed >= 2:
+                return f"💡 訊號分歧，市場有雜音，輕倉試探即可，嚴守止損"
+            return f"💡 條件初步符合，{dir_verb}機率偏高，建議輕倉操作"
+
+        verdict_line = _crit_verdict()
+
         msg_lines = [
             "💥 *爆擊雷達*",
             "────────────────",
@@ -16236,13 +16534,19 @@ def run_crit_radar_once() -> None:
             f"📍 *方向* · {dir_zh}",
             "📍 *狀態* · 已達爆擊門檻",
             "",
-            "*〔籌碼／價格〕*",
+            "*〔籌碼分析〕*",
             f"• 持倉動能：{oi_note}",
             f"• 價格節奏：{'上行偏強' if p15f > 0 else ('下行偏弱' if p15f < 0 else '盤整')}",
             f"• 盤口主導：{tk_note}",
             f"• 費率氛圍：{fr_note}",
             f"• TD節奏：{td_note}",
             f"• 資金趨勢：{nf_1h_s}",
+        ]
+        if rsi_warn:
+            msg_lines.append(f"• {rsi_warn}")
+        msg_lines += [
+            "",
+            verdict_line,
             "",
             "*〔參考價〕* · Gate USDT 永續",
             f"進場 `{ent_s}` ｜ SL `{sl_s}` ｜ TP `{tp_s}`",
