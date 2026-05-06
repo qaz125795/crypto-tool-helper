@@ -64,9 +64,10 @@ class Config:
     DXY_MIN_REL_MOVE: float = 0.0001  # 約 0.01%，過小視同橫盤不過濾
 
     # RSI：避免極端追高殺低
+    # 黃金多頭趨勢 RSI 長期在 60-75，62 過嚴幾乎封鎖所有多單 → 放寬至 72
     USE_RSI_FILTER: bool = True
-    RSI_LONG_MAX: float = 62.0      # 多單：收緊，減少過熱追多
-    RSI_SHORT_MIN: float = 38.0     # 空單：收緊，減少過冷追空
+    RSI_LONG_MAX: float = 72.0      # 多單：從 62 放寬至 72（黃金牛市 RSI 常居高）
+    RSI_SHORT_MIN: float = 35.0     # 空單：從 38 放寬至 35（避免誤殺輕微反彈）
 
     # SMA40 / SMA100 排列：順勢突破（多：快線在上；空：快線在下）
     USE_MA_STACK_FILTER: bool = True

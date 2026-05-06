@@ -5399,7 +5399,7 @@ SNIPER_TP2_BOX_MIN_HEIGHT_R = _env_float("SNIPER_TP2_BOX_MIN_H_R", 0.12)
 SNIPER_TP2_BOX_MIN_HEIGHT_PCT = _env_float("SNIPER_TP2_BOX_MIN_H_PCT", 0.12)  # 箱高 ≥ 現價×此%
 SNIPER_TP2_MAX_R = max(TP2_R_MULTIPLIER, _env_float("SNIPER_TP2_MAX_R", 6.0))
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
-MIN_SIGNAL_PUSH_SCORE = 74          # 平衡：過高會配合「車已發動」壓分誤殺陡坡結構單
+MIN_SIGNAL_PUSH_SCORE = 70          # 從 74 降至 70：補償 CVD/RSI 新懲罰項加入後分數整體下移
 # Tier2（觀察名單）略降底分，避免崩盤日僅剩觀察單卻全日無推播
 MIN_SIGNAL_PUSH_SCORE_TIER2 = int(round(_env_float("MIN_SIGNAL_PUSH_SCORE_TIER2", 66)))
 # 逆勢 R 級預設略嚴；但「機構成交 + 平倉浪摸頭/摸底」可用 MIN_R_STRUCT_TOUCH_SCORE 放行（見下方）
@@ -7031,14 +7031,14 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
             # 15m 已漲 >5%：車已發動，硬限 A 級
             _already_moving = True
             _motion_note = f"⚠️ 車已發動：15m 已漲 {_p15m:+.1f}%，注意追高風險，行情可能進入末段"
-        elif is_bull_sig and _p1h > 8.0:
-            # 1H 已漲 >8%：即使 15m 未超標，1H 大漲也視為車已發動
+        elif is_bull_sig and _p1h > 10.0:
+            # 1H 已漲 >10%（放寬閾值，山寨幣初段 8-10% 不算追高）
             _already_moving = True
             _motion_note = f"⚠️ 車已發動：1H 已漲 {_p1h:+.1f}%，注意追高風險"
         elif not is_bull_sig and _p15m < -5.0:
             _already_moving = True
             _motion_note = f"⚠️ 車已發動：15m 已跌 {_p15m:+.1f}%，注意追空風險，嘎空風險偏高"
-        elif not is_bull_sig and _p1h < -8.0:
+        elif not is_bull_sig and _p1h < -10.0:
             _already_moving = True
             _motion_note = f"⚠️ 車已發動：1H 已跌 {_p1h:+.1f}%，注意追空風險"
     except (TypeError, ValueError):
@@ -7199,7 +7199,7 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
             score += 8
             reasons.append("CVD/Taker同向")
         if _cvd_1h_chg is not None and _cvd_1h_chg < 0:
-            score -= 10
+            score -= 5   # 從 -10 降至 -5：橫盤/震盪市 CVD 1H 負是常態噪音
             reasons.append("CVD1h負(可能限價吸籌)")
         if _taker_pct is not None and _taker_pct < 45:
             score -= 5
@@ -7209,13 +7209,13 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
             score += 8
             reasons.append("CVD/Taker同向")
         if _cvd_1h_chg is not None and _cvd_1h_chg > 0:
-            score -= 10
+            score -= 5   # 從 -10 降至 -5
             reasons.append("CVD1h正(可能限價吸籌)")
         if _taker_pct is not None and _taker_pct > 55:
             score -= 5
             reasons.append("Taker買壓主導")
     if _cvd_conflict_strong:
-        score -= 12
+        score -= 8   # 從 -12 降至 -8
         reasons.append("CVD/Taker強衝突")
 
     # ── 6. 趨勢情境評分（核心策略：找「布局中」而非「已發動」）──────
@@ -16129,9 +16129,14 @@ def _crit_radar_score_components(
     timing_bonus = 0.0
     if oi_mag >= 2.2:
         if is_long and 0.15 <= p15f <= 1.6:
-            timing_bonus += 7.0
+            timing_bonus += 10.0   # 提高早期進場獎勵（原 7）
         elif (not is_long) and -1.6 <= p15f <= -0.15:
-            timing_bonus += 7.0
+            timing_bonus += 10.0
+    elif oi_mag >= 1.2:            # OI 輕度擴張也給部分早期加分
+        if is_long and 0.15 <= p15f <= 1.2:
+            timing_bonus += 5.0
+        elif (not is_long) and -1.2 <= p15f <= -0.15:
+            timing_bonus += 5.0
 
     # 過熱追價扣分：15m 已過大幅度時降低分數，避免「噴出後才報」
     if abs(p15f) >= 4.8:
@@ -16160,18 +16165,18 @@ def _crit_radar_score_components(
     if rsi_val is not None:
         r = float(rsi_val)
         if is_long:
-            if r > 78:
-                rsi_bonus -= 9.0    # 嚴重超買，追多失敗率大
-            elif r > 70:
-                rsi_bonus -= 5.0    # 偏超買
-            elif 32 <= r <= 55:
-                rsi_bonus += 5.0    # 理想做多起點
+            if r > 82:
+                rsi_bonus -= 9.0    # 嚴重超買（門檻從78上調至82）
+            elif r > 75:
+                rsi_bonus -= 3.0    # 偏超買（從-5降至-3，減少誤殺強勢幣初段）
+            elif 32 <= r <= 58:
+                rsi_bonus += 5.0    # 理想做多起點（範圍略微放寬）
         else:
-            if r < 22:
-                rsi_bonus -= 9.0    # 嚴重超賣，追空易被軋
-            elif r < 30:
-                rsi_bonus -= 5.0    # 偏超賣
-            elif 45 <= r <= 68:
+            if r < 18:
+                rsi_bonus -= 9.0    # 嚴重超賣（門檻從22下調至18）
+            elif r < 25:
+                rsi_bonus -= 3.0    # 偏超賣（從-5降至-3）
+            elif 42 <= r <= 68:
                 rsi_bonus += 5.0    # 理想做空起點
 
     total = int(round(oi_pts + price_pts + taker_pts + fund_pts + timing_bonus + td_bonus + rsi_bonus))
@@ -16369,7 +16374,8 @@ def run_crit_radar_once() -> None:
             )
     pool_n = max(20, min(200, _crit_radar_env_int("CRIT_RADAR_POOL", 100)))
     # 早期啟動預設：分數門檻下修，配合下方過熱濾網，提早但不追高/追低
-    min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 82)))
+    # 從 82 降至 78：補償 RSI/timing 新懲罰項加入後分數普遍下移 4-6 分
+    min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 78)))
     # 大社群：單輪預設少發一檔，降低「同一分鐘連三發」洗版感；要回 3 設 CRIT_RADAR_MAX_ALERTS=3
     max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 2)))
     cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 4.0)))
@@ -16380,7 +16386,8 @@ def run_crit_radar_once() -> None:
     max_p15_abs = max(min_p15_abs + 0.5, min(15.0, _env_float("CRIT_RADAR_MAX_P15_ABS", 5.8)))
     # 防翻向：若 1h 與選邊方向明顯對沖，略過（0=關閉）
     require_1h_confirm = (os.getenv("CRIT_RADAR_REQUIRE_1H_CONFIRM", "1").strip().lower() not in ("0", "false", "off", "no"))
-    p1h_oppose_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_1H_MAX_OPPOSE_PCT", 0.9)))
+    # 從 0.9% 放寬至 1.3%：正常市場噪音 1H 0.9% 極易誤觸，過濾掉太多有效逆轉初段
+    p1h_oppose_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_1H_MAX_OPPOSE_PCT", 1.3)))
     # 大社群預設：略增 ATR 倍數、放寬 SL%% 上限、提高 TP_R（貼近常見 2.5～3R 風報敘述）
     sl_atr = max(0.6, min(3.0, _env_float("CRIT_RADAR_SL_ATR", 1.5)))
     tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.8)))
@@ -16717,11 +16724,11 @@ def run_crit_radar_once() -> None:
                 if atr_1h_f > atr_f:
                     atr_f = atr_1h_f
         raw_sl_pct = (atr_f * sl_atr) / price
-        # 動態 SL 下限：BTC/ETH/SOL 等主流幣波動低，3.2% 過寬 → 自動縮到 1.5%
-        # 其餘山寨幣維持原本 sl_min_pct（避免設太緊被 wick 掃）
+        # 動態 SL 下限：BTC/ETH/SOL/BNB 設 1.8-2.2%，避免正常 wick 假觸發
+        # 山寨幣維持原本 sl_min_pct（流動性較薄需稍緊）
         _sym_clean = sym.replace("USDT", "")
         _is_major = _sym_clean in ("BTC", "ETH", "SOL", "BNB")
-        _sl_min_eff = max(0.012, min(sl_min_pct, 0.018)) if _is_major else sl_min_pct
+        _sl_min_eff = max(0.018, min(sl_min_pct, 0.022)) if _is_major else sl_min_pct
         raw_sl_pct = max(_sl_min_eff, min(sl_max_pct, raw_sl_pct))
         px_f = float(price)
         if is_long:
@@ -18149,6 +18156,46 @@ def run_gold_signal():
     signal = compute_signal(df_1h, cfg)
     if signal is None:
         logger.info("[黃金訊號] 本輪無符合條件的 ORB+MA 訊號，跳過推播")
+        # ── 大幅波動日提醒：當日波動 ≥ 3× ATR 但 ORB 未觸發時，推播一則警示 ─────────
+        try:
+            from gold_signal_bot.indicators import add_indicators as _gold_add_ind  # noqa
+            _dbg_df = df_1h
+            if "ATR" not in _dbg_df.columns:
+                _dbg_df = _gold_add_ind(_dbg_df, atr_period=14, ma_period=100)
+            _d_high = float(_dbg_df["High"].iloc[-48:].max()) if len(_dbg_df) >= 2 else None
+            _d_low  = float(_dbg_df["Low"].iloc[-48:].min())  if len(_dbg_df) >= 2 else None
+            _last_r = _dbg_df.iloc[-1]
+            _atr_r  = _last_r.get("ATR") if "ATR" in _last_r.index else None
+            if (
+                _d_high is not None and _d_low is not None
+                and isinstance(_atr_r, (int, float)) and float(_atr_r) > 0
+            ):
+                _day_range = _d_high - _d_low
+                _atr_f     = float(_atr_r)
+                _vol_mult  = _day_range / _atr_f
+                _vol_cd_key = "gold_signal_volatility_alert"
+                _vol_cd_sec = 4 * 3600  # 每 4 小時最多一次
+                _last_vol_ts = float((jackbot_universal_pre_send_gatekeeper.__self__  # noqa
+                    if hasattr(jackbot_universal_pre_send_gatekeeper, "__self__") else {})
+                    .get(_vol_cd_key, 0) if False else 0)  # fallback
+                if _vol_mult >= 3.0:
+                    _close_now = float(_last_r.get("Close") or _last_r.get("close") or 0)
+                    _sma40_now = float(_last_r.get("SMA_40") or 0) if "SMA_40" in _last_r.index else None
+                    _dir_hint  = ""
+                    if _close_now and _sma40_now:
+                        _dir_hint = "🟢 現價站上均線，趨勢偏多" if _close_now > _sma40_now else "🔴 現價跌破均線，趨勢偏空"
+                    _vol_msg = (
+                        "⚡ *黃金獵手｜大幅波動提醒*\n"
+                        f"今日波動幅度 `{_day_range:.1f}` 點（約 `{_vol_mult:.1f}×` ATR）\n"
+                        f"高點 `{_d_high:.2f}` ｜ 低點 `{_d_low:.2f}`\n"
+                        + (f"{_dir_hint}\n" if _dir_hint else "")
+                        + "_ORB 箱體尚未明確突破，建議等待收盤確認方向再進場_"
+                    )
+                    if jackbot_universal_pre_send_gatekeeper("gold_signal_volatility", text=_vol_msg):
+                        logger.info("[黃金訊號] 大幅波動提醒推播（%.1f× ATR）", _vol_mult)
+                        send_telegram_message(_vol_msg, TG_THREAD_IDS.get("gold_signal", 254), parse_mode="Markdown")
+        except Exception as _ve:
+            logger.warning("[黃金訊號] 大幅波動檢查失敗（繼續執行）: %s", _ve)
         # 可選：無訊號也發「盤勢快報」，避免頻道長時間無動靜（預設開啟，帶冷卻避免洗版）
         _no_sig_push_on = os.getenv("GOLD_SIGNAL_NO_SETUP_PUSH", "1").strip().lower() not in ("0", "false", "off", "no")
         _no_sig_cd_min = max(30, min(720, int(round(_env_float("GOLD_SIGNAL_NO_SETUP_COOLDOWN_MIN", 180)))))

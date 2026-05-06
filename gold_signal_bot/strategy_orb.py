@@ -543,6 +543,8 @@ def compute_signal(
         trend_strength = f"{session_label} 突破 | 空頭 (收盤 < SMA40)"
 
     # ── 6b. SMA40 / SMA100 排列：順勢突破（降低逆大週期均線硬追）
+    # 允許 0.5% 誤差：黃金牛市初期 SMA40 剛剛上穿 SMA100，兩線非常接近
+    # 若強制 SMA40 > SMA100 無誤差，會在最佳進場點附近誤殺大量訊號
     if getattr(config, "USE_MA_STACK_FILTER", True):
         s40 = last.get("SMA_40")
         s100 = last.get("SMA_100")
@@ -553,16 +555,17 @@ def compute_signal(
             and not pd.isna(s100)
         ):
             f40, f100 = float(s40), float(s100)
-            if direction == "long" and f40 <= f100:
+            _margin = f100 * 0.005   # 允許 0.5% 誤差，避免剛剛穿越時誤殺
+            if direction == "long" and f40 < f100 - _margin:
                 logger.info(
-                    "[ORB] 多單未過均線排列濾網（SMA40 %.2f ≤ SMA100 %.2f）",
+                    "[ORB] 多單未過均線排列濾網（SMA40 %.2f < SMA100 %.2f - 0.5%%margin）",
                     f40,
                     f100,
                 )
                 return None
-            if direction == "short" and f40 >= f100:
+            if direction == "short" and f40 > f100 + _margin:
                 logger.info(
-                    "[ORB] 空單未過均線排列濾網（SMA40 %.2f ≥ SMA100 %.2f）",
+                    "[ORB] 空單未過均線排列濾網（SMA40 %.2f > SMA100 %.2f + 0.5%%margin）",
                     f40,
                     f100,
                 )
