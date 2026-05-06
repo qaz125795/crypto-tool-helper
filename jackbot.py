@@ -5360,18 +5360,20 @@ def _env_float(name: str, default: float) -> float:
 MTF_VOLUME_MIN_USD = int(max(100_000, round(_env_float("MTF_VOLUME_MIN_USD", 9_900_000))))  # 預設 9.9M
 
 SNIPER_FAST_MODE = os.getenv("SNIPER_FAST_MODE", "").strip().lower() in ("1", "true", "yes", "on")
-_default_tp1 = 1.2 if SNIPER_FAST_MODE else 1.5
-_default_tp2 = 2.4 if SNIPER_FAST_MODE else 3.0
+# 持倉狙擊 TP1 縮短至 1.0R：提高 TP1 勝率至 60%+，先穩穩拿走大部分倉位
+# TP2 維持 2.5R：讓剩餘倉位追更大的行情
+_default_tp1 = 1.0 if SNIPER_FAST_MODE else 1.0   # 統一 1.0R，目標 60% TP1 勝率
+_default_tp2 = 2.2 if SNIPER_FAST_MODE else 2.5
 _default_min_sl = 0.008 if SNIPER_FAST_MODE else 0.015
 
-TP1_R_MULTIPLIER = max(1.0, _env_float("SNIPER_TP1_R", _default_tp1))   # TP1 至少 1R
-TP2_R_MULTIPLIER = max(TP1_R_MULTIPLIER + 0.5, _env_float("SNIPER_TP2_R", _default_tp2))   # TP2 必須高於 TP1
+TP1_R_MULTIPLIER = max(0.8, _env_float("SNIPER_TP1_R", _default_tp1))   # 最低 0.8R（手續費保護）
+TP2_R_MULTIPLIER = max(TP1_R_MULTIPLIER + 0.8, _env_float("SNIPER_TP2_R", _default_tp2))   # TP2 必須高於 TP1
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
 MAX_SL_PERCENT = _env_float("SNIPER_MAX_SL_PCT", 0.055)  # 過寬止損上限（預設 5.5%），由 EMA20/EMA100（15m）優先收斂
 SL_EMA_GUARD_BUFFER_ATR = _env_float("SNIPER_SL_EMA_GUARD_BUFFER_ATR", 0.12)  # EMA 防守位外再留一點呼吸空間
 SL_TOUCH_BUFFER_ATR = _env_float("SNIPER_SL_TOUCH_BUFFER_ATR", 0.08)  # EMA 回踩點位防守緩衝
-MIN_TP1_R_FOR_PUSH = max(1.0, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 1.2))  # 預設 1.2R（手續費+滑點後仍有正報酬）
+MIN_TP1_R_FOR_PUSH = max(0.8, _env_float("SNIPER_MIN_TP1_R_FOR_PUSH", 0.8))  # 降至 0.8R：TP1 設 1.0R，給 0.2R 緩衝
 MAX_MARKET_VWAP_GAP_ATR = _env_float("SNIPER_MAX_MARKET_VWAP_GAP_ATR", 1.5)    # 防追價：與 VWAP 偏離最多 1.5*ATR
 MARKET_ENTRY_ZONE_ATR = _env_float("SNIPER_ENTRY_ZONE_ATR", 0.2)                 # 市價可進場區：Entry ± 0.2*ATR
 MIN_SL_ATR_MULTIPLIER = _env_float("SNIPER_MIN_SL_ATR", 1.0)                     # 最低 SL 距離：至少 1.0*ATR
@@ -5388,8 +5390,8 @@ SNIPER_ANCHOR_OI_STEP_PCT = _env_float("SNIPER_ANCHOR_OI_STEP_PCT", 2.5)  # 與�
 SNIPER_ANCHOR_OI_LOOKBACK_BARS = int(max(2, round(_env_float("SNIPER_ANCHOR_OI_LOOKBACK_BARS", 6))))  # 最多回看幾根 5m 算 OI 變化
 SNIPER_ANCHOR_LOOKBACK_BARS = int(max(24, round(_env_float("SNIPER_ANCHOR_LOOKBACK_BARS", 72))))   # 5m 根數（預設 6h）
 SNIPER_ANCHOR_VOL_BASELINE_BARS = int(max(3, round(_env_float("SNIPER_ANCHOR_VOL_BASELINE_BARS", 10))))
-TP1_EXIT_RATIO = 0.50
-TP2_EXIT_RATIO = 0.50
+TP1_EXIT_RATIO = 0.65   # TP1 先拿走 65%：穩穩落袋，低回撤感，目標 60%+ 勝率
+TP2_EXIT_RATIO = 0.35   # 剩 35% 追 TP2：讓少量倉位跑大行情
 # TP2 箱體等幅（15m）：箱頂/箱底 ± 箱高；與原 TP2_R 取「多=max／空=min」，且保證比 TP1 更遠
 SNIPER_TP2_BOX_ENABLED = os.getenv("SNIPER_TP2_BOX", "1").strip().lower() in ("1", "true", "yes", "on")
 SNIPER_TP2_BOX_FETCH_LIMIT = int(max(24, round(_env_float("SNIPER_TP2_BOX_FETCH_LIMIT", 48))))
@@ -8291,10 +8293,11 @@ def build_report_message_tiered(
 
             msg_lines.append("━━━━━━━━━━━━━━━━")
             msg_lines.append(f"🎯 進場  `{_entry_now_txt}`")
-            msg_lines.append(f"🛑 止損  `{_sl_txt}`")
-            msg_lines.append(f"🥇 停利1 `{_tp1_txt}`（{_tp1_rr_newbie:.1f}R）→ 先平一半，SL移成本")
+            msg_lines.append(f"🛑 止損  `{_sl_txt}` ← 觸及立刻出")
+            msg_lines.append(f"🥇 停利1 `{_tp1_txt}`（{_tp1_rr_newbie:.1f}R）→ 先平 *65%*，SL 移進場")
             if _tp2_line_newbie:
-                msg_lines.append(_tp2_line_newbie)
+                _tp2_line_nb2 = _tp2_line_newbie.replace("剩下繼續持有", "剩 35% 讓利潤奔跑")
+                msg_lines.append(_tp2_line_nb2)
             msg_lines.append("━━━━━━━━━━━━━━━━")
             msg_lines.append(f"💡 {_conclusion}")
             if _already_moving:
@@ -16388,9 +16391,10 @@ def run_crit_radar_once() -> None:
     require_1h_confirm = (os.getenv("CRIT_RADAR_REQUIRE_1H_CONFIRM", "1").strip().lower() not in ("0", "false", "off", "no"))
     # 從 0.9% 放寬至 1.3%：正常市場噪音 1H 0.9% 極易誤觸，過濾掉太多有效逆轉初段
     p1h_oppose_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_1H_MAX_OPPOSE_PCT", 1.3)))
-    # 大社群預設：略增 ATR 倍數、放寬 SL%% 上限、提高 TP_R（貼近常見 2.5～3R 風報敘述）
+    # 爆擊雷達 TP1：從 2.8R 降至 2.0R，目標 40%+ TP1 勝率
+    # TP2 保持結構位（3-10R），追大行情用
     sl_atr = max(0.6, min(3.0, _env_float("CRIT_RADAR_SL_ATR", 1.5)))
-    tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.8)))
+    tp_r = max(1.0, min(4.5, _env_float("CRIT_RADAR_TP_R", 2.0)))
     sl_min_pct = max(0.01, min(0.2, _env_float("CRIT_RADAR_SL_MIN_PCT", 0.032)))
     sl_max_pct = max(sl_min_pct + 0.005, min(0.25, _env_float("CRIT_RADAR_SL_MAX_PCT", 0.11)))
     log_pool_preview = max(5, min(30, _crit_radar_env_int("CRIT_RADAR_LOG_POOL_PREVIEW", 12)))
@@ -16737,10 +16741,11 @@ def run_crit_radar_once() -> None:
             sl_px = px_f * (1.0 + raw_sl_pct)
 
         # ── TP1：1H 近期結構位（24h swing，近目標先平 60%） ───────────────
+        # min_r 從 2.0 降至 1.5：TP1 目標 2.0R 更容易達到，提升 40%+ 勝率
         swing_near = _crit_radar_fetch_swing_levels(sym, interval="1h", limit=24)
         tp_px, tp_src = _crit_radar_compute_tp_with_structure(
             entry=px_f, sl_px=sl_px, is_long=is_long, swing=swing_near,
-            tp_r_default=tp_r, min_r=2.0, max_r=4.5, buffer_pct=0.0025,
+            tp_r_default=tp_r, min_r=1.5, max_r=4.0, buffer_pct=0.0025,
         )
         try:
             actual_r = abs(tp_px - px_f) / abs(px_f - sl_px) if px_f != sl_px else 0.0
@@ -16955,7 +16960,7 @@ def run_crit_radar_once() -> None:
             f"💰 盈虧比：*{actual_r:.1f}R*（近）" + (f" / *{tp2_r:.1f}R*（遠）" if _show_tp2 else ""),
             f"🎯 進場  `{ent_s}`",
             f"🛑 止損  `{sl_s}` ← 觸及立刻出，不凹",
-            f"🥇 近目標 `{tp_s}`（{actual_r:.1f}R · {tp_src}）→ 先平 60%",
+            f"🥇 近目標 `{tp_s}`（{actual_r:.1f}R）→ 先平 *60%* 倉，移 SL 至進場價",
         ] + _tp2_block + [
             "━━━━━━━━━━━━━━━━",
             f"📊 {oi_note}｜{tk_note}｜資金{nf_1h_s}",
