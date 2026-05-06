@@ -1,9 +1,10 @@
 name: 爆擊雷達
 
 on:
-  schedule:
-    # 每 15 分鐘（UTC）錯峰 7 分，避免整點擁擠；若只用 Zeabur Cron 可關閉本 workflow
-    - cron: '7,22,37,52 * * * *'
+  # schedule 已停用：改由 Zeabur 外部 Cron 以 workflow_dispatch 觸發，避免雙觸發重複推播
+  # 若要恢復 GHA 自排程，取消下面兩行的註解（同時記得在 Zeabur 停用對應的 Cron）
+  # schedule:
+  #   - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -34,15 +35,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 無 Gist 時：跨 runner 保留冷卻檔，避免 15 分鐘排程在 4h 冷卻內重複推同幣（與 jackbot 日誌警告對應）
+      # 跨 runner 保留冷卻檔（無 Gist 時的備援方案）
+      # 使用動態 key（含 run_id），每次都寫入最新檔案；
+      # restore-keys 前綴確保拿到上一輪的最新快取
       - name: Ensure data dir
         run: mkdir -p data
 
       - name: Restore crit radar cooldown cache
+        id: cooldown-cache
         uses: actions/cache@v4
         with:
           path: data/crit_radar_cooldown.json
-          key: crit-radar-cooldown-${{ github.repository_id }}
+          key: crit-radar-cooldown-${{ github.repository_id }}-${{ github.run_id }}
+          restore-keys: |
+            crit-radar-cooldown-${{ github.repository_id }}-
 
       - name: Run crit radar
         env:
