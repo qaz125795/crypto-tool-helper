@@ -7465,10 +7465,54 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
         return grade, score, brief, _already_moving, _motion_note
 
+    # ── UTC 時段品質門：亞洲死盤時段（00-06 UTC）山寨幣假訊號密集 ──────────
+    # 00:00-06:00 UTC = 凌晨亞洲盤，流動性最差，主力掃盤洗盤最頻繁
+    # 這段時間的訊號假突破率最高，直接壓分保護
+    try:
+        import datetime as _dt
+        _utc_h = _dt.datetime.utcnow().hour
+        _is_dead_session = 0 <= _utc_h < 6  # 00:00-05:59 UTC
+        if _is_dead_session:
+            score = min(score, 74)  # 死盤時段最高 A 級（不允許 S 級）
+            if not _motion_note:
+                _motion_note = f"🕐 亞洲死盤時段（{_utc_h:02d}:xx UTC），假突破率偏高，輕倉"
+    except Exception:
+        pass
+    # ── 反人性關鍵：S 級「晚期耗竭」保護 ──────────────────────────────────
+    # 現象：S 35% < A 60% → 評分越高進場越晚，反而輸多。
+    # 原因：所有指標全對齊（S 級）= 主力已建完倉，散戶才剛看到 = 晚期進場。
+    # 解法：加入「24h 延伸檢查」和「FR 過熱封鎖」，避免 S 級在行情末段觸發。
+    _p24h_raw = float(x.get("priceChange24h") or 0)
+    _fr_raw    = x.get("funding_rate")
+    try:
+        _fr_val = float(_fr_raw) if _fr_raw is not None else None
+    except (TypeError, ValueError):
+        _fr_val = None
+
+    # 24h 延伸過多 → 降為 A 級（趨勢太成熟，進場晚）
+    _is_overextended = (
+        (is_bull_sig and _p24h_raw > 10.0) or
+        (not is_bull_sig and _p24h_raw < -10.0)
+    )
+    # FR 過熱 → 封鎖 S 級（多頭擁擠或空頭擁擠，輸多贏少）
+    _is_fr_overheated = False
+    if _fr_val is not None:
+        if is_bull_sig and _fr_val > 0.0003:    # >0.03% 多頭嚴重擁擠
+            _is_fr_overheated = True
+        elif not is_bull_sig and _fr_val < -0.0003:  # <-0.03% 空頭嚴重擁擠
+            _is_fr_overheated = True
+
     if _align_4h and score >= 80:
-        grade = "S"
-        grade_badge = "🏆 *S 級*"
-        grade_desc = "訊號極強・順勢"
+        if _is_overextended or _is_fr_overheated:
+            # 本應 S 級，但行情已過度延伸或 FR 過熱，降為 A 級保護
+            _reason_cap = "24h過度延伸" if _is_overextended else "FR過熱擁擠"
+            grade = "A"
+            grade_badge = "🥇 *A 級*"
+            grade_desc = f"訊號強（{_reason_cap}，降級保護）"
+        else:
+            grade = "S"
+            grade_badge = "🏆 *S 級*"
+            grade_desc = "訊號極強・順勢・早段入場"
     elif _align_4h:
         grade = "A"
         grade_badge = "🥇 *A 級*"
@@ -16031,17 +16075,39 @@ def _crit_radar_compute_tp_with_structure(
 
 
 def _crit_radar_oi_sort_key(item: Dict[str, Any]) -> float:
+    """
+    反人性選池邏輯：最好的進場不是追剛噴的幣，而是「1H趨勢確立 + 15m回踩」。
+    - 傳統邏輯（追漲/追空）：取 15m OI 絕對值最大 → 永遠在噴出後才進 → 23% 勝率
+    - 反人性邏輯（回踩入場）：
+        * 1H OI 正 + 15m OI 負（多頭回踩）→ 加權 1.8x（最優先）
+        * 1H OI 負 + 15m OI 正（空頭回踩）→ 加權 1.8x（最優先）
+        * 純 15m 動能（傳統）→ 維持原本分數作為候補
+    這樣選出的幣：大方向有趨勢，短線在洗手換手 → 勝率提升核心
+    """
     oi15 = item.get("_cg_oi_change_15m")
     oi1h = item.get("oiChange1h") or item.get("open_interest_change_percent_1h")
     try:
-        a = abs(float(oi15)) if oi15 is not None else 0.0
+        oi15f = float(oi15) if oi15 is not None else 0.0
     except (TypeError, ValueError):
-        a = 0.0
+        oi15f = 0.0
     try:
-        b = abs(float(oi1h)) if oi1h is not None else 0.0
+        oi1hf = float(oi1h) if oi1h is not None else 0.0
     except (TypeError, ValueError):
-        b = 0.0
-    return max(a, b * 0.65)
+        oi1hf = 0.0
+
+    _abs_oi1h = abs(oi1hf)
+    _abs_oi15 = abs(oi15f)
+
+    # 回踩型（最高優先）：1H 趨勢存在 + 15m 短線逆向（洗盤/換手中）
+    _is_pullback_long  = oi1hf >= 1.0 and oi15f <= -0.3   # 1H 多頭趨勢 + 15m OI 微縮
+    _is_pullback_short = oi1hf <= -1.0 and oi15f >= 0.3   # 1H 空頭趨勢 + 15m OI 微漲
+
+    if _is_pullback_long or _is_pullback_short:
+        # 用 1H OI 強度為主排序（趨勢越強越優先），加上 15m 反向幅度作為品質加分
+        return _abs_oi1h * 1.8 + _abs_oi15 * 0.5
+    else:
+        # 傳統追勢型：降低優先度，讓回踩型先填滿候選池
+        return max(_abs_oi15, _abs_oi1h * 0.55)
 
 
 def _crit_radar_score_components(
@@ -16081,12 +16147,33 @@ def _crit_radar_score_components(
         oi_mag = abs(oi1hf) * 0.85
     else:
         oi_mag = 0.0
-    oi_pts = min(38, oi_mag * 9.0)
+    # 反人性 OI 評分：1H 趨勢 + 15m 回踩型特別加分
+    _is_pullback_setup_long  = (oi1hf is not None and oi1hf >= 1.0 and oi15f is not None and oi15f <= -0.3)
+    _is_pullback_setup_short = (oi1hf is not None and oi1hf <= -1.0 and oi15f is not None and oi15f >= 0.3)
+    if (is_long and _is_pullback_setup_long) or (not is_long and _is_pullback_setup_short):
+        # 回踩型：用 1H OI 強度計算，額外加回踩獎勵
+        oi_pts = min(38, abs(oi1hf) * 8.5) + 12   # 回踩入場獎勵 +12
+    else:
+        oi_pts = min(38, oi_mag * 9.0)
 
     if is_long:
-        price_pts = min(22, max(0.0, p15f) * 4.2)
+        if _is_pullback_setup_long:
+            # 回踩型多單：15m 價格微跌是好事（不是壞事），給中性分
+            price_pts = 12.0
+        elif p15f > 3.5:
+            # 追漲懲罰：15m 已漲超 3.5%，進場風險大
+            price_pts = max(0.0, min(22, p15f * 4.2) - 8.0)
+        else:
+            price_pts = min(22, max(0.0, p15f) * 4.2)
     else:
-        price_pts = min(22, max(0.0, -p15f) * 4.2)
+        if _is_pullback_setup_short:
+            # 回踩型空單：15m 微漲是好事，給中性分
+            price_pts = 12.0
+        elif p15f < -3.5:
+            # 追空懲罰
+            price_pts = max(0.0, min(22, (-p15f) * 4.2) - 8.0)
+        else:
+            price_pts = min(22, max(0.0, -p15f) * 4.2)
 
     if tk is None:
         taker_pts = 8
@@ -16182,7 +16269,17 @@ def _crit_radar_score_components(
             elif 42 <= r <= 68:
                 rsi_bonus += 5.0    # 理想做空起點
 
-    total = int(round(oi_pts + price_pts + taker_pts + fund_pts + timing_bonus + td_bonus + rsi_bonus))
+    # UTC 時段懲罰：00-06 UTC 亞洲死盤，假突破密集，額外扣 5 分
+    session_penalty = 0.0
+    try:
+        import datetime as _dt2
+        _uh = _dt2.datetime.utcnow().hour
+        if 0 <= _uh < 6:
+            session_penalty = -5.0
+    except Exception:
+        pass
+
+    total = int(round(oi_pts + price_pts + taker_pts + fund_pts + timing_bonus + td_bonus + rsi_bonus + session_penalty))
     return max(0, min(100, total))
 
 
@@ -16532,7 +16629,19 @@ def run_crit_radar_once() -> None:
             p15f = float(p15) if p15 is not None else 0.0
         except (TypeError, ValueError):
             p15f = 0.0
-        if abs(p15f) < min_p15_abs:
+        # 動能/回踩雙軌道：
+        # (A) 傳統動能型：|p15| >= min_p15_abs 且方向一致 → 繼續
+        # (B) 回踩型（反人性）：1H OI 趨勢存在 + 15m 輕微逆向回踩 → 放行
+        _oi1h_it = it.get("oiChange1h") or it.get("open_interest_change_percent_1h")
+        try:
+            _oi1h_it_f = float(_oi1h_it) if _oi1h_it is not None else 0.0
+        except (TypeError, ValueError):
+            _oi1h_it_f = 0.0
+        _is_pullback_entry = (
+            (side == "LONG"  and _oi1h_it_f >= 1.0 and -3.0 <= p15f <= -0.15) or
+            (side == "SHORT" and _oi1h_it_f <= -1.0 and 0.15 <= p15f <= 3.0)
+        )
+        if not _is_pullback_entry and abs(p15f) < min_p15_abs:
             n_low_momentum += 1
             if len(sample_low_momentum) < 8:
                 sample_low_momentum.append(f"{sym}{side[0]}|p15={p15f:+.2f}%<{min_p15_abs:.2f}%")
