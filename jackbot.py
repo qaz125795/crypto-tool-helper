@@ -1445,7 +1445,11 @@ def fetch_stablecoin_marketcap_history() -> Optional[List[Dict]]:
                         }
                         formatted_list.append(formatted_item)
                 
-                logger.info(f"格式化後的數據: {len(formatted_list)} 條記錄")
+                # CoinGlass stablecoin API 回傳順序是「最新在前（index 0）」
+                # calculate_marketcap_change 期望「最舊在前、最新在後（sorted_data[-1]）」
+                # 若不 reverse，會把 index 4083 的舊平值當最新值 → 變化率永遠為 0%
+                formatted_list.reverse()
+                logger.info(f"格式化後的數據: {len(formatted_list)} 條記錄（已反轉為舊→新順序）")
                 return formatted_list
         
         # 如果 data 是列表，直接返回（但需要格式化）
@@ -2127,7 +2131,9 @@ def _fuel_direction_summary(
 
 
 def _fetch_major_p15_snapshot() -> Dict[str, float]:
-    """抓取 BTC/ETH 15m 漲跌幅快照（供高波動低燃料提醒）。"""
+    """抓取 BTC/ETH 15m / 1H / 24H 漲跌幅快照（供高波動低燃料提醒）。
+    回傳格式：{"BTC": 15m%, "ETH": 15m%, "BTC_1h": 1h%, "ETH_1h": 1h%, "BTC_24h": 24h%, ...}
+    """
     out: Dict[str, float] = {}
     try:
         rows = fetch_coinglass_coins_markets() or []
@@ -2142,12 +2148,17 @@ def _fetch_major_p15_snapshot() -> Dict[str, float]:
             sym = sym[:-4]
         if sym not in ("BTC", "ETH"):
             continue
-        raw = r.get("price_change_percent_15m")
-        try:
-            if raw is not None:
-                out[sym] = float(raw)
-        except (TypeError, ValueError):
-            continue
+        for field, key_suffix in [
+            ("price_change_percent_15m", ""),
+            ("price_change_percent_1h",  "_1h"),
+            ("price_change_percent_24h", "_24h"),
+        ]:
+            raw = r.get(field)
+            try:
+                if raw is not None:
+                    out[sym + key_suffix] = float(raw)
+            except (TypeError, ValueError):
+                continue
     return out
 
 
@@ -2313,25 +2324,51 @@ def buying_power_monitor():
             major = _fetch_major_p15_snapshot()
             btc_p15 = major.get("BTC")
             eth_p15 = major.get("ETH")
+            # 也從 coins-markets 抓 1H / 24H 漲跌幅，補足 15m 快照無法偵測緩跌的缺陷
+            btc_p1h = major.get("BTC_1h")
+            eth_p1h = major.get("ETH_1h")
+            btc_p24h = major.get("BTC_24h")
+            eth_p24h = major.get("ETH_24h")
+            _vol_1h_thresh = max(0.5, min(10.0, _env_float("BUYING_POWER_VOL_ALERT_MIN_P1H_ABS", 1.5)))
+            _vol_24h_thresh = max(1.0, min(20.0, _env_float("BUYING_POWER_VOL_ALERT_MIN_P24H_ABS", 3.0)))
             trigger = (
                 (btc_p15 is not None and abs(btc_p15) >= _vol_alert_min_abs) or
-                (eth_p15 is not None and abs(eth_p15) >= _vol_alert_min_abs)
+                (eth_p15 is not None and abs(eth_p15) >= _vol_alert_min_abs) or
+                (btc_p1h is not None and abs(btc_p1h) >= _vol_1h_thresh) or
+                (eth_p1h is not None and abs(eth_p1h) >= _vol_1h_thresh) or
+                (btc_p24h is not None and abs(btc_p24h) >= _vol_24h_thresh) or
+                (eth_p24h is not None and abs(eth_p24h) >= _vol_24h_thresh)
             )
             if trigger:
                 now_ts = time.time()
                 if _buying_power_vol_alert_should_fire(now_ts, _vol_alert_cool_min):
-                    btxt = "—" if btc_p15 is None else f"{btc_p15:+.2f}%"
-                    etxt = "—" if eth_p15 is None else f"{eth_p15:+.2f}%"
+                    btxt   = "—" if btc_p15  is None else f"{btc_p15:+.2f}%"
+                    etxt   = "—" if eth_p15  is None else f"{eth_p15:+.2f}%"
+                    b1h    = "—" if btc_p1h  is None else f"{btc_p1h:+.2f}%"
+                    e1h    = "—" if eth_p1h  is None else f"{eth_p1h:+.2f}%"
+                    b24h   = "—" if btc_p24h is None else f"{btc_p24h:+.2f}%"
+                    e24h   = "—" if eth_p24h is None else f"{eth_p24h:+.2f}%"
+                    # 判斷整體走向做白話解讀
+                    _is_drop = (
+                        (btc_p24h is not None and btc_p24h < -3) or
+                        (btc_p1h  is not None and btc_p1h  < -1.5)
+                    )
+                    _trend_txt = (
+                        "🔴 主流幣近期在跌，市場偏空，波動偏下方清算為主"
+                        if _is_drop else
+                        "🟡 波動放大，方向不明，雙向清算都有可能"
+                    )
                     vol_msg = "\n".join([
-                        "⚠️ *【高波動提醒｜低燃料環境】*",
+                        "⚠️ *【波動警示｜燃料不足】*",
                         f"🕐 {datetime.now(TAIPEI_TZ).strftime('%H:%M')} 台北｜CoinGlass",
                         "━━━━━━━━━━━━━━━━━━━",
-                        f"BTC 15m：`{btxt}` ｜ ETH 15m：`{etxt}`",
-                        f"目前燃料分：`{fuel_score}/10`（< 3，增量資金不足）",
+                        f"BTC：15m `{btxt}` ｜ 1H `{b1h}` ｜ 24H `{b24h}`",
+                        f"ETH：15m `{etxt}` ｜ 1H `{e1h}` ｜ 24H `{e24h}`",
+                        f"燃料分：`{fuel_score}/10`（< 3，增量資金不足）",
                         "",
-                        "📌 *解讀*：盤面波動很大，但油箱不夠；這種盤常見急拉急殺、假突破與來回清算。",
-                        "👉 建議：降槓桿／縮倉／等燃料回升再追。",
-                        "_此提醒屬風險提示，非做多或做空訊號。_",
+                        f"📌 *現況*：{_trend_txt}",
+                        "👉 *建議*：降槓桿、縮倉，等燃料回升再加碼",
+                        "_此提醒屬風險提示，非進場訊號_",
                     ])
                     if jackbot_universal_pre_send_gatekeeper("buying_power_monitor", text=vol_msg):
                         send_telegram_message(
