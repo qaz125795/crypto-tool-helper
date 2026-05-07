@@ -16714,22 +16714,45 @@ def run_crit_radar_once() -> None:
     cool_log_cap = 15
     cand_evaluated = 0
     queue_cap = max_alerts * 3
+    # 反向冷卻時長（小時）：空單剛發完後不能立刻發多單，反之亦然
+    # 避免同一幣短時間內先空後多、先多後空的「打臉」狀況
+    _opp_cool_h = max(cooldown_h, _env_float("CRIT_RADAR_OPPOSITE_COOLDOWN_HOURS", 10.0))
+    _opp_cool_sec = _opp_cool_h * 3600.0
+
     for it in candidates:
         cand_evaluated += 1
         sym = str(it.get("symbol") or "").strip().upper()
-        cd_key = _crit_radar_cooldown_symbol(sym)
-        last_ts = cd.get(cd_key, 0.0)
+        _this_side = str(it.get("_crit_side") or "")
+        _opp_side  = "SHORT" if _this_side == "LONG" else "LONG"
+        _base_key  = _crit_radar_cooldown_symbol(sym)
+        # 方向分開存：MU_LONG / MU_SHORT
+        cd_key     = f"{_base_key}_{_this_side}"
+        cd_opp_key = f"{_base_key}_{_opp_side}"
+        # 也向下相容舊版（無方向後綴）的冷卻記錄
+        last_ts     = max(cd.get(cd_key, 0.0), cd.get(_base_key, 0.0))
+        last_opp_ts = cd.get(cd_opp_key, 0.0)
+
+        # 同方向冷卻
         if last_ts and (now - last_ts) < cool_sec:
             n_cool_skip += 1
             if n_cool_skip <= cool_log_cap:
                 remain_sec = cool_sec - (now - last_ts)
                 logger.info(
                     "[爆擊雷達·冷卻] 略過 %s %s 分=%s｜約 %.2f 小時後可再發（上次 epoch=%.0f）",
-                    sym,
-                    it.get("_crit_side"),
-                    it.get("_crit_score"),
-                    remain_sec / 3600.0,
-                    last_ts,
+                    sym, it.get("_crit_side"), it.get("_crit_score"),
+                    remain_sec / 3600.0, last_ts,
+                )
+            continue
+        # 反向冷卻：避免短時間內先空後多（或先多後空）的打臉訊號
+        if last_opp_ts and (now - last_opp_ts) < _opp_cool_sec:
+            n_cool_skip += 1
+            if n_cool_skip <= cool_log_cap:
+                remain_opp = _opp_cool_sec - (now - last_opp_ts)
+                logger.info(
+                    "[爆擊雷達·反向冷卻] 略過 %s %s 分=%s｜反向（%s）%.1fh 內不推，"
+                    "約 %.2fh 後可再發（避免打臉訊號）",
+                    sym, _this_side, it.get("_crit_score"),
+                    _opp_side, _opp_cool_h, remain_opp / 3600.0,
                 )
             continue
         filtered.append(it)
@@ -16798,8 +16821,9 @@ def run_crit_radar_once() -> None:
             )
             break
         sym = str(it.get("symbol") or "").strip().upper()
-        cd_key = _crit_radar_cooldown_symbol(sym)
         side = str(it.get("_crit_side") or "")
+        # 冷卻 key 含方向，避免反向訊號誤用同一個時間戳
+        cd_key = f"{_crit_radar_cooldown_symbol(sym)}_{side}"
         score = int(it.get("_crit_score") or 0)
         fr = fr_map.get(sym) or fr_map.get(sym.replace("1000", ""))
         is_long = side == "LONG"
