@@ -2185,6 +2185,122 @@ def _buying_power_vol_alert_should_fire(now_ts: float, cool_min: int) -> bool:
         return True
 
 
+def _periodic_push_check(
+    fuel_score: int,
+    headline: str,
+    mcap_1h: float,
+    mcap_15m: float,
+    oi_1h_chg: float,
+    oi_15m_chg: float,
+    smart_money: Optional[bool],
+    fg_val: Optional[float],
+    etf_data: Dict[str, Any],
+    ls_data: Dict[str, Any],
+    thread_id: int,
+    *,
+    periodic_hours: float = 4.0,
+) -> None:
+    """定期保底速報：不管燃料分高低，每 N 小時必推一次現況更新。
+    避免「低燃料 = 頻道完全靜音 3 天」的用戶體驗問題。
+    """
+    _state_path = DATA_DIR / "buying_power_last_push.json"
+    try:
+        _st = load_json_file(_state_path, {})
+        if not isinstance(_st, dict):
+            _st = {}
+        _last_ts = float(_st.get("last_push_ts") or 0)
+        _now_ts  = time.time()
+        _cool_sec = max(60.0, periodic_hours * 3600.0)
+        if _last_ts > 0 and (_now_ts - _last_ts) < _cool_sec:
+            _remain_h = (_cool_sec - (_now_ts - _last_ts)) / 3600.0
+            logger.info(
+                "[牛市燃料·定期速報] 冷卻中（距上次推播 %.1fh，還剩 %.1fh）",
+                (_now_ts - _last_ts) / 3600.0,
+                _remain_h,
+            )
+            return
+    except Exception as _e:
+        logger.debug("[牛市燃料·定期速報] 讀狀態失敗，視為可發: %s", _e)
+        _now_ts = time.time()
+
+    # 組成簡潔速報
+    _now_str = datetime.now(TAIPEI_TZ).strftime("%m/%d %H:%M")
+    _score_bar = _make_fuel_bar(min(fuel_score, 10), max_score=10)
+
+    # 穩定幣方向白話
+    if mcap_1h > 0.03:
+        _mcap_txt = "📈 流入（偏多信號）"
+    elif mcap_1h < -0.025:
+        _mcap_txt = "📉 流出（偏空注意）"
+    else:
+        _mcap_txt = "➡️ 橫盤中"
+
+    # OI 方向白話
+    if oi_1h_chg > 0.55:
+        _oi_txt = "⬆️ 槓桿擴張"
+    elif oi_1h_chg < -0.3:
+        _oi_txt = "⬇️ 槓桿收縮"
+    else:
+        _oi_txt = "➡️ 槓桿平穩"
+
+    # FG
+    _fg_txt = "—"
+    if fg_val is not None:
+        if fg_val >= 70:
+            _fg_txt = f"😱 {fg_val:.0f} 貪婪"
+        elif fg_val >= 50:
+            _fg_txt = f"😊 {fg_val:.0f} 中性偏多"
+        elif fg_val >= 30:
+            _fg_txt = f"😟 {fg_val:.0f} 中性偏空"
+        else:
+            _fg_txt = f"😨 {fg_val:.0f} 恐懼（抄底機會？）"
+
+    # L/S
+    _ls_txt = ls_data.get("label") or "—"
+
+    # 大方向一句話
+    if fuel_score >= 4:
+        _bias = "🟢 偏多，小倉布局可以考慮"
+    elif fuel_score >= 2:
+        _bias = "🟡 偏中性，等方向更明確再動"
+    elif mcap_1h < -0.04:
+        _bias = "🔴 錢在撤，偏空，控倉或觀望"
+    else:
+        _bias = "⚪ 無明確方向，先觀望"
+
+    _msg_lines = [
+        "⛽ *燃料儀表板｜定期速報*",
+        f"🕐 {_now_str} 台北",
+        "━━━━━━━━━━━━━━━",
+        f"燃料 `{_score_bar}` {min(fuel_score, 10)}/10",
+        "",
+        f"💵 場外資金：{_mcap_txt}",
+        f"📊 合約槓桿：{_oi_txt}",
+        f"😬 恐懼貪婪：{_fg_txt}",
+    ]
+    if _ls_txt and _ls_txt != "—":
+        _msg_lines.append(f"⚖️ 多空比：{_ls_txt}")
+    if smart_money is True:
+        _msg_lines.append("🧠 機構動向：穩定幣OI擴張，偏機構建倉")
+    elif smart_money is False:
+        _msg_lines.append("⚠️ 機構動向：幣本位OI偏高，散戶槓桿為主")
+    _msg_lines += [
+        "",
+        f"👉 {_bias}",
+        "_定期速報，僅供參考，非進場訊號_",
+    ]
+    _msg = "\n".join(_msg_lines)
+
+    if jackbot_universal_pre_send_gatekeeper("buying_power_monitor_periodic", text=_msg):
+        ok = send_telegram_message(_msg, thread_id, parse_mode="Markdown", discord_force_everyone=False)
+        if ok:
+            try:
+                save_json_file(_state_path, {"last_push_ts": int(_now_ts)})
+                logger.info("[牛市燃料·定期速報] 已發送（fuel=%d）", fuel_score)
+            except Exception as _se:
+                logger.debug("[牛市燃料·定期速報] 寫狀態失敗: %s", _se)
+
+
 def buying_power_monitor():
     """【牛市燃料監控】場外穩定幣 + 場內 OI + 情緒／機構輔助指標（CoinGlass 為主）。"""
     logger.info("開始執行牛市燃料監控（CoinGlass 聚合 + 聰明錢拆分）...")
@@ -2386,6 +2502,12 @@ def buying_power_monitor():
                     )
                     return
         logger.info("[牛市燃料] 燃料積分=%s < 3，不推播（無文字）", fuel_score)
+        # ── 定期保底速報：即使燃料不足，每 4h 也要推一次狀態更新 ──────────────
+        _periodic_push_check(
+            fuel_score, headline, mcap_1h, mcap_15m, oi_1h_chg, oi_15m_chg,
+            smart_money, fg_val, etf_data, ls_data,
+            TG_THREAD_IDS.get("buying_power_monitor", 246)
+        )
         return
     _dc_ping = _fuel_buying_power_dc_ping_everyone(
         fuel_score, headline, smart_money, mcap_1h, oi_1h_chg, premium_boost
@@ -2394,6 +2516,12 @@ def buying_power_monitor():
         logger.info(
             "[牛市燃料] 未達 @everyone 條件（積分=%s），不推播",
             fuel_score,
+        )
+        # 達到 3 分但無 @everyone 條件 → 也走定期保底
+        _periodic_push_check(
+            fuel_score, headline, mcap_1h, mcap_15m, oi_1h_chg, oi_15m_chg,
+            smart_money, fg_val, etf_data, ls_data,
+            TG_THREAD_IDS.get("buying_power_monitor", 246)
         )
         return
 
@@ -2508,7 +2636,7 @@ def buying_power_monitor():
     keyboard = {"inline_keyboard": [[{"text": "💰 去 CoinGlass 看圖", "url": "https://www.coinglass.com/zh-TW/pro/futures/OpenInterest"}]]}
     if not jackbot_universal_pre_send_gatekeeper("buying_power_monitor", text=msg):
         return
-    send_telegram_message(
+    ok = send_telegram_message(
         msg,
         TG_THREAD_IDS.get("buying_power_monitor", 246),
         parse_mode="Markdown",
@@ -2519,6 +2647,13 @@ def buying_power_monitor():
         "[牛市燃料] 推播完成（積分=%s，TG／Discord 皆帶 @everyone）",
         fuel_score,
     )
+    # 正式推播成功後同步更新定期速報冷卻時間戳，避免緊跟著再發速報
+    if ok:
+        try:
+            _ts_path = DATA_DIR / "buying_power_last_push.json"
+            save_json_file(_ts_path, {"last_push_ts": int(time.time())})
+        except Exception:
+            pass
 
 
 # 保留舊函數名稱以向後兼容
