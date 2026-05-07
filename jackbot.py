@@ -1055,54 +1055,51 @@ def _discord_content_with_mentions(
     thread_key = _resolve_thread_key_by_id(thread_id) or ""
 
     def _compact_screener_for_discord(msg: str) -> str:
-        """screener_board 的 Discord 專屬短版：
-        每區僅保留 1 檔代表 + 一句結論，避免超過 2000 字導致被硬截斷。"""
+        """screener_board 的 Discord 格式化：
+        保留所有區塊的全部 3 筆標的，只移除每筆第二行的「4H · 1H · 15m」細節，
+        讓 Discord 內容與 TG 一致（全筆數）但篇幅縮減 ~35% 以符合 2000 字上限。
+        """
         lines = [ln.rstrip() for ln in (msg or "").splitlines()]
         out: List[str] = []
-        section_titles = (
-            "📤", "📥", "🩹", "🔄", "⭐",
-        )
-        i = 0
-        while i < len(lines):
-            ln = lines[i].strip()
-            if not ln:
-                i += 1
-                continue
-            if ln.startswith("🧭"):
-                out.append(ln)
-                out.append("")
-                i += 1
-                continue
-            if any(ln.startswith(x) for x in section_titles):
-                out.append(ln)
-                # 取此區第一檔（含結論），其餘略
-                j = i + 1
-                picked_item = ""
-                picked_conclusion = ""
-                while j < len(lines):
-                    cur = lines[j].strip()
-                    if any(cur.startswith(x) for x in section_titles):
-                        break
-                    if (not picked_item) and ("🎯" in cur or "🧱" in cur):
-                        picked_item = cur
-                    if (not picked_conclusion) and ("4) 結論：" in cur or cur.startswith("💡")):
-                        picked_conclusion = cur
-                    j += 1
-                if picked_item:
-                    out.append(f"  {picked_item}")
-                if picked_conclusion:
-                    out.append(f"  {picked_conclusion}")
-                out.append("")
-                i = j
-                continue
-            if ln.startswith("⚠️") or ln.startswith("🕐"):
-                out.append(ln)
-            i += 1
+        section_titles = ("📤", "📥", "🩹", "🔄", "⭐", "⭐")
+        _detail_markers = ("4H", "1H", "15m")   # 時框細節行的起始識別
 
-        if not out:
-            return msg[:1800]
-        compact = "\n".join(out).strip()
-        return compact[:1800]
+        def _is_detail_line(s: str) -> bool:
+            """判斷是否為「4H — · 1H ... · 15m ...」這類時框細節行，應被移除。"""
+            s = s.strip()
+            return (
+                s.startswith("4H") or
+                (s.startswith("4h") or
+                ("4H" in s and "1H" in s and "15m" in s))
+            )
+
+        for ln in lines:
+            stripped = ln.strip()
+            if not stripped:
+                out.append("")
+                continue
+            # 移除 4H/1H/15m 時框細節行
+            if _is_detail_line(stripped):
+                continue
+            out.append(ln)
+
+        # 去除連續空行（最多保留 1 個）
+        result_lines: List[str] = []
+        prev_blank = False
+        for ln in out:
+            if not ln.strip():
+                if not prev_blank:
+                    result_lines.append("")
+                prev_blank = True
+            else:
+                result_lines.append(ln)
+                prev_blank = False
+
+        compact = "\n".join(result_lines).strip()
+        # 如果還是超過 1950 字，才做最後保底截斷（正常情況不會到這）
+        if len(compact) > 1950:
+            compact = compact[:1920].rstrip() + "\n...(更多內容請看 Telegram)"
+        return compact
 
     if thread_key == "screener_board":
         base = _compact_screener_for_discord(base)
