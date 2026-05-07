@@ -10614,8 +10614,10 @@ def fetch_position_change():
     # 統一預設 2 小時冷卻（同幣同方向）；需其他值可設 SNIPER_COOLDOWN_HOURS
     _default_cd_hours = 2.0
     COOLDOWN_HOURS = int(max(1, round(_env_float("SNIPER_COOLDOWN_HOURS", _default_cd_hours))))
-    # 同幣反向訊號最短間隔（分鐘）：預設 45 分鐘，避免半小時內同標的多空連炸
-    COOLDOWN_OPPOSITE_MINUTES = int(max(0, round(_env_float("SNIPER_COOLDOWN_OPPOSITE_MINUTES", 45))))
+    # 同幣反向訊號最短間隔：從 45 分鐘提升至 360 分鐘（6 小時）
+    # 避免多單推完 1~2 小時後又推空單，用戶不知道原來的倉位要怎麼辦
+    # 若市場結構真的快速反轉，6h 後才允許推反向（至少一個交易時段後再換方向）
+    COOLDOWN_OPPOSITE_MINUTES = int(max(0, round(_env_float("SNIPER_COOLDOWN_OPPOSITE_MINUTES", 360))))
     cooldown_opp_sec = COOLDOWN_OPPOSITE_MINUTES * 60
     HISTORY_HOURS = 24   # 冷卻歷史保留 24h（每日自動清理）
     # 順勢 S/A 推過後，此時間內不推「反向」R（S 為主、R 為輔；避免敘事打架）
