@@ -10860,7 +10860,12 @@ def fetch_position_change():
     # - 保留 confirmed / exhaustion_reversal
     # - 放行 tier2（觀察轉實戰）與 pullback（回踩跟隨）
     #   讓節奏更接近 2 月短線狙擊版本，不再只剩極少數訊號
-    _ALLOW_PUSH_SIGNAL_VERSIONS = frozenset({"confirmed", "exhaustion_reversal", "tier2", "pullback"})
+    # 移除 tier2：tier2 = 部分共振、確認不足，win rate 較低
+    # 只保留三種高品質版本：
+    #   confirmed         = 三層完整共振，勝率最穩
+    #   exhaustion_reversal = 籌碼耗竭反轉，高 R:R
+    #   pullback          = 結構回踩確認，TP1 命中率高（目標 60%+）
+    _ALLOW_PUSH_SIGNAL_VERSIONS = frozenset({"confirmed", "exhaustion_reversal", "pullback"})
     _pre_ver_filt = len(all_top)
     all_top = [
         x for x in all_top
@@ -16765,12 +16770,10 @@ def run_crit_radar_once() -> None:
     # 早期啟動預設：分數門檻下修，配合下方過熱濾網，提早但不追高/追低
     # 從 82 降至 78：補償 RSI/timing 新懲罰項加入後分數普遍下移 4-6 分
     min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 78)))
-    # 爆擊訊號定位：「樂透單，拚爆擊，小倉玩」→ 嚴格控量，每輪最多 1 個，冷卻 8h
-    # 避免用戶每天收到 10+ 個訊號根本跟不完，也防止不同方向的爆擊互相衝突
+    # 爆擊訊號定位：「樂透單，拚爆擊，小倉玩」→ 每輪只推最高分（Top 1→2→3 fallback），冷卻 8h
+    # Top 1 冷卻中就試 Top 2，Top 2 也冷卻就試 Top 3，三個都冷卻才本輪無訊號
     max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 1)))
     cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 8.0)))
-    # 每日總推播上限（UTC 日）：爆擊是稀缺彩券，一天最多 3 個
-    daily_max = max(1, min(20, _crit_radar_env_int("CRIT_RADAR_DAILY_MAX", 3)))
     margin = max(0, _crit_radar_env_int("CRIT_RADAR_SIDE_MARGIN", 4))
     # 防翻向：要求 15m 至少有基本動能；可用環境變數覆寫（單位：%）
     min_p15_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_MIN_P15_ABS", 0.35)))
@@ -17004,26 +17007,10 @@ def run_crit_radar_once() -> None:
     cd = _crit_radar_load_cooldown()
     now = time.time()
     cool_sec = cooldown_h * 3600.0
-    filtered: List[Dict[str, Any]] = []
     n_cool_skip = 0
-    cool_log_cap = 15
-    cand_evaluated = 0
-    queue_cap = max_alerts * 3
     # 反向冷卻時長（小時）：空單剛發完後不能立刻發多單，反之亦然
-    # 避免同一幣短時間內先空後多、先多後空的「打臉」狀況
     _opp_cool_h = max(cooldown_h, _env_float("CRIT_RADAR_OPPOSITE_COOLDOWN_HOURS", 10.0))
     _opp_cool_sec = _opp_cool_h * 3600.0
-
-    # ── 每日總推播計數（UTC 日）：超過 daily_max 本輪不發 ──────────────────
-    _today_utc = time.strftime("%Y-%m-%d", time.gmtime(now))
-    _daily_count_key = f"_daily_{_today_utc}"
-    _today_sent = int(cd.get(_daily_count_key) or 0)
-    if _today_sent >= daily_max:
-        logger.info(
-            "[爆擊雷達·每日上限] 今日（UTC %s）已發送 %d/%d 個爆擊訊號，本輪靜音",
-            _today_utc, _today_sent, daily_max,
-        )
-        return
 
     # ── 跨模組去重：持倉狙擊 6h 內發過的幣，爆擊跳過（防重複/衝突） ──────
     _sniper_cd_path = DATA_DIR / "sniper_cooldown.json"
@@ -17044,74 +17031,69 @@ def run_crit_radar_once() -> None:
     if _sniper_recent_syms:
         logger.info("[爆擊雷達·跨模組] 持倉狙擊 6h 內有報的幣：%s（爆擊本輪跳過這些）", ", ".join(sorted(_sniper_recent_syms)))
 
-    for it in candidates:
-        cand_evaluated += 1
+    # ── Top 1 → 2 → 3 fallback：依分數取前 3 名，逐一嘗試，第一個通過所有冷卻檢查的就推播 ──
+    # 邏輯：第 1 名冷卻中 → 試第 2 名 → 試第 3 名 → 三名都重複則本輪無訊號
+    _TRY_LIMIT = max(3, _crit_radar_env_int("CRIT_RADAR_FALLBACK_LIMIT", 3))
+    _try_pool = candidates[:_TRY_LIMIT]
+    if _try_pool:
+        logger.info(
+            "[爆擊雷達·Top%d候選] %s（依分數排序，逐一嘗試直到找到未冷卻的）",
+            _TRY_LIMIT,
+            " | ".join(
+                f"{x.get('symbol')}{str(x.get('_crit_side') or '')[:1]}{int(x.get('_crit_score') or 0)}"
+                for x in _try_pool
+            ),
+        )
+
+    filtered: List[Dict[str, Any]] = []
+    for it in _try_pool:
         sym = str(it.get("symbol") or "").strip().upper()
         _this_side = str(it.get("_crit_side") or "")
         _opp_side  = "SHORT" if _this_side == "LONG" else "LONG"
         _base_key  = _crit_radar_cooldown_symbol(sym)
-        # 方向分開存：MU_LONG / MU_SHORT
         cd_key     = f"{_base_key}_{_this_side}"
         cd_opp_key = f"{_base_key}_{_opp_side}"
-        # 也向下相容舊版（無方向後綴）的冷卻記錄
         last_ts     = max(cd.get(cd_key, 0.0), cd.get(_base_key, 0.0))
         last_opp_ts = cd.get(cd_opp_key, 0.0)
 
         # 同方向冷卻
         if last_ts and (now - last_ts) < cool_sec:
             n_cool_skip += 1
-            if n_cool_skip <= cool_log_cap:
-                remain_sec = cool_sec - (now - last_ts)
-                logger.info(
-                    "[爆擊雷達·冷卻] 略過 %s %s 分=%s｜約 %.2f 小時後可再發（上次 epoch=%.0f）",
-                    sym, it.get("_crit_side"), it.get("_crit_score"),
-                    remain_sec / 3600.0, last_ts,
-                )
+            remain_sec = cool_sec - (now - last_ts)
+            logger.info(
+                "[爆擊雷達·冷卻] 第%d名 %s %s 分=%s 冷卻中｜%.2fh 後可再發，試下一名",
+                _try_pool.index(it) + 1, sym, _this_side, it.get("_crit_score"), remain_sec / 3600.0,
+            )
             continue
-        # 反向冷卻：避免短時間內先空後多（或先多後空）的打臉訊號
+        # 反向冷卻
         if last_opp_ts and (now - last_opp_ts) < _opp_cool_sec:
             n_cool_skip += 1
-            if n_cool_skip <= cool_log_cap:
-                remain_opp = _opp_cool_sec - (now - last_opp_ts)
-                logger.info(
-                    "[爆擊雷達·反向冷卻] 略過 %s %s 分=%s｜反向（%s）%.1fh 內不推，"
-                    "約 %.2fh 後可再發（避免打臉訊號）",
-                    sym, _this_side, it.get("_crit_score"),
-                    _opp_side, _opp_cool_h, remain_opp / 3600.0,
-                )
+            remain_opp = _opp_cool_sec - (now - last_opp_ts)
+            logger.info(
+                "[爆擊雷達·反向冷卻] 第%d名 %s %s 分=%s 反向冷卻中｜%.2fh 後可再發，試下一名",
+                _try_pool.index(it) + 1, sym, _this_side, it.get("_crit_score"), remain_opp / 3600.0,
+            )
             continue
-        # 跨模組去重：持倉狙擊 6h 內已發過這個幣 → 爆擊跳過，避免重複/衝突
-        _sym_base_cr2 = _crit_radar_cooldown_symbol(sym)
-        if _sym_base_cr2 in _sniper_recent_syms:
+        # 跨模組去重
+        if _crit_radar_cooldown_symbol(sym) in _sniper_recent_syms:
             n_cool_skip += 1
-            if n_cool_skip <= cool_log_cap:
-                logger.info(
-                    "[爆擊雷達·跨模組去重] 略過 %s %s 分=%s｜持倉狙擊 %.0fh 內已報此幣，跳過",
-                    sym, _this_side, it.get("_crit_score"), _cross_cool_sec / 3600.0,
-                )
+            logger.info(
+                "[爆擊雷達·跨模組] 第%d名 %s %s 分=%s 持倉狙擊已報，試下一名",
+                _try_pool.index(it) + 1, sym, _this_side, it.get("_crit_score"),
+            )
             continue
+        # 通過所有檢查 → 選定此筆，不再看後面的名次
         filtered.append(it)
-        if len(filtered) >= queue_cap:
-            rest = len(candidates) - cand_evaluated
-            if rest > 0:
-                logger.info(
-                    "[爆擊雷達·隊列] 已集滿 ATR 驗證隊列上限（%d 名），其餘 %d 筆達標候選本輪不排入",
-                    queue_cap,
-                    rest,
-                )
-            break
-
-    if n_cool_skip > cool_log_cap:
-        logger.info("[爆擊雷達·冷卻] 另略過 %d 筆（僅顯示前 %d 筆詳細）", n_cool_skip - cool_log_cap, cool_log_cap)
-    if filtered:
-        fq = " | ".join(
-            f"{x.get('symbol')}{str(x.get('_crit_side') or '')[:1]}{int(x.get('_crit_score') or 0)}"
-            for x in filtered
-        )
         logger.info(
-            "[爆擊雷達·隊列] 冷卻後待驗 ATR/推播（最多取 %d 名）：%s",
-            max_alerts * 3,
-            fq,
+            "[爆擊雷達·選定] 第%d名 %s %s 分=%s 通過所有冷卻檢查，本輪推播此筆",
+            _try_pool.index(it) + 1, sym, _this_side, it.get("_crit_score"),
+        )
+        break
+
+    if not filtered:
+        logger.info(
+            "[爆擊雷達·Top%d] 前 %d 名候選均在冷卻或已被持倉狙擊佔用，本輪無訊號",
+            _TRY_LIMIT, len(_try_pool),
         )
 
     thread_id = int(TG_THREAD_IDS.get("crit_radar") or 0)
@@ -17471,14 +17453,11 @@ def run_crit_radar_once() -> None:
         ok = send_telegram_message(msg, thread_id, parse_mode="Markdown")
         if ok:
             cd[cd_key] = time.time()
-            # 每日計數 +1
-            _today_sent += 1
-            cd[_daily_count_key] = _today_sent
             sent += 1
             _crit_radar_save_cooldown(cd)
             logger.info(
-                "[爆擊雷達·推播] 成功 %s %s 分=%s thread_id=%s（今日第 %d/%d 個）",
-                sym, side, score, thread_id, _today_sent, daily_max,
+                "[爆擊雷達·推播] 成功 %s %s 分=%s thread_id=%s",
+                sym, side, score, thread_id,
             )
         else:
             n_tg_fail += 1
