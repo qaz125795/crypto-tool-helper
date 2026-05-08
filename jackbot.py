@@ -16765,9 +16765,12 @@ def run_crit_radar_once() -> None:
     # 早期啟動預設：分數門檻下修，配合下方過熱濾網，提早但不追高/追低
     # 從 82 降至 78：補償 RSI/timing 新懲罰項加入後分數普遍下移 4-6 分
     min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 78)))
-    # 大社群：單輪預設少發一檔，降低「同一分鐘連三發」洗版感；要回 3 設 CRIT_RADAR_MAX_ALERTS=3
-    max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 2)))
-    cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 4.0)))
+    # 爆擊訊號定位：「樂透單，拚爆擊，小倉玩」→ 嚴格控量，每輪最多 1 個，冷卻 8h
+    # 避免用戶每天收到 10+ 個訊號根本跟不完，也防止不同方向的爆擊互相衝突
+    max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 1)))
+    cooldown_h = max(1.0, min(72.0, _env_float("CRIT_RADAR_COOLDOWN_HOURS", 8.0)))
+    # 每日總推播上限（UTC 日）：爆擊是稀缺彩券，一天最多 3 個
+    daily_max = max(1, min(20, _crit_radar_env_int("CRIT_RADAR_DAILY_MAX", 3)))
     margin = max(0, _crit_radar_env_int("CRIT_RADAR_SIDE_MARGIN", 4))
     # 防翻向：要求 15m 至少有基本動能；可用環境變數覆寫（單位：%）
     min_p15_abs = max(0.0, min(8.0, _env_float("CRIT_RADAR_MIN_P15_ABS", 0.35)))
@@ -17011,6 +17014,36 @@ def run_crit_radar_once() -> None:
     _opp_cool_h = max(cooldown_h, _env_float("CRIT_RADAR_OPPOSITE_COOLDOWN_HOURS", 10.0))
     _opp_cool_sec = _opp_cool_h * 3600.0
 
+    # ── 每日總推播計數（UTC 日）：超過 daily_max 本輪不發 ──────────────────
+    _today_utc = time.strftime("%Y-%m-%d", time.gmtime(now))
+    _daily_count_key = f"_daily_{_today_utc}"
+    _today_sent = int(cd.get(_daily_count_key) or 0)
+    if _today_sent >= daily_max:
+        logger.info(
+            "[爆擊雷達·每日上限] 今日（UTC %s）已發送 %d/%d 個爆擊訊號，本輪靜音",
+            _today_utc, _today_sent, daily_max,
+        )
+        return
+
+    # ── 跨模組去重：持倉狙擊 6h 內發過的幣，爆擊跳過（防重複/衝突） ──────
+    _sniper_cd_path = DATA_DIR / "sniper_cooldown.json"
+    _sniper_recent_syms: Set[str] = set()
+    _cross_cool_sec = max(3600.0, _env_float("CRIT_RADAR_CROSS_MODULE_HOURS", 6.0) * 3600.0)
+    try:
+        _sniper_cd_raw = load_json_file(_sniper_cd_path, {})
+        _sniper_hist = _sniper_cd_raw.get("history") if isinstance(_sniper_cd_raw, dict) else None
+        if isinstance(_sniper_hist, list):
+            for _entry in _sniper_hist:
+                _e_ts = float(_entry.get("ts") or 0)
+                if (now - _e_ts) < _cross_cool_sec:
+                    _sym_e = str(_entry.get("symbol") or "").replace("USDT", "").upper()
+                    if _sym_e:
+                        _sniper_recent_syms.add(_sym_e)
+    except Exception as _ce:
+        logger.debug("[爆擊雷達·跨模組] 讀持倉狙擊冷卻檔失敗（跳過去重）: %s", _ce)
+    if _sniper_recent_syms:
+        logger.info("[爆擊雷達·跨模組] 持倉狙擊 6h 內有報的幣：%s（爆擊本輪跳過這些）", ", ".join(sorted(_sniper_recent_syms)))
+
     for it in candidates:
         cand_evaluated += 1
         sym = str(it.get("symbol") or "").strip().upper()
@@ -17045,6 +17078,16 @@ def run_crit_radar_once() -> None:
                     "約 %.2fh 後可再發（避免打臉訊號）",
                     sym, _this_side, it.get("_crit_score"),
                     _opp_side, _opp_cool_h, remain_opp / 3600.0,
+                )
+            continue
+        # 跨模組去重：持倉狙擊 6h 內已發過這個幣 → 爆擊跳過，避免重複/衝突
+        _sym_base_cr2 = _crit_radar_cooldown_symbol(sym)
+        if _sym_base_cr2 in _sniper_recent_syms:
+            n_cool_skip += 1
+            if n_cool_skip <= cool_log_cap:
+                logger.info(
+                    "[爆擊雷達·跨模組去重] 略過 %s %s 分=%s｜持倉狙擊 %.0fh 內已報此幣，跳過",
+                    sym, _this_side, it.get("_crit_score"), _cross_cool_sec / 3600.0,
                 )
             continue
         filtered.append(it)
@@ -17428,14 +17471,14 @@ def run_crit_radar_once() -> None:
         ok = send_telegram_message(msg, thread_id, parse_mode="Markdown")
         if ok:
             cd[cd_key] = time.time()
+            # 每日計數 +1
+            _today_sent += 1
+            cd[_daily_count_key] = _today_sent
             sent += 1
             _crit_radar_save_cooldown(cd)
             logger.info(
-                "[爆擊雷達·推播] 成功 %s %s 分=%s thread_id=%s",
-                sym,
-                side,
-                score,
-                thread_id,
+                "[爆擊雷達·推播] 成功 %s %s 分=%s thread_id=%s（今日第 %d/%d 個）",
+                sym, side, score, thread_id, _today_sent, daily_max,
             )
         else:
             n_tg_fail += 1
