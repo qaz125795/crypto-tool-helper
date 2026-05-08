@@ -7583,6 +7583,51 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
     except (TypeError, ValueError):
         pass
 
+    # ── 6b. 反人性 OI 週期評分（核心升級）──────────────────────────────────
+    # 山寨幣 OI 真相：
+    #   「OI 大漲 + 價格大漲」= 散戶追進去 = 主力在出貨 = 最差入場時機
+    #   「OI 下降 + 價格守支撐」= 弱手被洗 = 主力靜悄悄吸籌 = 最佳入場時機
+    #   「OI 從低點剛開始回升」= 吸籌完成 = 新的多頭週期開始 = 最高勝率
+    # ──────────────────────────────────────────────────────────────────────
+    try:
+        _oi1h_raw  = float(x.get("oiChange1h")  or x.get("open_interest_change_percent_1h")  or 0)
+        _oi15m_raw = float(x.get("oiChange15m") or x.get("_cg_oi_change_15m") or 0)
+        _p1h_raw   = float(x.get("priceChange1h") or 0)
+
+        if is_bull_sig:
+            # ★ 最佳多單：4H 跌後 OI 收縮，現在 1H OI 剛開始轉正（吸籌完成）
+            # 表現：24h 價跌或平 + 1H OI 小幅正 + 費率偏中或負
+            if p24h < -2.0 and 0.2 <= _oi1h_raw <= 3.0:
+                score += 20
+                reasons.append("OI底部復甦（吸籌完成）")
+            # ★ 次佳多單：1H OI 先跌（洗盤）現在 15m 剛轉正（洗盤結束）
+            elif _oi1h_raw < 0 and _oi15m_raw > 0.3:
+                score += 15
+                reasons.append("OI洗盤後反轉（剛轉正）")
+            # ✗ 最差多單：OI 持續大漲（散戶在追，主力在出）
+            if _oi1h_raw > 4.0 and p24h > 5.0:
+                score -= 18
+                reasons.append("OI過熱追多（主力出貨中）")
+            # ✗ 次差多單：1H 大漲後 15m OI 還在漲（末段追）
+            elif _p1h_raw > 3.5 and _oi15m_raw > 2.0:
+                score -= 12
+                reasons.append("短線過熱（末段追進）")
+        else:
+            # ★ 最佳空單：24h 大漲後 OI 仍在擴（散戶都進來了）
+            if p24h > 5.0 and _oi1h_raw > 2.0:
+                score += 18
+                reasons.append("OI過熱頂部形成（空單最佳）")
+            # ★ 次佳空單：1H OI 持續擴張 + 費率偏正（多頭高度擁擠）
+            elif _oi1h_raw > 1.5 and _p1h_raw > 2.0:
+                score += 12
+                reasons.append("OI擴張摸頭")
+            # ✗ 最差空單：OI 已大量收縮（多數人已跑了，空單風險高）
+            if _oi1h_raw < -3.0 and p24h < -8.0:
+                score -= 15
+                reasons.append("OI已大縮（追空風險高）")
+    except (TypeError, ValueError):
+        pass
+
     # ── 7. 資金費率順風加分 ──────────────────────────────────────
     # 費率為小數（0.001 = 0.1%）
     # 做多 + 費率偏負（空頭支付費率給多頭）→ 順風，空頭持續補倉壓力
@@ -16626,7 +16671,39 @@ def _crit_radar_score_components(
     except Exception:
         pass
 
-    total = int(round(oi_pts + price_pts + taker_pts + fund_pts + timing_bonus + td_bonus + rsi_bonus + session_penalty))
+    # ── 反人性 OI 週期加分（爆擊版）────────────────────────────────────────
+    # 同 _calc_signal_grade 邏輯：OI 底部復甦最佳，OI 過熱追多最差
+    oi_cycle_bonus = 0.0
+    try:
+        _p24_cr  = float(item.get("price_change_percent_24h") or item.get("priceChange24h") or 0)
+        _p1h_cr  = float(item.get("price_change_percent_1h")  or item.get("priceChange1h")  or 0)
+        _oi15_cr = oi15f if oi15f is not None else 0.0
+        _oi1h_cr = oi1hf if oi1hf is not None else 0.0
+        if is_long:
+            # 最佳：24h 跌後 OI 從低點回升（吸籌完成）
+            if _p24_cr < -2.0 and 0.2 <= _oi1h_cr <= 3.0:
+                oi_cycle_bonus += 18.0
+            # 次佳：1H OI 先跌現在 15m 剛轉正（洗盤結束）
+            elif _oi1h_cr < 0 and _oi15_cr > 0.3:
+                oi_cycle_bonus += 12.0
+            # 最差：OI 大漲 + 價大漲（散戶追，主力出貨）
+            if _oi1h_cr > 4.0 and _p24_cr > 5.0:
+                oi_cycle_bonus -= 18.0
+            elif _p1h_cr > 3.5 and _oi15_cr > 2.0:
+                oi_cycle_bonus -= 10.0
+        else:
+            # 最佳空單：24h 大漲後 OI 仍擴（頂部）
+            if _p24_cr > 5.0 and _oi1h_cr > 2.0:
+                oi_cycle_bonus += 16.0
+            elif _oi1h_cr > 1.5 and _p1h_cr > 2.0:
+                oi_cycle_bonus += 10.0
+            # 最差空單：OI 已大縮（追空風險高）
+            if _oi1h_cr < -3.0 and _p24_cr < -8.0:
+                oi_cycle_bonus -= 14.0
+    except (TypeError, ValueError):
+        pass
+
+    total = int(round(oi_pts + price_pts + taker_pts + fund_pts + timing_bonus + td_bonus + rsi_bonus + session_penalty + oi_cycle_bonus))
     return max(0, min(100, total))
 
 
