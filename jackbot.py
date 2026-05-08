@@ -2871,13 +2871,53 @@ def get_gate_max_safe_size(
         return 500.0
 
 
+def gate_depth_signal_ok(
+    symbol: str,
+    is_long: bool,
+    min_fill_usdt: float = 5000.0,
+    max_slippage_pct: float = 0.02,
+) -> Tuple[bool, float]:
+    """
+    訊號發送前的訂單簿深度把關：
+    在 max_slippage_pct（預設 2%）滑點上限內，能否吃進 min_fill_usdt（預設 5000 USDT）。
+
+    回傳 (ok: bool, depth_usdt: float)
+      ok=True  → 深度足夠，訊號可推播
+      ok=False → 深度不足，訊號跳過（滑點過大）
+
+    主流大幣（BTC/ETH/SOL/BNB/XRP/DOGE）直接放行，不需偵測。
+    API 失敗時保守放行（避免誤殺訊號），並記錄警告。
+    """
+    _BIG_COINS = {"BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "DOT", "MATIC"}
+    base = str(symbol).replace("USDT", "").replace("-", "").replace("_", "").upper()
+    if base in _BIG_COINS:
+        return True, 999999.0   # 主流幣直接放行
+
+    side = "buy" if is_long else "sell"
+    try:
+        depth_usdt = get_gate_max_safe_size(symbol, side=side, threshold=max_slippage_pct)
+    except Exception as e:
+        logger.warning("[深度把關] %s 查詢失敗，保守放行: %s", symbol, e)
+        return True, 0.0   # API 失敗 → 保守放行，不誤殺
+
+    ok = depth_usdt >= min_fill_usdt
+    if not ok:
+        logger.info(
+            "[深度把關🚫] %s %s 跳過：2%% 滑點內僅 %.0f USDT < 門檻 %.0f USDT（訂單簿深度不足）",
+            symbol, "多" if is_long else "空", depth_usdt, min_fill_usdt,
+        )
+    return ok, depth_usdt
+
+
 def _gate_depth_warning(symbol: str, is_long: bool) -> str:
     """
     回傳滑點警語字串（空字串 = 深度充足，不需顯示）。
-    深度不足門檻：
-      < 500  USDT → 🔴 高風險滑點預警
+    注意：gate_depth_signal_ok() 已在推播前過濾掉深度極差的幣，
+    此函數僅用於在訊息內附加「中等深度」的提示文字。
+    深度門檻（0.5% 內）：
+      < 500  USDT → 🔴 高風險滑點預警（實際上已被 signal_ok 過濾大多數）
       < 2000 USDT → ⚠️ 建議單筆勿超過 X USDT
-      ≥ 2000 USDT → 不顯示（深度充足）
+      ≥ 2000 USDT → 不顯示
     """
     side = "buy" if is_long else "sell"
     try:
@@ -11413,6 +11453,19 @@ def fetch_position_change():
                 caption_txt = payload.get("caption") or ""
                 if not caption_txt:
                     continue
+
+                # ── 訂單簿深度把關：2% 滑點內能否吃進 5000 USDT ─────────────
+                _is_long_payload = bool(payload.get("direction_is_long"))
+                _depth_pass, _depth_usdt = gate_depth_signal_ok(
+                    sym_b, _is_long_payload, min_fill_usdt=5000.0, max_slippage_pct=0.02
+                )
+                if not _depth_pass:
+                    logger.info(
+                        "[持倉狙擊·深度把關🚫] 跳過 %s %s｜2%%滑點內僅 %.0f USDT < 5000 USDT（訂單簿深度不足）",
+                        sym_b, "多" if _is_long_payload else "空", _depth_usdt,
+                    )
+                    continue
+
                 _gk_card = _gk_trade_payload_for_card_base(sym_b)
                 if _gk_card is not None:
                     if not jackbot_universal_pre_send_gatekeeper(
@@ -17224,6 +17277,16 @@ def run_crit_radar_once() -> None:
             "[爆擊雷達·TP] %s %s entry=%s sl=%s tp1=%s(%.2fR·%s) tp2=%s(%.2fR·%s)",
             sym, side, ent_s, sl_s, tp_s, actual_r, tp_src, tp2_s, tp2_r, tp2_src,
         )
+
+        # ── 訂單簿深度把關：2% 滑點內能否吃進 5000 USDT，不行就換下一名 ────
+        _depth_ok, _depth_val = gate_depth_signal_ok(sym, is_long, min_fill_usdt=5000.0, max_slippage_pct=0.02)
+        if not _depth_ok:
+            n_gk_skip += 1
+            logger.info(
+                "[爆擊雷達·深度把關🚫] 跳過 %s %s 分=%s｜2%%滑點內僅 %.0f USDT < 5000 USDT",
+                sym, side, score, _depth_val,
+            )
+            continue
 
         if _crit_use_gk and not _crit_gk_glob_off:
             _gk_dict = _crit_radar_gatekeeper_payload(
