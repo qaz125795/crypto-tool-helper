@@ -2794,6 +2794,115 @@ def fetch_gate_usdt_contract_bases() -> Set[str]:
     return out
 
 
+# ── Gate.io 永續合約盤口深度偵測（滑點安全倉位估算） ─────────────────────────
+_gate_depth_cache: Dict[str, Tuple[float, float]] = {}   # {key: (safe_usdt, fetch_ts)}
+_GATE_DEPTH_CACHE_TTL = 45.0   # 秒，同一幣同方向快取有效期
+
+
+def get_gate_max_safe_size(
+    symbol: str,
+    side: str = "buy",
+    threshold: float = 0.005,   # 預設 0.5%（比 1% 更保守，對小幣友善）
+) -> float:
+    """
+    估算 Gate.io USDT 永續盤口深度：
+    在「加權平均成交價」超出最優檔 threshold% 以前，最多能吃進多少 USDT。
+    side: 'buy'  → 看 asks（買入）
+          'sell' → 看 bids（賣出）
+    回傳 safe_usdt（0 = API 失敗或盤口太薄）
+    帶有 45 秒快取，避免頻繁打 Gate API。
+    """
+    global _gate_depth_cache
+    base = str(symbol).replace("USDT", "").replace("-", "").replace("_", "").upper()
+    pair = f"{base}_USDT"
+    cache_key = f"{pair}_{side}"
+    now = time.time()
+
+    # 快取命中
+    if cache_key in _gate_depth_cache:
+        cached_val, cached_ts = _gate_depth_cache[cache_key]
+        if (now - cached_ts) < _GATE_DEPTH_CACHE_TTL:
+            return cached_val
+
+    try:
+        url = f"https://api.gateio.ws/api/v4/futures/usdt/order_book"
+        params = {"contract": pair, "limit": 50, "with_id": "false"}
+        resp = requests.get(url, params=params, timeout=3)
+        if resp.status_code != 200:
+            _gate_depth_cache[cache_key] = (500.0, now)
+            return 500.0
+        data = resp.json()
+
+        # Gate 永續盤口：asks=賣盤（買入用）, bids=買盤（賣出用）
+        book = data.get("asks") if side == "buy" else data.get("bids")
+        if not book or not isinstance(book, list):
+            _gate_depth_cache[cache_key] = (500.0, now)
+            return 500.0
+
+        # 每一項格式：{"p": "price", "s": size_contracts}
+        # 永續合約 size 是合約張數，需轉換為 USDT（1 張通常 = 合約面值，Gate 通常以 USDT 計）
+        best_price = float(book[0].get("p", 0))
+        if best_price <= 0:
+            _gate_depth_cache[cache_key] = (500.0, now)
+            return 500.0
+
+        limit_price = best_price * (1 + threshold) if side == "buy" else best_price * (1 - threshold)
+        total_usdt = 0.0
+
+        for entry in book:
+            p = float(entry.get("p", 0))
+            s = float(entry.get("s", 0))
+            if p <= 0 or s <= 0:
+                continue
+            if side == "buy" and p > limit_price:
+                break
+            if side == "sell" and p < limit_price:
+                break
+            total_usdt += p * s
+
+        result = round(total_usdt, 2)
+        _gate_depth_cache[cache_key] = (result, now)
+        logger.debug("[Gate深度] %s %s 安全倉位=%.0f USDT（閾值=%.1f%%）", pair, side, result, threshold * 100)
+        return result
+
+    except Exception as e:
+        logger.debug("[Gate深度] %s %s 深度偵測失敗（保守值500）: %s", symbol, side, e)
+        _gate_depth_cache[cache_key] = (500.0, now)
+        return 500.0
+
+
+def _gate_depth_warning(symbol: str, is_long: bool) -> str:
+    """
+    回傳滑點警語字串（空字串 = 深度充足，不需顯示）。
+    深度不足門檻：
+      < 500  USDT → 🔴 高風險滑點預警
+      < 2000 USDT → ⚠️ 建議單筆勿超過 X USDT
+      ≥ 2000 USDT → 不顯示（深度充足）
+    """
+    side = "buy" if is_long else "sell"
+    try:
+        safe_usdt = get_gate_max_safe_size(symbol, side=side, threshold=0.005)
+    except Exception:
+        return ""
+
+    base = str(symbol).replace("USDT", "").strip().upper()
+    gate_url = f"https://www.gate.io/futures/USDT/{base}_USDT"
+
+    if safe_usdt <= 0:
+        return f"⚠️ Gate 深度資料暫無法取得，建議小倉試單"
+    elif safe_usdt < 500:
+        return (
+            f"🔴 *高風險滑點預警*：盤口深度極薄（0.5% 內僅 ~`{safe_usdt:.0f}` USDT），"
+            f"建議單筆 ≤ 200 USDT 或換幣｜[查看盤口]({gate_url})"
+        )
+    elif safe_usdt < 2000:
+        return (
+            f"⚠️ *滑點提醒*：深度偏薄（0.5% 內約 `{safe_usdt:.0f}` USDT），"
+            f"建議單筆勿超過 `{int(safe_usdt * 0.5):.0f}` USDT｜[查看盤口]({gate_url})"
+        )
+    return ""   # 深度充足，不需顯示
+
+
 def fetch_bingx_futures_24h_vol() -> Dict[str, float]:
     """
     Plan B 成交值備援：Gate 永續合約 24h quoteVolume（USDT）批次取得。
@@ -8516,6 +8625,11 @@ def build_report_message_tiered(
             if _already_moving:
                 msg_lines.append("⚠️ 車已發動，分批進場")
             msg_lines.append(_GATE_PRICE_SOURCE_NOTE)
+            # 深度偵測（主流大幣跳過，避免不必要延遲）
+            if sym_base not in ("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"):
+                _dw = _gate_depth_warning(sym_base, is_bull_sig)
+                if _dw:
+                    msg_lines.append(_dw)
         else:
             # ── 點位（舊版樣式）──────────────────────────────────────────────
             msg_lines.append("**📌 點位**")
@@ -8543,6 +8657,10 @@ def build_report_message_tiered(
                 msg_lines.append("市價帶 `—`")
 
             msg_lines.append(_GATE_PRICE_SOURCE_NOTE)
+            if sym_base not in ("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"):
+                _dw2 = _gate_depth_warning(sym_base, is_bull_sig)
+                if _dw2:
+                    msg_lines.append(_dw2)
 
             # ── 均價／錨（舊版樣式）────────────────────────────────────────
             msg_lines.append("**📊 均價／錨**")
@@ -17271,11 +17389,18 @@ def run_crit_radar_once() -> None:
         ]
         if _rsi_note:
             msg_lines.append(f"⚠️ {_rsi_note}")
+        # 深度偵測：非主流幣才檢查（BTC/ETH/SOL 深度充足，不需顯示）
+        _depth_warn = ""
+        _sym_base_cr = sym.replace("USDT", "")
+        if _sym_base_cr not in ("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"):
+            _depth_warn = _gate_depth_warning(sym, is_long)
         msg_lines += [
             "",
             verdict_line,
             _GATE_PRICE_SOURCE_NOTE,
         ]
+        if _depth_warn:
+            msg_lines.append(_depth_warn)
         msg = "\n".join(msg_lines)
         _gk_pre_send = _crit_radar_gatekeeper_payload(
             it, sym, float(price), fr, is_long, liq_map_cr
