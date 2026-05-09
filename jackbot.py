@@ -5678,14 +5678,14 @@ def _env_float(name: str, default: float) -> float:
 MTF_VOLUME_MIN_USD = int(max(100_000, round(_env_float("MTF_VOLUME_MIN_USD", 9_900_000))))  # 預設 9.9M
 
 SNIPER_FAST_MODE = os.getenv("SNIPER_FAST_MODE", "").strip().lower() in ("1", "true", "yes", "on")
-# 持倉狙擊 TP1 縮短至 1.0R：提高 TP1 勝率至 60%+，先穩穩拿走大部分倉位
-# TP2 維持 2.5R：讓剩餘倉位追更大的行情
-_default_tp1 = 1.0 if SNIPER_FAST_MODE else 1.0   # 統一 1.0R，目標 60% TP1 勝率
-_default_tp2 = 2.2 if SNIPER_FAST_MODE else 2.5
+# 持倉狙擊 TP1 調高至 1.5R：27.7% 勝率下需 TP≥2.6R 才損益平衡；提高 TP 同時靠篩選提升勝率
+# 目標：進場更精準，TP1 1.5R，整體勝率拉到 45%+
+_default_tp1 = 1.2 if SNIPER_FAST_MODE else 1.5
+_default_tp2 = 2.8 if SNIPER_FAST_MODE else 3.2
 _default_min_sl = 0.008 if SNIPER_FAST_MODE else 0.015
 
-TP1_R_MULTIPLIER = max(0.8, _env_float("SNIPER_TP1_R", _default_tp1))   # 最低 0.8R（手續費保護）
-TP2_R_MULTIPLIER = max(TP1_R_MULTIPLIER + 0.8, _env_float("SNIPER_TP2_R", _default_tp2))   # TP2 必須高於 TP1
+TP1_R_MULTIPLIER = max(0.8, _env_float("SNIPER_TP1_R", _default_tp1))
+TP2_R_MULTIPLIER = max(TP1_R_MULTIPLIER + 0.8, _env_float("SNIPER_TP2_R", _default_tp2))
 SL_R_LABEL = 1.0        # 推播顯示用：止損標為 -1.0R（1R = 進場到 SL 的距離）
 MIN_SL_PERCENT = _env_float("SNIPER_MIN_SL_PCT", _default_min_sl)  # 快進快出建議 0.006~0.010
 MAX_SL_PERCENT = _env_float("SNIPER_MAX_SL_PCT", 0.055)  # 過寬止損上限（預設 5.5%），由 EMA20/EMA100（15m）優先收斂
@@ -5719,7 +5719,7 @@ SNIPER_TP2_BOX_MIN_HEIGHT_R = _env_float("SNIPER_TP2_BOX_MIN_H_R", 0.12)
 SNIPER_TP2_BOX_MIN_HEIGHT_PCT = _env_float("SNIPER_TP2_BOX_MIN_H_PCT", 0.12)  # 箱高 ≥ 現價×此%
 SNIPER_TP2_MAX_R = max(TP2_R_MULTIPLIER, _env_float("SNIPER_TP2_MAX_R", 6.0))
 # 綜合評分低於此不分級推播（S / A / R 皆不推）
-MIN_SIGNAL_PUSH_SCORE = 70          # 從 74 降至 70：補償 CVD/RSI 新懲罰項加入後分數整體下移
+MIN_SIGNAL_PUSH_SCORE = 76          # 27.7% 勝率 → 說明我們放太鬆了；嚴格回到 76，只推高確信度訊號
 # Tier2（觀察名單）略降底分，避免崩盤日僅剩觀察單卻全日無推播
 MIN_SIGNAL_PUSH_SCORE_TIER2 = int(round(_env_float("MIN_SIGNAL_PUSH_SCORE_TIER2", 66)))
 # 逆勢 R 級預設略嚴；但「機構成交 + 平倉浪摸頭/摸底」可用 MIN_R_STRUCT_TOUCH_SCORE 放行（見下方）
@@ -10961,6 +10961,29 @@ def fetch_position_change():
             f"[版本門檻] 淘汰 {_pre_ver_filt - len(all_top)} 個非 confirmed/衰竭反轉，"
             f"剩餘 {len(all_top)} 個"
         )
+
+    # ── 強制回踩過濾：絕對不追高/追空 ─────────────────────────────────────────
+    # 27.7% 勝率的核心病因：我們在「已漲 / 已跌」之後才報訊號
+    # 規則：做多訊號的 15m 漲幅不能超過 1.5%（如果漲太快，代表還沒拉回，等拉回再進）
+    #        做空訊號的 15m 跌幅不能超過 1.5%（如果跌太快，代表還沒反彈，等反彈再空）
+    _pre_pullback_filt = len(all_top)
+    _MAX_CHASE_P15 = 1.5  # 超過這個就是追高/追空
+    def _is_chasing(item: Dict) -> bool:
+        cat = (item.get("category") or "").strip()
+        is_bull = cat in ("long_open", "short_close")
+        try:
+            p15 = float(item.get("priceChange15m") or item.get("price_change_percent_15m") or 0)
+        except (TypeError, ValueError):
+            p15 = 0.0
+        if is_bull and p15 > _MAX_CHASE_P15:
+            return True   # 多單但 15m 已漲 >1.5%
+        if not is_bull and p15 < -_MAX_CHASE_P15:
+            return True   # 空單但 15m 已跌 >1.5%
+        return False
+    all_top = [x for x in all_top if not _is_chasing(x)]
+    _chase_drop = _pre_pullback_filt - len(all_top)
+    if _chase_drop > 0:
+        logger.info(f"[追高追空過濾] 移除 {_chase_drop} 個 15m 漲跌超過 {_MAX_CHASE_P15}% 的追價訊號，剩餘 {len(all_top)} 個")
 
     _gk_pre = len(all_top)
     all_top = [x for x in all_top if sniper_coinglass_gatekeeper_allow(x)]
@@ -16897,9 +16920,8 @@ def run_crit_radar_once() -> None:
                 "`data/crit_radar_cooldown.json`（見 .github/workflows/crit-radar.yml）。"
             )
     pool_n = max(20, min(200, _crit_radar_env_int("CRIT_RADAR_POOL", 100)))
-    # 早期啟動預設：分數門檻下修，配合下方過熱濾網，提早但不追高/追低
-    # 從 82 降至 78：補償 RSI/timing 新懲罰項加入後分數普遍下移 4-6 分
-    min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 78)))
+    # 27.7% 勝率 → 門檻太低。提回 84：只有真正強勢的 OI 底部復甦型才能通過
+    min_score = max(55, min(100, _crit_radar_env_int("CRIT_RADAR_MIN_SCORE", 84)))
     # 爆擊訊號定位：「樂透單，拚爆擊，小倉玩」→ 每輪只推最高分（Top 1→2→3 fallback），冷卻 8h
     # Top 1 冷卻中就試 Top 2，Top 2 也冷卻就試 Top 3，三個都冷卻才本輪無訊號
     max_alerts = max(1, min(8, _crit_radar_env_int("CRIT_RADAR_MAX_ALERTS", 1)))
