@@ -7828,6 +7828,30 @@ def _calc_signal_grade(x: dict, is_bull_sig: bool) -> tuple:
         brief = f"{grade_badge} {grade_desc}（{'・'.join(reasons[:3])}）"
         return grade, score, brief, _already_moving, _motion_note
 
+    # ── 1H RSI 硬關門：不進已過熱的幣 ─────────────────────────────────────
+    # 29.4% 勝率的另一個根因：1H RSI 在 65+ 時做多、35- 時做空 = 末段接棒
+    # 硬規則：RSI 不對就直接 B 級，不管分數多高
+    _rsi_kline = x.get("rsi")
+    if _rsi_kline is not None:
+        try:
+            _rk = float(_rsi_kline)
+            if is_bull_sig and _rk > 65 and not _counter_4h:
+                # 多單但 RSI 已在 65 以上，進場即是末段追，pass
+                return "B", score, "🥈 *B 級* RSI 已超 65（多單過熱，等回落再進）", _already_moving, _motion_note
+            elif not is_bull_sig and _rk < 35 and not _counter_4h:
+                # 空單但 RSI 已在 35 以下，進場即是末段追空，pass
+                return "B", score, "🥈 *B 級* RSI 已低於 35（空單過冷，等反彈再空）", _already_moving, _motion_note
+        except (TypeError, ValueError):
+            pass
+
+    # ── 1H 過度延伸硬關門：1H 已跑超 3%，不再進場 ──────────────────────────
+    _p1h_check = float(x.get("priceChange1h") or 0)
+    _MAX_1H_EXTEND = 3.0
+    if is_bull_sig and _p1h_check > _MAX_1H_EXTEND:
+        return "B", score, f"🥈 *B 級* 1H 已漲 {_p1h_check:.1f}%（>3%，不追高）", _already_moving, _motion_note
+    if not is_bull_sig and _p1h_check < -_MAX_1H_EXTEND:
+        return "B", score, f"🥈 *B 級* 1H 已跌 {abs(_p1h_check):.1f}%（>3%，不追空）", _already_moving, _motion_note
+
     # ── UTC 時段品質門：亞洲死盤時段（00-06 UTC）山寨幣假訊號密集 ──────────
     # 00:00-06:00 UTC = 凌晨亞洲盤，流動性最差，主力掃盤洗盤最頻繁
     # 這段時間的訊號假突破率最高，直接壓分保護
@@ -10975,10 +10999,19 @@ def fetch_position_change():
             p15 = float(item.get("priceChange15m") or item.get("price_change_percent_15m") or 0)
         except (TypeError, ValueError):
             p15 = 0.0
+        try:
+            p1h = float(item.get("priceChange1h") or item.get("price_change_percent_1h") or 0)
+        except (TypeError, ValueError):
+            p1h = 0.0
         if is_bull and p15 > _MAX_CHASE_P15:
             return True   # 多單但 15m 已漲 >1.5%
         if not is_bull and p15 < -_MAX_CHASE_P15:
             return True   # 空單但 15m 已跌 >1.5%
+        # 1H 延伸也不追
+        if is_bull and p1h > 3.5:
+            return True   # 多單但 1H 已漲 >3.5%
+        if not is_bull and p1h < -3.5:
+            return True   # 空單但 1H 已跌 >3.5%
         return False
     all_top = [x for x in all_top if not _is_chasing(x)]
     _chase_drop = _pre_pullback_filt - len(all_top)
