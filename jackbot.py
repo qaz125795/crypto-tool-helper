@@ -12597,7 +12597,7 @@ def get_why_macro_matters_plain(data: Dict) -> str:
 
 
 def filter_today_events(data_array: List[Dict], min_importance: int = 4) -> List[Dict]:
-    """過濾今日事件（用於早上8點預告）"""
+    """過濾今日預告事件（只顯示尚未到達公布時間的未來事件，避免舊事件混入）"""
     now = get_taipei_time()
     today_start = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=TAIPEI_TZ)
     today_end = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=TAIPEI_TZ)
@@ -12611,11 +12611,12 @@ def filter_today_events(data_array: List[Dict], min_importance: int = 4) -> List
         if not publish_time:
             continue
         
-        # 只取今日且未發布的事件
-        is_published = item.get('published_value') not in [None, '']
+        # 只取今日（台北時間當天）且尚未到達公布時間的事件
+        # 使用 publish_time > now 取代 is_published 判斷，避免 CoinGlass 預填 published_value 導致誤判
         is_today = today_start <= publish_time <= today_end
+        is_upcoming = publish_time > now
         
-        if importance >= min_importance and is_today and not is_published:
+        if importance >= min_importance and is_today and is_upcoming:
             filtered.append(item)
     
     return filtered
@@ -12642,7 +12643,8 @@ def get_unsent_data(data_array: List[Dict]) -> List[Dict]:
     sent_ids = load_json_file(SENT_DATA_FILE, [])
     unsent = []
     now = get_taipei_time()
-    wait_actual_sec = max(60.0, _env_float("ECONOMIC_WAIT_ACTUAL_SEC", 7200.0))
+    # CoinGlass 通常 5~10 分鐘內回填實際值；10分鐘等待已足夠，舊設定2小時會造成完全漏推
+    wait_actual_sec = max(60.0, _env_float("ECONOMIC_WAIT_ACTUAL_SEC", 600.0))
     
     for item in data_array:
         data_id = generate_data_id(item)
@@ -12658,22 +12660,18 @@ def get_unsent_data(data_array: List[Dict]) -> List[Dict]:
             if pt_taipei > now:
                 continue
             
-            # 已過表定時間但尚無實值：先等待 CoinGlass 回填（避免先推「只有預期」並標記已送）
+            # 已過表定時間但尚無實值：等待 CoinGlass 回填（避免先推「只有預期值」）
             if not _economic_has_published_figure(item):
                 age_sec = (now - pt_taipei).total_seconds()
                 if age_sec < wait_actual_sec:
                     continue
         
-        # 額外檢查：如果數據已發布超過 2 小時，且已有實際值，則跳過
-        # 這可以防止在 GitHub Actions 環境中重複推送
+        # 過期保護：超過 6 小時且已有實際值，才靜默丟棄（避免連夜補推舊數據）
+        # 注意：此處不再在 2 小時時觸發，防止「尚未推播就被標記已送」的死局
         if publish_time:
             time_diff = (now - get_taipei_time(publish_time)).total_seconds()
-            published_value = item.get('published_value') or item.get('actual')
-            
-            # 如果已發布超過 2 小時且有實際值，視為已處理過（避免重複）
-            if time_diff > 7200 and published_value:  # 2小時 = 7200秒
-                logger.debug(f"跳過已發布超過2小時的數據: {data_id}")
-                # 標記為已推送，避免下次再檢查
+            if time_diff > 21600 and _economic_has_published_figure(item):  # 6小時 = 21600秒
+                logger.debug(f"跳過已超過6小時的過期數據: {data_id}")
                 mark_as_sent(data_id)
                 continue
         
@@ -12852,13 +12850,13 @@ def format_economic_data_message(data: Dict) -> str:
     lines.append(f"{country_flag} {country_name}")
     lines.append("")
     
-    # 時間資訊
-    lines.append("🕐 *發布時間*")
+    # 時間資訊（台北時間）
+    lines.append("🕐 *發布時間（台北 UTC+8）*")
     if is_published:
-        lines.append(f"✅ {time_str}")
+        lines.append(f"✅ {time_str}（台北）")
         lines.append(f"⏰ {time_status}")
     else:
-        lines.append(f"📅 {time_str}")
+        lines.append(f"📅 {time_str}（台北）")
         lines.append(f"⏳ {time_status}")
     lines.append("")
     
@@ -12921,6 +12919,7 @@ def format_today_preview_message(events: List[Dict]) -> str:
     lines = []
     lines.append("📅 *【今日重要經濟數據預告】*")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("_⏱ 以下時間均為台北時間（UTC+8）_")
     lines.append("")
     
     # 分組：極高重要性（>= 3）和高重要性（>= 2 且 < 3）
@@ -12938,12 +12937,11 @@ def format_today_preview_message(events: List[Dict]) -> str:
         for event in very_high:
             publish_time = parse_publish_time(event)
             if publish_time:
-                # 轉換為台灣時間並格式化
                 publish_time_taipei = get_taipei_time(publish_time)
                 time_display = publish_time_taipei.strftime("%H:%M")
                 event_name = event.get('calendar_name') or event.get('name') or event.get('title') or '經濟指標'
                 country_flag = get_country_flag(event.get('country_name') or event.get('country') or '')
-                lines.append(f"  • {time_display} | {country_flag} {event_name}")
+                lines.append(f"  • {time_display}（台北）| {country_flag} {event_name}")
         lines.append("")
     
     if high:
@@ -12952,12 +12950,11 @@ def format_today_preview_message(events: List[Dict]) -> str:
         for event in high:
             publish_time = parse_publish_time(event)
             if publish_time:
-                # 轉換為台灣時間並格式化
                 publish_time_taipei = get_taipei_time(publish_time)
                 time_display = publish_time_taipei.strftime("%H:%M")
                 event_name = event.get('calendar_name') or event.get('name') or event.get('title') or '經濟指標'
                 country_flag = get_country_flag(event.get('country_name') or event.get('country') or '')
-                lines.append(f"  • {time_display} | {country_flag} {event_name}")
+                lines.append(f"  • {time_display}（台北）| {country_flag} {event_name}")
         lines.append("")
     
     if not very_high and not high:
@@ -12967,7 +12964,7 @@ def format_today_preview_message(events: List[Dict]) -> str:
     lines.extend(_economic_preview_analysis_lines(events))
     
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"⏰ 預告時間：{time_str}")
+    lines.append(f"⏰ 預告時間：{time_str}（台北）")
     
     return "\n".join(lines)
 
