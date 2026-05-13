@@ -72,6 +72,8 @@ jobs:
           # 與 Zeabur／爆擊雷達一致：跨 runner 保留狙擊冷卻與 pending（僅讀寫 gist 內 sniper 檔，不覆蓋爆擊檔）
           GIST_ID: ${{ secrets.GIST_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAT_ID_2: ${{ secrets.CHAT_ID_2 }}
+          TG_THREAD_IDS_2: ${{ secrets.TG_THREAD_IDS_2 }}
         run: |
           echo "=============================================="
           echo " 持倉變化篩選 Action 開始（log 即時輸出）"

@@ -44,6 +44,8 @@ jobs:
           DC_TOKEN: ${{ secrets.DC_TOKEN }}
           DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
           DC_THREAD_IDSfunding_rate: ${{ secrets.DC_THREAD_IDSfunding_rate }}
+          CHAT_ID_2: ${{ secrets.CHAT_ID_2 }}
+          TG_THREAD_IDS_2: ${{ secrets.TG_THREAD_IDS_2 }}
         run: |
           timeout 480 python jackbot.py funding_rate || exit 0
           echo "任務執行完成"

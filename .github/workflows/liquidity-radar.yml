@@ -47,6 +47,8 @@ jobs:
           # 清算柱狀圖：限制每次同步天數，避免 Actions 首次下載過久
           LIQ_CHART_MAX_SYNC_DAYS: "10"
           LIQ_CHART_LOOKBACK_DAYS: "180"
+          CHAT_ID_2: ${{ secrets.CHAT_ID_2 }}
+          TG_THREAD_IDS_2: ${{ secrets.TG_THREAD_IDS_2 }}
         run: |
           # 設置超時保護（含 matplotlib 繪圖與 Binance 快照下載）
           timeout 600 python jackbot.py liquidity_radar || exit 0

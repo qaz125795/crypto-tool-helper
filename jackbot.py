@@ -350,6 +350,24 @@ try:
 except Exception:
     TG_THREAD_IDS["crit_radar"] = int(os.environ.get("TG_THREAD_CRIT_RADAR") or 11040)
 
+# ── 第二組 TG 目的地（額外頻道，不含 Discord 鏡像）────────────────────────────
+# CHAT_ID_2          = 第二個超級群組的 chat_id（例如 -1002965597249）
+# TG_THREAD_IDS_2    = JSON，格式同 TG_THREAD_IDS（例如 {"position_change":24255,...}）
+CHAT_ID_2: Optional[str] = os.environ.get("CHAT_ID_2", "").strip() or None
+TG_THREAD_IDS_2: Dict[str, int] = {}
+_tg2_raw = os.environ.get("TG_THREAD_IDS_2", "").strip()
+if _tg2_raw:
+    try:
+        _tg2_loaded = json.loads(_tg2_raw)
+        if isinstance(_tg2_loaded, dict):
+            for _k2, _v2 in _tg2_loaded.items():
+                try:
+                    TG_THREAD_IDS_2[str(_k2)] = int(str(_v2).strip())
+                except (TypeError, ValueError):
+                    pass
+    except Exception as _e2:
+        logger.warning("TG_THREAD_IDS_2 JSON 解析失敗，第二組頻道停用：%s", _e2)
+
 # 其他配置
 EXCHANGE = "Binance"
 TIME_TYPE = "h1"
@@ -716,6 +734,46 @@ def _tg_queue_flush(max_items: int = 10) -> None:
         _TG_FLUSH_LOCK.release()
 
 
+def _send_extra_tg_channels(
+    text: str,
+    key: Optional[str],
+    parse_mode: Optional[str],
+    force_everyone: bool = False,
+) -> None:
+    """將訊息額外發送到第二組 TG 頻道（CHAT_ID_2 + TG_THREAD_IDS_2），不做 Discord 鏡像。"""
+    if not CHAT_ID_2 or not key:
+        return
+    extra_tid = TG_THREAD_IDS_2.get(key)
+    if not extra_tid:
+        return
+    tg_text2 = _telegram_content_with_mentions(text, extra_tid, force_everyone=force_everyone)
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    payload2: Dict[str, Any] = {
+        "chat_id": CHAT_ID_2,
+        "message_thread_id": extra_tid,
+        "text": tg_text2,
+        "disable_web_page_preview": True,
+    }
+    if parse_mode:
+        payload2["parse_mode"] = parse_mode
+    try:
+        r = requests.post(url, json=payload2, timeout=10)
+        if r.status_code == 200 and r.json().get("ok"):
+            logger.info("[推播追蹤] 第二組頻道發送成功 chat_id=%s thread=%s key=%s", CHAT_ID_2, extra_tid, key)
+        else:
+            err_txt = r.text[:200] if r.text else ""
+            # parse_mode 錯誤時降級重試一次
+            if "parse" in err_txt.lower() and "entities" in err_txt.lower() and payload2.get("parse_mode"):
+                payload2.pop("parse_mode", None)
+                r2 = requests.post(url, json=payload2, timeout=10)
+                if r2.status_code == 200 and r2.json().get("ok"):
+                    logger.info("[推播追蹤] 第二組頻道降級重試成功 thread=%s", extra_tid)
+                    return
+            logger.warning("[推播追蹤] 第二組頻道發送失敗 thread=%s: %s", extra_tid, err_txt)
+    except Exception as exc:
+        logger.warning("[推播追蹤] 第二組頻道例外 thread=%s: %s", extra_tid, exc)
+
+
 def send_telegram_message(
     text: str,
     thread_id: int,
@@ -811,6 +869,14 @@ def send_telegram_message(
                 "retry_count": 0,
                 "created_at": int(time.time()),
             }
+        )
+    else:
+        # 主頻道發送成功後，同步推送到第二組 TG 頻道（不含 Discord 鏡像）
+        _send_extra_tg_channels(
+            text=text,
+            key=_resolve_thread_key_by_id(thread_id),
+            parse_mode=payload_retry.get("parse_mode"),
+            force_everyone=discord_force_everyone,
         )
 
     if not tg_ok and mirror_discord:

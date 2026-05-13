@@ -64,6 +64,8 @@ jobs:
           # 與持倉狙擊相同：跨 runner 保留爆擊冷卻，避免 15 分內重複推同幣
           GIST_ID: ${{ secrets.GIST_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAT_ID_2: ${{ secrets.CHAT_ID_2 }}
+          TG_THREAD_IDS_2: ${{ secrets.TG_THREAD_IDS_2 }}
         run: |
           timeout 600 python jackbot.py crit_radar || exit 0
           echo "任務執行完成"

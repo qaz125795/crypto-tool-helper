@@ -48,6 +48,8 @@ jobs:
           DC_TOKEN: ${{ secrets.DC_TOKEN }}
           DC_THREAD_IDS: ${{ secrets.DC_THREAD_IDS }}
           DC_THREAD_IDSeconomic_data: ${{ secrets.DC_THREAD_IDSeconomic_data }}
+          CHAT_ID_2: ${{ secrets.CHAT_ID_2 }}
+          TG_THREAD_IDS_2: ${{ secrets.TG_THREAD_IDS_2 }}
         run: |
           # 設置超時保護
           timeout 600 python jackbot.py economic_data_preview || exit 0

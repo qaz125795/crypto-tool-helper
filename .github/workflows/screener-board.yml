@@ -44,6 +44,8 @@ jobs:
           DC_TOKEN: ${{ secrets.DC_TOKEN }}
           # 直接指定：確保程式能找到 DC_THREAD_IDS['screener_board']
           DC_THREAD_IDS: '{"screener_board":1501259126741663799}'
+          CHAT_ID_2: ${{ secrets.CHAT_ID_2 }}
+          TG_THREAD_IDS_2: ${{ secrets.TG_THREAD_IDS_2 }}
         run: |
           echo "=============================================="
           echo " Screener 看板推播啟動（每小時）"
