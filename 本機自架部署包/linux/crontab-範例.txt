@@ -1,20 +1,54 @@
-# 將 /ABS/PATH/TO/... 換成 jackbot-cron.sh 的實際路徑
-# 並執行: chmod +x /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh
-#
-# 你的排程設定：
-#   持倉狙擊     → position_change，每 30 分鐘
-#   鏈上巨鯨動向 → hyperliquid，每 30 分鐘
-#   爆擊雷達     → crit_radar，每 15 分鐘
-#
+# ================================================
+#  JackBot 完整排程範例（對照 GitHub Actions 頻率）
+#  請將 /ABS/PATH/TO 替換為你機器上的實際絕對路徑
+#  先執行：chmod +x /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh
+# ================================================
 
-# ── 每 30 分鐘（:00 / :30）持倉狙擊 ──
+# 你指定的三支（30 / 30 / 15 分鐘）
+# ── 持倉狙擊鏡：每 30 分鐘 ──
 */30 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh position_change
 
-# ── 每 30 分鐘、與上攻錯開 10 分（:10 / :40）鏈上巨鯨，可依喜好改成 */30 + 任一時點對齊規則 ──
-10,40 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh hyperliquid
+# ── 鏈上巨鯨動向（Hyperliquid 大佬錢包）：每 30 分鐘，錯開 5 分避開 API 高峰 ──
+5,35 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh hyperliquid
 
-# ── 每 15 分鐘 爆擊雷達 ──
+# ── 爆擊雷達：每 15 分鐘 ──
 */15 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh crit_radar
 
-# 備註：若你希望巨鯨也用「標準」*/30（與持倉同分鐘），可改成：
-# */30 * * * * ... jackbot-cron.sh hyperliquid
+
+# ================================================
+#  以下為「其他全部訊號」，對應 GitHub Actions 原始頻率
+#  若要在本機全量運行，取消對應行的 # 即可
+# ================================================
+
+# ── 📊 市場地圖 screener_board：每小時 :25 ──
+# 25 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh screener_board
+
+# ── 🔥 資金費率排行榜 funding_rate：每日 0/4/8/12/16/20 點 :55 ──
+# 55 0,4,8,12,16,20 * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh funding_rate
+
+# ── 🐋 牛市超級燃料箱 buying_power_monitor：每小時 :25 ──
+# 25 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh buying_power_monitor
+
+# ── 💣 主力清算雷達 liquidity_radar：每小時 :50 ──
+# 50 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh liquidity_radar
+
+# ── 🌙 山寨爆發雷達 altseason_radar：每小時（與 screener 錯 10 分）:35 ──
+# 35 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh altseason_radar
+
+# ── 🥇 黃金獵首 gold_signal：每小時整點 ──
+# 0 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh gold_signal
+
+# ── 📰 新聞快訊 news：每 5 分鐘 ──
+# */5 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh news
+
+# ── 📅 重要經濟數據即時推播 economic_data：每 10 分鐘，錯開 3 分 ──
+# 3,13,23,33,43,53 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh economic_data
+
+# ── 📅 重要經濟數據今日預告 economic_data_preview：每日早上 8:10 台北（UTC 0:10）──
+# 10 0 * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh economic_data_preview
+
+# ── 📈 板塊排行榜 sector_ranking：每小時整點 ──
+# 0 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh sector_ranking
+
+# ── 🧭 長線牛熊導航 long_term_index_once：每日一次，UTC 1:00（台北 9:00）──
+# 0 1 * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh long_term_index_once
