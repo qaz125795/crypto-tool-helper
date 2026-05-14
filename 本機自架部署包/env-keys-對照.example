@@ -1,0 +1,27 @@
+# 複製為專案根目錄的 .env（或依你的載入工具格式調整）
+# 以下僅為「常見會用到的變數名稱」列表，請勿把真金鑰貼進版控。
+
+# ── Telegram / Discord ──
+TG_TOKEN=
+CHAT_ID=
+# CHAT_ID_2=                           # 第二組頻道（選用）
+# TG_THREAD_IDS_2={"position_change":12345,...}   # JSON 一行（選用）
+
+# 可依功能單獨指定 thread（或整包 TG_THREAD_IDS JSON）
+# TG_THREAD_IDS={"position_change":250,...}
+TG_THREAD_POSITION_CHANGE=
+TG_THREAD_HYPERLIQUID=
+TG_THREAD_CRIT_RADAR=
+
+DC_TOKEN=
+# DC_THREAD_IDS={"hyperliquid":"..." , ...}
+
+# ── CoinGlass ──
+CG_API_KEY=
+
+# ── 鏈上巨鯨（hyperliquid）──
+ETHERSCAN_API_KEY=
+
+# ── Gist 冷卻（選用）──
+# GIST_ID=
+# GITHUB_TOKEN=

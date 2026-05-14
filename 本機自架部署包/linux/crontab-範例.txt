@@ -1,0 +1,20 @@
+# 將 /ABS/PATH/TO/... 換成 jackbot-cron.sh 的實際路徑
+# 並執行: chmod +x /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh
+#
+# 你的排程設定：
+#   持倉狙擊     → position_change，每 30 分鐘
+#   鏈上巨鯨動向 → hyperliquid，每 30 分鐘
+#   爆擊雷達     → crit_radar，每 15 分鐘
+#
+
+# ── 每 30 分鐘（:00 / :30）持倉狙擊 ──
+*/30 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh position_change
+
+# ── 每 30 分鐘、與上攻錯開 10 分（:10 / :40）鏈上巨鯨，可依喜好改成 */30 + 任一時點對齊規則 ──
+10,40 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh hyperliquid
+
+# ── 每 15 分鐘 爆擊雷達 ──
+*/15 * * * * /ABS/PATH/TO/本機自架部署包/linux/jackbot-cron.sh crit_radar
+
+# 備註：若你希望巨鯨也用「標準」*/30（與持倉同分鐘），可改成：
+# */30 * * * * ... jackbot-cron.sh hyperliquid
