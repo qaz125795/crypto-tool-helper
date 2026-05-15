@@ -8,6 +8,14 @@ from datetime import datetime, timezone, timedelta
 import os
 import json
 
+# filelock：跨 process 安全地保護 .env 寫入
+try:
+    from filelock import FileLock as _FileLock
+    _ENV_LOCK = _FileLock("/root/.env.lock", timeout=5)
+except ImportError:
+    import threading as _threading
+    _ENV_LOCK = _threading.Lock()
+
 admin_bp = Blueprint("admin", __name__, url_prefix="/api/admin")
 
 SIGNAL_NAMES = {
@@ -30,7 +38,7 @@ SIGNAL_NAMES = {
 SIGNAL_PARAMS = {
     "crit_radar": [
         ("CRIT_RADAR_POOL",              "掃描幣種池大小",   "int",   "100"),
-        ("CRIT_RADAR_MIN_SCORE",         "最低分數門檻",     "int",   "84"),
+        ("CRIT_RADAR_MIN_SCORE",         "最低分數門檻",     "int",   "84"),   # 與 jackbot.py 預設一致
         ("CRIT_RADAR_MAX_ALERTS",        "每次最多推播",     "int",   "1"),
         ("CRIT_RADAR_COOLDOWN_HOURS",    "冷卻小時數",       "float", "8"),
         ("CRIT_RADAR_SL_ATR",            "SL ATR 倍數",      "float", "1.5"),
@@ -206,32 +214,33 @@ def _register_routes(scheduler_ref, save_fn=None):
         if not safe_upd:
             return jsonify({"ok": False, "error": "no valid keys"}), 400
 
-        # 原子寫入 .env（.tmp → os.replace 防止截斷損毀）
+        # 原子寫入 .env（filelock + .tmp → os.replace 防止跨 process 競態）
         env_path = "/root/.env"
         if os.path.exists(env_path):
-            with open(env_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            updated_keys = set()
-            new_lines    = []
-            for line in lines:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#") or "=" not in stripped:
-                    new_lines.append(line)
-                    continue
-                key = stripped.split("=", 1)[0].strip()
-                if key in safe_upd:
-                    new_lines.append(f"{key}={safe_upd[key]}\n")
-                    updated_keys.add(key)
-                else:
-                    new_lines.append(line)
-            for k, v in safe_upd.items():
-                if k not in updated_keys:
-                    new_lines.append(f"{k}={v}\n")
-            # 原子寫入：先寫暫存檔，再替換
-            tmp_path = env_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.writelines(new_lines)
-            os.replace(tmp_path, env_path)
+            with _ENV_LOCK:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                updated_keys = set()
+                new_lines    = []
+                for line in lines:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#") or "=" not in stripped:
+                        new_lines.append(line)
+                        continue
+                    key = stripped.split("=", 1)[0].strip()
+                    if key in safe_upd:
+                        new_lines.append(f"{key}={safe_upd[key]}\n")
+                        updated_keys.add(key)
+                    else:
+                        new_lines.append(line)
+                for k, v in safe_upd.items():
+                    if k not in updated_keys:
+                        new_lines.append(f"{k}={v}\n")
+                # 原子寫入：先寫暫存檔，再替換
+                tmp_path = env_path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.writelines(new_lines)
+                os.replace(tmp_path, env_path)
 
         # 即時生效（當前 process；注意：此為單 worker 設計，多 worker 需重啟）
         for k, v in safe_upd.items():

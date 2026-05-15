@@ -126,13 +126,17 @@ def parse_signal(text: str) -> dict:
 
 
 def get_market_state() -> dict:
-    """帶 30 秒 TTL 快取的市場狀態查詢，防止訊號海嘯時灌爆 signal-tracker。"""
+    """帶 30 秒 TTL 快取的市場狀態查詢，防止訊號海嘯時灌爆 signal-tracker。
+    若 API 失敗，使用「最後已知良好狀態 (Last Known Good)」而非空字典，
+    避免 fuel_score 預設 50 讓高風險訊號意外放行。
+    """
     global _ms_cache
     now = time.monotonic()
     with _ms_cache_lock:
         data, expire_ts = _ms_cache
         if now < expire_ts:
             return data
+        stale_data = data  # 快取已過期，但保留舊值供 fallback
     try:
         r = requests.get(f"{TRACKER_URL}/market-state", timeout=5)
         if r.status_code == 200:
@@ -142,38 +146,52 @@ def get_market_state() -> dict:
             return fresh
     except Exception as e:
         logger.warning("get_market_state error: %s", e)
-    return {}
+
+    # Fallback：用舊快取（保守）而非空字典（危險）
+    if stale_data:
+        logger.warning("get_market_state: signal-tracker 不可用，使用過期快取 fuel=%.0f",
+                       stale_data.get("fuel_score", 50))
+        return stale_data
+    # 完全沒有任何快取時：回傳極端保守值（阻擋高風險訊號）
+    logger.error("get_market_state: 無任何快取，回傳保守預設 fuel=0")
+    return {"fuel_score": 0, "market_mode": "defensive", "fuel_label": "API不可用(保守)"}
+
 
 
 def calc_symbol_rs(symbol: str) -> float:
     """幣種相對 BTC 的 4H 相對強度（RS）。
     - TTL=90s 快取：極端行情多訊號並發時不重複打 Binance API
-    - Single-flight：快取 miss 時只讓一個 thread 發請求，其餘 wait()
+    - Single-flight（is_leader 模式）：快取 miss 時只讓一個 thread 發請求，
+      其餘等待；try/finally 確保 Event 在任何情況下都會被 set，不會永遠卡住
     """
     sym = symbol.replace("_", "").upper()
     now = time.monotonic()
 
-    # 1. 快取命中
+    # ── 原子性地判斷「是否快取命中」與「自己是否 leader」──────────────────
+    is_leader = False
+    wait_event: threading.Event | None = None
+
     with _rs_cache_lock:
         cached = _rs_cache.get(sym)
         if cached and now < cached[1]:
-            return cached[0]
-        # 2. 是否已有其他 thread 在飛
-        if sym in _rs_inflight:
-            event = _rs_inflight[sym]
-        else:
-            event = threading.Event()
-            _rs_inflight[sym] = event
-            event = None  # 本 thread 負責請求
+            return cached[0]                      # 快取命中，直接返回
 
-    if event is not None:
-        # 等其他 thread 完成，然後從快取取結果
-        event.wait(timeout=8)
+        if sym in _rs_inflight:
+            wait_event = _rs_inflight[sym]        # 有人在飛，拿到 Event 等待
+        else:
+            evt = threading.Event()
+            _rs_inflight[sym] = evt
+            is_leader = True                      # 本 thread 負責發請求
+
+    # ── Waiter：等 leader 完成後從快取讀取 ──────────────────────────────
+    if not is_leader:
+        wait_event.wait(timeout=8)
         with _rs_cache_lock:
             cached = _rs_cache.get(sym)
             return cached[0] if cached else 0.0
 
-    # 3. 本 thread 負責發請求
+    # ── Leader：發 API 請求，try/finally 確保無論如何都通知等待者 ────────
+    rs = 0.0
     try:
         r = requests.get(
             "https://fapi.binance.com/fapi/v1/klines",
@@ -181,24 +199,23 @@ def calc_symbol_rs(symbol: str) -> float:
             timeout=5,
         )
         klines = r.json()
-        if not isinstance(klines, list) or len(klines) < 5:
-            rs = 0.0
-        else:
+        if isinstance(klines, list) and len(klines) >= 5:
             close_now    = float(klines[-1][4])
             close_4h_ago = float(klines[-4][4])
             sym_change   = (close_now - close_4h_ago) / close_4h_ago * 100
-            ms         = get_market_state()
-            btc_change = float(ms.get("btc_change_4h", 0))
-            rs         = round(sym_change - btc_change, 3)
+            ms           = get_market_state()
+            btc_change   = float(ms.get("btc_change_4h", 0))
+            rs           = round(sym_change - btc_change, 3)
     except Exception:
         rs = 0.0
+    finally:
+        # 無論成功或失敗，都寫快取並通知等待的 thread
+        with _rs_cache_lock:
+            _rs_cache[sym] = (rs, time.monotonic() + _RS_TTL_SEC)
+            leader_evt = _rs_inflight.pop(sym, None)
+        if leader_evt:
+            leader_evt.set()
 
-    # 4. 寫快取、通知等待的 thread、移除 inflight 標記
-    with _rs_cache_lock:
-        _rs_cache[sym] = (rs, time.monotonic() + _RS_TTL_SEC)
-        evt = _rs_inflight.pop(sym, None)
-    if evt:
-        evt.set()
     return rs
 
 
@@ -542,7 +559,7 @@ def install_hook(jackbot_module):
 
     jackbot_module.send_telegram_message = patched_send
     logger.info(
-        "[tracker-hook] v3 安裝完成 | TG 先推+tracker 背景 | RS TTL快取 | "
-        "燃料箱轉折 + 逆勢強幣 + 硬性過濾 | thread_ids=%s",
+        "[tracker-hook] v4 安裝完成 | TG先推+tracker背景 | Single-flight+TTL快取 | "
+        "LKG fuel fallback | 燃料箱轉折+逆勢強幣+硬性過濾 | thread_ids=%s",
         list(TRACK_THREAD_IDS.keys()),
     )
