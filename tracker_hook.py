@@ -21,7 +21,6 @@ tracker_hook.py — JackBot 訊號攔截 + 品質過濾 + 訊息加工 v3
    · 持倉狙擊：RS 未達 2.5% 的訊號 → 拒絕（優勢不夠明確）
 ────────────────────────────────────────────────────────
 """
-import atexit
 import os
 import re
 import html as _html_mod
@@ -621,10 +620,10 @@ def install_hook(jackbot_module):
             # 驗證 HTML 並自動降級
             safe_text, safe_parse_mode = _safe_html(enhanced)
 
-            # DEBUG：每次都 log raw payload 幫助排查格式問題（可視需要設為 debug level）
+            # 生產環境：只記錄長度與模式，不記錄訊號文本（避免日誌含使用者內容）
             logger.debug(
-                "[tracker-hook] 即將送出 HTML（長度=%d，parse_mode=%s）: %s",
-                len(safe_text), safe_parse_mode, repr(safe_text[:500])
+                "[tracker-hook] 即將送出 HTML（長度=%d，parse_mode=%s）",
+                len(safe_text), safe_parse_mode,
             )
             if not safe_parse_mode:
                 # 降級到純文字（原始訊號，不含 HTML 加工）

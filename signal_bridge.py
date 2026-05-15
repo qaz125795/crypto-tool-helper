@@ -20,11 +20,6 @@ GATE_QUANT_URL = os.environ.get(
 WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "")
 
 DEFAULT_SIGNAL_CHAT = os.environ.get("CHAT_ID", "")
-TG_THREAD_MAP = {
-    "crit_radar":      int(os.environ.get("TG_THREAD_CRIT_RADAR", "11040") or 11040),
-    "position_change": int(os.environ.get("TG_THREAD_POSITION_CHANGE", "250") or 250),
-    "gold_signal":     int(os.environ.get("TG_THREAD_GOLD_SIGNAL", "254") or 254),
-}
 
 _MAX_RETRIES = 3
 _RETRY_BASE_SEC = 1.0  # 指數退避起始秒數：1, 2, 4

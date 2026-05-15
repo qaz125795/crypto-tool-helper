@@ -6,7 +6,6 @@ admin_api.py - 訊號管理後台 API（APScheduler 版）
 from flask import Blueprint, jsonify, request
 from datetime import datetime, timezone, timedelta
 import os
-import json
 
 # filelock：跨 process 安全地保護 .env 寫入
 try:
