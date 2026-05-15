@@ -135,6 +135,12 @@ export default function JackBotAdmin() {
 
   const saveCron = async () => {
     if (!editCron) return
+    // 前端防呆：5 個空白分隔欄位
+    const parts = editCron.val.trim().split(/\s+/)
+    if (parts.length !== 5) {
+      showToast('Cron 必須剛好是 5 個欄位（分 時 日 月 週）', 'err')
+      return
+    }
     setBusy('cron')
     const r = await req<{ ok: boolean }>('PUT', `/api/admin/jobs/${editCron.id}/cron`, { cron: editCron.val })
     if (r?.ok) { showToast('Cron 已更新'); setEditCron(null) }

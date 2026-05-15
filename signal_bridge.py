@@ -37,6 +37,11 @@ def _post_with_retry(url: str, payload: dict, label: str) -> requests.Response |
             resp = requests.post(url, json=payload, timeout=10)
             if resp.status_code == 200:
                 return resp
+            # 422 通常是 Pydantic schema mismatch（欄位格式不符），重試不會改善
+            if resp.status_code == 422:
+                logger.error("[bridge] %s HTTP 422 Pydantic 校驗失敗，訊號格式不符（不重試）: %s",
+                             label, resp.text[:400])
+                return None  # 不重試，直接放棄此次請求
             logger.warning("[bridge] %s HTTP %s (attempt %d/%d): %s",
                            label, resp.status_code, attempt + 1, _MAX_RETRIES, resp.text[:200])
         except requests.exceptions.RequestException as e:

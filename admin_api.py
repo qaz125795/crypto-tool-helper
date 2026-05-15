@@ -236,11 +236,11 @@ def _register_routes(scheduler_ref, save_fn=None):
                 for k, v in safe_upd.items():
                     if k not in updated_keys:
                         new_lines.append(f"{k}={v}\n")
-                # 原子寫入：先寫暫存檔，再替換
-                tmp_path = env_path + ".tmp"
-                with open(tmp_path, "w", encoding="utf-8") as f:
+                # 注意：.env 是 Docker 單一檔案 Bind Mount，os.replace 會改變 Inode
+                # 導致 Docker 掛載斷鏈（容器重啟後舊值還原）。
+                # filelock 已保護跨 process 競態，直接 in-place 覆寫即可。
+                with open(env_path, "w", encoding="utf-8") as f:
                     f.writelines(new_lines)
-                os.replace(tmp_path, env_path)
 
         # 即時生效（當前 process；注意：此為單 worker 設計，多 worker 需重啟）
         for k, v in safe_upd.items():

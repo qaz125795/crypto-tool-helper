@@ -475,6 +475,19 @@ def enhance_signal_message(original: str, signal: dict, source: str,
     return enhanced
 
 
+_DEAD_LETTER_FILE = "/app/data/dead_letter.log"
+
+def _write_dead_letter(signal: dict, source: str, kind: str):
+    """Executor 已關閉時，將丟失的訊號寫入死信紀錄，方便事後排查。"""
+    try:
+        sym  = signal.get("symbol", "?")
+        side = signal.get("side", "?")
+        with open(_DEAD_LETTER_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{time.time():.0f} | {kind} | {source} | {sym} | {side}\n")
+    except Exception as e:
+        logger.debug("dead letter write failed: %s", e)
+
+
 def send_to_tracker(signal: dict, source: str, chat_id: int,
                     msg_id: int = None, eval_result: dict = None) -> dict:
     # timeout=4：縮短內部微服務 timeout，避免 Gunicorn shutdown 時 bg thread 拖慢關閉
@@ -537,6 +550,7 @@ def install_hook(jackbot_module):
                 _tracker_executor.submit(send_to_tracker, signal, source, chat_id, None, eval_result)
             except RuntimeError:
                 logger.warning("[tracker-hook] executor 已關閉，FILTERED tracker 記錄丟失（shutdown 中）")
+                _write_dead_letter(signal, source, "FILTERED")
             return True  # 回傳 True 避免 jackbot 誤判為發送失敗
 
         # ── 通過：TG 先推，tracker 非同步背景記錄 ───────────────────
@@ -565,6 +579,7 @@ def install_hook(jackbot_module):
             _tracker_executor.submit(_bg_tracker)
         except RuntimeError:
             logger.warning("[tracker-hook] executor 已關閉，PASS tracker 記錄丟失（shutdown 中）")
+            _write_dead_letter(signal, source, "PASS")
         return result
 
     jackbot_module.send_telegram_message = patched_send
