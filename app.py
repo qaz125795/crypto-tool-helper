@@ -19,6 +19,25 @@ logger = logging.getLogger(__name__)
 # ── 背景任務執行緒池 ────────────────────────────────────────────────────────
 _task_executor = ThreadPoolExecutor(max_workers=4)
 
+# ── 執行日誌（記錄每支訊號最近一次執行結果）────────────────────────────────
+import collections, datetime as _dt
+_exec_log: dict = {}           # task_id → TaskLog dict
+_exec_log_lock = threading.Lock()
+
+def _record_exec(task_id: str, status: str, msg: str = ""):
+    now = _dt.datetime.now(_dt.timezone(  # 台北時間
+        _dt.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+    with _exec_log_lock:
+        entry = _exec_log.get(task_id, {"task": task_id, "status": "pending",
+                                         "last_run": None, "logs": []})
+        entry["status"]   = status
+        entry["last_run"] = now
+        log_line = f"[{now}] {status}" + (f" - {msg}" if msg else "")
+        logs = entry.get("logs") or []
+        logs.append(log_line)
+        entry["logs"] = logs[-20:]     # 只保留最近 20 筆
+        _exec_log[task_id] = entry
+
 # ── 排程設定持久化路徑（volume 掛載，重啟後保留）──────────────────────────
 _SCHEDULES_FILE = Path("/app/data/schedules.json")
 
@@ -182,10 +201,13 @@ try:
         captured_name = task_id
         def _make_runner(f, name):
             def _runner():
+                _record_exec(name, "running")
                 try:
                     f()
+                    _record_exec(name, "success")
                 except Exception as exc:
                     logger.error("[scheduler] %s 執行失敗: %s", name, exc)
+                    _record_exec(name, "error", str(exc)[:200])
             return _runner
 
         scheduler.add_job(_make_runner(captured_fn, task_id), trigger,
@@ -226,6 +248,21 @@ def health():
         "scheduler": "running" if sched_ok else "not running",
         "signals": len(TASK_FUNCTIONS),
     }), 200
+
+# ── /api/logs（前端管理介面需要，不需 CRON_SECRET）─────────────────────────
+@app.route("/api/logs", methods=["GET"])
+def api_logs_all():
+    with _exec_log_lock:
+        return jsonify(dict(_exec_log))
+
+@app.route("/api/logs/<task_id>", methods=["GET"])
+def api_logs_one(task_id):
+    with _exec_log_lock:
+        entry = _exec_log.get(task_id)
+    if not entry:
+        return jsonify({"task": task_id, "status": "pending",
+                        "last_run": None, "logs": []}), 200
+    return jsonify(entry)
 
 # ── / 健康檢查 ────────────────────────────────────────────────────────────────
 @app.route("/", methods=["GET"])
@@ -314,8 +351,14 @@ def ep_news():
     return _run_task_bg(fetch_all_news, "news")
 
 @app.route("/run/<task>", methods=["GET", "POST"])
-@require_cron_secret
 def run_task(task):
+    # 允許 CRON_SECRET（外部 cron）或 api-gateway 代理（已有 admin 保護）
+    secret = os.environ.get("CRON_SECRET", "").strip()
+    if secret:
+        auth = request.headers.get("Authorization", "")
+        token = request.args.get("token", "")
+        if auth != f"Bearer {secret}" and token != secret:
+            return jsonify({"status": "error", "message": "unauthorized"}), 401
     fn = TASK_FUNCTIONS.get(task)
     if not fn:
         return jsonify({"status": "error", "message": f"未知任務: {task}",
