@@ -3189,6 +3189,9 @@ def fetch_oi_change_tf(
     """
     global _coinglass_oi_rate_limiter, _coinglass_oi_first_failure_logged
 
+    # 在 Lock 內只計算需要 sleep 多久，釋放鎖後再 sleep
+    # 避免「拿著鎖睡覺」導致其他執行緒全部串行阻塞
+    sleep_sec = 0.0
     with _oi_rate_limit_lock:
         if _coinglass_oi_rate_limiter is None:
             _coinglass_oi_rate_limiter = {"last_call": 0.0}
@@ -3196,8 +3199,10 @@ def fetch_oi_change_tf(
         elapsed = now - _coinglass_oi_rate_limiter.get("last_call", 0.0)
         wait_time = random.uniform(0.1, 0.25) * _cb_get_wait_multiplier()
         if elapsed < wait_time:
-            time.sleep(wait_time - elapsed)
-        _coinglass_oi_rate_limiter["last_call"] = time.time()
+            sleep_sec = wait_time - elapsed
+        _coinglass_oi_rate_limiter["last_call"] = time.time() + sleep_sec
+    if sleep_sec > 0:
+        time.sleep(sleep_sec)
 
     base_symbol = symbol.replace("USDT", "").replace("-", "").replace("_", "").upper()
     url = f"{CG_API_BASE}/api/futures/open-interest/aggregated-history"
