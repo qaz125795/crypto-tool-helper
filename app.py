@@ -246,6 +246,61 @@ try:
         if not enabled:
             scheduler.pause_job(task_id)
 
+    # ── 額外健康監控任務 ──────────────────────────────────────────────────
+    def _forwarder_health_check():
+        """每 12 小時確認搬單機器人全部運行，若有停止則重啟"""
+        import requests as _req
+        try:
+            r = _req.get("http://tg-forwarder:7788/api/bots", timeout=8)
+            if r.status_code != 200:
+                logger.warning("[health] tg-forwarder /api/bots 失敗: %s", r.status_code)
+                return
+            bots = r.json()
+            stopped = [b for b in bots if not b.get("is_running") and b.get("auto_start")]
+            if stopped:
+                names = ", ".join(b.get("name","?") for b in stopped)
+                logger.warning("[health] 搬單機器人停止：%s，嘗試重啟", names)
+                _req.post("http://tg-forwarder:7788/api/bots/action/start-all",
+                          timeout=30, json={})
+                logger.info("[health] start-all 已觸發")
+        except Exception as e:
+            logger.error("[health] forwarder health check error: %s", e)
+
+    def _position_risk_check():
+        """每小時檢查 signal-tracker 活躍持倉，浮虧超 1.5x 風險自動平倉"""
+        import requests as _req
+        try:
+            r = _req.get("http://signal-tracker:8004/signals?status=active&limit=50",
+                         timeout=8)
+            if r.status_code != 200:
+                return
+            signals = r.json() if isinstance(r.json(), list) else r.json().get("signals", [])
+            for sig in signals:
+                pnl = sig.get("pnl_pct", 0) or 0
+                risk = abs(sig.get("initial_risk_pct", 0) or 0)
+                if risk > 0 and pnl < 0 and abs(pnl) > risk * 1.5:
+                    sid = sig.get("id")
+                    sym = sig.get("symbol","?")
+                    logger.warning("[risk] #%s %s 浮虧 %.2f%% > 1.5x 風險 %.2f%%，觸發強制平倉",
+                                   sid, sym, pnl, risk)
+                    try:
+                        _req.post(f"http://signal-tracker:8004/signals/{sid}/force-close",
+                                  json={"reason": "浮虧超過 1.5x 風險上限"}, timeout=10)
+                    except Exception as ce:
+                        logger.error("[risk] force-close #%s 失敗: %s", sid, ce)
+        except Exception as e:
+            logger.error("[risk] position risk check error: %s", e)
+
+    # 每 12 小時搬單機器人健康檢查（錯開 6 分鐘避免整點衝突）
+    scheduler.add_job(_forwarder_health_check, CronTrigger(hour="*/12", minute=6,
+                      timezone="Asia/Taipei"), id="forwarder_health",
+                      replace_existing=True, max_instances=1, coalesce=True)
+    # 每小時持倉浮虧監控
+    scheduler.add_job(_position_risk_check, CronTrigger(minute=10,
+                      timezone="Asia/Taipei"), id="position_risk",
+                      replace_existing=True, max_instances=1, coalesce=True)
+    logger.info("[APScheduler] 健康監控任務已註冊（12h 搬單 + 1h 浮虧）")
+
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
     # 初始化 _exec_log：啟動時所有 task 設為 pending，前端不顯示空白

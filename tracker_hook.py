@@ -68,9 +68,9 @@ _MS_TTL_SEC = 30.0
 # 燃料箱分數閾值（核心轉折判斷）
 # ══════════════════════════════════════════════════════════════
 FUEL_BULL      = 65   # 以上 = 偏多，空單受阻
-FUEL_NEUTRAL   = 48   # 以上 = 中性
-FUEL_BEAR      = 40   # 以下 = 跌勢中，空單已過度（追空二段危險）
-FUEL_BEAR_SNP  = 45   # 持倉狙擊用（更嚴格）
+FUEL_NEUTRAL   = 45   # 以上 = 中性（放寬：原 48）
+FUEL_BEAR      = 30   # 以下 = 跌勢中，空單已過度（放寬：原 40）
+FUEL_BEAR_SNP  = 35   # 持倉狙擊用（放寬：原 45）
 
 
 def _extract_number_after(text: str, keywords: list):
@@ -268,6 +268,12 @@ def evaluate_signal(signal: dict, source: str) -> dict:
     # 跌勢中的空單 = 追空二段，反彈危險
     is_exhausted_short = (not is_long) and zone in ("bear", "deep_bear")
 
+    # ── 摸頭摸底場景（明確識別）────────────────────────────────────────────
+    # 摸底（bottom fishing）：深度熊市 + RS > 1.5%（強勢抗跌幣）→ 最佳低接點
+    is_bottom_fishing = is_long and zone == "deep_bear" and rs > 1.5
+    # 摸頭（top shorting）：牛市高位 + RS 已轉負（幣種相對轉弱）→ 頂部做空機會
+    is_top_shorting = (not is_long) and zone == "bull" and rs < -1.0
+
     # ──────────────────────────────────────────────────────────
     # 爆擊雷達（樂透型）：寬鬆過濾，只擋最差場景
     # ──────────────────────────────────────────────────────────
@@ -280,12 +286,18 @@ def evaluate_signal(signal: dict, source: str) -> dict:
                     "reason": (f"牛市燃料 {fuel:.0f}（市場跌勢持續），"
                                f"此時空單為追空第二段，反彈風險極高，本輪不推")}
 
-        # ❌ 硬拒：RS 過弱的多單（幣種比大盤跌更多，沒有理由做多）
-        if is_long and rs < -2.0:
+        # ❌ 硬拒：RS 過弱的多單（放寬：原 -2.0）
+        if is_long and rs < -3.0:
             return {**base, "pass": False, "quality": "❌ 已過濾",
                     "scenario": "weak_rs_long",
                     "reason": (f"相對強度 RS {rs:+.2f}%（幣種弱於大盤），"
                                f"多單無相對優勢，跳過")}
+
+        # ⭐⭐⭐⭐⭐ 摸底場景（deep_bear + 強RS）：最優先
+        if is_bottom_fishing:
+            return {**base, "pass": True, "quality": "⭐⭐⭐⭐⭐ 摸底強幣",
+                    "scenario": "bottom_fishing",
+                    "reason": f"深度熊市低接，RS +{rs:.2f}%（主力護盤 = 反彈領漲標的）"}
 
         # ⭐⭐⭐⭐⭐ 逆勢強幣多單：高勝率場景
         if is_counter_long:
@@ -295,13 +307,19 @@ def evaluate_signal(signal: dict, source: str) -> dict:
                     "reason": (f"跌勢中 RS +{rs:.2f}%（本幣抗跌/獨立走強）"
                                f"→ 逆勢強幣多單，歷史高勝率場景")}
 
+        # ⭐⭐⭐⭐⭐ 摸頭場景（bull + RS 轉弱 + 空單）：頂部做空
+        if is_top_shorting:
+            return {**base, "pass": True, "quality": "⭐⭐⭐⭐⭐ 摸頭做空",
+                    "scenario": "top_shorting",
+                    "reason": f"牛市高位 RS {rs:+.2f}%（幣種相對轉弱 = 頂部分配訊號）"}
+
         # 多頭市場出現多單 → 正常順勢
         if is_long and zone == "bull":
             quality = "⭐⭐⭐⭐⭐ 極優" if rs >= 2.5 else "⭐⭐⭐⭐ 優質" if rs >= 1.0 else "⭐⭐⭐ 良好"
             return {**base, "pass": True, "quality": quality,
                     "scenario": "bull_long", "reason": "多頭市場順勢多單"}
 
-        # 中性市場 or 牛市出現空單 → 附加品質標籤
+        # 中性市場 or 其他 → 附加品質標籤
         quality = "⭐⭐⭐⭐ 優質" if abs(rs) >= 2.0 else "⭐⭐⭐ 良好" if abs(rs) >= 0.8 else "⭐⭐ 弱訊號"
         dir_note = "空頭市場" if not is_long and zone == "bull" else "中性市場"
         return {**base, "pass": True, "quality": quality,
@@ -311,7 +329,7 @@ def evaluate_signal(signal: dict, source: str) -> dict:
     # 持倉狙擊（高勝率型）：嚴格過濾，只推最有把握的
     # ──────────────────────────────────────────────────────────
     elif source == "position_change":
-        SNP_RS = 2.5   # 持倉狙擊 RS 嚴格門檻
+        SNP_RS = 1.5   # 持倉狙擊 RS 門檻（放寬：原 2.5%）
 
         # ❌ 硬拒：跌勢中追空二段（持倉狙擊比爆擊雷達更嚴，燃料 < 45 就拒）
         fuel_bear_snp = float(os.environ.get("SNIPER_FUEL_BEAR_THRESHOLD", FUEL_BEAR_SNP))
@@ -332,6 +350,18 @@ def evaluate_signal(signal: dict, source: str) -> dict:
                     "scenario": "weak_rs_short",
                     "reason": (f"RS {rs:+.2f}%（持倉狙擊需 < -{SNP_RS}%），"
                                f"相對弱勢不夠明確，等更好機會")}
+
+        # ⭐⭐⭐⭐⭐ 摸底：deep_bear + 強RS → 狙擊最優先
+        if is_bottom_fishing and rs >= SNP_RS:
+            return {**base, "pass": True, "quality": "⭐⭐⭐⭐⭐ 摸底狙擊",
+                    "scenario": "bottom_fishing",
+                    "reason": f"深度熊市底部狙擊，RS +{rs:.2f}%"}
+
+        # ⭐⭐⭐⭐⭐ 摸頭：bull高位 + RS 轉弱 + 空單
+        if is_top_shorting and abs(rs) >= SNP_RS:
+            return {**base, "pass": True, "quality": "⭐⭐⭐⭐⭐ 摸頭狙擊",
+                    "scenario": "top_shorting",
+                    "reason": f"牛市頂部狙擊，RS {rs:+.2f}%（相對轉弱）"}
 
         # ⭐⭐⭐⭐⭐ 逆勢強幣多單：最佳狙擊場景（跌勢 + 幣種抗跌強勢）
         if is_counter_long and rs >= SNP_RS:
