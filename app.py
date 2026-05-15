@@ -38,6 +38,7 @@ def require_cron_secret(f):
     return wrapped
 
 
+import jackbot as _jackbot_module
 from jackbot import (
     fetch_sector_ranking,
     fetch_whale_position,
@@ -51,6 +52,17 @@ from jackbot import (
     run_crit_radar_once,
     run_hyperliquid_monitor_once,
 )
+
+# 安裝訊號強化 hook（加上市場品質、金字塔策略、訊號編號）
+try:
+    import tracker_hook as _tracker_hook
+    _tracker_hook.install_hook(_jackbot_module)
+except ImportError:
+    import logging as _log
+    _log.getLogger(__name__).warning("[app] tracker_hook 未找到，訊號訊息將不包含品質分析區塊")
+except Exception as _hook_err:
+    import logging as _log
+    _log.getLogger(__name__).error("[app] tracker_hook 安裝失敗: %s", _hook_err)
 
 app = Flask(__name__)
 
