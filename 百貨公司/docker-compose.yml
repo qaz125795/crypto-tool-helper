@@ -1,0 +1,248 @@
+
+x-common-env: &common-env
+  env_file: .env
+
+services:
+
+  # ── Docker Socket Proxy（安全代理，取代直接掛載 docker.sock）────────────
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: platform-docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1   # 允許查詢容器列表
+      INFO: 1         # 允許查詢系統資訊
+      IMAGES: 0       # 禁止操作 image
+      NETWORKS: 0
+      VOLUMES: 0
+      POST: 0         # 禁止所有寫入操作（只讀模式）
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket-proxy-net
+
+  # ── 反向代理 ─────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: platform-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx-logs:/var/log/nginx
+    depends_on:
+      - frontend
+      - api-gateway
+    networks:
+      - platform-net
+
+  # ── Next.js 管控台 ────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: platform-frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://api-gateway:8000
+    networks:
+      - platform-net
+
+  # ── API Gateway ───────────────────────────────────────────────────────────
+  api-gateway:
+    volumes:
+      - ./.env:/root/.env
+      - /root/unified-platform:/root/unified-platform
+      # docker.sock 已移除，改透過 docker-proxy 以唯讀方式查詢容器資訊
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: platform-gateway
+    restart: unless-stopped
+    <<: *common-env
+    environment:
+      - GATE_QUANT_URL=http://gate-quant:8001
+      - ORDER_REPORTER_URL=http://order-reporter:8002
+      - TG_FORWARDER_URL=http://tg-forwarder:7788
+      - JACKBOT_URL=http://jackbot:5000
+      - DOCKER_HOST=tcp://docker-proxy:2375
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      gate-quant:
+        condition: service_started
+      order-reporter:
+        condition: service_started
+      tg-forwarder:
+        condition: service_started
+      jackbot:
+        condition: service_started
+      docker-proxy:
+        condition: service_started
+    networks:
+      - platform-net
+      - socket-proxy-net
+
+  # ── Gate 量化引擎 ─────────────────────────────────────────────────────────
+  gate-quant:
+    ports:
+      - "8001:8001"
+    build:
+      context: ./services/gate-quant
+      dockerfile: Dockerfile
+    container_name: platform-gate-quant
+    restart: unless-stopped
+    <<: *common-env
+    volumes:
+      - gate-sessions:/app/sessions
+      - ./services/gate-quant/runtime_state.json:/app/runtime_state.json
+      - ./services/gate-quant/signal_logs.json:/app/signal_logs.json
+      - gate-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - platform-net
+
+  # ── 一級報單服務 ──────────────────────────────────────────────────────────
+  order-reporter:
+    build:
+      context: ./services/order-reporter
+      dockerfile: Dockerfile
+    container_name: platform-order-reporter
+    restart: unless-stopped
+    <<: *common-env
+    volumes:
+      - ./services/order-reporter/data:/app/data
+      - ./services/order-reporter/settings.json:/app/settings.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - platform-net
+
+  # ── TG 搬單服務（14 實例）────────────────────────────────────────────────
+  tg-forwarder:
+    ports:
+      - "7788:7788"
+    build:
+      context: ./services/tg-forwarder
+      dockerfile: Dockerfile
+    container_name: platform-tg-forwarder
+    restart: unless-stopped
+    <<: *common-env
+    volumes:
+      - ./services/tg-forwarder/config:/app/config
+      - ./services/tg-forwarder/sessions:/app/sessions
+      - tg-logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - platform-net
+
+  # ── JackBot 訊號引擎 ──────────────────────────────────────────────────────
+  jackbot:
+    build:
+      context: ./services/jackbot
+      dockerfile: Dockerfile
+    container_name: platform-jackbot
+    restart: unless-stopped
+    <<: *common-env
+    volumes:
+      - ./services/jackbot/data:/app/data
+      - ./services/jackbot/gold_signal_bot/gold_signal_state:/app/gold_signal_bot/gold_signal_state
+      - ./.env:/root/.env
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - platform-net
+
+  # ── Signal Tracker ────────────────────────────────────────────────────────
+  signal-tracker:
+    build:
+      context: ./services/signal-tracker
+      dockerfile: Dockerfile
+    container_name: platform-signal-tracker
+    restart: unless-stopped
+    <<: *common-env
+    environment:
+      - GATE_QUANT_URL=http://gate-quant:8001
+      - TRACKER_POLL_INTERVAL=5
+      - TRACKER_AUTO_TRADE=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gate-quant:
+        condition: service_started
+    networks:
+      - platform-net
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: platform-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - platform-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: platform-redis
+    restart: unless-stopped
+    command: redis-server /etc/redis/redis.conf
+    volumes:
+      - ./infra/redis/redis.conf:/etc/redis/redis.conf:ro
+      - redis-data:/data
+    networks:
+      - platform-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  platform-net:
+    driver: bridge
+  socket-proxy-net:
+    driver: bridge
+    internal: true  # docker-proxy 網路不對外暴露
+
+volumes:
+  postgres-data:
+  redis-data:
+  nginx-logs:
+  gate-sessions:
+  gate-data:
+  order-data:
+  tg-sessions:
+  tg-logs:
+  jackbot-data:
+  jackbot-state:
