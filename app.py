@@ -9,9 +9,18 @@ JackBot Flask 入口 — 統一平台版 v3
 
 from functools import wraps
 from flask import Flask, request, jsonify
-import os, sys, json, threading, logging
+import os, sys, json, threading, logging, shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+# filelock：跨 process（Gunicorn multi-worker）安全的檔案鎖
+try:
+    from filelock import FileLock
+    _HAS_FILELOCK = True
+except ImportError:
+    _HAS_FILELOCK = False
+    logger_tmp = logging.getLogger(__name__)
+    logger_tmp.warning("[app] filelock 未安裝，fallback 為 threading.Lock（單 worker 模式）")
 
 sys.path.insert(0, str(Path(__file__).parent))
 logger = logging.getLogger(__name__)
@@ -20,7 +29,7 @@ logger = logging.getLogger(__name__)
 _task_executor = ThreadPoolExecutor(max_workers=4)
 
 # ── 執行日誌（記錄每支訊號最近一次執行結果）────────────────────────────────
-import collections, datetime as _dt
+import datetime as _dt
 _exec_log: dict = {}           # task_id → TaskLog dict
 _exec_log_lock = threading.Lock()
 
@@ -41,7 +50,13 @@ def _record_exec(task_id: str, status: str, msg: str = ""):
 # ── 排程設定持久化路徑（volume 掛載，重啟後保留）──────────────────────────
 _SCHEDULES_FILE = Path("/app/data/schedules.json")
 
-_SCHEDULES_LOCK = threading.Lock()
+_SCHEDULES_LOCKFILE = Path(str(_SCHEDULES_FILE) + ".lock")
+
+def _schedules_lock():
+    """回傳跨 process 安全的 filelock（或 fallback threading.Lock）。"""
+    if _HAS_FILELOCK:
+        return FileLock(str(_SCHEDULES_LOCKFILE), timeout=5)
+    return threading.Lock()
 
 def _load_saved_schedules() -> dict:
     """讀取排程設定，主檔失敗自動從 .bak 還原。"""
@@ -56,8 +71,8 @@ def _load_saved_schedules() -> dict:
     return {}
 
 def _save_schedule_state(task_id: str, cron_str: str = None, enabled: bool = None):
-    """原子寫入（.tmp → os.replace），並保留 .bak 備份，防止 Race Condition 損毀。"""
-    with _SCHEDULES_LOCK:
+    """跨 process 原子寫入（filelock + .tmp → os.replace + .bak 備份）。"""
+    with _schedules_lock():
         data  = _load_saved_schedules()
         entry = data.get(task_id, {})
         if cron_str is not None:
@@ -70,9 +85,7 @@ def _save_schedule_state(task_id: str, cron_str: str = None, enabled: bool = Non
             content  = json.dumps(data, ensure_ascii=False, indent=2)
             tmp_file = Path(str(_SCHEDULES_FILE) + ".tmp")
             tmp_file.write_text(content, encoding="utf-8")
-            # 備份舊檔再原子替換
             if _SCHEDULES_FILE.exists():
-                import shutil
                 shutil.copy2(_SCHEDULES_FILE, str(_SCHEDULES_FILE) + ".bak")
             os.replace(tmp_file, _SCHEDULES_FILE)
         except Exception as e:
@@ -236,7 +249,7 @@ except Exception as _adm_err:
 # ── Flask ─────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
-if _app_admin:
+if _app_admin and _app_admin.name not in app.blueprints:
     app.register_blueprint(_app_admin)
 
 # ── /health（不需驗證，供 api-gateway 存活確認）───────────────────────────────
@@ -249,14 +262,28 @@ def health():
         "signals": len(TASK_FUNCTIONS),
     }), 200
 
-# ── /api/logs（前端管理介面需要，不需 CRON_SECRET）─────────────────────────
+# ── /api/logs（前端管理介面需要；api-gateway 已有 ADMIN_TOKEN 保護）────────
+def _internal_ok() -> bool:
+    """接受 CRON_SECRET 或 ADMIN_TOKEN（透過 api-gateway 代理時自動加入）。"""
+    cron   = os.environ.get("CRON_SECRET", "").strip()
+    admin  = os.environ.get("ADMIN_TOKEN", "").strip()
+    auth   = request.headers.get("Authorization", "")
+    token  = request.args.get("token", "")
+    if cron  and (auth == f"Bearer {cron}"  or token == cron):  return True
+    if admin and (auth == f"Bearer {admin}" or token == admin): return True
+    return False
+
 @app.route("/api/logs", methods=["GET"])
 def api_logs_all():
+    if not _internal_ok():
+        return jsonify({"status": "error", "message": "unauthorized"}), 401
     with _exec_log_lock:
         return jsonify(dict(_exec_log))
 
 @app.route("/api/logs/<task_id>", methods=["GET"])
 def api_logs_one(task_id):
+    if not _internal_ok():
+        return jsonify({"status": "error", "message": "unauthorized"}), 401
     with _exec_log_lock:
         entry = _exec_log.get(task_id)
     if not entry:
@@ -352,13 +379,13 @@ def ep_news():
 
 @app.route("/run/<task>", methods=["GET", "POST"])
 def run_task(task):
-    # 允許 CRON_SECRET（外部 cron）或 api-gateway 代理（已有 admin 保護）
-    secret = os.environ.get("CRON_SECRET", "").strip()
-    if secret:
-        auth = request.headers.get("Authorization", "")
-        token = request.args.get("token", "")
-        if auth != f"Bearer {secret}" and token != secret:
-            return jsonify({"status": "error", "message": "unauthorized"}), 401
+    # Fail-Safe：CRON_SECRET 未設定時回 500，強制部署者明確設定
+    if not _internal_ok():
+        secret = os.environ.get("CRON_SECRET", "").strip()
+        if not secret:
+            return jsonify({"status": "error",
+                            "message": "CRON_SECRET is not configured"}), 500
+        return jsonify({"status": "error", "message": "unauthorized"}), 401
     fn = TASK_FUNCTIONS.get(task)
     if not fn:
         return jsonify({"status": "error", "message": f"未知任務: {task}",

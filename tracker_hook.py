@@ -47,10 +47,16 @@ SOURCE_DISPLAY = {
 
 RE_SYMBOL = re.compile(r"\b([A-Z]{2,10})[/_]?(USDT|USD)\b", re.I)
 
-# ── RS 記憶體快取（TTL = 90 秒，防止極端行情下大量訊號打爆 Binance API）──────
-_rs_cache: dict[str, tuple[float, float]] = {}  # symbol → (rs_value, expire_ts)
-_rs_cache_lock = threading.Lock()
+# ── RS 快取 + Single-Flight（防止快取 miss 時多 thread 同時打 Binance API）──
+_rs_cache: dict[str, tuple[float, float]] = {}   # symbol → (rs_value, expire_ts)
+_rs_cache_lock  = threading.Lock()
+_rs_inflight: dict[str, threading.Event] = {}    # symbol → Event（正在請求中）
 _RS_TTL_SEC = 90.0
+
+# ── get_market_state TTL 快取（30 秒，防訊號海嘯時灌爆 signal-tracker）─────
+_ms_cache: tuple[dict, float] = ({}, 0.0)   # (data, expire_ts)
+_ms_cache_lock  = threading.Lock()
+_MS_TTL_SEC = 30.0
 
 # ══════════════════════════════════════════════════════════════
 # 燃料箱分數閾值（核心轉折判斷）
@@ -120,28 +126,54 @@ def parse_signal(text: str) -> dict:
 
 
 def get_market_state() -> dict:
+    """帶 30 秒 TTL 快取的市場狀態查詢，防止訊號海嘯時灌爆 signal-tracker。"""
+    global _ms_cache
+    now = time.monotonic()
+    with _ms_cache_lock:
+        data, expire_ts = _ms_cache
+        if now < expire_ts:
+            return data
     try:
         r = requests.get(f"{TRACKER_URL}/market-state", timeout=5)
         if r.status_code == 200:
-            return r.json()
+            fresh = r.json()
+            with _ms_cache_lock:
+                _ms_cache = (fresh, now + _MS_TTL_SEC)
+            return fresh
     except Exception as e:
         logger.warning("get_market_state error: %s", e)
     return {}
 
 
 def calc_symbol_rs(symbol: str) -> float:
-    """幣種相對 BTC 的 4H 相對強度（RS）。正 = 強於大盤，負 = 弱於大盤。
-    內建 TTL=90s 快取：極端行情多訊號並發時不會重複打 Binance API。
+    """幣種相對 BTC 的 4H 相對強度（RS）。
+    - TTL=90s 快取：極端行情多訊號並發時不重複打 Binance API
+    - Single-flight：快取 miss 時只讓一個 thread 發請求，其餘 wait()
     """
     sym = symbol.replace("_", "").upper()
     now = time.monotonic()
 
-    # 快取命中
+    # 1. 快取命中
     with _rs_cache_lock:
         cached = _rs_cache.get(sym)
         if cached and now < cached[1]:
             return cached[0]
+        # 2. 是否已有其他 thread 在飛
+        if sym in _rs_inflight:
+            event = _rs_inflight[sym]
+        else:
+            event = threading.Event()
+            _rs_inflight[sym] = event
+            event = None  # 本 thread 負責請求
 
+    if event is not None:
+        # 等其他 thread 完成，然後從快取取結果
+        event.wait(timeout=8)
+        with _rs_cache_lock:
+            cached = _rs_cache.get(sym)
+            return cached[0] if cached else 0.0
+
+    # 3. 本 thread 負責發請求
     try:
         r = requests.get(
             "https://fapi.binance.com/fapi/v1/klines",
@@ -150,20 +182,23 @@ def calc_symbol_rs(symbol: str) -> float:
         )
         klines = r.json()
         if not isinstance(klines, list) or len(klines) < 5:
-            return 0.0
-        close_now    = float(klines[-1][4])
-        close_4h_ago = float(klines[-4][4])
-        sym_change   = (close_now - close_4h_ago) / close_4h_ago * 100
-
-        ms         = get_market_state()
-        btc_change = float(ms.get("btc_change_4h", 0))
-        rs         = round(sym_change - btc_change, 3)
+            rs = 0.0
+        else:
+            close_now    = float(klines[-1][4])
+            close_4h_ago = float(klines[-4][4])
+            sym_change   = (close_now - close_4h_ago) / close_4h_ago * 100
+            ms         = get_market_state()
+            btc_change = float(ms.get("btc_change_4h", 0))
+            rs         = round(sym_change - btc_change, 3)
     except Exception:
         rs = 0.0
 
-    # 寫入快取
+    # 4. 寫快取、通知等待的 thread、移除 inflight 標記
     with _rs_cache_lock:
-        _rs_cache[sym] = (rs, now + _RS_TTL_SEC)
+        _rs_cache[sym] = (rs, time.monotonic() + _RS_TTL_SEC)
+        evt = _rs_inflight.pop(sym, None)
+    if evt:
+        evt.set()
     return rs
 
 
@@ -491,6 +526,7 @@ def install_hook(jackbot_module):
             result = original_send(message, thread_id, *args, **kwargs)
 
         # 背景送 tracker（不阻塞 TG 推播）
+        # daemon=False：確保 Gunicorn graceful shutdown 時 thread 能跑完，不丟失記錄
         def _bg_tracker():
             resp = send_to_tracker(signal, source, chat_id, None, eval_result)
             sid  = resp.get("id") if resp else None
@@ -501,7 +537,7 @@ def install_hook(jackbot_module):
                 eval_result.get("quality", "?"),
             )
 
-        threading.Thread(target=_bg_tracker, daemon=True).start()
+        threading.Thread(target=_bg_tracker, daemon=False).start()
         return result
 
     jackbot_module.send_telegram_message = patched_send

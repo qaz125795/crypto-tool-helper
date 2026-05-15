@@ -9,3 +9,4 @@ Pillow
 matplotlib>=3.8.0
 tqdm>=4.66.0
 apscheduler>=3.10.0
+filelock>=3.12.0
