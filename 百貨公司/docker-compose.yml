@@ -183,6 +183,8 @@ services:
       - GATE_QUANT_URL=http://gate-quant:8001
       - TRACKER_POLL_INTERVAL=5
       - TRACKER_AUTO_TRADE=true
+      - TG_TOKEN=${TG_TOKEN}
+      - DC_TOKEN=${DC_TOKEN}
     depends_on:
       postgres:
         condition: service_healthy
