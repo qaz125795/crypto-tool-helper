@@ -358,21 +358,22 @@ def evaluate_signal(signal: dict, source: str) -> dict:
 # ══════════════════════════════════════════════════════════════
 def build_market_block(eval_result: dict, signal_side: str = "long") -> str:
     fuel     = eval_result.get("fuel_score", 50)
-    label    = eval_result.get("fuel_label", "中性")
+    # 所有動態字串套用 html.escape()，防止 > < & 等字元破壞 HTML → Telegram 400
+    _e = _html_mod.escape  # 別名，簡化呼叫
+    label    = _e(str(eval_result.get("fuel_label", "中性")))
     mode     = eval_result.get("market_mode", "neutral")
     rs       = eval_result.get("rs", 0)
     warnings = eval_result.get("warnings", [])
-    quality  = eval_result.get("quality", "⭐⭐⭐ 良好")
+    quality  = _e(str(eval_result.get("quality", "⭐⭐⭐ 良好")))
     scenario = eval_result.get("scenario", "normal")
 
     mode_text = {
         "aggressive": "🟢 進攻（多單為主）",
         "defensive":  "🔴 防守（空單為主）",
         "neutral":    "⚪ 中性（雙向操作）",
-    }.get(mode, mode)
+    }.get(mode, _e(str(mode)))
 
-    # 燃料視覺化（每 10 分一個格子）
-    filled = int(fuel / 10)
+    filled   = int(fuel / 10)
     fuel_bar = "█" * filled + "░" * (10 - filled)
 
     lines = [
@@ -383,19 +384,17 @@ def build_market_block(eval_result: dict, signal_side: str = "long") -> str:
         f"💪 相對強度：<b>{rs:+.2f}%</b>（vs BTC 4h）",
     ]
 
-    # 場景說明
     if scenario == "counter_trend_long":
         lines.append("🔥 <b>逆勢強幣多單</b>：市場下跌本幣抗跌 → 主力護盤，歷史高勝率場景")
         lines.append("💡 幣種在大跌中相對強勢 = 機構選擇性買入，反彈力道通常較強")
     elif scenario == "bull_long":
         lines.append("💡 多頭趨勢中的順勢做多，方向與燃料一致")
-    elif scenario == "exhausted_short" or scenario == "weak_rs_long" or scenario == "weak_rs_short":
-        # 這些已被過濾，不應出現在推播中；萬一出現則顯示原因
-        reason = eval_result.get("reason", "")
+    elif scenario in ("exhausted_short", "weak_rs_long", "weak_rs_short"):
+        reason = _e(str(eval_result.get("reason", "")))  # ← 關鍵修復：>< 轉義
         lines.append(f"⚠️ <b>注意：{reason}</b>")
 
     for w in (warnings or [])[:2]:
-        lines.append(f"⚠️ {w}")
+        lines.append(f"⚠️ {_e(str(w))}")
 
     return "\n".join(lines)
 
