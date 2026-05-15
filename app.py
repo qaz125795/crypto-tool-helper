@@ -9,7 +9,7 @@ JackBot Flask 入口 — 統一平台版 v3
 
 from functools import wraps
 from flask import Flask, request, jsonify
-import os, sys, json, threading, logging, shutil
+import hmac, os, sys, json, threading, logging, shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -231,6 +231,12 @@ try:
 
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))
+    # 初始化 _exec_log：啟動時所有 task 設為 pending，前端不顯示空白
+    with _exec_log_lock:
+        for _tid in TASK_FUNCTIONS:
+            if _tid not in _exec_log:
+                _exec_log[_tid] = {"task": _tid, "status": "pending",
+                                   "last_run": None, "logs": []}
     logger.info("[APScheduler] 啟動完成，共 %d 個訊號任務", len(TASK_FUNCTIONS))
 
 except ImportError:
@@ -264,13 +270,17 @@ def health():
 
 # ── /api/logs（前端管理介面需要；api-gateway 已有 ADMIN_TOKEN 保護）────────
 def _internal_ok() -> bool:
-    """接受 CRON_SECRET 或 ADMIN_TOKEN（透過 api-gateway 代理時自動加入）。"""
+    """接受 CRON_SECRET 或 ADMIN_TOKEN；使用 hmac.compare_digest 防計時攻擊。"""
     cron   = os.environ.get("CRON_SECRET", "").strip()
     admin  = os.environ.get("ADMIN_TOKEN", "").strip()
     auth   = request.headers.get("Authorization", "")
     token  = request.args.get("token", "")
-    if cron  and (auth == f"Bearer {cron}"  or token == cron):  return True
-    if admin and (auth == f"Bearer {admin}" or token == admin): return True
+    if cron:
+        if hmac.compare_digest(auth, f"Bearer {cron}"): return True
+        if hmac.compare_digest(token, cron):            return True
+    if admin:
+        if hmac.compare_digest(auth, f"Bearer {admin}"): return True
+        if hmac.compare_digest(token, admin):            return True
     return False
 
 @app.route("/api/logs", methods=["GET"])

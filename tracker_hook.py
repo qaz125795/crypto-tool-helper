@@ -28,6 +28,10 @@ import logging
 import threading
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor
+
+# 限制背景 tracker thread 數量，防訊號海嘯時 thread 爆炸（最多 8 個並發）
+_tracker_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tracker-bg")
 
 logger = logging.getLogger(__name__)
 
@@ -152,9 +156,10 @@ def get_market_state() -> dict:
         logger.warning("get_market_state: signal-tracker 不可用，使用過期快取 fuel=%.0f",
                        stale_data.get("fuel_score", 50))
         return stale_data
-    # 完全沒有任何快取時：回傳極端保守值（阻擋高風險訊號）
-    logger.error("get_market_state: 無任何快取，回傳保守預設 fuel=0")
-    return {"fuel_score": 0, "market_mode": "defensive", "fuel_label": "API不可用(保守)"}
+    # 完全沒有任何快取時：回傳中性值 48（恰好在 FUEL_NEUTRAL 邊界，不觸發逆勢強幣邏輯）
+    # fuel=0 會讓任何 RS>0.5% 的多單被誤判為「逆勢強幣⭐⭐⭐⭐⭐」→ 應避免
+    logger.error("get_market_state: 無任何快取，回傳中性保守預設 fuel=48")
+    return {"fuel_score": 48, "market_mode": "neutral", "fuel_label": "中性(API不可用)"}
 
 
 
@@ -470,6 +475,7 @@ def enhance_signal_message(original: str, signal: dict, source: str,
 
 def send_to_tracker(signal: dict, source: str, chat_id: int,
                     msg_id: int = None, eval_result: dict = None) -> dict:
+    # timeout=4：縮短內部微服務 timeout，避免 Gunicorn shutdown 時 bg thread 拖慢關閉
     try:
         payload = {
             **signal,
@@ -478,7 +484,7 @@ def send_to_tracker(signal: dict, source: str, chat_id: int,
             "tg_message_id": msg_id,
             "payload": {"market_eval": eval_result} if eval_result else None,
         }
-        r = requests.post(f"{TRACKER_URL}/signals", json=payload, timeout=10)
+        r = requests.post(f"{TRACKER_URL}/signals", json=payload, timeout=4)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
@@ -524,12 +530,8 @@ def install_hook(jackbot_module):
                 source, signal["symbol"], signal["side"],
                 eval_result.get("reason", "")
             )
-            # 送 tracker 記錄（統計用，不推播）
-            threading.Thread(
-                target=send_to_tracker,
-                args=(signal, source, chat_id, None, eval_result),
-                daemon=True,
-            ).start()
+            # 送 tracker 記錄（統計用，不推播）；用 executor 限制 thread 數
+            _tracker_executor.submit(send_to_tracker, signal, source, chat_id, None, eval_result)
             return True  # 回傳 True 避免 jackbot 誤判為發送失敗
 
         # ── 通過：TG 先推，tracker 非同步背景記錄 ───────────────────
@@ -543,7 +545,7 @@ def install_hook(jackbot_module):
             result = original_send(message, thread_id, *args, **kwargs)
 
         # 背景送 tracker（不阻塞 TG 推播）
-        # daemon=False：確保 Gunicorn graceful shutdown 時 thread 能跑完，不丟失記錄
+        # 用 _tracker_executor（max_workers=8）限制並發數，防訊號海嘯時 thread 爆炸
         def _bg_tracker():
             resp = send_to_tracker(signal, source, chat_id, None, eval_result)
             sid  = resp.get("id") if resp else None
@@ -554,7 +556,7 @@ def install_hook(jackbot_module):
                 eval_result.get("quality", "?"),
             )
 
-        threading.Thread(target=_bg_tracker, daemon=False).start()
+        _tracker_executor.submit(_bg_tracker)
         return result
 
     jackbot_module.send_telegram_message = patched_send

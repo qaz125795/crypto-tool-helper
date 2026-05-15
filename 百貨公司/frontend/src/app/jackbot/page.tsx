@@ -32,12 +32,15 @@ function getToken() {
   return document.cookie.split('; ').find(r => r.startsWith('admin_token='))?.split('=')[1] ?? ''
 }
 
-/** 相對時間顯示（"剛剛" / "3 分鐘前" / "2 小時前"）*/
+/** 相對時間顯示（Safari 相容：空格→T 再 new Date）*/
 function timeAgo(dateStr: string | null): string {
   if (!dateStr) return '--'
   try {
-    const diff = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
-    if (diff < 60)  return '剛剛'
+    // Safari 只接受 ISO 8601（含 T），"2026-05-15 18:04:00" 需先替換空格
+    const date = new Date(dateStr.replace(' ', 'T'))
+    if (isNaN(date.getTime())) return dateStr.slice(0, 16)
+    const diff = Math.floor((Date.now() - date.getTime()) / 1000)
+    if (diff < 60)   return '剛剛'
     if (diff < 3600) return `${Math.floor(diff / 60)} 分鐘前`
     if (diff < 86400) return `${Math.floor(diff / 3600)} 小時前`
     return `${Math.floor(diff / 86400)} 天前`
@@ -84,6 +87,7 @@ export default function JackBotAdmin() {
   const [paramEdits, setParamEdits] = useState<Record<string, string>>({})
   const [expandLog, setExpandLog] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState<string | null>(null)
+  const [tick, setTick] = useState(0)  // 每分鐘 +1，強制重新計算相對時間
 
   const showToast = (msg: string, type: 'ok' | 'err' = 'ok') => {
     setToast({ msg, type })
@@ -104,7 +108,9 @@ export default function JackBotAdmin() {
     if (!getToken()) { window.location.href = '/login'; return }
     void loadAll()
     const iv = setInterval(() => void loadAll(), 10000)
-    return () => clearInterval(iv)
+    // 每分鐘更新 tick，強制重算「X 分鐘前」避免顯示過時
+    const tickIv = setInterval(() => setTick(t => t + 1), 60000)
+    return () => { clearInterval(iv); clearInterval(tickIv) }
   }, [loadAll])
 
   // ── 動作 ────────────────────────────────────────────────────────────────
@@ -154,13 +160,16 @@ export default function JackBotAdmin() {
     const r = await req<{ status: string }>('POST', `/run/${id}`)
     if (r?.status === 'accepted' || r?.status === 'success') {
       showToast('🚀 任務已在背景啟動')
-      // 啟動 polling：每 4 秒更新日誌，直到 running → success/error
+      // Polling：直接從 API 讀最新狀態，避免 stale closure 問題
       let poll = 0
       const iv = setInterval(async () => {
         poll++
         await loadAll()
-        const log = logs[id]
-        if (poll > 15 || (log?.status && log.status !== 'running')) clearInterval(iv)
+        // 每輪都直接呼叫 API 取得最新 log，不依賴 React state 快照
+        const fresh = await req<TaskLog>('GET', `/api/logs/${id}`)
+        if (poll > 15 || (fresh?.status && fresh.status !== 'running' && fresh.status !== 'pending')) {
+          clearInterval(iv)
+        }
       }, 4000)
     } else {
       showToast('執行失敗', 'err')
@@ -255,7 +264,8 @@ export default function JackBotAdmin() {
                     )}
                     {tl?.last_run && (
                       <p className={`text-[11px] mt-0.5 ${isError ? 'text-red-400/70' : 'text-gray-600'}`}>
-                        上次：{timeAgo(tl.last_run)}
+                        {/* tick 讓此行在每分鐘強制重新計算 */}
+                        上次：{timeAgo(tl.last_run)}{tick > 0 ? '' : ''}
                       </p>
                     )}
                   </div>
