@@ -1,5 +1,5 @@
 """
-tracker_hook.py — JackBot 訊號攔截 + 品質過濾 + 訊息加工 v2
+tracker_hook.py — JackBot 訊號攔截 + 品質過濾 + 訊息加工 v3
 
 核心設計哲學（來自實戰體感）：
 ────────────────────────────────────────────────────────
@@ -26,6 +26,7 @@ import re
 import html as _html_mod
 import logging
 import threading
+import time
 import requests
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,11 @@ SOURCE_DISPLAY = {
 }
 
 RE_SYMBOL = re.compile(r"\b([A-Z]{2,10})[/_]?(USDT|USD)\b", re.I)
+
+# ── RS 記憶體快取（TTL = 90 秒，防止極端行情下大量訊號打爆 Binance API）──────
+_rs_cache: dict[str, tuple[float, float]] = {}  # symbol → (rs_value, expire_ts)
+_rs_cache_lock = threading.Lock()
+_RS_TTL_SEC = 90.0
 
 # ══════════════════════════════════════════════════════════════
 # 燃料箱分數閾值（核心轉折判斷）
@@ -124,9 +130,19 @@ def get_market_state() -> dict:
 
 
 def calc_symbol_rs(symbol: str) -> float:
-    """幣種相對 BTC 的 4H 相對強度（RS）。正 = 強於大盤，負 = 弱於大盤。"""
+    """幣種相對 BTC 的 4H 相對強度（RS）。正 = 強於大盤，負 = 弱於大盤。
+    內建 TTL=90s 快取：極端行情多訊號並發時不會重複打 Binance API。
+    """
+    sym = symbol.replace("_", "").upper()
+    now = time.monotonic()
+
+    # 快取命中
+    with _rs_cache_lock:
+        cached = _rs_cache.get(sym)
+        if cached and now < cached[1]:
+            return cached[0]
+
     try:
-        sym = symbol.replace("_", "").upper()
         r = requests.get(
             "https://fapi.binance.com/fapi/v1/klines",
             params={"symbol": sym, "interval": "1h", "limit": 5},
@@ -141,9 +157,14 @@ def calc_symbol_rs(symbol: str) -> float:
 
         ms         = get_market_state()
         btc_change = float(ms.get("btc_change_4h", 0))
-        return round(sym_change - btc_change, 3)
+        rs         = round(sym_change - btc_change, 3)
     except Exception:
-        return 0.0
+        rs = 0.0
+
+    # 寫入快取
+    with _rs_cache_lock:
+        _rs_cache[sym] = (rs, now + _RS_TTL_SEC)
+    return rs
 
 
 def _fuel_zone(fuel: float) -> str:
@@ -459,27 +480,33 @@ def install_hook(jackbot_module):
             ).start()
             return True  # 回傳 True 避免 jackbot 誤判為發送失敗
 
-        # ── 通過：加工並推播 ────────────────────────────────────
-        tracker_resp = send_to_tracker(signal, source, chat_id, None, eval_result)
-        signal_id    = tracker_resp.get("id") if tracker_resp else None
-
+        # ── 通過：TG 先推，tracker 非同步背景記錄 ───────────────────
+        # 設計原則：推播時效 > tracker 記錄，不讓 signal-tracker 延遲卡住 TG。
         try:
-            enhanced    = enhance_signal_message(message, signal, source, eval_result, signal_id)
+            enhanced    = enhance_signal_message(message, signal, source, eval_result, signal_id=None)
             kwargs_html = {**kwargs, "parse_mode": "HTML"}
             result      = original_send(enhanced, thread_id, *args, **kwargs_html)
-            logger.info(
-                "[tracker-hook] PASS #%s %s %s %s | RS=%.2f%% fuel=%.0f quality=%s scenario=%s",
-                signal_id, source, signal["symbol"], signal["side"],
-                eval_result.get("rs", 0), eval_result.get("fuel_score", 50),
-                eval_result.get("quality", "?"), eval_result.get("scenario", "?"),
-            )
-            return result
         except Exception as e:
             logger.error("[tracker-hook] enhance error: %s", e)
-            return original_send(message, thread_id, *args, **kwargs)
+            result = original_send(message, thread_id, *args, **kwargs)
+
+        # 背景送 tracker（不阻塞 TG 推播）
+        def _bg_tracker():
+            resp = send_to_tracker(signal, source, chat_id, None, eval_result)
+            sid  = resp.get("id") if resp else None
+            logger.info(
+                "[tracker-hook] PASS #%s %s %s %s | RS=%.2f%% fuel=%.0f quality=%s",
+                sid, source, signal["symbol"], signal["side"],
+                eval_result.get("rs", 0), eval_result.get("fuel_score", 50),
+                eval_result.get("quality", "?"),
+            )
+
+        threading.Thread(target=_bg_tracker, daemon=True).start()
+        return result
 
     jackbot_module.send_telegram_message = patched_send
     logger.info(
-        "[tracker-hook] v2 安裝完成 | 邏輯：燃料箱轉折判斷 + 逆勢強幣高勝率 + 硬性過濾 | thread_ids=%s",
+        "[tracker-hook] v3 安裝完成 | TG 先推+tracker 背景 | RS TTL快取 | "
+        "燃料箱轉折 + 逆勢強幣 + 硬性過濾 | thread_ids=%s",
         list(TRACK_THREAD_IDS.keys()),
     )

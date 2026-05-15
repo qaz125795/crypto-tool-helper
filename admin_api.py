@@ -206,7 +206,7 @@ def _register_routes(scheduler_ref, save_fn=None):
         if not safe_upd:
             return jsonify({"ok": False, "error": "no valid keys"}), 400
 
-        # 寫入 .env（重啟後保留）
+        # 原子寫入 .env（.tmp → os.replace 防止截斷損毀）
         env_path = "/root/.env"
         if os.path.exists(env_path):
             with open(env_path, "r", encoding="utf-8") as f:
@@ -227,17 +227,20 @@ def _register_routes(scheduler_ref, save_fn=None):
             for k, v in safe_upd.items():
                 if k not in updated_keys:
                     new_lines.append(f"{k}={v}\n")
-            with open(env_path, "w", encoding="utf-8") as f:
+            # 原子寫入：先寫暫存檔，再替換
+            tmp_path = env_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
+            os.replace(tmp_path, env_path)
 
-        # 即時生效（當前 process）
+        # 即時生效（當前 process；注意：此為單 worker 設計，多 worker 需重啟）
         for k, v in safe_upd.items():
             os.environ[k] = str(v)
 
         return jsonify({
             "ok": True, "task": task_id,
             "updated": list(safe_upd.keys()),
-            "note": "已即時生效，並寫入 .env（重啟後保留）",
+            "note": "已即時生效（當前 worker），並原子寫入 .env（重啟後保留）",
         })
 
     @admin_bp.route("/signal-types", methods=["GET"])

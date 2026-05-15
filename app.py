@@ -22,28 +22,42 @@ _task_executor = ThreadPoolExecutor(max_workers=4)
 # ── 排程設定持久化路徑（volume 掛載，重啟後保留）──────────────────────────
 _SCHEDULES_FILE = Path("/app/data/schedules.json")
 
+_SCHEDULES_LOCK = threading.Lock()
+
 def _load_saved_schedules() -> dict:
-    try:
-        if _SCHEDULES_FILE.exists():
-            return json.loads(_SCHEDULES_FILE.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.warning("load schedules failed: %s", e)
+    """讀取排程設定，主檔失敗自動從 .bak 還原。"""
+    for path in (_SCHEDULES_FILE, Path(str(_SCHEDULES_FILE) + ".bak")):
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            logger.warning("load schedules failed (%s): %s", path.name, e)
     return {}
 
 def _save_schedule_state(task_id: str, cron_str: str = None, enabled: bool = None):
-    """將排程設定寫入持久化檔（cron 和 enabled 狀態各自可選更新）"""
-    data = _load_saved_schedules()
-    entry = data.get(task_id, {})
-    if cron_str is not None:
-        entry["cron"] = cron_str
-    if enabled is not None:
-        entry["enabled"] = enabled
-    data[task_id] = entry
-    try:
-        _SCHEDULES_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _SCHEDULES_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        logger.error("save schedules failed: %s", e)
+    """原子寫入（.tmp → os.replace），並保留 .bak 備份，防止 Race Condition 損毀。"""
+    with _SCHEDULES_LOCK:
+        data  = _load_saved_schedules()
+        entry = data.get(task_id, {})
+        if cron_str is not None:
+            entry["cron"] = cron_str
+        if enabled is not None:
+            entry["enabled"] = enabled
+        data[task_id] = entry
+        try:
+            _SCHEDULES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            content  = json.dumps(data, ensure_ascii=False, indent=2)
+            tmp_file = Path(str(_SCHEDULES_FILE) + ".tmp")
+            tmp_file.write_text(content, encoding="utf-8")
+            # 備份舊檔再原子替換
+            if _SCHEDULES_FILE.exists():
+                import shutil
+                shutil.copy2(_SCHEDULES_FILE, str(_SCHEDULES_FILE) + ".bak")
+            os.replace(tmp_file, _SCHEDULES_FILE)
+        except Exception as e:
+            logger.error("save schedules failed: %s", e)
 
 # ── 認證 ─────────────────────────────────────────────────────────────────────
 def _cron_secret_ok() -> bool:
