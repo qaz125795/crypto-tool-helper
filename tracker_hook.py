@@ -21,6 +21,7 @@ tracker_hook.py — JackBot 訊號攔截 + 品質過濾 + 訊息加工 v3
    · 持倉狙擊：RS 未達 2.5% 的訊號 → 拒絕（優勢不夠明確）
 ────────────────────────────────────────────────────────
 """
+import atexit
 import os
 import re
 import html as _html_mod
@@ -31,7 +32,9 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 
 # 限制背景 tracker thread 數量，防訊號海嘯時 thread 爆炸（最多 8 個並發）
+# atexit 確保 Gunicorn 收到 SIGTERM 時等待所有 tracker task 完成後才退出
 _tracker_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tracker-bg")
+atexit.register(lambda: _tracker_executor.shutdown(wait=True))
 
 logger = logging.getLogger(__name__)
 

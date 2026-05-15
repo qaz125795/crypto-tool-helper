@@ -26,7 +26,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 logger = logging.getLogger(__name__)
 
 # ── 背景任務執行緒池 ────────────────────────────────────────────────────────
+import atexit as _atexit
 _task_executor = ThreadPoolExecutor(max_workers=4)
+_atexit.register(lambda: _task_executor.shutdown(wait=True))
 
 # ── 執行日誌（記錄每支訊號最近一次執行結果）────────────────────────────────
 import datetime as _dt

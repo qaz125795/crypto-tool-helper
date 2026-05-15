@@ -1,5 +1,5 @@
 'use client'
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 
 // ─── 型別 ──────────────────────────────────────────────────────────────────
 interface Job {
@@ -88,6 +88,8 @@ export default function JackBotAdmin() {
   const [expandLog, setExpandLog] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState<string | null>(null)
   const [tick, setTick] = useState(0)  // 每分鐘 +1，強制重新計算相對時間
+  // 收集所有 polling interval，Unmount 時統一清除，防 Memory/Network Leak
+  const pollIntervals = useRef<Set<ReturnType<typeof setInterval>>>(new Set())
 
   const showToast = (msg: string, type: 'ok' | 'err' = 'ok') => {
     setToast({ msg, type })
@@ -107,10 +109,15 @@ export default function JackBotAdmin() {
   useEffect(() => {
     if (!getToken()) { window.location.href = '/login'; return }
     void loadAll()
-    const iv = setInterval(() => void loadAll(), 10000)
-    // 每分鐘更新 tick，強制重算「X 分鐘前」避免顯示過時
+    const iv    = setInterval(() => void loadAll(), 10000)
     const tickIv = setInterval(() => setTick(t => t + 1), 60000)
-    return () => { clearInterval(iv); clearInterval(tickIv) }
+    return () => {
+      clearInterval(iv)
+      clearInterval(tickIv)
+      // Unmount 時清除所有 polling interval，防 Memory/Network Leak
+      pollIntervals.current.forEach(clearInterval)
+      pollIntervals.current.clear()
+    }
   }, [loadAll])
 
   // ── 動作 ────────────────────────────────────────────────────────────────
@@ -165,12 +172,14 @@ export default function JackBotAdmin() {
       const iv = setInterval(async () => {
         poll++
         await loadAll()
-        // 每輪都直接呼叫 API 取得最新 log，不依賴 React state 快照
+        // 每輪直接呼叫 API 取得最新 log，不依賴 stale React state
         const fresh = await req<TaskLog>('GET', `/api/logs/${id}`)
         if (poll > 15 || (fresh?.status && fresh.status !== 'running' && fresh.status !== 'pending')) {
           clearInterval(iv)
+          pollIntervals.current.delete(iv)
         }
       }, 4000)
+      pollIntervals.current.add(iv)
     } else {
       showToast('執行失敗', 'err')
     }
@@ -264,8 +273,7 @@ export default function JackBotAdmin() {
                     )}
                     {tl?.last_run && (
                       <p className={`text-[11px] mt-0.5 ${isError ? 'text-red-400/70' : 'text-gray-600'}`}>
-                        {/* tick 讓此行在每分鐘強制重新計算 */}
-                        上次：{timeAgo(tl.last_run)}{tick > 0 ? '' : ''}
+                        上次：{timeAgo(tl.last_run)}
                       </p>
                     )}
                   </div>
