@@ -30,6 +30,7 @@ import threading
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
+from html.parser import HTMLParser
 
 # 限制背景 tracker thread 數量，防訊號海嘯時 thread 爆炸（最多 8 個並發）
 # 關閉由 app.py 的 _coordinated_shutdown 統一協調（確保 task_executor 先完成）
@@ -474,6 +475,67 @@ def enhance_signal_message(original: str, signal: dict, source: str,
     return enhanced
 
 
+# ══════════════════════════════════════════════════════════════
+# HTML 安全工具：驗證 + 自動降級
+# ══════════════════════════════════════════════════════════════
+class _TagBalanceChecker(HTMLParser):
+    """計算開閉標籤是否平衡（Telegram 支援的 HTML 子集）。"""
+    TG_TAGS = {'b', 'i', 'u', 's', 'code', 'pre', 'a', 'em', 'strong'}
+
+    def __init__(self):
+        super().__init__()
+        self._stack: list[str] = []
+        self._ok = True
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.TG_TAGS:
+            self._stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if tag in self.TG_TAGS:
+            if self._stack and self._stack[-1] == tag:
+                self._stack.pop()
+            else:
+                self._ok = False   # 閉合順序錯誤
+
+    def is_balanced(self) -> bool:
+        return self._ok and len(self._stack) == 0
+
+    def unclosed(self) -> list[str]:
+        return list(self._stack)
+
+
+def _validate_html(text: str) -> tuple[bool, list[str]]:
+    """回傳 (is_valid, unclosed_tags)。"""
+    checker = _TagBalanceChecker()
+    try:
+        checker.feed(text)
+    except Exception:
+        return False, []
+    return checker.is_balanced(), checker.unclosed()
+
+
+def _strip_html_tags(text: str) -> str:
+    """移除所有 HTML 標籤，保留純文字（含 unescape entity）。"""
+    clean = re.sub(r'<[^>]+>', '', text)
+    return _html_mod.unescape(clean)
+
+
+def _safe_html(text: str) -> tuple[str, str | None]:
+    """
+    驗證 HTML：
+    - 有效 → 回傳 (text, 'HTML')
+    - 無效（標籤未閉合等）→ 移除所有標籤，回傳 (clean_text, None)
+    """
+    valid, unclosed = _validate_html(text)
+    if valid:
+        return text, "HTML"
+    logger.warning(
+        "[tracker-hook] HTML 驗證失敗，未閉合標籤: %s，降級為純文字", unclosed
+    )
+    return _strip_html_tags(text), None
+
+
 _DEAD_LETTER_FILE = "/app/data/dead_letter.log"
 
 def _write_dead_letter(signal: dict, source: str, kind: str):
@@ -553,11 +615,29 @@ def install_hook(jackbot_module):
             return True  # 回傳 True 避免 jackbot 誤判為發送失敗
 
         # ── 通過：TG 先推，tracker 非同步背景記錄 ───────────────────
-        # 設計原則：推播時效 > tracker 記錄，不讓 signal-tracker 延遲卡住 TG。
         try:
-            enhanced    = enhance_signal_message(message, signal, source, eval_result, signal_id=None)
-            kwargs_html = {**kwargs, "parse_mode": "HTML"}
-            result      = original_send(enhanced, thread_id, *args, **kwargs_html)
+            enhanced = enhance_signal_message(message, signal, source, eval_result, signal_id=None)
+
+            # 驗證 HTML 並自動降級
+            safe_text, safe_parse_mode = _safe_html(enhanced)
+
+            # DEBUG：每次都 log raw payload 幫助排查格式問題（可視需要設為 debug level）
+            logger.debug(
+                "[tracker-hook] 即將送出 HTML（長度=%d，parse_mode=%s）: %s",
+                len(safe_text), safe_parse_mode, repr(safe_text[:500])
+            )
+            if not safe_parse_mode:
+                # 降級到純文字（原始訊號，不含 HTML 加工）
+                logger.warning(
+                    "[tracker-hook] HTML 格式異常，降級為原始訊號純文字 sym=%s",
+                    signal.get("symbol", "?")
+                )
+                safe_text = message
+
+            kwargs_final = {**kwargs, "parse_mode": safe_parse_mode} if safe_parse_mode else {
+                k: v for k, v in kwargs.items() if k != "parse_mode"
+            }
+            result = original_send(safe_text, thread_id, *args, **kwargs_final)
         except Exception as e:
             logger.error("[tracker-hook] enhance error: %s", e)
             result = original_send(message, thread_id, *args, **kwargs)
