@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 # ── 背景任務執行緒池 ────────────────────────────────────────────────────────
 import atexit as _atexit
 _task_executor = ThreadPoolExecutor(max_workers=4)
-_atexit.register(lambda: _task_executor.shutdown(wait=True))
+# 注意：不在此立即 atexit！需在 tracker_hook import 之後統一注冊一個協調關閉函數
+# 確保順序：_task_executor 先完成（含最後一批 tracker submit）→ _tracker_executor 再關閉
 
 # ── 執行日誌（記錄每支訊號最近一次執行結果）────────────────────────────────
 import datetime as _dt
@@ -144,13 +145,27 @@ from jackbot import (
 )
 
 # ── 安裝 tracker_hook ─────────────────────────────────────────────────────────
+_tracker_hook_module = None
 try:
-    import tracker_hook as _tracker_hook
-    _tracker_hook.install_hook(_jackbot_module)
+    import tracker_hook as _tracker_hook_module
+    _tracker_hook_module.install_hook(_jackbot_module)
 except ImportError:
     logger.warning("[app] tracker_hook 未找到，訊號不含品質分析")
 except Exception as _hook_err:
     logger.error("[app] tracker_hook 安裝失敗: %s", _hook_err)
+
+# ── 協調關閉（atexit LIFO 修復）────────────────────────────────────────────────
+# atexit 是 LIFO：最後 register 的最先執行。
+# 正確順序：task_executor 先完成（含最後 tracker submit）→ tracker_executor 再關閉
+def _coordinated_shutdown():
+    logger.info("[shutdown] 等待 _task_executor 完成...")
+    _task_executor.shutdown(wait=True)
+    if _tracker_hook_module and hasattr(_tracker_hook_module, "_tracker_executor"):
+        logger.info("[shutdown] 等待 _tracker_executor 完成...")
+        _tracker_hook_module._tracker_executor.shutdown(wait=True)
+    logger.info("[shutdown] 所有 executor 已安全關閉")
+
+_atexit.register(_coordinated_shutdown)
 
 # ── 任務對應表 ────────────────────────────────────────────────────────────────
 TASK_FUNCTIONS = {

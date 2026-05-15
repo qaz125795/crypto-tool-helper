@@ -32,9 +32,8 @@ import requests
 from concurrent.futures import ThreadPoolExecutor
 
 # 限制背景 tracker thread 數量，防訊號海嘯時 thread 爆炸（最多 8 個並發）
-# atexit 確保 Gunicorn 收到 SIGTERM 時等待所有 tracker task 完成後才退出
+# 關閉由 app.py 的 _coordinated_shutdown 統一協調（確保 task_executor 先完成）
 _tracker_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tracker-bg")
-atexit.register(lambda: _tracker_executor.shutdown(wait=True))
 
 logger = logging.getLogger(__name__)
 
@@ -534,7 +533,10 @@ def install_hook(jackbot_module):
                 eval_result.get("reason", "")
             )
             # 送 tracker 記錄（統計用，不推播）；用 executor 限制 thread 數
-            _tracker_executor.submit(send_to_tracker, signal, source, chat_id, None, eval_result)
+            try:
+                _tracker_executor.submit(send_to_tracker, signal, source, chat_id, None, eval_result)
+            except RuntimeError:
+                logger.warning("[tracker-hook] executor 已關閉，FILTERED tracker 記錄丟失（shutdown 中）")
             return True  # 回傳 True 避免 jackbot 誤判為發送失敗
 
         # ── 通過：TG 先推，tracker 非同步背景記錄 ───────────────────
@@ -559,7 +561,10 @@ def install_hook(jackbot_module):
                 eval_result.get("quality", "?"),
             )
 
-        _tracker_executor.submit(_bg_tracker)
+        try:
+            _tracker_executor.submit(_bg_tracker)
+        except RuntimeError:
+            logger.warning("[tracker-hook] executor 已關閉，PASS tracker 記錄丟失（shutdown 中）")
         return result
 
     jackbot_module.send_telegram_message = patched_send
