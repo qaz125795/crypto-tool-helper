@@ -275,6 +275,26 @@ app = Flask(__name__)
 if _app_admin and _app_admin.name not in app.blueprints:
     app.register_blueprint(_app_admin)
 
+# ── /api/schedule（Dashboard 判斷 JackBot 是否在線 + 無排程顯示）──────────────
+# 格式：[{id, next_run}]，前端用 Array.isArray() 判斷在線
+@app.route("/api/schedule", methods=["GET"])
+def api_schedule():
+    result = []
+    if scheduler:
+        for task_id in DEFAULT_CRONS:
+            job = scheduler.get_job(task_id)
+            next_run = ""
+            if job and job.next_run_time:
+                try:
+                    import datetime as _dt2
+                    tw = job.next_run_time.astimezone(
+                        _dt2.timezone(_dt2.timedelta(hours=8)))
+                    next_run = tw.strftime("%m/%d %H:%M")
+                except Exception:
+                    next_run = str(job.next_run_time)[:16]
+            result.append({"id": task_id, "next_run": next_run})
+    return jsonify(result)
+
 # ── /health（不需驗證，供 api-gateway 存活確認）───────────────────────────────
 @app.route("/health", methods=["GET"])
 def health():
