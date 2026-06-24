@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 # sendPhoto 最近一次 TG 失敗原因（供外層決定是否做文字備援，避免雙發）
 _LAST_TG_PHOTO_FAILURE_REASON = ""
+# tracker_hook 讀取：最近一次推播的 TG/DC message_id（供持倉狙擊追蹤 reply 用）
+_LAST_PUSH_TG_MSG_ID: Optional[int] = None
+_LAST_PUSH_DC_MSG_ID: Optional[str] = None
 _TG_FLUSH_LOCK = threading.Lock()
 
 # ==================== 配置設定 ====================
@@ -719,10 +722,16 @@ def _tg_queue_flush(max_items: int = 10) -> None:
                     _tg_recent_mark_sent(str(it.get("trace_id") or ""), int(it.get("thread_id") or 0))
                     flushed += 1
                     logger.info("[TG補發] 補發成功 trace=%s", it.get("trace_id"))
+                elif resp.status_code == 400:
+                    # 400 為永久性錯誤（過長/格式/thread 不存在），重試永遠不會成功，直接丟棄
+                    logger.warning("[TG補發] 永久性錯誤(400)丟棄 trace=%s: %s", it.get("trace_id"), resp.text[:120])
                 else:
                     it["retry_count"] = int(it.get("retry_count") or 0) + 1
-                    remain.append(it)
-                    logger.warning("[TG補發] 補發失敗保留 trace=%s status=%s", it.get("trace_id"), resp.status_code)
+                    if it["retry_count"] >= 10:
+                        logger.warning("[TG補發] 重試達 10 次丟棄 trace=%s", it.get("trace_id"))
+                    else:
+                        remain.append(it)
+                        logger.warning("[TG補發] 補發失敗保留 trace=%s status=%s", it.get("trace_id"), resp.status_code)
             except Exception as e:
                 it["retry_count"] = int(it.get("retry_count") or 0) + 1
                 remain.append(it)
@@ -782,6 +791,7 @@ def send_telegram_message(
     *,
     mirror_discord: bool = True,
     discord_force_everyone: bool = False,
+    disable_notification: bool = False,
 ) -> bool:
     """
     發送訊息到 Telegram（支援 Inline Keyboard 按鈕）。
@@ -816,17 +826,26 @@ def send_telegram_message(
     tg_text = _telegram_content_with_mentions(
         text, thread_id, force_everyone=discord_force_everyone
     )
+    # TG sendMessage 上限 4096 字，超長直接 400（永久失敗），發送前截斷
+    if len(tg_text) > 4000:
+        logger.warning("[推播追蹤] trace=%s 訊息過長（%s 字）已截斷至 4000", trace_id, len(tg_text))
+        tg_text = tg_text[:4000] + "…"
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
         "message_thread_id": thread_id,
         "text": tg_text,
-        "disable_web_page_preview": True
+        "disable_web_page_preview": True,
+        "disable_notification": bool(disable_notification),
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
+
+    global _LAST_PUSH_TG_MSG_ID, _LAST_PUSH_DC_MSG_ID
+    _LAST_PUSH_TG_MSG_ID = None
+    _LAST_PUSH_DC_MSG_ID = None
 
     tg_ok = False
     tg_err = ""
@@ -841,6 +860,10 @@ def send_telegram_message(
                 if result.get("ok"):
                     logger.info("[推播追蹤] trace=%s TG sendMessage 成功 attempt=%s/%s", trace_id, i, tg_retry)
                     tg_ok = True
+                    try:
+                        _LAST_PUSH_TG_MSG_ID = int(result.get("result", {}).get("message_id"))
+                    except (TypeError, ValueError):
+                        _LAST_PUSH_TG_MSG_ID = None
                     _tg_recent_mark_sent(trace_id, thread_id, ttl_sec=dedup_ttl_sec)
                     break
                 tg_err = str(result.get("description") or result)[:260]
@@ -912,6 +935,10 @@ def send_telegram_message(
             dc_resp = requests.post(dc_url, headers=dc_headers, json=dc_payload, timeout=10)
             if 200 <= dc_resp.status_code < 300:
                 dc_ok = True
+                try:
+                    _LAST_PUSH_DC_MSG_ID = str(dc_resp.json().get("id"))
+                except Exception:
+                    _LAST_PUSH_DC_MSG_ID = None
                 logger.info("[推播追蹤] trace=%s Discord sendMessage 成功 channel_id=%s", trace_id, dc_channel_id)
             else:
                 logger.error(
@@ -986,8 +1013,10 @@ def send_telegram_photo(
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
-    global _LAST_TG_PHOTO_FAILURE_REASON
+    global _LAST_TG_PHOTO_FAILURE_REASON, _LAST_PUSH_TG_MSG_ID, _LAST_PUSH_DC_MSG_ID
     _LAST_TG_PHOTO_FAILURE_REASON = ""
+    _LAST_PUSH_TG_MSG_ID = None
+    _LAST_PUSH_DC_MSG_ID = None
     tg_ok = False
     try:
         with open(photo_path, "rb") as f:
@@ -998,6 +1027,10 @@ def send_telegram_photo(
             if result.get("ok"):
                 logger.info("[推播追蹤] trace=%s TG sendPhoto 成功", trace_id)
                 tg_ok = True
+                try:
+                    _LAST_PUSH_TG_MSG_ID = int(result.get("result", {}).get("message_id"))
+                except (TypeError, ValueError):
+                    _LAST_PUSH_TG_MSG_ID = None
             else:
                 _LAST_TG_PHOTO_FAILURE_REASON = str(result.get("description") or result)
                 logger.error(
@@ -1046,6 +1079,11 @@ def send_telegram_photo(
                 dc_resp = requests.post(dc_url, headers=dc_headers, files=files, timeout=30)
             if 200 <= dc_resp.status_code < 300:
                 dc_ok = True
+                try:
+                    _dc_body = dc_resp.json()
+                    _LAST_PUSH_DC_MSG_ID = str(_dc_body.get("id"))
+                except Exception:
+                    _LAST_PUSH_DC_MSG_ID = None
                 logger.info("[推播追蹤] trace=%s Discord 圖片發送成功 channel_id=%s", trace_id, dc_channel_id)
             else:
                 logger.error(
@@ -1192,10 +1230,30 @@ def _telegram_content_with_mentions(
 
 
 def _convert_text_for_discord(text: str) -> str:
-    """Discord 不吃 Telegram Markdown；按需求把單星號改雙星號。"""
+    """Telegram HTML / Markdown → Discord 相容格式。"""
     if not text:
         return ""
-    return text.replace("*", "**")
+    import html as _html
+    import re as _re
+
+    s = text
+    has_html = bool(_re.search(r"</?(?:b|strong|i|em|u|s|code|pre|a)\b", s, _re.I))
+    if has_html:
+        s = _re.sub(r"<b>(.*?)</b>", r"**\1**", s, flags=_re.DOTALL)
+        s = _re.sub(r"<strong>(.*?)</strong>", r"**\1**", s, flags=_re.DOTALL)
+        s = _re.sub(r"<i>(.*?)</i>", r"*\1*", s, flags=_re.DOTALL)
+        s = _re.sub(r"<em>(.*?)</em>", r"*\1*", s, flags=_re.DOTALL)
+        s = _re.sub(r"<code>(.*?)</code>", r"`\1`", s, flags=_re.DOTALL)
+        s = _re.sub(r"<pre>(.*?)</pre>", r"```\1```", s, flags=_re.DOTALL)
+        s = _re.sub(
+            r'<a href="([^"]+)">(.*?)</a>', r"[\2](\1)", s, flags=_re.DOTALL
+        )
+        s = _re.sub(r"<[^>]+>", "", s)
+        s = _html.unescape(s)
+    else:
+        # 舊版 Telegram Markdown：單星號粗體 → Discord 雙星號
+        s = s.replace("*", "**")
+    return s
 
 
 def _convert_reply_markup_to_discord_components(reply_markup: Optional[Dict]) -> List[Dict]:
@@ -17006,6 +17064,11 @@ def run_crit_radar_once() -> None:
     預設（大社群適用）：SL 以 max(15m,1h) ATR×係數 再夾％上下限；TP_R 約 2.8R；SL 上限放寬，避免瘋狗幣
     被 7.5% 天花板壓得比「真實波動」還窄。可用 CRIT_RADAR_ATR_BLEND=15m 還原僅 15m ATR。
     """
+    # [2026-06-24] 爆擊雷達已停用（使用者已移除其頻道/話題）。預設完全不執行、不推播，
+    # 連 OI 預載等耗時動作都跳過；如需恢復：設定環境變數 CRIT_RADAR_ENABLED=1。
+    if os.getenv("CRIT_RADAR_ENABLED", "0").strip().lower() not in ("1", "true", "on", "yes"):
+        logger.info("[爆擊雷達] 已停用（CRIT_RADAR_ENABLED!=1），略過本輪")
+        return
     logger.info("開始執行爆擊雷達…")
     if not CG_API_KEY:
         logger.warning("[爆擊雷達] 未設定 CG_API_KEY，結束")
@@ -18683,6 +18746,60 @@ def run_hyperliquid_monitor_once():
         logger.info("[鏈上巨鯨] 本輪①②③皆無可推播內容；若需③請設 WHALE_CG_MARKET_DIGEST=1 並確認 CG_API_KEY")
 
 
+def _gold_tracker_active_signals() -> list:
+    """查 signal-tracker 未結黃金倉（tracker 模式防洗版用）。"""
+    url = os.environ.get("SIGNAL_TRACKER_URL", "").strip().rstrip("/")
+    if not url:
+        return []
+    try:
+        r = requests.get(f"{url}/signals/active", timeout=10)
+        r.raise_for_status()
+        rows = r.json() if isinstance(r.json(), list) else []
+        return [
+            s for s in rows
+            if str(s.get("source") or "") == "gold_signal"
+            and str(s.get("status") or "") in ("active", "tp1", "tp2", "tp3")
+        ]
+    except Exception as e:
+        logger.warning("[黃金訊號] 查詢 tracker 未結倉失敗: %s", e)
+        return []
+
+
+def _gold_preserve_v2_state(state: dict) -> dict:
+    """保留 v2 防洗版欄位（時段箱體已推、計數、冷卻時間戳）。"""
+    out = {}
+    for k, v in (state or {}).items():
+        if str(k).startswith("v2_orb_") or k in ("v2_trade_date", "v2_signal_count"):
+            out[k] = v
+        elif str(k).endswith("_ts") and str(k).startswith("last_"):
+            out[k] = v
+        elif k == "last_push_ts":
+            out[k] = v
+    return out
+
+
+def _sync_gold_state_from_tracker(state: dict, today_trade_date: str, save_fn) -> dict:
+    """tracker 已結案時同步本地狀態，避免 last_direction 永久卡住或跨日誤清後重複進場。"""
+    if not os.environ.get("SIGNAL_TRACKER_URL", "").strip():
+        return state
+    active = _gold_tracker_active_signals()
+    if active:
+        return state
+    if not state.get("last_direction"):
+        return state
+    logger.info(
+        "[黃金訊號] tracker 無未結黃金倉，同步結案本地 %s 倉",
+        state.get("last_direction"),
+    )
+    merged = {
+        "closed_direction": state.get("last_direction"),
+        "closed_trade_date": today_trade_date,
+        **_gold_preserve_v2_state(state),
+    }
+    save_fn(merged)
+    return merged
+
+
 def run_gold_signal():
     """黃金 XAUUSD 多空訊號（ORB+MA），推播到同一個 Telegram 機器人、指定 topic。"""
     import sys
@@ -18731,9 +18848,14 @@ def run_gold_signal():
             send_telegram_message(_gim, TG_THREAD_IDS.get("gold_signal", 254))
         return
     cfg = get_config()
+    _gold_ver = str(getattr(cfg, "GOLD_STRATEGY_VERSION", "v2") or "v2").lower().strip()
+    _gold_use_tracker = bool(os.environ.get("SIGNAL_TRACKER_URL", "").strip())
     data_src = getattr(cfg, "DATA_SOURCE", "yfinance")
     symbol = getattr(cfg, "SYMBOL_GOLD", "GC=F")
-    logger.info("[黃金訊號] 數據源=%s 符號=%s 開始拉取 1h K 線", data_src, symbol)
+    logger.info(
+        "[黃金訊號] 策略=%s tracker=%s 數據源=%s 符號=%s",
+        _gold_ver, "on" if _gold_use_tracker else "off", data_src, symbol,
+    )
     df_1h = fetch_ohlc(cfg.SYMBOL_GOLD, interval="1h", period="5d", config=cfg)
     if df_1h is None or df_1h.empty:
         logger.warning("[黃金訊號] 黃金 1h 數據為空 (df is None=%s, empty=%s)，本輪不推播",
@@ -18744,13 +18866,33 @@ def run_gold_signal():
         logger.warning("[黃金訊號] 黃金 1h 數據不足 24 根 (目前 %s 根)，本輪不推播", n_rows)
         return
     # 先算 ATR/RSI 等，讓波動率與 RSI 濾網在 apply_filters 時有欄位可用
+    _use_v2 = _gold_ver in ("v2", "hunter", "hunter_v2")
     df_1h = add_indicators(
         df_1h,
         atr_period=cfg.ATR_PERIOD,
         ma_period=cfg.MA_TREND_PERIOD,
         sma_fast=cfg.SMA_FAST,
         sma_slow=cfg.SMA_SLOW,
+        with_ema=_use_v2,
+        with_adx=_use_v2,
     )
+    df_15m = None
+    if _use_v2:
+        df_15m = fetch_ohlc(cfg.SYMBOL_GOLD, interval="15m", period="5d", config=cfg)
+        if df_15m is not None and not df_15m.empty:
+            df_15m = add_indicators(
+                df_15m,
+                atr_period=cfg.ATR_PERIOD,
+                ma_period=cfg.MA_TREND_PERIOD,
+                sma_fast=cfg.SMA_FAST,
+                sma_slow=cfg.SMA_SLOW,
+                with_ema=True,
+                with_adx=False,
+            )
+            logger.info("[黃金訊號] 15m K 線 OK，共 %s 根", len(df_15m))
+        else:
+            logger.warning("[黃金訊號] v2 需要 15m 數據，本輪跳過")
+            return
     logger.info("[黃金訊號] 黃金 1h 數據 OK，共 %s 根 | 時間範圍: %s ~ %s",
                 n_rows, df_1h.index.min() if hasattr(df_1h.index, 'min') and len(df_1h) else "N/A", df_1h.index.max() if hasattr(df_1h.index, 'max') and len(df_1h) else "N/A")
 
@@ -18805,6 +18947,14 @@ def run_gold_signal():
     else:
         today_trade_date = now_utc.strftime("%Y-%m-%d")
 
+    if _gold_use_tracker:
+        state = _sync_gold_state_from_tracker(state, today_trade_date, _save_gold_state)
+        _tracker_active = _gold_tracker_active_signals()
+        if _tracker_active:
+            _sides = ", ".join(sorted({str(s.get("side") or "?") for s in _tracker_active}))
+            logger.info("[黃金訊號] tracker 仍有未結黃金倉（%s），本輪不開新進場", _sides)
+            return
+
     # 跨日自動清除：ORB 為日內策略，前一交易日未觸及 TP/SL 的殘留倉位不應封鎖新一天偵測
     _active_trade_date = state.get("trade_date")
     if state.get("last_direction") and _active_trade_date and _active_trade_date != today_trade_date:
@@ -18812,8 +18962,8 @@ def run_gold_signal():
             "[黃金訊號] 前一交易日（%s）%s 倉 TP/SL 未觸及，跨日自動清除過期狀態，今日（%s）重新偵測",
             _active_trade_date, state.get("last_direction"), today_trade_date,
         )
-        state = {}
-        _save_gold_state({})
+        state = _gold_preserve_v2_state(state)
+        _save_gold_state(state)
 
     last_bar_row = df_1h.iloc[-1]
     bar_high = float(last_bar_row["High"])
@@ -18825,7 +18975,13 @@ def run_gold_signal():
     last_entry = state.get("last_entry")
     last_tp1_hit = state.get("last_tp1_hit", False)
 
-    if last_dir and last_sl is not None and last_tp2 is not None and last_entry is not None:
+    if (
+        not _gold_use_tracker
+        and last_dir
+        and last_sl is not None
+        and last_tp2 is not None
+        and last_entry is not None
+    ):
         hit = None
         if last_dir == "long":
             if bar_high >= last_tp2:
@@ -18872,9 +19028,13 @@ def run_gold_signal():
     if cfg.USE_DXY_FILTER:
         df_dxy = fetch_ohlc(cfg.SYMBOL_DXY, interval="1h", period="5d", config=None)
         logger.info("[黃金訊號] DXY 濾網用數據: %s 根", len(df_dxy) if df_dxy is not None and not df_dxy.empty else 0)
-    signal = compute_signal(df_1h, cfg)
+    if _use_v2:
+        from strategy_v2 import compute_signal_v2
+        signal = compute_signal_v2(df_1h, df_15m, cfg, state=state, now=now_utc)
+    else:
+        signal = compute_signal(df_1h, cfg)
     if signal is None:
-        logger.info("[黃金訊號] 本輪無符合條件的 ORB+MA 訊號，跳過推播")
+        logger.info("[黃金訊號] 本輪無符合條件的訊號（%s），跳過推播", _gold_ver)
         # ── 大幅波動日提醒：當日波動 ≥ 3× ATR 但 ORB 未觸發時，推播一則警示 ─────────
         try:
             from gold_signal_bot.indicators import add_indicators as _gold_add_ind  # noqa
@@ -18912,7 +19072,7 @@ def run_gold_signal():
                     )
                     if jackbot_universal_pre_send_gatekeeper("gold_signal_volatility", text=_vol_msg):
                         logger.info("[黃金訊號] 大幅波動提醒推播（%.1f× ATR）", _vol_mult)
-                        send_telegram_message(_vol_msg, TG_THREAD_IDS.get("gold_signal", 254), parse_mode="Markdown")
+                        send_telegram_message(_vol_msg, TG_THREAD_IDS.get("gold_signal", 254), parse_mode="Markdown", disable_notification=True)
         except Exception as _ve:
             logger.warning("[黃金訊號] 大幅波動檢查失敗（繼續執行）: %s", _ve)
         # 可選：無訊號也發「盤勢快報」，避免頻道長時間無動靜（預設開啟，帶冷卻避免洗版）
@@ -18985,7 +19145,7 @@ def run_gold_signal():
                     f"_本輪 ORB 未觸發進場條件，繼續等待破位（冷卻 {_no_sig_cd_min} 分鐘）_"
                 )
                 if jackbot_universal_pre_send_gatekeeper("gold_signal_info", text=_neutral_msg):
-                    send_telegram_message(_neutral_msg, TG_THREAD_IDS.get("gold_signal", 254), parse_mode="Markdown")
+                    send_telegram_message(_neutral_msg, TG_THREAD_IDS.get("gold_signal", 254), parse_mode="Markdown", disable_notification=True)
                     _save_no_signal_state({"last_push_ts": now_ts})
         return
     logger.info("[黃金訊號] 取得訊號: 方向=%s 進場=%s", signal.direction, signal.entry)
@@ -19005,6 +19165,21 @@ def run_gold_signal():
     # 同向持倉中：不重複推
     if state.get("last_direction") == signal.direction:
         logger.info("[黃金訊號] 同向訊號重疊（目前仍有 %s 倉），跳過推播", signal.direction)
+        return
+    _last_entry = state.get("last_entry")
+    _sig_atr = float(getattr(signal, "atr", 0) or 0)
+    _last_push = float(state.get("last_push_ts") or 0)
+    if (
+        _last_entry is not None
+        and _sig_atr > 0
+        and _last_push > 0
+        and (now_utc.timestamp() - _last_push) < 4 * 3600
+        and abs(float(signal.entry) - float(_last_entry)) < _sig_atr * 0.35
+    ):
+        logger.info(
+            "[黃金訊號] 進場價與上筆過近（Δ=%.2f < 0.35×ATR），跳過重複喊單",
+            abs(float(signal.entry) - float(_last_entry)),
+        )
         return
     # 反向持倉中：目前有一筆尚未結案的倉位，不開反向新倉（避免訊號矛盾且覆蓋 TP/SL 追蹤）
     active_direction = state.get("last_direction")
@@ -19034,9 +19209,10 @@ def run_gold_signal():
     keyboard = get_gold_chart_keyboard()
     sent = False
     if jackbot_universal_pre_send_gatekeeper("gold_signal", text=msg):
-        sent = send_telegram_message(msg, thread_id, parse_mode=None, reply_markup=keyboard)
+        sent = send_telegram_message(msg, thread_id, parse_mode="HTML", reply_markup=keyboard)
     if sent:
-        _save_gold_state({
+        _new_state = {
+            **_gold_preserve_v2_state(state),
             "last_direction": signal.direction,
             "last_entry": signal.entry,
             "last_sl": signal.sl,
@@ -19044,8 +19220,24 @@ def run_gold_signal():
             "last_tp2": signal.tp2,
             "last_tp1_hit": False,
             "last_time_utc": now_utc.isoformat(),
+            "last_push_ts": now_utc.timestamp(),
             "trade_date": today_trade_date,
-        })
+            "strategy": _gold_ver,
+        }
+        if _use_v2:
+            _cnt = int(state.get("v2_signal_count") or 0)
+            if state.get("v2_trade_date") != today_trade_date:
+                _cnt = 0
+            _new_state.update({
+                "v2_trade_date": today_trade_date,
+                "v2_signal_count": _cnt + 1,
+                f"last_{signal.direction}_ts": now_utc.timestamp(),
+            })
+            _setup = getattr(signal, "setup", "") or ""
+            _sess = getattr(signal, "session_label", "") or ""
+            if _setup == "session_orb" and _sess:
+                _new_state[f"v2_orb_{_sess}_{signal.direction}_{today_trade_date}"] = True
+        _save_gold_state(_new_state)
     logger.info("[黃金訊號] 推播完成 | thread_id=%s 發送結果=%s", thread_id, sent)
 
 

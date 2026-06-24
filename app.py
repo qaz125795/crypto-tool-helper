@@ -169,7 +169,7 @@ _atexit.register(_coordinated_shutdown)
 
 # ── 任務對應表 ────────────────────────────────────────────────────────────────
 TASK_FUNCTIONS = {
-    "crit_radar":           run_crit_radar_once,
+    # [2026-06-24] 爆擊雷達已停用，從排程表移除（如需恢復：加回此列並設 CRIT_RADAR_ENABLED=1）
     "position_change":      fetch_position_change,
     "hyperliquid":          run_hyperliquid_monitor_once,
     "screener_board":       run_position_screener_board_once,
@@ -186,7 +186,6 @@ TASK_FUNCTIONS = {
 }
 
 DEFAULT_CRONS = {
-    "crit_radar":            "*/15 * * * *",
     "position_change":       "*/30 * * * *",
     "hyperliquid":           "5,35 * * * *",
     "screener_board":        "25 * * * *",
@@ -194,7 +193,7 @@ DEFAULT_CRONS = {
     "buying_power_monitor":  "20 * * * *",
     "liquidity_radar":       "50 * * * *",
     "altseason_radar":       "35 * * * *",
-    "gold_signal":           "0 * * * *",
+    "gold_signal":           "*/15 * * * *",
     "news":                  "*/5 * * * *",
     "economic_data":         "3,13,23,33,43,53 * * * *",
     "economic_data_preview": "10 0 * * *",
