@@ -143,3 +143,6 @@ fi
 log "完成。"
 log "Testnet 第一週：1 組 API + mm 策略即可；4 策略正式帶單再考慮多 slot。"
 log "戰情室前端：https://108.160.139.47/war-room/apps/p-6e6dee8f/"
+
+# war-room 容器若掛掉會 502，一併拉起
+docker compose up -d war-room 2>/dev/null || docker start platform-war-room 2>/dev/null || true
