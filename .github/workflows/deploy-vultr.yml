@@ -1,0 +1,47 @@
+name: Deploy Vultr
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'fr_sniper_push.py'
+      - 'frs_settle.py'
+      - 'arena_web/**'
+      - '百貨公司/services/gate-quant/**'
+      - '百貨公司/services/jackbot/fr_sniper_push.py'
+      - '百貨公司/services/jackbot/frs_settle.py'
+      - 'scripts/vultr_on_server.sh'
+      - '.github/workflows/deploy-vultr.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload deploy bundle
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER || 'root' }}
+          password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+          port: 22
+          source: "fr_sniper_push.py,frs_settle.py,arena_web,scripts/vultr_on_server.sh,百貨公司/services/gate-quant/backend/volume_runner,百貨公司/services/gate-quant/backend/app.py,百貨公司/services/gate-quant/VOLUME_RUNNER.md,百貨公司/services/jackbot/fr_sniper_push.py,百貨公司/services/jackbot/frs_settle.py"
+          target: "/root/deploy-staging"
+          strip_components: 0
+
+      - name: Run server deploy script
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_SSH_HOST }}
+          username: ${{ secrets.DEPLOY_SSH_USER || 'root' }}
+          password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+          port: 22
+          script: |
+            set -e
+            export EXTRA_SRC=/root/deploy-staging
+            export UNIFIED=/root/unified-platform
+            export GATE_TESTNET_KEY='${{ secrets.GATE_TESTNET_KEY }}'
+            export GATE_TESTNET_SECRET='${{ secrets.GATE_TESTNET_SECRET }}'
+            bash /root/deploy-staging/scripts/vultr_on_server.sh

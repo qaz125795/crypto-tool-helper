@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <script>
+    (function () {
+      var p = location.pathname, base;
+      if (/\.html?$/i.test(p)) base = p.replace(/[^/]*$/, "");
+      else base = p.replace(/\/?$/, "/");
+      document.write('<base href="' + base + '">');
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex,nofollow,noarchive" />
+  <title>代理小金庫 | Gate 刷量試算</title>
+  <script src="js/access_guard.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root{
+      --bg:#0a0b10;--bg2:#0f111a;--panel:#13161f;--panel2:#171b26;
+      --line:#232838;--line2:#2c3346;
+      --txt:#eef1f8;--mut:#9aa3b8;--mut2:#6b7385;
+      --grn:#36d399;--grn-d:#1d8f68;--red:#ff6b6b;--amb:#ffce5c;--blu:#5b8cff;
+      --shadow:0 18px 50px rgba(0,0,0,.45);
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:"Sora",system-ui,-apple-system,"Segoe UI","PingFang TC",sans-serif;
+      background:radial-gradient(120% 80% at 50% -10%, #161a2b 0%, var(--bg) 55%);
+      color:var(--txt);min-height:100vh;line-height:1.6;-webkit-font-smoothing:antialiased}
+    .mono{font-family:"DM Mono",ui-monospace,monospace}
+    a{color:inherit;text-decoration:none}
+    .wrap{max-width:1180px;margin:0 auto;padding:0 18px}
+    .nav{position:sticky;top:0;z-index:40;backdrop-filter:blur(12px);background:rgba(10,11,16,.72);border-bottom:1px solid var(--line)}
+    .nav-in{max-width:1180px;margin:0 auto;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px}
+    .logo .dot{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--amb),#e08b3a);display:grid;place-items:center;font-size:14px}
+    .nav-links{display:flex;gap:8px;flex-wrap:wrap}
+    .nav-links a{font-size:13.5px;color:var(--mut);padding:7px 12px;border-radius:9px;border:1px solid transparent;transition:.15s}
+    .nav-links a:hover{color:var(--txt);background:var(--panel);border-color:var(--line)}
+
+    .hero{padding:40px 0 8px}
+    .eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--amb);
+      border:1px solid #9c7d2c;background:rgba(255,206,92,.08);padding:5px 12px;border-radius:999px;font-weight:600}
+    .hero h1{font-size:clamp(26px,4.4vw,40px);font-weight:800;line-height:1.14;margin:16px 0 10px;letter-spacing:-.5px}
+    .hero p{max-width:680px;color:var(--mut);font-size:15px}
+    .prep-banner{margin:16px 0 0;padding:14px 16px;border-radius:14px;border:1px solid #36508f;background:rgba(91,140,255,.08);font-size:13px;line-height:1.85;color:#9aa3b8}
+    .prep-banner b{color:#eef1f8}
+
+    .card{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);border-radius:18px;padding:20px;margin:18px 0}
+    .card h2{font-size:18px;font-weight:700;margin-bottom:4px}
+    .card .hint{font-size:12.5px;color:var(--mut2);margin-bottom:14px}
+
+    .settings{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:14px}
+    .field label{display:block;font-size:12.5px;color:var(--mut);margin-bottom:8px}
+    .field .v{font-family:"DM Mono",monospace;color:var(--amb);font-weight:600}
+    .field input[type=range]{width:100%;accent-color:var(--amb)}
+    .field select,.field input[type=number]{width:100%;background:#0e1220;border:1px solid var(--line2);color:#fff;border-radius:10px;padding:10px 12px;font-size:14px;font-family:"DM Mono",monospace}
+    @media(max-width:780px){.settings{grid-template-columns:1fr}}
+
+    .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:4px}
+    .strat{position:relative;background:rgba(0,0,0,.22);border:1px solid var(--line);border-radius:16px;padding:16px;cursor:pointer;transition:.16s}
+    .strat:hover{border-color:var(--line2);transform:translateY(-2px)}
+    .strat.sel{border-color:var(--amb);box-shadow:0 0 0 1px var(--amb) inset,0 10px 30px rgba(255,206,92,.08)}
+    .strat .top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+    .strat .nm{font-size:16px;font-weight:700}
+    .ot{font-size:11px;font-weight:700;padding:4px 9px;border-radius:999px;white-space:nowrap}
+    .ot.maker{background:rgba(54,211,153,.14);border:1px solid var(--grn-d);color:#9af0cd}
+    .ot.taker{background:rgba(91,140,255,.14);border:1px solid #36508f;color:#bcd0ff}
+    .strat .mk{font-size:12.5px;color:var(--mut);margin-top:6px}
+    .strat .row{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--mut2)}
+    .strat .row b{color:var(--txt);font-family:"DM Mono",monospace;font-weight:600}
+    .strat .rk{font-size:12px;color:var(--amb);margin-top:10px}
+    .pick{position:absolute;top:14px;right:14px;display:none}
+    .strat.sel .pick{display:block;color:var(--amb);font-weight:800}
+    @media(max-width:680px){.grid{grid-template-columns:1fr}}
+
+    .result{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:6px}
+    .res{background:rgba(0,0,0,.25);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+    .res .lab{font-size:12px;color:var(--mut2)}
+    .res .num{font-family:"DM Mono",monospace;font-size:21px;font-weight:600;margin-top:6px}
+    .res .sub{font-size:11.5px;color:var(--mut2);margin-top:4px}
+    .good{color:var(--grn)}.bad{color:var(--red)}.warn{color:var(--amb)}.blu{color:var(--blu)}
+    @media(max-width:780px){.result{grid-template-columns:repeat(2,1fr)}}
+    @media(max-width:480px){.result{grid-template-columns:1fr}}
+
+    table.t{width:100%;border-collapse:collapse;margin-top:6px;font-size:13px;color:#eef1f8}
+    table.t th,table.t td{border:1px solid var(--line);padding:9px 10px;text-align:center}
+    table.t th{background:rgba(40,46,64,.6);color:var(--amb);font-weight:600}
+    table.t tr.on td{background:rgba(255,206,92,.08)}
+    table.t td.l{text-align:left}
+
+    .assume{margin:8px 0 0;padding-left:18px;color:var(--mut);font-size:13px;line-height:1.85}
+    .assume b{color:var(--txt)}
+    .disc{margin:30px 0 60px;padding:16px 18px;border:1px dashed var(--line2);border-radius:14px;color:var(--mut2);font-size:12.5px;line-height:1.8}
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <div class="nav-in">
+      <div class="logo"><span class="dot">💼</span> 代理小金庫</div>
+      <div class="nav-links">
+        <a href="index.html">擂台</a>
+        <a href="fund.html">實盤策略池</a>
+        <a href="vip.html">VIP 實驗室</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="wrap">
+      <span class="eyebrow">● Gate 真實費率 · 保守試算（不誇大）</span>
+      <h1>挑一個刷量策略，<br>套上你的費率，看一個月薄利或打平</h1>
+      <p>策略全部用<b>限價單(Maker)</b>——這是能打平／薄利的關鍵；市價單(Taker)費率高 2~3 倍，大多會倒貼。費率對齊 Gate 永續官方檔位（最高 <b>VIP 10</b>），反佣最高 <b>80%</b>。淨利＝極薄的價差/資費毛收益 − 扣完反佣的手續費，<b>VIP 越高、反佣越高才容易由負轉正</b>。數字皆保守估、回撤刻意多抓。</p>
+      <div class="prep-banner">
+        <b>🧪 實盤帶單準備中（Testnet 驗證週）</b><br>
+        後端已部署 <b>Volume Runner</b>（雙邊掛單造市 · Maker 往返）。目前階段：<b>Gate Testnet dry-run → 小資金實測 → 約一週後開放帶單號</b>。
+        本頁試算僅供代理規劃；真實成交 edge 以 Testnet 日報為準。
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="card">
+      <h2>① 設定你的條件</h2>
+      <p class="hint">本金、VIP 檔位、反佣比例。VIP 檔位決定 maker/taker 費率，反佣決定能回收多少手續費。</p>
+      <div style="background:rgba(91,140,255,.07);border:1px solid #36508f;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:12.5px;color:#bcd0ff;line-height:1.8">
+        <b style="color:#fff">金額單位先講清楚（合約都有槓桿）：</b><br>
+        ・<b>保證金（本金）</b>＝你實際投入的錢，單位 USDT。<br>
+        ・<b>名目持倉價值</b>＝保證金 × 槓桿，這才是合約「一筆單實際控制的部位大小」。<br>
+        ・<b>名目交易量</b>＝所有開倉＋平倉的名目價值加總，刷量算的是這個，不是你的本金。<br>
+        ・舉例：保證金 1,000 USDT 開 10 倍槓桿 → 單筆名目持倉 = 10,000 USDT。<b style="color:#ffce5c">槓桿越高、部位越大，爆倉風險也等比放大。</b>
+      </div>
+      <div class="settings">
+        <div class="field">
+          <label>投入保證金（USDT，本金） <span id="v-cap" class="v">10,000 USDT</span></label>
+          <input id="i-cap" type="range" min="1000" max="500000" step="1000" value="10000" />
+        </div>
+        <div class="field">
+          <label>Gate VIP 檔位（合約）</label>
+          <select id="i-vip"></select>
+        </div>
+        <div class="field">
+          <label>代理返佣比例 <span id="v-rebate" class="v">70%</span></label>
+          <input id="i-rebate" type="range" min="0" max="80" step="5" value="70" />
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>② 挑一個你喜歡的策略</h2>
+      <p class="hint">點卡片選擇。選好後可在下方<b>自行調槓桿</b>：預設＝安全上限（資金利用率最大、最壞虧損壓在 50% 保證金內），大資金想更穩可往下調。Maker = 掛限價單（費率低，能打平/薄利的關鍵）。</p>
+      <div class="grid" id="strat-grid"></div>
+    </section>
+
+    <section class="card">
+      <h2>③ 這個月會變怎樣（保守估）</h2>
+      <p class="hint" id="picked-name">尚未選擇策略</p>
+      <div class="field" style="margin:0 0 16px">
+        <label>槓桿（可調，預設＝安全上限） <span id="v-lev" class="v">-</span> <span id="lev-note" style="font-size:12px;color:#6b7385"></span></label>
+        <input id="i-lev" type="range" min="1" max="50" step="1" value="10" />
+      </div>
+      <div class="result">
+        <div class="res"><div class="lab">預估月淨利（已扣費＋反佣，USDT）</div><div id="r-net" class="num good">-</div><div class="sub" id="r-net-sub">-</div></div>
+        <div class="res"><div class="lab">當月名目交易量（USD）</div><div id="r-vol" class="num blu">-</div><div class="sub">保證金 × 槓桿 × 換手 × 雙邊 × 30 天</div></div>
+        <div class="res"><div class="lab">單筆名目持倉價值（USDT）</div><div id="r-pos" class="num blu">-</div><div class="sub" id="r-pos-sub">保證金 × 槓桿</div></div>
+        <div class="res"><div class="lab">策略毛收益（價差/資費）</div><div id="r-edge" class="num good">-</div><div class="sub" id="r-edge-sub">-</div></div>
+        <div class="res"><div class="lab">手續費淨支出（已扣反佣）</div><div id="r-fee" class="num bad">-</div><div class="sub" id="r-fee-sub">-</div></div>
+        <div class="res"><div class="lab">最壞虧損（佔保證金，已多抓 1.3×）</div><div id="r-dd" class="num warn">-</div><div class="sub" id="r-dd-sub">含槓桿的最壞情況，非預測</div></div>
+      </div>
+      <ul class="assume" id="assume"></ul>
+    </section>
+
+    <section class="card">
+      <h2>Gate 永續合約費率對照（官方）</h2>
+      <p class="hint">VIP 0–8 為官方公告值；VIP 9–10 標 ≈ 為極速費率近似，以你帳號實際顯示為準。</p>
+      <div style="background:rgba(54,211,153,.06);border:1px solid #1d8f68;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:12.5px;color:#a8e8cc;line-height:1.85">
+        <b style="color:#fff">「費率」和「反佣」是兩回事，API 還有第三套：</b><br>
+        ・<b>費率（手續費）</b>＝開平倉付給交易所的錢，照 VIP 等級走，<b>API 下單與網頁完全相同</b>。<br>
+        ・<b>反佣</b>＝代理／經紀商佣金，從產生的手續費「回收一部分」，跟 VIP 費率分開算，最高 80%。<br>
+        ・<b>做市商(MM)專案（需另外申請）</b>：合格做市商的掛單(maker)可拿到<b>負費率（最低約 −0.015%）</b>＝掛單成交不但不付費、還倒拿返點；MM 等級決定 maker、VIP 等級決定 taker，兩者並行。<br>
+        ・<b>經紀商(Broker) API</b>：經紀商可在 Gate 核定範圍內自訂子帳戶費率與佣金比例。<br>
+        <span style="color:#ffce5c">→ 本試算用「一般 VIP maker 費率」保守計；若你有 MM 負費率或經紀商自訂費率，實際會比這裡更好。</span>
+      </div>
+      <table class="t" id="vip-table">
+        <thead><tr><th>VIP</th><th>30 日合約量(USD)</th><th>Maker（限價）</th><th>Taker（市價）</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <div class="disc">
+      <b style="color:#ff8a8a;font-size:13.5px">⚠️ 新手必讀（看不懂就先不要做）</b><br><br>
+      ① <b>這是「薄利／打平」策略，不是高收益。</b>真正的產出是「交易量」（用來衝 VIP 等級與反佣資格）；淨利很薄，靠的是極小的價差/資費，<b>不是穩賺</b>。<br>
+      ② <b>賺不賺錢高度取決於 VIP 等級與反佣%：</b>VIP 越高（費率越低）、反佣越高（最高 80%）才容易由負轉正；<b>低 VIP 或改用市價單(taker)就會倒貼</b>。<br>
+      ③ <b>毛收益是保守估、非保證。</b>行情不利、價差被吃、單邊走勢時，實際可能更低甚至虧損。<br>
+      ④ <b>槓桿等比放大爆倉風險。</b>例如 5 倍槓桿、幣價反向 20% 保證金就歸零。「最壞虧損」已用槓桿換算並 ×1.3 緩衝，極端行情仍可能更慘。<br>
+      ⑤ 數字全是<b>模型估算</b>，非實盤對帳、不構成投資建議。合約可能損失全部本金，請只用賠得起的錢，盈虧自負。
+    </div>
+  </main>
+
+  <script src="js/volume_live.js"></script>
+</body>
+</html>

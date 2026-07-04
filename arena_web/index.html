@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <!-- 動態 base：無論網址結尾有無斜線，都讓 css/js/data 相對路徑指向正確目錄 -->
+  <script>
+    (function () {
+      var p = location.pathname, base;
+      if (/\.html?$/i.test(p)) base = p.replace(/[^/]*$/, "");
+      else base = p.replace(/\/?$/, "/");
+      document.write('<base href="' + base + '">');
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex,nofollow,noarchive" />
+  <title>影子交易擂台 ｜ 誰先爬到 20000</title>
+  <script src="js/access_guard.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=DotGothic16&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- 像素掃描線濾鏡（固定、不吃滾動效能）-->
+  <div class="scanlines" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-badge">⛰</span>
+        <div class="brand-text">
+          <h1>影子交易擂台</h1>
+          <p>10,000U · 5x 槓桿 · 晉級賽開打</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <a class="btn btn-vip" href="vip.html">🧪 VIP 實驗室</a>
+        <a class="btn btn-vip" href="fund.html">🧭 實盤策略池</a>
+        <a class="btn btn-vip" href="volume.html">💼 代理小金庫</a>
+        <button id="tg-connect" class="btn btn-gold" type="button">📲 串接我的 TG 推播</button>
+        <button id="refresh" class="btn btn-wood" type="button">↻ 重新整理</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 爬山主視覺 -->
+  <section class="mountain" id="mountain">
+    <div class="peak-flag">
+      <span class="peak-label">🏁 終點 20,000U</span>
+    </div>
+    <div class="base-label">🚩 起點 10,000U · 5x</div>
+    <div class="climbers" id="climbers"><!-- JS 注入爬山角色 --></div>
+    <div class="mountain-loading" id="mountain-loading">載入戰況中…</div>
+  </section>
+
+  <!-- 賽制 / 晉級 / 淘汰 -->
+  <section class="tournament" id="tournament">
+    <div class="tour-panel">
+      <div class="tour-head">
+        <h2 class="tour-title">賽制總覽</h2>
+        <div class="tour-phase-pill" id="phase-pill">載入中…</div>
+      </div>
+      <div class="tour-phases" id="tour-phases"></div>
+      <div class="tour-tiers" id="tour-tiers"></div>
+      <div class="tour-stats" id="tour-stats"></div>
+      <details class="tour-rules">
+        <summary>📜 晉級資格與淘汰規則</summary>
+        <div class="tour-rules-body" id="tour-rules-body"></div>
+      </details>
+    </div>
+  </section>
+
+  <main class="board">
+    <div class="board-head">
+      <h2>戰況快報</h2>
+      <span class="board-meta" id="board-meta"></span>
+    </div>
+
+    <div class="tier-tabs" id="tier-tabs"></div>
+    <div class="tabs" id="tabs"><!-- JS 注入流派分頁 --></div>
+
+    <div class="grid" id="grid">
+      <!-- JS 注入選手卡 -->
+      <div class="state" id="state-loading">
+        <div class="state-pixel">⏳</div><p>正在連線擂台…</p>
+      </div>
+    </div>
+  </main>
+
+  <footer class="foot">
+    <p>所有數字為 <b>實盤校準值</b>（已扣手續費 + 滑點）× <b>5 倍槓桿</b> 帳面損益</p>
+    <p>固定每筆風險 100U（SL 帳面 −500U）· 目標權益 20,000U · 出場照各選手 SL/TP</p>
+    <p class="foot-src">📊 數據來源：Gate.io 即時 K 線 · CoinGlass 籌碼 · <b>Tardis.dev</b> 歷史回測檔</p>
+    <p class="foot-warn">⚠️ 影子模擬績效（系統未實際下單），僅供觀戰研究，<b>不構成任何投資建議</b>。選手倉位唯讀，網站絕不干涉交易。依此操作之盈虧由使用者自負。</p>
+  </footer>
+
+  <!-- 選手詳情 -->
+  <div class="modal-backdrop" id="modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-name">
+      <button class="modal-close" id="modal-close" aria-label="關閉">✕</button>
+      <div class="modal-body" id="modal-body"><!-- JS 注入 --></div>
+    </div>
+  </div>
+
+  <!-- TG 串接說明 -->
+  <div class="modal-backdrop" id="tg-modal" hidden>
+    <div class="modal modal-sm" role="dialog" aria-modal="true">
+      <button class="modal-close" id="tg-close" aria-label="關閉">✕</button>
+      <div class="tg-panel">
+        <div class="tg-icon">📲</div>
+        <h3>把戰況推到你的 Telegram</h3>
+        <ol class="tg-steps">
+          <li>點下方按鈕開啟擂台 Bot</li>
+          <li>按 <b>/start</b> 或 <b>📖 新手教學</b></li>
+          <li>選 <b>🔔 追蹤通知</b> 挑你想跟的選手</li>
+          <li>按 <b>🧪 測試通知</b> 確認能收到推播</li>
+          <li>選手進場就會私訊你（只推追蹤的，不洗版）</li>
+        </ol>
+        <a class="btn btn-gold btn-block" id="tg-open" href="https://t.me/SSSshadowBOTBOT?start=guide" target="_blank" rel="noopener">開啟 @SSSshadowBOTBOT</a>
+        <p class="tg-note">只推你追蹤的選手，預設不洗版。</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/strategies.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

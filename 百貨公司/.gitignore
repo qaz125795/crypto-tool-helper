@@ -1,0 +1,30 @@
+﻿# 環境設定
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Telegram Sessions
+services/*/sessions/*.session
+services/*/sessions/*.session-journal
+services/gate-quant/*.session
+
+# 資料與狀態
+services/jackbot/data/
+services/jackbot/gold_signal_bot/gold_signal_state/
+*.pid
+*.log
+*.db
+
+# Next.js
+frontend/.next/
+frontend/node_modules/
+frontend/out/
+
+# IDE
+.cursor/
+.vscode/

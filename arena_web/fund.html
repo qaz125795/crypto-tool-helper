@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <script>
+    (function () {
+      var p = location.pathname, base;
+      if (/\.html?$/i.test(p)) base = p.replace(/[^/]*$/, "");
+      else base = p.replace(/\/?$/, "/");
+      document.write('<base href="' + base + '">');
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>實盤策略池 | 跟單中心</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root{
+      --bg:#0a0b10;--bg2:#0f111a;--panel:#13161f;--panel2:#171b26;
+      --line:#232838;--line2:#2c3346;
+      --txt:#eef1f8;--mut:#9aa3b8;--mut2:#6b7385;
+      --grn:#36d399;--grn-d:#1d8f68;--red:#ff6b6b;--amb:#ffce5c;--blu:#5b8cff;
+      --shadow:0 18px 50px rgba(0,0,0,.45);
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{
+      font-family:"Sora",system-ui,-apple-system,"Segoe UI","PingFang TC",sans-serif;
+      background:radial-gradient(120% 80% at 50% -10%, #161a2b 0%, var(--bg) 55%);
+      color:var(--txt);min-height:100vh;line-height:1.6;-webkit-font-smoothing:antialiased;
+    }
+    .mono{font-family:"DM Mono",ui-monospace,monospace}
+    a{color:inherit;text-decoration:none}
+    .wrap{max-width:1180px;margin:0 auto;padding:0 18px}
+
+    /* top nav */
+    .nav{position:sticky;top:0;z-index:40;backdrop-filter:blur(12px);
+      background:rgba(10,11,16,.72);border-bottom:1px solid var(--line)}
+    .nav-in{max-width:1180px;margin:0 auto;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:.2px}
+    .logo .dot{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--grn),#2bb3ff);display:grid;place-items:center;font-size:14px}
+    .nav-links{display:flex;gap:8px;flex-wrap:wrap}
+    .nav-links a{font-size:13.5px;color:var(--mut);padding:7px 12px;border-radius:9px;border:1px solid transparent;transition:.15s}
+    .nav-links a:hover{color:var(--txt);background:var(--panel);border-color:var(--line)}
+
+    /* hero */
+    .hero{padding:48px 0 18px}
+    .eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--grn);
+      border:1px solid var(--grn-d);background:rgba(54,211,153,.08);padding:5px 12px;border-radius:999px;font-weight:600}
+    .hero h1{font-size:clamp(28px,4.6vw,44px);font-weight:800;line-height:1.12;margin:18px 0 12px;letter-spacing:-.5px}
+    .hero h1 span{background:linear-gradient(120deg,var(--grn),#54c8ff);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+    .hero p{max-width:620px;color:var(--mut);font-size:15.5px}
+
+    .summary{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:28px 0 6px}
+    .sum{background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);border-radius:16px;padding:16px 18px}
+    .sum .k{font-size:12.5px;color:var(--mut2)}
+    .sum .v{font-size:24px;font-weight:800;margin-top:6px;letter-spacing:-.3px}
+    .sum .s{font-size:12px;color:var(--mut);margin-top:3px}
+
+    .sec-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:42px 0 16px}
+    .sec-head h2{font-size:21px;font-weight:700}
+    .sec-head p{font-size:13px;color:var(--mut2)}
+
+    /* strategy grid */
+    .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+    .card{position:relative;background:linear-gradient(180deg,var(--panel),var(--bg2));border:1px solid var(--line);
+      border-radius:18px;padding:20px;cursor:pointer;transition:.18s;overflow:hidden}
+    .card:hover{transform:translateY(-3px);border-color:var(--line2);box-shadow:var(--shadow)}
+    .card::after{content:"";position:absolute;inset:0;border-radius:18px;pointer-events:none;
+      background:radial-gradient(120% 60% at 100% 0%,rgba(91,140,255,.10),transparent 60%);opacity:0;transition:.18s}
+    .card:hover::after{opacity:1}
+    .c-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+    .tag{font-size:11px;font-weight:700;padding:4px 9px;border-radius:999px;letter-spacing:.3px}
+    .tag.core{background:rgba(54,211,153,.14);border:1px solid var(--grn-d);color:#9af0cd}
+    .tag.observe{background:rgba(255,206,92,.12);border:1px solid #9c7d2c;color:#ffe5a3}
+    .card.observe{border-color:#3a3428}
+    .c-code{font-family:"DM Mono",monospace;font-size:12px;color:var(--mut2)}
+    .c-name{font-size:18px;font-weight:700;margin:12px 0 4px}
+    .c-desc{font-size:13px;color:var(--mut);min-height:38px}
+    .spark{margin:14px 0 4px;height:54px}
+    .spark svg{width:100%;height:54px;display:block}
+    .c-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+    .m{background:rgba(0,0,0,.25);border:1px solid var(--line);border-radius:11px;padding:9px 10px;text-align:center}
+    .m .lab{font-size:10.5px;color:var(--mut2)}
+    .m .num{font-family:"DM Mono",monospace;font-size:15px;font-weight:600;margin-top:4px}
+    .c-foot{display:flex;align-items:center;justify-content:space-between;margin-top:16px}
+    .c-foot .cap{font-size:11.5px;color:var(--mut2)}
+    .view{font-size:13px;font-weight:600;color:var(--blu)}
+    .good{color:var(--grn)}.bad{color:var(--red)}.warn{color:var(--amb)}
+
+    /* modal */
+    .ov{position:fixed;inset:0;z-index:90;background:rgba(5,6,10,.72);backdrop-filter:blur(6px);
+      display:none;align-items:center;justify-content:center;padding:20px}
+    .ov.on{display:flex}
+    .modal{width:min(720px,100%);max-height:90vh;overflow:auto;background:var(--panel2);
+      border:1px solid var(--line2);border-radius:20px;box-shadow:var(--shadow)}
+    .m-hd{position:sticky;top:0;background:linear-gradient(180deg,var(--panel2),rgba(23,27,38,.92));
+      border-bottom:1px solid var(--line);padding:20px 22px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+    .m-hd h3{font-size:22px;font-weight:800}
+    .m-hd .sub{font-size:12.5px;color:var(--mut);margin-top:5px;font-family:"DM Mono",monospace}
+    .x{border:1px solid var(--line2);background:var(--panel);color:var(--txt);width:36px;height:36px;
+      border-radius:10px;font-size:18px;cursor:pointer;flex:none}
+    .x:hover{background:var(--bg2)}
+    .m-bd{padding:22px}
+    .m-bd .lead{color:var(--mut);font-size:14px;margin-bottom:18px}
+    .m-curve{background:rgba(0,0,0,.3);border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:18px}
+    .m-curve svg{width:100%;height:170px;display:block}
+    .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}
+    .st{background:rgba(0,0,0,.25);border:1px solid var(--line);border-radius:12px;padding:12px;text-align:center}
+    .st .lab{font-size:11px;color:var(--mut2)}
+    .st .num{font-family:"DM Mono",monospace;font-size:17px;font-weight:600;margin-top:5px}
+    .block{margin-bottom:18px}
+    .block h4{font-size:14px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+    .block h4::before{content:"";width:4px;height:14px;border-radius:2px;background:var(--grn)}
+    .block p,.block li{font-size:13.5px;color:var(--mut);line-height:1.75}
+    .block ul{padding-left:18px}
+    .risk h4::before{background:var(--amb)}
+    .m-ft{position:sticky;bottom:0;background:linear-gradient(0deg,var(--panel2),rgba(23,27,38,.92));
+      border-top:1px solid var(--line);padding:16px 22px;display:flex;align-items:center;gap:12px}
+    .m-ft .note{font-size:12px;color:var(--mut2);flex:1}
+    .follow{background:linear-gradient(135deg,var(--grn),#22b07a);color:#06231a;font-weight:800;
+      border:none;padding:13px 26px;border-radius:12px;font-size:15px;cursor:pointer;white-space:nowrap}
+    .follow:hover{filter:brightness(1.07)}
+
+    .disc{margin:46px 0 60px;padding:18px 20px;border:1px dashed var(--line2);border-radius:14px;
+      color:var(--mut2);font-size:12.5px;line-height:1.8}
+
+    @media (max-width:920px){.grid{grid-template-columns:repeat(2,1fr)}.summary{grid-template-columns:repeat(2,1fr)}.stat-grid{grid-template-columns:repeat(2,1fr)}}
+    @media (max-width:600px){.grid{grid-template-columns:1fr}.hero{padding:34px 0 8px}}
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <div class="nav-in">
+      <div class="logo"><span class="dot">📈</span> 實盤策略池</div>
+      <div class="nav-links">
+        <a href="index.html">擂台</a>
+        <a href="vip.html">VIP 實驗室</a>
+        <a href="volume.html">代理小金庫</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="wrap">
+      <span class="eyebrow">● 實盤候選 · 2 主力驗證 + 1 觀察</span>
+      <h1>真正<span>數據站得住</span>的策略<br>才放上來，一鍵跟單</h1>
+      <p>主力池只放「影子系統實際結案、確認正期望」的策略——目前 <b>資費反殺（多）+ 大戶純空（空）</b>。<b>黃金獵手</b>在觀察池（訊號已推播、樣本收集中，暫無自動跟單）。金額單位 <b>USDT</b>；主力年化已<b>打對折保守呈現</b>，實盤通常更低。</p>
+
+      <div class="summary" id="summary"></div>
+
+      <div style="margin-top:18px;background:rgba(91,140,255,.06);border:1px solid #2c3346;border-radius:14px;padding:14px 16px;font-size:13px;color:#9aa3b8;line-height:1.85">
+        <b style="color:#eef1f8">幾個你該先懂的名詞（合約有槓桿）：</b><br>
+        ・<b style="color:#cdd5e8">保證金（本金）</b>＝你投入的錢；<b style="color:#cdd5e8">名目持倉</b>＝保證金 × 槓桿，才是實際控制的部位。<br>
+        ・<b style="color:#cdd5e8">保守年化估</b>＝回測年化 × 0.5（扣過擬合與滑點），<b>不是保證收益</b>。<br>
+        ・<b style="color:#cdd5e8">最大回撤</b>＝歷史最深虧損幅度，實盤可能更深。<br>
+        ・<b style="color:#cdd5e8">名目容量</b>＝這支策略所有跟單者加總能承接的部位上限，不是單人要投的金額。<br>
+        ・訊號掃描範圍：<b style="color:#cdd5e8">Gate 全市場 USDT 永續</b>，過濾 24h 成交量後每輪最多約 <b style="color:#cdd5e8">320 檔</b>（主流＋小盤輪動），持續擴充中。
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="sec-head">
+      <h2>策略清單</h2>
+      <p>2 主力 + 1 觀察。主力可一鍵跟單；觀察池僅推播訊號</p>
+    </div>
+    <div class="grid" id="grid"></div>
+
+    <div class="disc">
+      <b style="color:#ff8a8a;font-size:13.5px">⚠️ 新手必讀</b><br><br>
+      ① 上面的績效是<b>回測／影子模擬</b>（90 天 grid-search＋樣本外驗證，已扣手續費與滑點），而且<b>年化已打對折</b>呈現。即便如此，<b>實盤通常還會比這更低</b>，請不要把它當成「一定賺這麼多」。<br>
+      ② <b>會虧損、會回撤。</b>表上的最大回撤是歷史值，真實行情可能更深。槓桿合約可能讓你<b>損失全部本金甚至爆倉</b>。<br>
+      ③ 跟單前先用<b>賠得起的小錢</b>試，搞懂部位大小與停損再加碼。看不懂就先別跟。<br>
+      ④ 本頁所有內容為研究參考，<b>不構成投資建議</b>，盈虧自負。
+    </div>
+  </main>
+
+  <!-- 詳情 modal -->
+  <div class="ov" id="ov">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="m-hd">
+        <div>
+          <h3 id="md-name">—</h3>
+          <div class="sub" id="md-sub">—</div>
+        </div>
+        <button class="x" id="md-x" aria-label="關閉">✕</button>
+      </div>
+      <div class="m-bd">
+        <p class="lead" id="md-lead">—</p>
+        <div class="m-curve"><svg id="md-curve" viewBox="0 0 1000 170" preserveAspectRatio="none"></svg></div>
+        <div class="stat-grid" id="md-stats"></div>
+        <div class="block"><h4>策略怎麼運作</h4><p id="md-logic">—</p></div>
+        <div class="block"><h4>本金與槓桿（怎麼跟）</h4><p id="md-cap">—</p></div>
+        <div class="block"><h4>適合對象</h4><p id="md-fit">—</p></div>
+        <div class="block risk"><h4>風險與注意事項</h4><ul id="md-risk"></ul></div>
+      </div>
+      <div class="m-ft">
+        <div class="note">跟單將開啟對應帶單帳號 / Bot，實際下單與資金仍在你自己的帳戶。</div>
+        <button class="follow" id="md-follow">一鍵跟單</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/fund.js"></script>
+</body>
+</html>

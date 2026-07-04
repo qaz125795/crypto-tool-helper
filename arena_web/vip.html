@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <script>
+    (function () {
+      var p = location.pathname, base;
+      if (/\.html?$/i.test(p)) base = p.replace(/[^/]*$/, "");
+      else base = p.replace(/\/?$/, "/");
+      document.write('<base href="' + base + '">');
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex,nofollow,noarchive" />
+  <title>VIP 實驗室 ｜ 持倉狙擊 TP 版本對照</title>
+  <script src="js/access_guard.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=DotGothic16&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body class="vip-body">
+  <div class="scanlines" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-badge">🧪</span>
+        <div class="brand-text">
+          <h1>VIP 實驗室</h1>
+          <p>持倉狙擊 · 多 TP 出場版本對照</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <a class="btn btn-wood" href="index.html">⬅ 回主擂台</a>
+        <a class="btn btn-vip" href="fund.html">🧭 實盤策略池</a>
+        <a class="btn btn-vip" href="volume.html">💼 代理小金庫</a>
+        <button id="refresh" class="btn btn-gold" type="button">↻ 重新整理</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="vip-intro">
+    <div class="vip-intro-card">
+      <div class="vip-subject" id="vip-subject">載入中…</div>
+      <p class="vip-explain">
+        同一批 <b>持倉狙擊</b> 訊號（OI-MTF 四框共振），<b>進場與停損完全相同</b>，
+        只改「停利 / 倉位管理」版本，跑真實 5m K 線回放，比哪一版最強。
+        數字已扣手續費＋滑點，5x 槓桿、每筆固定風險 100U。
+        <b>僅含 2026/6/5 優化完整落地後的訊號</b>；6/5 前舊版邏輯不納入，避免混算失真。
+        可再細拉開賽後、近 7/14/30 天或自訂區間對照。
+      </p>
+      <div class="vip-coverage" id="vip-coverage"></div>
+      <div class="vip-scope" id="vip-scope"></div>
+    </div>
+  </section>
+
+  <section class="vip-winner" id="vip-winner"></section>
+
+  <main class="board">
+    <div class="board-head">
+      <h2>版本排行榜</h2>
+      <span class="board-meta" id="vip-meta"></span>
+    </div>
+    <div class="vip-grid" id="vip-grid">
+      <div class="state"><div class="state-pixel">⏳</div><p>正在重放實驗數據…</p></div>
+    </div>
+  </main>
+
+  <footer class="foot">
+    <p>所有數字為 <b>實盤校準值</b>（已扣手續費 + 滑點）× <b>5 倍槓桿</b> 帳面損益</p>
+    <p>同訊號、同進場、同停損，<b>唯一變數＝停利/倉管版本</b>；72h 回放視窗。</p>
+    <p class="foot-warn">⚠️ 影子模擬研究，非投資建議。系統未實際下單。</p>
+  </footer>
+
+  <div class="modal-backdrop" id="modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <button class="modal-close" id="modal-close" aria-label="關閉">✕</button>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="js/vip.js"></script>
+</body>
+</html>

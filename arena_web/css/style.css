@@ -1,0 +1,416 @@
+/* 影子交易擂台 — 楓之谷/JRPG 像素風
+   配色鎖定：天空藍底 + 木質米色面板 + 金黃強調（單一強調色）。
+   形狀鎖定：全站 radius 0（像素硬角）。字體：Press Start 2P（英數）+ DotGothic16（日系像素）。 */
+
+:root {
+  --sky-1: #6cc4f5;
+  --sky-2: #3a9bd9;
+  --wood: #f3e3c0;        /* 木質面板 */
+  --wood-2: #e7cf9f;
+  --ink: #3a2614;         /* 深棕文字 */
+  --ink-soft: #6b4f33;
+  --line: #5b3d21;        /* 像素描邊深棕 */
+  --gold: #f5c542;        /* 唯一強調色 */
+  --gold-deep: #c8941f;
+  --grass: #67ad3e;
+  --win: #2e8b57;
+  --loss: #c0473b;
+  --shadow: 4px 4px 0 rgba(58, 38, 20, 0.55);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--sky-2);
+  color: var(--ink);
+  font-family: "DotGothic16", "Microsoft JhengHei", "PingFang TC", sans-serif;
+  image-rendering: pixelated;
+  -webkit-font-smoothing: none;
+}
+
+img, .mountain { image-rendering: pixelated; }
+
+h1, h2, h3, .pix { font-family: "Press Start 2P", "DotGothic16", monospace; }
+
+/* 掃描線濾鏡（固定層，不重繪滾動）*/
+.scanlines {
+  position: fixed; inset: 0; z-index: 90; pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom, rgba(0,0,0,0.06) 0, rgba(0,0,0,0.06) 1px, transparent 1px, transparent 3px);
+  mix-blend-mode: multiply; opacity: .5;
+}
+
+/* ── 頂列 ── */
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  background: var(--wood);
+  border-bottom: 4px solid var(--line);
+  box-shadow: 0 4px 0 rgba(58,38,20,.25);
+}
+.topbar-inner {
+  max-width: 1280px; margin: 0 auto; padding: 10px 16px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-badge {
+  width: 44px; height: 44px; display: grid; place-items: center;
+  background: var(--grass); border: 3px solid var(--line); font-size: 22px;
+  box-shadow: var(--shadow);
+}
+.brand-text h1 { margin: 0; font-size: 14px; color: var(--ink); line-height: 1.4; }
+.brand-text p { margin: 4px 0 0; font-size: 12px; color: var(--ink-soft); }
+.topbar-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ── 按鈕（像素硬角 + 硬陰影 + 按壓下沉）── */
+.btn {
+  font-family: "DotGothic16", sans-serif; font-size: 14px; font-weight: 700;
+  padding: 10px 14px; border: 3px solid var(--line); cursor: pointer;
+  box-shadow: var(--shadow); transition: transform .05s, box-shadow .05s;
+  color: var(--ink);
+}
+.btn:active { transform: translate(4px,4px); box-shadow: 0 0 0 rgba(0,0,0,0); }
+.btn-gold { background: var(--gold); }
+.btn-gold:hover { background: #ffd45c; }
+.btn-wood { background: var(--wood-2); }
+.btn-wood:hover { background: #f0dcb0; }
+.btn-block { display: block; width: 100%; text-align: center; text-decoration: none; }
+
+/* ── 爬山主視覺 ── */
+.mountain {
+  position: relative;
+  max-width: 1280px; margin: 16px auto 0;
+  aspect-ratio: 3 / 2; max-height: 560px;
+  background: url("../assets/mountain-bg.png") center/cover no-repeat, var(--sky-1);
+  border: 4px solid var(--line); box-shadow: var(--shadow); overflow: hidden;
+}
+.peak-flag { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 5; }
+.peak-label, .base-label {
+  font-family: "Press Start 2P", monospace; font-size: 9px;
+  background: var(--gold); color: var(--ink); padding: 5px 8px; border: 2px solid var(--line);
+  white-space: nowrap; box-shadow: 2px 2px 0 rgba(58,38,20,.5);
+}
+.base-label { position: absolute; bottom: 8px; left: 12px; z-index: 5; background: var(--wood); }
+.mountain-loading {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  background: rgba(58,155,217,.85); color: #fff; font-family: "Press Start 2P"; font-size: 12px;
+}
+
+/* 爬山角色 */
+.climbers { position: absolute; inset: 0; z-index: 4; }
+.climber {
+  position: absolute; transform: translate(-50%, 50%);
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  cursor: pointer; padding: 10px;
+}
+.climber:hover { z-index: 30; }
+.climber:hover .climber-tag { background: var(--gold); }
+.climber:hover .climber-avatar { transform: scale(1.22); filter: brightness(1.12); }
+.climber-avatar {
+  width: 32px; height: 32px; display: grid; place-items: center; font-size: 17px;
+  border: 3px solid var(--line); box-shadow: 2px 2px 0 rgba(58,38,20,.5);
+  transition: transform .1s, filter .1s;
+}
+.climber-tag {
+  font-family: "Press Start 2P", monospace; font-size: 8px;
+  background: var(--wood); color: var(--ink); padding: 2px 4px; border: 2px solid var(--line);
+  white-space: nowrap;
+}
+.climber-rank {
+  position: absolute; top: -10px; right: -10px; width: 18px; height: 18px;
+  background: var(--gold); border: 2px solid var(--line); font-size: 9px;
+  display: grid; place-items: center; font-family: "Press Start 2P";
+}
+
+/* ── 榜單 ── */
+.board { max-width: 1280px; margin: 24px auto 0; padding: 0 16px; }
+.board-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.board-head h2 { font-size: 16px; color: #fff; text-shadow: 2px 2px 0 var(--line); margin: 0; }
+.board-meta { font-size: 12px; color: #eaf6ff; }
+
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 14px 0 18px; }
+.tab {
+  font-family: "DotGothic16", sans-serif; font-size: 13px; font-weight: 700;
+  padding: 7px 12px; background: var(--wood-2); color: var(--ink-soft);
+  border: 3px solid var(--line); cursor: pointer; box-shadow: 2px 2px 0 rgba(58,38,20,.4);
+}
+.tab.active { background: var(--gold); color: var(--ink); }
+.tab:active { transform: translate(2px,2px); box-shadow: none; }
+
+.grid {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+/* 選手卡 */
+.card {
+  background: var(--wood); border: 4px solid var(--line); box-shadow: var(--shadow);
+  padding: 14px; cursor: pointer; transition: transform .06s, box-shadow .06s;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.card:hover { transform: translate(-2px,-2px); box-shadow: 6px 6px 0 rgba(58,38,20,.55); }
+.card:active { transform: translate(2px,2px); box-shadow: 2px 2px 0 rgba(58,38,20,.4); }
+.card-top { display: flex; align-items: center; gap: 10px; }
+.card-avatar {
+  width: 40px; height: 40px; display: grid; place-items: center; font-size: 20px;
+  border: 3px solid var(--line); flex: none;
+}
+.card-id { flex: 1; min-width: 0; }
+.card-code { font-family: "Press Start 2P"; font-size: 11px; }
+.card-name { font-size: 13px; color: var(--ink-soft); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-rank {
+  font-family: "Press Start 2P"; font-size: 12px; background: var(--gold);
+  border: 2px solid var(--line); padding: 4px 6px; flex: none;
+}
+
+.card-equity { display: flex; align-items: baseline; gap: 8px; }
+.eq-num { font-family: "Press Start 2P"; font-size: 15px; }
+.eq-roi { font-size: 13px; font-weight: 700; }
+.up { color: var(--win); }
+.down { color: var(--loss); }
+
+/* 進度條到 20000 */
+.prog { height: 16px; background: var(--wood-2); border: 2px solid var(--line); position: relative; overflow: hidden; }
+.prog-fill { height: 100%; background: var(--gold); border-right: 2px solid var(--gold-deep); }
+.prog-fill.full { background: var(--win); }
+
+.card-stats { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--ink-soft); }
+.card-stats b { color: var(--ink); font-family: "Press Start 2P"; font-size: 10px; }
+.tag-pill {
+  font-size: 11px; background: var(--grass); color: #fff; padding: 2px 6px;
+  border: 2px solid var(--line); align-self: flex-start;
+}
+.tag-pill.opt { background: var(--gold-deep); }
+
+/* 狀態 */
+.state { grid-column: 1 / -1; text-align: center; padding: 48px 0; color: #eaf6ff; }
+.state-pixel { font-size: 40px; }
+
+/* ── Modal ── */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 80; background: rgba(28,18,8,.72);
+  display: grid; place-items: center; padding: 16px;
+}
+.modal-backdrop[hidden] { display: none; }
+.modal {
+  position: relative; width: min(640px, 100%); max-height: 88vh; overflow: auto;
+  background: var(--wood); border: 4px solid var(--line); box-shadow: var(--shadow); padding: 20px;
+}
+.modal-sm { width: min(420px, 100%); }
+.modal-close {
+  position: absolute; top: 8px; right: 8px; width: 32px; height: 32px;
+  background: var(--loss); color: #fff; border: 3px solid var(--line);
+  font-family: "Press Start 2P"; font-size: 11px; cursor: pointer;
+}
+.modal-close:active { transform: translate(2px,2px); }
+
+.m-head { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+.m-avatar { width: 52px; height: 52px; display: grid; place-items: center; font-size: 26px; border: 3px solid var(--line); flex: none; }
+.m-title h2 { margin: 0; font-size: 14px; }
+.m-title .m-tag { font-size: 13px; color: var(--ink-soft); margin-top: 4px; }
+.m-logic { background: var(--wood-2); border: 3px solid var(--line); padding: 10px 12px; font-size: 13px; line-height: 1.7; margin: 12px 0; }
+.m-logic b { font-family: "Press Start 2P"; font-size: 9px; display: block; margin-bottom: 6px; color: var(--ink-soft); }
+.m-exit { background: #eef6ff; }
+.m-rev { background: #fff4e3; }
+
+.kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; }
+.kpi { background: #fff; border: 3px solid var(--line); padding: 8px; text-align: center; }
+.kpi .k-v { font-family: "Press Start 2P"; font-size: 12px; }
+.kpi .k-l { font-size: 11px; color: var(--ink-soft); margin-top: 4px; }
+
+.pos-title { font-family: "Press Start 2P"; font-size: 10px; margin: 16px 0 8px; }
+.pos { background: #fff; border: 3px solid var(--line); padding: 10px; margin-bottom: 8px; font-size: 13px; }
+.pos-row1 { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.pos-sym { font-family: "Press Start 2P"; font-size: 11px; }
+.side { font-size: 11px; padding: 2px 6px; border: 2px solid var(--line); }
+.side.long { background: #d7f0dc; color: var(--win); }
+.side.short { background: #f6dcd8; color: var(--loss); }
+.pos-r { font-family: "Press Start 2P"; font-size: 12px; }
+.pos-row2 { color: var(--ink-soft); margin-top: 6px; font-size: 12px; }
+.pos-empty { background: #fff; border: 3px dashed var(--line); padding: 16px; text-align: center; color: var(--ink-soft); }
+
+/* 歷史成交 */
+.hist { max-height: 320px; overflow: auto; border: 3px solid var(--line); background: #fff; }
+.hist-row {
+  display: grid; grid-template-columns: 74px 1fr 28px 74px 58px; gap: 6px; align-items: center;
+  padding: 7px 10px; border-bottom: 2px solid var(--wood-2); font-size: 12px;
+}
+.hist-row:last-child { border-bottom: 0; }
+.hist-date { color: var(--ink-soft); font-size: 11px; }
+.hist-sym { font-family: "Press Start 2P"; font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hist-side { width: 22px; height: 18px; display: grid; place-items: center; border: 2px solid var(--line); font-size: 11px; }
+.hist-side.long { background: #d7f0dc; color: var(--win); }
+.hist-side.short { background: #f6dcd8; color: var(--loss); }
+.hist-res { font-size: 11px; white-space: nowrap; }
+.hist-r { font-family: "Press Start 2P"; font-size: 9px; text-align: right; }
+.hist-r.rev { color: #b8801f; }
+@media (max-width: 640px) {
+  .hist-row { grid-template-columns: 60px 1fr 24px 56px 48px; gap: 4px; font-size: 11px; }
+}
+
+/* ── TG 面板 ── */
+.tg-panel { text-align: center; }
+.tg-icon { font-size: 40px; }
+.tg-panel h3 { font-size: 13px; margin: 8px 0 14px; }
+.tg-steps { text-align: left; font-size: 13px; line-height: 1.9; margin: 0 0 16px; padding-left: 20px; }
+.tg-note { font-size: 12px; color: var(--ink-soft); margin-top: 10px; }
+
+/* ── Footer ── */
+.foot { max-width: 1280px; margin: 28px auto; padding: 16px; text-align: center; color: #eaf6ff; font-size: 12px; line-height: 1.8; }
+.foot-src { color: #bfe0d0; }
+.foot-warn { color: #cfe6f5; }
+
+/* ── 賽制總覽 ── */
+.tournament { max-width: 1280px; margin: 18px auto 0; padding: 0 16px; }
+.tour-panel { background: var(--wood); border: 4px solid var(--line); box-shadow: var(--shadow); padding: 16px; }
+.tour-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.tour-title { font-size: 14px; margin: 0; color: var(--ink); }
+.tour-phase-pill {
+  font-family: "Press Start 2P", monospace; font-size: 9px; color: var(--ink);
+  background: var(--gold); border: 2px solid var(--line); padding: 6px 8px; box-shadow: 2px 2px 0 rgba(58,38,20,.5);
+}
+.tour-phase-pill.phase-elimination { background: #e89a5a; }
+.tour-phase-pill.phase-finals { background: var(--grass); color: #fff; }
+
+/* 三階段流程 */
+.tour-phases { display: flex; align-items: stretch; gap: 6px; flex-wrap: wrap; margin: 14px 0; }
+.phase-step { flex: 1 1 180px; background: var(--wood-2); border: 3px solid var(--line); padding: 10px; }
+.phase-step.active { background: var(--gold); box-shadow: inset 0 0 0 2px var(--gold-deep); }
+.phase-day { font-family: "Press Start 2P"; font-size: 9px; color: var(--ink-soft); }
+.phase-name { font-size: 14px; font-weight: 700; margin: 4px 0; }
+.phase-desc { font-size: 12px; color: var(--ink-soft); line-height: 1.6; }
+.phase-arrow { align-self: center; font-size: 16px; color: var(--ink-soft); }
+
+/* 分級卡 */
+.tour-tiers { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 8px 0 12px; }
+.tier-card { background: #fff; border: 3px solid var(--line); padding: 8px 10px; border-left-width: 7px; }
+.tier-card-head { display: flex; align-items: center; gap: 6px; }
+.tier-emoji { font-size: 16px; }
+.tier-name { font-weight: 700; font-size: 13px; }
+.tier-count { margin-left: auto; font-family: "Press Start 2P"; font-size: 11px; }
+.tier-req { font-size: 11px; color: var(--ink-soft); margin-top: 5px; line-height: 1.5; }
+.tier-card.tier-ace { border-left-color: var(--gold-deep); }
+.tier-card.tier-promoted { border-left-color: var(--win); }
+.tier-card.tier-candidate { border-left-color: #3a9bd9; }
+.tier-card.tier-watch { border-left-color: var(--ink-soft); }
+.tier-card.tier-warmup { border-left-color: #9a9a9a; }
+
+.tour-stats { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; padding-top: 8px; border-top: 2px dashed var(--wood-2); }
+.tour-stat b { font-family: "Press Start 2P"; font-size: 11px; }
+.tour-stat.danger b { color: var(--loss); }
+
+.tour-rules { margin-top: 10px; }
+.tour-rules summary { cursor: pointer; font-weight: 700; font-size: 13px; padding: 6px 0; }
+.tour-rules-body { font-size: 13px; line-height: 1.8; color: var(--ink-soft); }
+.tour-rules-body ul { margin: 6px 0; padding-left: 18px; }
+.tour-rules-body b { color: var(--ink); }
+
+/* ── 分級分頁 ── */
+.tier-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 14px 0 0; }
+.tier-tab {
+  font-family: "DotGothic16", sans-serif; font-size: 13px; font-weight: 700;
+  padding: 7px 11px; background: var(--wood); color: var(--ink-soft);
+  border: 3px solid var(--line); cursor: pointer; box-shadow: 2px 2px 0 rgba(58,38,20,.4);
+}
+.tier-tab b { font-family: "Press Start 2P"; font-size: 9px; margin-left: 4px; }
+.tier-tab.active { background: var(--gold); color: var(--ink); }
+.tier-tab.tier-tab-danger.active { background: var(--loss); color: #fff; }
+.tier-tab:active { transform: translate(2px,2px); box-shadow: none; }
+
+/* ── 卡片：分級徽章 + 方向 + 危險邊框 ── */
+.tier-badge {
+  align-self: flex-start; font-size: 11px; font-weight: 700;
+  padding: 2px 7px; border: 2px solid var(--line); background: var(--wood-2); color: var(--ink);
+}
+.tier-badge.tier-ace { background: var(--gold); }
+.tier-badge.tier-promoted { background: #cdebd6; color: var(--win); }
+.tier-badge.tier-candidate { background: #d6ecfb; color: #1f6da8; }
+.tier-badge.tier-watch { background: var(--wood-2); color: var(--ink-soft); }
+.tier-badge.tier-warmup { background: #e6e6e6; color: #666; }
+.tier-badge.tier-danger { background: #f6d8d4; color: var(--loss); }
+
+.card { border-left-width: 7px; }
+.card.tierline-ace { border-left-color: var(--gold-deep); }
+.card.tierline-promoted { border-left-color: var(--win); }
+.card.tierline-candidate { border-left-color: #3a9bd9; }
+.card.tierline-watch { border-left-color: var(--ink-soft); }
+.card.tierline-warmup { border-left-color: #9a9a9a; }
+.card.is-danger { border-left-color: var(--loss); background: #fbeeec; }
+
+.dir-pill { font-size: 10px; font-weight: 700; padding: 1px 5px; border: 2px solid var(--line); margin-left: 6px; vertical-align: middle; }
+.dir-pill.long { background: #d7f0dc; color: var(--win); }
+.dir-pill.short { background: #f6dcd8; color: var(--loss); }
+.dir-pill.both { background: #ece3ff; color: #6a4fd0; }
+
+/* ── RWD ── */
+@media (max-width: 640px) {
+  .mountain { aspect-ratio: 4 / 5; max-height: 460px; }
+  .kpis { grid-template-columns: repeat(2, 1fr); }
+  .brand-text h1 { font-size: 12px; }
+  .climber-tag, .climber-rank { display: none; }
+  .climber-avatar { width: 24px; height: 24px; font-size: 13px; }
+  .tour-phases { flex-direction: column; }
+  .phase-arrow { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn, .card, .climber { transition: none; }
+}
+
+/* ══ VIP 實驗室 ══ */
+.btn-vip { background: #6a4fd0; color: #fff; border: 3px solid var(--line); box-shadow: 2px 2px 0 rgba(58,38,20,.4); text-decoration: none; }
+.btn-vip:hover { filter: brightness(1.08); }
+.vip-body { background: linear-gradient(180deg, #2a2050 0%, #3a9bd9 100%); }
+
+.vip-intro { max-width: 1280px; margin: 18px auto 0; padding: 0 16px; }
+.vip-intro-card { background: var(--wood); border: 4px solid var(--line); box-shadow: var(--shadow); padding: 16px; }
+.vip-subject { font-size: 15px; color: var(--ink); margin-bottom: 8px; }
+.vip-code { font-family: "Press Start 2P"; font-size: 11px; background: var(--gold); border: 2px solid var(--line); padding: 2px 6px; margin-left: 4px; }
+.vip-explain { font-size: 13px; color: var(--ink-soft); line-height: 1.7; margin: 6px 0; }
+.vip-coverage { font-size: 12px; color: var(--ink); background: var(--wood-2); border: 2px solid var(--line); padding: 6px 10px; display: inline-block; }
+
+.vip-winner { max-width: 1280px; margin: 16px auto 0; padding: 0 16px; }
+.vip-winner-card { background: linear-gradient(135deg, #f5c542, #e7cf9f); border: 4px solid var(--line); box-shadow: var(--shadow); padding: 18px; text-align: center; }
+.vip-crown { font-family: "Press Start 2P"; font-size: 12px; color: var(--line); margin-bottom: 8px; }
+.vip-winner-name { font-size: 22px; font-weight: 700; color: var(--ink); }
+.vip-winner-rule { font-size: 13px; color: var(--ink-soft); margin: 4px 0 10px; }
+.vip-winner-kpis { display: flex; flex-wrap: wrap; gap: 16px; justify-content: center; font-size: 13px; color: var(--ink); }
+.vip-winner-kpis b { font-family: "Press Start 2P"; font-size: 12px; }
+.vip-delta { margin-top: 10px; font-size: 12px; color: var(--ink); background: rgba(255,255,255,.4); border: 2px dashed var(--line); padding: 6px 10px; display: inline-block; }
+.vip-warn-neg { margin-top: 12px; font-size: 12px; line-height: 1.6; color: #fff; background: rgba(192,71,59,.92); border: 3px solid var(--line); box-shadow: var(--shadow); padding: 10px 12px; }
+.vip-ok-pos { margin-top: 12px; font-size: 12px; line-height: 1.6; color: #fff; background: rgba(46,139,87,.92); border: 3px solid var(--line); box-shadow: var(--shadow); padding: 10px 12px; }
+.vip-card-eqlbl { font-size: 11px; color: var(--ink-soft); }
+.vip-scope { margin-top: 12px; }
+.vip-scope-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.vip-scope-tab { font-family: inherit; font-size: 12px; padding: 6px 12px; background: var(--wood-2); color: var(--ink); border: 3px solid var(--line); cursor: pointer; box-shadow: 2px 2px 0 rgba(58,38,20,.4); }
+.vip-scope-tab.active { background: var(--gold); box-shadow: inset 0 0 0 2px var(--gold-deep); }
+.vip-scope-tab:active { transform: translate(2px,2px); box-shadow: none; }
+.vip-scope-note { font-size: 11px; color: var(--ink-soft); margin-top: 6px; }
+.vip-range { display: none; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 10px; padding: 10px; background: var(--wood-2); border: 2px dashed var(--line); }
+.vip-range.on { display: flex; }
+.vip-range label { font-size: 12px; color: var(--ink); display: flex; align-items: center; gap: 6px; }
+.vip-range input[type="date"] { font-family: inherit; font-size: 12px; padding: 4px 6px; border: 2px solid var(--line); background: #fff; color: var(--ink); }
+.vip-range-hint { font-size: 11px; color: var(--ink-soft); }
+
+.vip-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin-top: 14px; }
+.vip-card { background: var(--wood); border: 4px solid var(--line); box-shadow: var(--shadow); padding: 14px; cursor: pointer; transition: transform .06s, box-shadow .06s; }
+.vip-card:hover { transform: translate(-2px,-2px); box-shadow: 6px 6px 0 rgba(58,38,20,.55); }
+.vip-card.is-best { border-color: var(--gold-deep); background: #fff6df; }
+.vip-card-top { display: flex; align-items: center; gap: 10px; }
+.vip-card-emoji { width: 38px; height: 38px; display: grid; place-items: center; font-size: 20px; background: #ece3ff; border: 3px solid var(--line); }
+.vip-card-id { flex: 1; min-width: 0; }
+.vip-card-label { font-size: 15px; font-weight: 700; color: var(--ink); }
+.vip-card-rule { font-size: 11px; color: var(--ink-soft); }
+.vip-card-rank { font-family: "Press Start 2P"; font-size: 13px; color: var(--gold-deep); }
+.vip-card-eq { display: flex; align-items: baseline; justify-content: space-between; margin: 10px 0 4px; }
+.vip-spark { width: 100%; height: 46px; display: block; margin: 4px 0; }
+.vip-card-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 8px; font-size: 11px; color: var(--ink-soft); margin-top: 6px; }
+.vip-card-stats b { color: var(--ink); font-size: 12px; }
+.vip-card-desc { font-size: 11px; color: var(--ink-soft); line-height: 1.6; margin: 8px 0 0; }
+.vip-modal-spark { margin: 8px 0; }
+
+@media (max-width: 640px) {
+  .vip-grid { grid-template-columns: 1fr; }
+  .vip-card-stats { grid-template-columns: repeat(2, 1fr); }
+}
