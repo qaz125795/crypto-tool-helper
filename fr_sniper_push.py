@@ -58,6 +58,78 @@ WHALE_MIN_TOP_LONG = 75.0
 SIGNALS_LOG = os.path.join(DIR, "frs_signals.jsonl")
 BREAKER = os.path.join(DIR, "frs_breaker.json")
 
+BACKTEST_REF = {
+    "資費反殺": {"wr": 52.6, "n": 344},
+    "大戶純空": {"wr": 58.2, "n": 146},
+}
+STATS_SINCE_TS = int(os.environ.get("FRS_STATS_SINCE_TS", "0"))  # 0=全部實盤 log
+
+
+def _load_signal_records():
+    recs = []
+    if not os.path.exists(SIGNALS_LOG):
+        return recs
+    try:
+        with open(SIGNALS_LOG, encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    recs.append(json.loads(ln))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return recs
+
+
+def strategy_live_stats(strategy_name):
+    """從 frs_signals.jsonl 累積實盤結案樣本（每 15 分 frs_settle 更新 status）。"""
+    out = {"win": 0, "loss": 0, "timeout": 0, "open": 0, "total": 0}
+    for rec in _load_signal_records():
+        if rec.get("strategy") != strategy_name:
+            continue
+        ts = int(fnum(rec.get("ts")) or 0)
+        if STATS_SINCE_TS and ts < STATS_SINCE_TS:
+            continue
+        st = (rec.get("status") or "open").lower()
+        if st in out:
+            out[st] += 1
+        else:
+            out[st] = out.get(st, 0) + 1
+        out["total"] += 1
+    return out
+
+
+def format_live_winrate(strategy_name, exp=False):
+    """推播用勝率/樣本行（實盤累積，非寫死回測數字）。"""
+    if exp:
+        return "實驗中（小倉觀察）"
+    st = strategy_live_stats(strategy_name)
+    settled = st["win"] + st["loss"]
+    open_n = st["open"]
+    ref = BACKTEST_REF.get(strategy_name, {})
+    ref_wr = ref.get("wr")
+    ref_n = ref.get("n")
+    ref_tail = ""
+    if ref_wr and ref_n:
+        ref_tail = "；回測參考 %.1f%%（n=%d）" % (ref_wr, ref_n)
+    if settled >= 1:
+        wr = st["win"] / settled * 100.0
+        return "實盤累積：勝率 %.1f%%｜結案 %d 筆（勝 %d 敗 %d%s）｜進行中 %d%s" % (
+            wr, settled, st["win"], st["loss"],
+            " 逾時 %d" % st["timeout"] if st["timeout"] else "",
+            open_n, ref_tail,
+        )
+    return "實盤累積：樣本收集中（進行中 %d%s）" % (open_n, ref_tail)
+
+
+def attach_live_winrate(sig):
+    sig["winrate"] = format_live_winrate(sig.get("name", ""), sig.get("exp", False))
+    return sig
+
+
 EXCLUDE_BASES = {
     "SPX500", "US500", "NDX", "NAS100", "DJI", "US30",
     "TSLA", "NVDA", "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "AMD",
@@ -140,12 +212,12 @@ def classify_long(row):
     if side == "LONG" and conf and aligned >= LONG_ALIGNED_MIN and LONG_FR_FLOOR <= fr <= LONG_FR:
         return {"side": "LONG", "name": "資費反殺",
                 "reason": "空頭擁擠（資費極負 %.3f%%）→ 軋空做多" % (fr * 100),
-                "winrate": "歷史勝率 52.6%（樣本 344）", "exp": False}
+                "exp": False}
     short_on = os.environ.get("FRS_SHORT_ENABLED", "0") == "1"
     if short_on and side == "SHORT" and conf and aligned >= 4 and SHORT_FR <= fr <= SHORT_FR_CAP:
         return {"side": "SHORT", "name": "資費過熱",
                 "reason": "多頭過熱（資費極正 %.3f%%）→ 回吐做空" % (fr * 100),
-                "winrate": "實驗中（小倉觀察）", "exp": True}
+                "exp": True}
     return None
 
 
@@ -175,7 +247,7 @@ def whale_short_candidates():
             continue
         sig = {"side": "SHORT", "name": "大戶純空",
                "reason": "大戶多 %.0f%% 高位派發 → 順勢做空" % top_long,
-               "winrate": "歷史勝率 58.2%（樣本 146）", "exp": False}
+               "exp": False}
         out.append((row.get("sym"), price, sig))
     return out
 
@@ -302,7 +374,7 @@ def fmt(sym, price, sig, sl=None, tp1=None, tp2=None):
         "　• 槓桿：5x 以內就好",
         "　• 不會抓價位就照上面數字（點價格可複製）",
         "📊 依據：%s" % sig["reason"],
-        "📈 %s" % sig["winrate"],
+        "📈 %s" % (sig.get("winrate") or format_live_winrate(sig.get("name", ""), sig.get("exp"))),
         "🛡 系統自動追蹤，到價會再提醒",
         "",
         "⚠️ 合約有風險，請控制倉位，盈虧自負。",
@@ -425,6 +497,7 @@ def main():
         key = "%s_%s" % (sym, sig["side"])
         if now - state.get(key, 0) < COOLDOWN_H * 3600:
             continue
+        attach_live_winrate(sig)
         entry, sl, tp1, tp2, _ = levels(price, sig["side"], base=base_of(sym))
         text = fmt(sym, price, sig, sl, tp1, tp2)
         if DRY:
