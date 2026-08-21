@@ -9,7 +9,11 @@
     season: null, tournament: null, tierCounts: {}, zoneCounts: {},
   };
 
-  var BIDIR = { CTRN: 1, RADAR: 1, SNIPE: 1 };
+  var BIDIR = {
+    CTRN: 1, RADAR: 1, SNIPE: 1,
+    CARY: 1, REGM: 1, PRSD: 1, WTRD: 1, TSUP: 1, KUMO: 1, VWAP: 1,
+    BSIZ: 1, STRP: 1, FVGR: 1, FSWD: 1, WKND: 1, BTCL: 1, POCR: 1, NR7I: 1,
+  };
   var SHORT_CODES = {
     FADE: 1, FNDS: 1, DSTR: 1, UNWD: 1, LSS: 1, PFS: 1, RPS: 1, PPF: 1,
     TKS: 1, WHS: 1, "WHS+": 1, SWS: 1, LLD: 1,
@@ -43,6 +47,7 @@
     if (c.indexOf("做空") >= 0) return { emoji: "🐻", bg: "#c96a5a" };
     if (c.indexOf("逆") >= 0) return { emoji: "🌀", bg: "#8aa0c0" };
     if (c.indexOf("衛冕") >= 0) return { emoji: "🛡️", bg: "#9a9a9a" };
+    if (c.indexOf("補選") >= 0) return { emoji: "🆕", bg: "#6c8cff" };
     return { emoji: "🧗", bg: "#67ad3e" };
   }
 
