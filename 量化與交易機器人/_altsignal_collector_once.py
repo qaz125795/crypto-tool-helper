@@ -640,7 +640,7 @@ def _wavetrend_cross(row, bars):
 
 def _turtle_soup(row, bars):
     # Event = bars[-2], confirm = bars[-1]. Cancel if reclaim is later than N+1.
-    if len(bars) < 23:
+    if len(bars) < 22:
         return None
     event = bars[-2]
     confirm = bars[-1]
@@ -806,18 +806,11 @@ def _funding_settle_fade(row, bars):
     if not now:
         return None
     dt = _utc(now)
-    if dt.hour not in FUNDING_HOURS:
-        return None
     minute = dt.minute + dt.second / 60.0
-    # T-15m .. T-3m  → minutes 45-57 of previous hour? 
-    # At 00/08/16 UTC is T. Window T-15..T-3 is 23:45-23:57, 07:45-07:57, 15:45-15:57.
-    # Also accept being in those hours' last 15 minutes via hour-1, or
-    # if now is in funding hour minutes 0-0 (too late). Spec: fade T-15m to T-3m.
-    prev_hour = (dt.hour - 1) % 24
-    in_window = False
-    if prev_hour in FUNDING_HOURS and minute >= 45 and minute <= 57:
-        in_window = True
-    # allow explicit flag for tests / collector clock aligned to T-10m
+    # T is 00/08/16 UTC. Window T-15m..T-3m lives in the previous hour
+    # (23:45-23:57, 07:45-07:57, 15:45-15:57). The funding hour itself is too late.
+    next_funding_hour = (dt.hour + 1) % 24
+    in_window = next_funding_hour in FUNDING_HOURS and 45 <= minute <= 57
     if row.get("in_funding_window"):
         in_window = True
     if not in_window:
