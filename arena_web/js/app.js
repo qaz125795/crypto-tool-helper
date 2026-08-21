@@ -13,6 +13,8 @@
     CTRN: 1, RADAR: 1, SNIPE: 1,
     CARY: 1, REGM: 1, PRSD: 1, WTRD: 1, TSUP: 1, KUMO: 1, VWAP: 1,
     BSIZ: 1, STRP: 1, FVGR: 1, FSWD: 1, WKND: 1, BTCL: 1, POCR: 1, NR7I: 1,
+    NYOR: 1, HKOR: 1, KROR: 1, GAPF: 1, ONDR: 1, WKCV: 1, SVWP: 1, NDRF: 1,
+    EWTR: 1, ETSU: 1, ENR7: 1, ESTR: 1,
   };
   var SHORT_CODES = {
     FADE: 1, FNDS: 1, DSTR: 1, UNWD: 1, LSS: 1, PFS: 1, RPS: 1, PPF: 1,
@@ -48,6 +50,8 @@
     if (c.indexOf("逆") >= 0) return { emoji: "🌀", bg: "#8aa0c0" };
     if (c.indexOf("衛冕") >= 0) return { emoji: "🛡️", bg: "#9a9a9a" };
     if (c.indexOf("補選") >= 0) return { emoji: "🆕", bg: "#6c8cff" };
+    if (c.indexOf("場外對照") >= 0) return { emoji: "🪞", bg: "#7a8aa0" };
+    if (c.indexOf("場外") >= 0) return { emoji: "🏛️", bg: "#c4a35a" };
     return { emoji: "🧗", bg: "#67ad3e" };
   }
 
@@ -100,14 +104,33 @@
   }
 
   // ── 載入資料 ──
+  function asWarmup(r) {
+    return inferTier({
+      name: r.name, code: r.code, cat: r.cat, key: r.key,
+      equity_live: CAPITAL, roi: 0, n: 0, wr: 0, avg_R: 0, total_R: 0,
+      open_n: 0, pf: 0, mdd: 0, history: [], open_positions: []
+    });
+  }
+
   function load() {
-    return fetch("data/arena.json?t=" + Date.now())
-      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    return fetch((window.ARENA_DATA_URL || "data/arena.json") + "?t=" + Date.now())
+      .then(function (r) {
+        if (!r.ok) {
+          if (window.ARENA_ALLOW_EMPTY && window.ARENA_EMPTY_BOARD) {
+            return window.ARENA_EMPTY_BOARD;
+          }
+          throw new Error(r.status);
+        }
+        return r.json();
+      })
       .then(function (d) {
         state.players = (d.players || []).slice()
           .map(inferTier)
           .sort(function (a, b) { return b.equity_live - a.equity_live; });
         state.registered = d.registered || [];
+        if (!state.players.length && state.registered.length && window.ARENA_SHOW_REGISTERED) {
+          state.players = state.registered.map(asWarmup);
+        }
         state.asOf = d.as_of || 0;
         state.season = d.season || null;
         state.tournament = d.tournament || null;
@@ -352,8 +375,9 @@
       positionsHtml(p) +
       '<div class="pos-title">📜 歷史成交（' + (p.history ? p.history.length : 0) + '）</div>' +
       historyHtml(p) +
+      (window.ARENA_NO_TG ? "" :
       '<a class="btn btn-gold btn-block m-tg-follow" href="https://t.me/SSSshadowBOTBOT?start=follow_' +
-        encodeURIComponent(p.code) + '" target="_blank" rel="noopener">🔔 追蹤 ' + esc(p.code) + ' 進場推播</a>';
+        encodeURIComponent(p.code) + '" target="_blank" rel="noopener">🔔 追蹤 ' + esc(p.code) + ' 進場推播</a>');
     body.innerHTML = html;
     show("modal");
   }
@@ -410,8 +434,14 @@
   }
 
   // ── Modal 控制 ──
-  function show(id) { document.getElementById(id).hidden = false; }
-  function hide(id) { document.getElementById(id).hidden = true; }
+  function show(id) {
+    var el = document.getElementById(id);
+    if (el) el.hidden = false;
+  }
+  function hide(id) {
+    var el = document.getElementById(id);
+    if (el) el.hidden = true;
+  }
 
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
@@ -429,31 +459,38 @@
 
   function doRefresh(showFx) {
     var b = document.getElementById("refresh");
-    if (showFx) { b.disabled = true; b.textContent = "↻ 更新中…"; }
+    if (showFx && b) { b.disabled = true; b.textContent = "↻ 更新中…"; }
     return load().then(function () {
       renderTournament(); renderTierTabs(); renderMountain(); renderTabs(); renderBoard();
-      if (showFx) {
+      if (showFx && b) {
         b.textContent = "✓ 已更新"; b.disabled = false;
         setTimeout(function () { b.textContent = "↻ 重新整理"; }, 1500);
       }
     }).catch(function (e) {
-      if (showFx) { b.textContent = "↻ 重新整理"; b.disabled = false; }
+      if (showFx && b) { b.textContent = "↻ 重新整理"; b.disabled = false; }
       showError("讀取資料失敗：" + e.message);
     });
   }
 
   function boot() {
-    document.getElementById("refresh").addEventListener("click", function () { doRefresh(true); });
-    // 自動輪詢：每 60 秒抓最新（伺服器每 15 分重生資料）；開著詳情時不打斷
+    var refresh = document.getElementById("refresh");
+    if (refresh) refresh.addEventListener("click", function () { doRefresh(true); });
     setInterval(function () {
-      var open = !document.getElementById("modal").hidden || !document.getElementById("tg-modal").hidden;
+      var modal = document.getElementById("modal");
+      var tg = document.getElementById("tg-modal");
+      var open = (modal && !modal.hidden) || (tg && !tg.hidden);
       if (!open) doRefresh(false);
     }, 60000);
-    document.getElementById("tg-connect").addEventListener("click", function () { show("tg-modal"); });
-    document.getElementById("tg-close").addEventListener("click", function () { hide("tg-modal"); });
-    document.getElementById("modal-close").addEventListener("click", function () { hide("modal"); });
+    var tgConnect = document.getElementById("tg-connect");
+    if (tgConnect) tgConnect.addEventListener("click", function () { show("tg-modal"); });
+    var tgClose = document.getElementById("tg-close");
+    if (tgClose) tgClose.addEventListener("click", function () { hide("tg-modal"); });
+    var modalClose = document.getElementById("modal-close");
+    if (modalClose) modalClose.addEventListener("click", function () { hide("modal"); });
     [["modal", "modal"], ["tg-modal", "tg-modal"]].forEach(function (pair) {
-      document.getElementById(pair[0]).addEventListener("click", function (e) {
+      var el = document.getElementById(pair[0]);
+      if (!el) return;
+      el.addEventListener("click", function (e) {
         if (e.target === this) hide(pair[1]);
       });
     });

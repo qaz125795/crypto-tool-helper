@@ -8,6 +8,7 @@ gatekeeper / grade functions, never enables TG.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -73,6 +74,11 @@ def _src_files():
         "arena_report.py": os.path.join(root, "量化與交易機器人", "arena_report.py"),
         "_altsignal_collector_once.py": os.path.join(root, "量化與交易機器人", "_altsignal_collector_once.py"),
         "arena_promote.py": os.path.join(root, "量化與交易機器人", "arena_promote.py"),
+        "stock_arena_report.py": os.path.join(root, "量化與交易機器人", "stock_arena_report.py"),
+        "stock_arena_classify.py": os.path.join(root, "量化與交易機器人", "stock_arena_classify.py"),
+        "stock_arena_hook.py": os.path.join(root, "量化與交易機器人", "stock_arena_hook.py"),
+        "stock_arena_once.py": os.path.join(root, "量化與交易機器人", "stock_arena_once.py"),
+        "stock_arena_exits.py": os.path.join(root, "backtest", "engine", "stock_arena_exits.py"),
     }
 
 
@@ -81,12 +87,11 @@ def _find_live_dir(explicit=None):
     if explicit:
         cands.append(explicit)
     cands.extend(SEARCH_DIRS)
-    cands.append(os.path.join(_repo_root(), "量化與交易機器人"))
     for d in cands:
         if d and os.path.isdir(d):
             if os.path.isfile(os.path.join(d, "arena_report.py")) or os.path.isfile(
                 os.path.join(d, "_altsignal_collector_once.py")
-            ) or os.path.basename(d) == "量化與交易機器人":
+            ) or os.path.basename(d) == "量化與交易機器人" or os.path.basename(d) == "crit_collector":
                 return d
     return None
 
@@ -101,6 +106,11 @@ def _copy_sidecars(dest):
         "s3_rookie_exits.py",
         "s3_rookie_promote.py",
         "s3_rookie_hook.py",
+        "stock_arena_report.py",
+        "stock_arena_classify.py",
+        "stock_arena_hook.py",
+        "stock_arena_once.py",
+        "stock_arena_exits.py",
     )
     os.makedirs(dest, exist_ok=True)
     for name in sidecar_names:
@@ -108,6 +118,8 @@ def _copy_sidecars(dest):
         if not os.path.isfile(src):
             continue
         dst = os.path.join(dest, name)
+        if os.path.abspath(src) == os.path.abspath(dst):
+            continue
         shutil.copy2(src, dst)
         copied.append(dst)
     # Also drop classify/roster under expected names IF they do not already exist.
@@ -116,22 +128,22 @@ def _copy_sidecars(dest):
         if os.path.isfile(dst):
             continue
         src = srcs[name]
-        if os.path.isfile(src):
+        if os.path.isfile(src) and os.path.abspath(src) != os.path.abspath(dst):
             shutil.copy2(src, dst)
             copied.append(dst)
-    engine_dest = os.path.join(os.path.dirname(dest), "backtest", "engine")
-    # If dest is 量化與交易機器人, engine lives at repo backtest/
     return copied
 
 
-def _patch(path, hook_block):
+def _patch(path, hook_block, marker=MARKER_BEGIN):
     if not path or not os.path.isfile(path):
         return "missing"
     text = open(path, encoding="utf-8").read()
-    if MARKER_BEGIN in text:
+    if marker in text:
         return "already"
-    # Do not patch our own rookie-only file (it already IS classify).
+    # Do not patch our own sidecar files (they already implement the merge).
     if "S3 補選 classify()" in text and "extend_hits" in text:
+        return "self"
+    if "S3 補選 ROSTER" in text and "apply_rookie_roster" in text and marker == MARKER_BEGIN:
         return "self"
     with open(path, "a", encoding="utf-8") as f:
         if not text.endswith("\n"):
@@ -140,6 +152,32 @@ def _patch(path, hook_block):
         if not hook_block.endswith("\n"):
             f.write("\n")
     return "patched"
+
+
+def _write_stock_seed(live):
+    bot = os.path.join(_repo_root(), "量化與交易機器人")
+    if bot not in sys.path:
+        sys.path.insert(0, bot)
+    try:
+        from stock_arena_report import seed_board
+    except ImportError as exc:
+        print("STOCK_SEED_FAIL", exc)
+        return []
+    board = seed_board()
+    paths = [os.path.join(live, "stock_arena.json")]
+    wr = "/data/partner-apps/p-6e6dee8f/releases/current/data/stock_arena.json"
+    if os.path.isdir(os.path.dirname(wr)):
+        paths.append(wr)
+    written = []
+    for path in paths:
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(board, f, ensure_ascii=False)
+            written.append(path)
+        except Exception as exc:
+            print("STOCK_SEED_FAIL", path, exc)
+    return written
 
 
 def main(argv=None):
@@ -154,13 +192,16 @@ def main(argv=None):
     copied = _copy_sidecars(live)
     print("SIDECARS", live, copied)
     results = {
-        "roster": _patch(os.path.join(live, "arena_report.py"), ROSTER_HOOK),
-        "classify": _patch(os.path.join(live, "_altsignal_collector_once.py"), CLASSIFY_HOOK),
+        "roster": _patch(os.path.join(live, "arena_report.py"), ROSTER_HOOK, MARKER_BEGIN),
+        "classify": _patch(
+            os.path.join(live, "_altsignal_collector_once.py"), CLASSIFY_HOOK, MARKER_BEGIN
+        ),
         "exits": _patch(
             os.path.join(live, "altsignal_replay_labeler.py")
             if os.path.isfile(os.path.join(live, "altsignal_replay_labeler.py"))
             else "",
             EXIT_HOOK,
+            MARKER_BEGIN,
         ),
     }
     # Search a sibling backtest path for EXIT_PROFILE
@@ -169,8 +210,9 @@ def main(argv=None):
         os.path.join(os.path.dirname(os.path.dirname(live)), "backtest", "engine", "altsignal_replay_labeler.py"),
     ):
         if os.path.isfile(cand) and results["exits"] == "missing":
-            results["exits"] = _patch(cand, EXIT_HOOK)
+            results["exits"] = _patch(cand, EXIT_HOOK, MARKER_BEGIN)
     print("PATCH", results)
+    print("STOCK_SEED", _write_stock_seed(live))
     if results["classify"] in ("missing", "self") and results["roster"] in ("missing", "self", "already"):
         print("NOTE: live veteran collector not found next to dest; "
               "ROSTER-only rookies will sit in registered once live ROSTER merges")

@@ -77,9 +77,14 @@ MAX_OPEN = {key: S3_ROOKIE_MAX_OPEN for key in S3_ROOKIE_KEYS}
 
 
 def apply_rookie_roster(base: dict | None) -> dict:
-    """Merge rookies into an existing live ROSTER. Veterans keep their tuples."""
+    """Merge rookies into an existing live ROSTER. Veterans keep their tuples.
+
+    Only cat=補選 is merged. 場外賽 keys must never enter this map.
+    """
     out = dict(base or {})
     for key, tup in ROSTER.items():
+        if len(tup) < 3 or tup[2] != S3_ROOKIE_CAT:
+            continue
         out[key] = tup
     return out
 

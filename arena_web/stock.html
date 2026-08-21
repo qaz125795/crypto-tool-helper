@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <script>
+    (function () {
+      var p = location.pathname, base;
+      if (/\.html?$/i.test(p)) base = p.replace(/[^/]*$/, "");
+      else base = p.replace(/\/?$/, "/");
+      document.write('<base href="' + base + '">');
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex,nofollow,noarchive" />
+  <title>股票代幣場外賽 ｜ SHADOW</title>
+  <script src="js/access_guard.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=DotGothic16&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="scanlines" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-badge">🏛️</span>
+        <div class="brand-text">
+          <h1>股票代幣場外賽</h1>
+          <p>10,000U · 5x · SHADOW · 不併入 S3</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <a class="btn btn-vip" href="index.html">⛰ S3 擂台</a>
+        <a class="btn btn-vip" href="vip.html">🧪 VIP 實驗室</a>
+        <button id="refresh" class="btn btn-wood" type="button">↻ 重新整理</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="mountain" id="mountain">
+    <div class="peak-flag">
+      <span class="peak-label">🏁 終點 20,000U</span>
+    </div>
+    <div class="base-label">🚩 起點 10,000U · 美／港／韓永續</div>
+    <div class="climbers" id="climbers"></div>
+    <div class="mountain-loading" id="mountain-loading">載入場外賽…</div>
+  </section>
+
+  <section class="tournament" id="tournament">
+    <div class="tour-panel">
+      <div class="tour-head">
+        <h2 class="tour-title">場外賽總覽</h2>
+        <div class="tour-phase-pill" id="phase-pill">載入中…</div>
+      </div>
+      <div class="tour-phases" id="tour-phases"></div>
+      <div class="tour-tiers" id="tour-tiers"></div>
+      <div class="tour-stats" id="tour-stats"></div>
+      <details class="tour-rules">
+        <summary>📜 規則（與 S3 隔離）</summary>
+        <div class="tour-rules-body" id="tour-rules-body"></div>
+      </details>
+    </div>
+  </section>
+
+  <main class="board">
+    <div class="board-head">
+      <h2>場外戰況</h2>
+      <span class="board-meta" id="board-meta"></span>
+    </div>
+    <div class="tier-tabs" id="tier-tabs"></div>
+    <div class="tabs" id="tabs"></div>
+    <div class="grid" id="grid">
+      <div class="state" id="state-loading">
+        <div class="state-pixel">⏳</div><p>正在連線場外賽…</p>
+      </div>
+    </div>
+  </main>
+
+  <footer class="foot">
+    <p>SHADOW paper only · 固定每筆風險 100U · 5x · 不開 TG／C34／實盤</p>
+    <p class="foot-src">宇宙：Gate 美股／港股／韓股永續（有量白名單）。三套開盤時鐘：NY / HKEX / KRX。</p>
+    <p class="foot-warn">⚠️ 不與 S3 幣圈榜混打。未實際下單，<b>不構成投資建議</b>。</p>
+  </footer>
+
+  <div class="modal-backdrop" id="modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="m-name">
+      <button class="modal-close" id="modal-close" aria-label="關閉">✕</button>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <script>
+    window.ARENA_DATA_URL = "data/stock_arena.json";
+    window.ARENA_NO_TG = true;
+    window.ARENA_ALLOW_EMPTY = true;
+    window.ARENA_SHOW_REGISTERED = true;
+    window.ARENA_EMPTY_BOARD = {
+      as_of: 1787241600, league: "stock_side", goal: 20000, capital: 10000,
+      risk_per_trade: 100, leverage: 5, calibrated: false, kickoff: 1787241600,
+      season: { id: "stock_side", label: "股票代幣場外賽", day: 1, total: 14, season_no: 0,
+        desc: "美／港／韓股票永續 SHADOW；不與 S3 幣圈榜混打" },
+      tournament: {
+        leverage: 5, capital: 10000, goal: 20000, risk_per_trade: 100, season_days: 14,
+        radar_baseline_avg_r: null,
+        phases: [{ id: "stock_side", days: "1–14", label: "場外賽",
+          desc: "8 檔股票原生 + 4 檔幣圈價格對照，獨立宇宙" }],
+        tiers: [
+          { id: "watch", emoji: "🔭", label: "觀察", req: "有成交或持倉" },
+          { id: "warmup", emoji: "🚧", label: "暖身", req: "尚未有成交" }
+        ],
+        dream_goal: "獨立驗證股票代幣時鐘，不併入 S3 晉級"
+      },
+      tier_counts: { warmup: 12 }, zone_counts: { warmup: 12 },
+      players: [],
+      registered: [
+        { name: "美股開盤區間 NYORB", code: "NYOR", cat: "場外賽", key: "ny_orb" },
+        { name: "港股開盤區間 HKORB", code: "HKOR", cat: "場外賽", key: "hk_orb" },
+        { name: "韓股開盤區間 KRORB", code: "KROR", cat: "場外賽", key: "kr_orb" },
+        { name: "跳空回補 GapFill", code: "GAPF", cat: "場外賽", key: "gap_fill" },
+        { name: "隔夜漂移 OvDrift", code: "ONDR", cat: "場外賽", key: "overnight_drift" },
+        { name: "週末收斂 WkConv", code: "WKCV", cat: "場外賽", key: "weekend_converge" },
+        { name: "盤中VWAP SessVW", code: "SVWP", cat: "場外賽", key: "session_vwap" },
+        { name: "隔夜資費淡出 NightFR", code: "NDRF", cat: "場外賽", key: "overnight_fund_fade" },
+        { name: "波浪對照 WT-eq", code: "EWTR", cat: "場外對照", key: "eq_wavetrend" },
+        { name: "海龜湯對照 Soup-eq", code: "ETSU", cat: "場外對照", key: "eq_turtle_soup" },
+        { name: "NR7對照 NR7-eq", code: "ENR7", cat: "場外對照", key: "eq_nr7" },
+        { name: "三重ST對照 ST3-eq", code: "ESTR", cat: "場外對照", key: "eq_triple_st" }
+      ]
+    };
+  </script>
+  <script src="js/strategies.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

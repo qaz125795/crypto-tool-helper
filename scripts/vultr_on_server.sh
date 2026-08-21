@@ -41,7 +41,7 @@ ARENA="$(src_dir arena_web || true)"
 if [ -n "$ARENA" ]; then
   log "前端 $ARENA → $WR_RELEASE"
   mkdir -p "$WR_RELEASE/js"
-  for f in fund.html volume.html index.html vip.html; do
+  for f in fund.html volume.html index.html vip.html stock.html; do
     [ -f "$ARENA/$f" ] && cp "$ARENA/$f" "$WR_RELEASE/$f"
   done
   for f in js/fund.js js/volume_live.js js/access_guard.js js/strategies.js js/app.js; do
@@ -78,6 +78,10 @@ if [ -n "$ROOKIE_SRC" ]; then
       docker cp "$CRIT/." platform-jackbot:/app/data/crit_collector/ 2>/dev/null || \
         warn "docker cp rookies 失敗"
     fi
+    mkdir -p "$WR_RELEASE/data"
+    python3 "$ROOKIE_SRC/stock_arena_once.py" --out "$WR_RELEASE/data/stock_arena.json" \
+      --out "$CRIT/stock_arena.json" 2>/dev/null || \
+      warn "stock_arena.json seed 失敗（前端 404 時仍可走空榜）"
   fi
 else
   warn "找不到 量化與交易機器人，跳過 S3 補選 sidecar"

@@ -53,6 +53,12 @@ except ImportError:
         def exit_for(key):
             return {"sl_atr": 1.5, "tp_r": 2.0, "horizon_h": 48}
 
+try:
+    from stock_arena_report import is_stock_token
+except ImportError:
+    def is_stock_token(_sym_or_row):
+        return False
+
 logger = logging.getLogger("s3_rookie_classify")
 
 MAJORS = {"BTC", "ETH", "BTCUSDT", "ETHUSDT", "BTC_USDT", "ETH_USDT"}
@@ -1003,6 +1009,14 @@ def classify(row, ctx=None):
         merged.update(row or {})
         row = merged
     row = row or {}
+    if is_stock_token(row):
+        # Lazy import: stock_arena_hook → classify_stock → this module.
+        try:
+            from stock_arena_hook import record_stock_row
+            record_stock_row(row)
+        except Exception as exc:
+            logger.error("stock_arena record: %s", exc)
+        return []
     bars = _bars_of(row)
     hits = []
     for fn in _RULES:
