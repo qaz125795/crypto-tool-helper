@@ -8,6 +8,9 @@ on:
       - 'fr_sniper_push.py'
       - 'frs_settle.py'
       - 'arena_web/**'
+      - '量化與交易機器人/**'
+      - 'backtest/engine/**'
+      - 'scripts/install_s3_rookies.py'
       - '百貨公司/services/gate-quant/**'
       - '百貨公司/services/jackbot/fr_sniper_push.py'
       - '百貨公司/services/jackbot/frs_settle.py'
@@ -28,7 +31,7 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           password: ${{ secrets.DEPLOY_SSH_PASSWORD }}
           port: 22
-          source: "fr_sniper_push.py,frs_settle.py,arena_web,scripts/vultr_on_server.sh,百貨公司/services/gate-quant/backend/volume_runner,百貨公司/services/gate-quant/backend/app.py,百貨公司/services/gate-quant/VOLUME_RUNNER.md,百貨公司/services/jackbot/fr_sniper_push.py,百貨公司/services/jackbot/frs_settle.py"
+          source: "fr_sniper_push.py,frs_settle.py,arena_web,scripts/vultr_on_server.sh,scripts/install_s3_rookies.py,量化與交易機器人,backtest/engine,百貨公司/services/gate-quant/backend/volume_runner,百貨公司/services/gate-quant/backend/app.py,百貨公司/services/gate-quant/VOLUME_RUNNER.md,百貨公司/services/jackbot/fr_sniper_push.py,百貨公司/services/jackbot/frs_settle.py"
           target: "/root/deploy-staging"
           strip_components: 0
 

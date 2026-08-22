@@ -41,10 +41,10 @@ ARENA="$(src_dir arena_web || true)"
 if [ -n "$ARENA" ]; then
   log "前端 $ARENA → $WR_RELEASE"
   mkdir -p "$WR_RELEASE/js"
-  for f in fund.html volume.html index.html vip.html; do
+  for f in fund.html volume.html index.html vip.html stock.html; do
     [ -f "$ARENA/$f" ] && cp "$ARENA/$f" "$WR_RELEASE/$f"
   done
-  for f in js/fund.js js/volume_live.js js/access_guard.js; do
+  for f in js/fund.js js/volume_live.js js/access_guard.js js/strategies.js js/app.js; do
     [ -f "$ARENA/$f" ] && cp "$ARENA/$f" "$WR_RELEASE/$f"
   done
 else
@@ -63,6 +63,29 @@ for fn in fr_sniper_push.py frs_settle.py; do
     warn "找不到 $fn"
   fi
 done
+
+# ── S3 補選（SHADOW sidecar；不覆寫 live classify / ROSTER / 風控）──
+ROOKIE_SRC="$(src_dir 量化與交易機器人 || true)"
+if [ -n "$ROOKIE_SRC" ]; then
+  CRIT="$UNIFIED/services/jackbot/data/crit_collector"
+  mkdir -p "$CRIT"
+  if [ -f "$ROOKIE_SRC/s3_rookie_hook.py" ] || [ -f "$ROOKIE_SRC/arena_report.py" ]; then
+    log "S3 rookies $ROOKIE_SRC → $CRIT (sidecars only)"
+    python3 "$REPO/scripts/install_s3_rookies.py" "$CRIT" || \
+      python3 /root/deploy-staging/scripts/install_s3_rookies.py "$CRIT" || \
+      warn "install_s3_rookies 失敗，略過（不阻斷部署）"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q platform-jackbot; then
+      docker cp "$CRIT/." platform-jackbot:/app/data/crit_collector/ 2>/dev/null || \
+        warn "docker cp rookies 失敗"
+    fi
+    mkdir -p "$WR_RELEASE/data"
+    python3 "$ROOKIE_SRC/stock_arena_once.py" --out "$WR_RELEASE/data/stock_arena.json" \
+      --out "$CRIT/stock_arena.json" 2>/dev/null || \
+      warn "stock_arena.json seed 失敗（前端 404 時仍可走空榜）"
+  fi
+else
+  warn "找不到 量化與交易機器人，跳過 S3 補選 sidecar"
+fi
 
 # ── gate-quant volume_runner ──
 VR_LOCAL="$(src_dir 百貨公司/services/gate-quant/backend/volume_runner || src_dir services/gate-quant/backend/volume_runner || true)"
