@@ -165,9 +165,13 @@ def _write_stock_seed(live):
         return []
     board = seed_board()
     paths = [os.path.join(live, "stock_arena.json")]
-    wr = "/data/partner-apps/p-6e6dee8f/releases/current/data/stock_arena.json"
-    if os.path.isdir(os.path.dirname(wr)):
-        paths.append(wr)
+    for wr in (
+        "/data/partner-apps/p-6e6dee8f/repo/data/stock_arena.json",
+        "/data/partner-apps/p-6e6dee8f/data/stock_arena.json",
+        "/data/partner-apps/p-6e6dee8f/releases/current/data/stock_arena.json",
+    ):
+        if os.path.isdir(os.path.dirname(wr)):
+            paths.append(wr)
     written = []
     for path in paths:
         try:

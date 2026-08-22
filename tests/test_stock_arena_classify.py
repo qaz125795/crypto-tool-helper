@@ -124,6 +124,8 @@ class IsolationTest(unittest.TestCase):
             "bars": later,
         }
         self.assertEqual(extend_hits([], row), [])
+        leftover = [{"key": "radar", "side": "LONG"}]
+        self.assertEqual(extend_hits(leftover, row), [])
         self.assertEqual(sides(classify_stock(row), "ny_orb"), ["LONG"])
 
     def test_push_still_only_lowcap(self):

@@ -1040,7 +1040,14 @@ def classify_rookies(row, ctx=None):
 
 
 def extend_hits(existing, row, ctx=None):
-    """Append rookie hits onto a live classify() result (list / dict / None)."""
+    """Append rookie hits onto a live classify() result (list / dict / None).
+
+    Stock-token rows are diverted to the 場外賽 jsonl and must not keep
+    S3 veteran hits (TSLAX/MSTR 等已在 S3 出現過的別名也一律跳過).
+    """
+    if is_stock_token(row):
+        classify(row, ctx)
+        return []
     if existing is None:
         hits = []
     elif isinstance(existing, dict):

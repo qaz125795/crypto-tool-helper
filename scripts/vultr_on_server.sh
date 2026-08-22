@@ -12,7 +12,8 @@ set -euo pipefail
 UNIFIED="${UNIFIED:-/root/unified-platform}"
 EXTRA_SRC="${EXTRA_SRC:-}"
 REPO="${REPO:-$UNIFIED}"
-WR_RELEASE="${WR_RELEASE:-/data/partner-apps/p-6e6dee8f/releases/current}"
+# Default is a stale folder. Live Node (PORT=4196) serves releases/<id> (= repo).
+WR_RELEASE="${WR_RELEASE:-}"
 
 log() { echo "[deploy] $*"; }
 warn() { echo "[warn] $*" >&2; }
@@ -36,17 +37,15 @@ src_dir() {
 cd "$UNIFIED"
 log "工作目錄 $UNIFIED"
 
-# ── 前端（不需 WR_TOKEN，直接覆寫 war-room release）──
+# ── 前端：只外科手術補場外賽。禁止把 repo index/app.js 蓋上線上第三季頁 ──
 ARENA="$(src_dir arena_web || true)"
-if [ -n "$ARENA" ]; then
-  log "前端 $ARENA → $WR_RELEASE"
-  mkdir -p "$WR_RELEASE/js"
-  for f in fund.html volume.html index.html vip.html stock.html; do
-    [ -f "$ARENA/$f" ] && cp "$ARENA/$f" "$WR_RELEASE/$f"
-  done
-  for f in js/fund.js js/volume_live.js js/access_guard.js js/strategies.js js/app.js; do
-    [ -f "$ARENA/$f" ] && cp "$ARENA/$f" "$WR_RELEASE/$f"
-  done
+PATCH_PY="$(src_file scripts/patch_live_stock_arena.py || true)"
+if [ -n "$PATCH_PY" ]; then
+  log "patch live stock arena via $PATCH_PY"
+  EXTRA_SRC="${EXTRA_SRC:-$REPO}" python3 "$PATCH_PY" "${EXTRA_SRC:-$REPO}" || \
+    warn "patch_live_stock_arena 失敗"
+elif [ -n "$ARENA" ]; then
+  warn "沒有 patch_live_stock_arena.py，略過前端（不會 cp repo index.html 蓋第三季）"
 else
   warn "找不到 arena_web，跳過前端"
 fi
@@ -78,9 +77,7 @@ if [ -n "$ROOKIE_SRC" ]; then
       docker cp "$CRIT/." platform-jackbot:/app/data/crit_collector/ 2>/dev/null || \
         warn "docker cp rookies 失敗"
     fi
-    mkdir -p "$WR_RELEASE/data"
-    python3 "$ROOKIE_SRC/stock_arena_once.py" --out "$WR_RELEASE/data/stock_arena.json" \
-      --out "$CRIT/stock_arena.json" 2>/dev/null || \
+    python3 "$ROOKIE_SRC/stock_arena_once.py" || \
       warn "stock_arena.json seed 失敗（前端 404 時仍可走空榜）"
   fi
 else
@@ -168,12 +165,12 @@ log "Testnet 第一週：1 組 API + mm 策略即可；4 策略正式帶單再�
 log "戰情室前端：https://blackstockai.com/war-room/apps/p-6e6dee8f/（網域）"
 log "戰情室直連：https://108.160.139.47/war-room/apps/p-6e6dee8f/"
 
-# blackstockai.com 走 war-room Next 發佈；僅 cp releases/current 不會更新線上 HTML
-SYNC_PY="$(src_file scripts/war_room_stock_sync.py || true)"
-if [ -n "$SYNC_PY" ] && [ -n "$ARENA" ]; then
-  log "war-room API 同步場外賽 → blackstockai.com"
-  UNIFIED_ENV="$ENV" EXTRA_SRC="${EXTRA_SRC:-$REPO}" python3 "$SYNC_PY" "${EXTRA_SRC:-$REPO}" || \
-    warn "war_room_stock_sync 失敗（檢查 .env 的 WR_TOKEN）"
+# 再跑一次 in-place patch（docker PORT=4196 cwd），不走會整包覆蓋的 push-once
+PATCH_PY="$(src_file scripts/patch_live_stock_arena.py || true)"
+if [ -n "$PATCH_PY" ]; then
+  log "re-patch live stock arena after compose"
+  EXTRA_SRC="${EXTRA_SRC:-$REPO}" python3 "$PATCH_PY" "${EXTRA_SRC:-$REPO}" || \
+    warn "patch_live_stock_arena 第二次失敗"
 fi
 
 # war-room 容器若掛掉會 502，一併拉起
