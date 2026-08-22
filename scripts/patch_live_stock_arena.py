@@ -377,6 +377,9 @@ def apply_to_live(live: str, staging: str) -> dict:
         for path in extra_data_targets(live):
             parent = os.path.dirname(path)
             if parent and not os.path.isdir(parent):
+                # Never mkdir container paths on the host (would create /app/...).
+                if parent.startswith("/app/"):
+                    continue
                 try:
                     os.makedirs(parent, exist_ok=True)
                 except OSError:
