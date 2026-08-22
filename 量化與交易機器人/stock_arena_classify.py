@@ -34,15 +34,26 @@ try:
 except ImportError:
     EXIT_PROFILE = {}
 
-from _altsignal_collector_once import (
-    _bars_of,
-    _f,
-    _now_ts,
-    _nr7_stretch,
-    _triple_supertrend,
-    _turtle_soup,
-    _wavetrend_cross,
-)
+try:
+    from s3_rookie_classify import (
+        _bars_of,
+        _f,
+        _now_ts,
+        _nr7_stretch,
+        _triple_supertrend,
+        _turtle_soup,
+        _wavetrend_cross,
+    )
+except ImportError:
+    from _altsignal_collector_once import (
+        _bars_of,
+        _f,
+        _now_ts,
+        _nr7_stretch,
+        _triple_supertrend,
+        _turtle_soup,
+        _wavetrend_cross,
+    )
 
 logger = logging.getLogger("stock_arena_classify")
 

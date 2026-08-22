@@ -78,7 +78,7 @@ def _src_files():
         "stock_arena_classify.py": os.path.join(root, "量化與交易機器人", "stock_arena_classify.py"),
         "stock_arena_hook.py": os.path.join(root, "量化與交易機器人", "stock_arena_hook.py"),
         "stock_arena_once.py": os.path.join(root, "量化與交易機器人", "stock_arena_once.py"),
-        "stock_arena_exits.py": os.path.join(root, "backtest", "engine", "stock_arena_exits.py"),
+        "stock_arena_exits.py": os.path.join(root, "量化與交易機器人", "stock_arena_exits.py"),
     }
 
 
