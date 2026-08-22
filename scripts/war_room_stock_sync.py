@@ -179,6 +179,21 @@ def _read_env(path: str) -> dict[str, str]:
     return out
 
 
+def _token_from_docker() -> str:
+    try:
+        r = subprocess.run(
+            ["docker", "exec", "platform-war-room", "printenv", "WR_TOKEN"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def main(argv=None) -> int:
     argv = list(argv or sys.argv[1:])
     staging = argv[0] if argv else os.environ.get("EXTRA_SRC", "/root/deploy-staging")

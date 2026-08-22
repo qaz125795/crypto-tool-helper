@@ -50,4 +50,7 @@ jobs:
             export UNIFIED=/root/unified-platform
             export GATE_TESTNET_KEY='${{ secrets.GATE_TESTNET_KEY }}'
             export GATE_TESTNET_SECRET='${{ secrets.GATE_TESTNET_SECRET }}'
+            export WR_TOKEN='${{ secrets.WR_TOKEN }}'
+            export WR_URL='${{ secrets.WR_URL }}'
+            export WR_SLUG='${{ secrets.WR_SLUG }}'
             bash /root/deploy-staging/scripts/vultr_on_server.sh
