@@ -19,8 +19,11 @@ from stock_arena_report import seed_board
 
 
 DEFAULT_OUTS = (
+    "/data/partner-apps/p-6e6dee8f/repo/data/stock_arena.json",
+    "/data/partner-apps/p-6e6dee8f/data/stock_arena.json",
     "/data/partner-apps/p-6e6dee8f/releases/current/data/stock_arena.json",
     "/app/data/crit_collector/stock_arena.json",
+    "/root/unified-platform/services/jackbot/data/crit_collector/stock_arena.json",
 )
 
 
