@@ -23,6 +23,13 @@ BREAKER = os.path.join(DIR, "frs_breaker.json")
 HORIZON_H = float(os.environ.get("FRS_HORIZON_H", "48"))
 PAUSE_H = float(os.environ.get("FRS_PAUSE_H", "12"))
 LOSS_STREAK = int(os.environ.get("FRS_LOSS_STREAK", "3"))
+DRY = os.environ.get("DRY_RUN", "0") == "1"
+
+TG_TOKEN = os.environ.get("TG_TOKEN", "")
+TG_CHAT = os.environ.get("FRS_TG_CHAT", "-1003611242392")
+TG_THREAD = int(os.environ.get("FRS_TG_THREAD", "250"))
+DC_TOKEN = os.environ.get("DC_TOKEN", "")
+DC_CHANNEL = os.environ.get("FRS_DC_CHANNEL", "1493134120186941470")
 
 
 def fnum(x):
@@ -59,6 +66,64 @@ def gate_klines(base, frm, to):
         except Exception:
             continue
     return None
+
+
+def settle_notice(rec, status):
+    """到價提醒文案（跟推播同一 thread）。"""
+    name = rec.get("strategy") or ""
+    sym = (rec.get("sym") or "").upper().replace("_", "")
+    if not sym.endswith("USDT"):
+        base = base_of(sym)
+        sym = base + "USDT" if base else sym
+    side = (rec.get("side") or "").upper()
+    arrow = "🟢 做多" if side == "LONG" else "🔴 做空"
+    if status == "win":
+        result = "止盈"
+        rtxt = "+1.5R"
+    elif status == "loss":
+        result = "止損"
+        rtxt = "−1.0R"
+    else:
+        result = "逾時平倉"
+        rtxt = "0R"
+    return "\n".join([
+        "🛡 追蹤結案 ·「%s」" % name,
+        "%s  `%s`  %s %s" % (arrow, sym, result, rtxt),
+        "到價自動提醒，請自行平倉（半自動跟單）。",
+    ])
+
+
+def send_tg(text):
+    if DRY or not TG_TOKEN:
+        return False
+    try:
+        r = httpx.post(
+            "https://api.telegram.org/bot%s/sendMessage" % TG_TOKEN,
+            json={"chat_id": TG_CHAT, "message_thread_id": TG_THREAD,
+                  "text": text, "parse_mode": "Markdown",
+                  "disable_web_page_preview": True},
+            timeout=15,
+        )
+        return r.json().get("ok", False)
+    except Exception as e:
+        print("[settle] TG err", str(e)[:80])
+        return False
+
+
+def send_dc(text):
+    if DRY or not DC_TOKEN:
+        return False
+    try:
+        r = httpx.post(
+            "https://discord.com/api/v10/channels/%s/messages" % DC_CHANNEL,
+            headers={"Authorization": "Bot %s" % DC_TOKEN},
+            json={"content": text},
+            timeout=15,
+        )
+        return r.status_code in (200, 201)
+    except Exception as e:
+        print("[settle] DC err", str(e)[:80])
+        return False
 
 
 def settle_one(rec):
@@ -120,6 +185,11 @@ def main():
             if res != "open":
                 rec["status"] = res
                 newly += 1
+                note = settle_notice(rec, res)
+                ok_tg = send_tg(note)
+                ok_dc = send_dc(note)
+                print("[settle] notify %s %s %s tg=%s dc=%s" % (
+                    rec.get("strategy"), rec.get("sym"), res, ok_tg, ok_dc))
 
     # 依策略、時間序，從已結算且尚未計入熔斷的訊號更新連虧
     for rec in sorted(recs, key=lambda r: r.get("ts", 0)):

@@ -2,51 +2,98 @@
 
 (function () {
   // 主力池：影子結案正期望。觀察池：邏輯已上線、樣本收集中（不與主力同級）。
+  // 五支選手訊號：小盤妖股為主力；其餘四支為擂台新選手（半自動跟單）。
   var STRATEGIES = [
     {
-      code: "FRX",
-      name: "資費反殺",
+      code: "SMCP",
+      name: "小盤妖股",
       side: "long",
       kind: "core",
-      desc: "資費極度偏空＝空頭過度擁擠，一反彈就軋空，順勢做多吃燃料。",
-      ann: 48, mdd: -15, oosR: 0.32, win: 52.6, n: 344, tradesM: 40, hold: "1~2 天",
-      capUsd: 250000, capacity: "中大（主流＋中型幣）", seed: 7,
-      logic: "偵測資金費率極度為負（大量空單擁擠、付錢給多方）的幣，判定空頭過度押注。一旦價格止穩反彈即順勢做多，吃空頭被迫回補的軋空行情。固定每筆風險，停損約 4% 價格波動。",
-      fit: "想跟一支『有統計優勢、邏輯清楚』主力多單的人。這是本系統目前數據最強的一支，已上線即時推播。",
-      risk: ["單邊大跌、資費遲遲不回正時會連續小虧 → 靠固定每筆風險 + 連虧冷卻控制回撤。", "盤整期符合條件的幣少、訊號會變稀。", "回測 +0.32R/筆、勝率 52.6%（樣本 344），實盤通常略低於回測。"],
-      follow: "https://t.me/SSSshadowBOTBOT?start=follow_fr_contrarian"
-    },
-    {
-      code: "WHS",
-      name: "大戶純空",
-      side: "short",
-      kind: "core",
-      desc: "大戶持倉過度偏多且開始轉弱＝主力高位派發，順勢做空。",
-      ann: 30, mdd: -12, oosR: 0.169, win: 58.2, n: 146, tradesM: 15, hold: "約 1 天",
-      capUsd: 150000, capacity: "中（主流幣）", seed: 19,
-      logic: "偵測大戶持倉過度偏多（≥72%）但價格動能開始轉弱，判定主力在高位派發倒貨，順勢做空跟著主力出貨方向。固定每筆風險，停損約 4% 價格波動。",
-      fit: "想要一支『做空對沖』來平衡多單組合的人；在大盤轉弱、單邊下跌時提供保護與獲利。",
-      risk: ["強勢單邊上漲時做空會虧 → 靠固定風險 + 趨勢過濾避免硬扛。", "符合條件較嚴、訊號量較少。", "回測勝率 58.2%、+0.169R（樣本 146），實盤通常略低於回測。"],
-      follow: "https://t.me/SSSshadowBOTBOT?start=follow_whale_pure_short_opt"
-    },
-    {
-      code: "GLD",
-      name: "黃金獵手",
-      side: "both",
-      kind: "observe",
-      desc: "XAUUSDT 多時框順勢（1H 趨勢 + 15m 進場），倫敦／紐約活躍時段出單，DXY／RSI 濾網已啟用。",
-      ann: 15, mdd: -20, oosR: 0, win: 0, n: 0, tradesM: 6, hold: "數小時~1天",
-      capUsd: 80000, capacity: "小（單標的 XAU）", seed: 31,
-      logic: "Gate XAU_USDT 永續：1H EMA20/50 + ADX 定方向，15m 找順勢突破／時段箱體／趨勢回踩三種進場。搭配 DXY 負相關、RSI 防追高殺低、活躍時段濾網。每筆建議倉位 2~3%，系統自動追蹤 TP/SL。",
-      fit: "想分散到黃金、與幣圈策略低相關的人。目前為觀察池：訊號已推播，樣本與實盤績效持續收集中，達標後才升級主力池。",
+      flagship: true,
+      desc: "低市值幣種放量突破後順勢做多。頻道主力，優先跟這一支。",
+      ann: 40, mdd: -12.8, oosR: 0.996, win: 45.5, n: 11, tradesM: 12, hold: "數小時~2天",
+      capUsd: 60000, capacity: "小（低市值幣，容量有限）", seed: 43,
+      logic: "小市值 ＋ OI 暴增 ＋ 急漲三合一做多，捕捉妖股級爆拉。胃納量小，不宜大量帶單。",
+      fit: "能接受低勝率、高賺賠比節奏的人。這是目前頻道主力。",
       risk: [
-        "觀察池：尚無足夠結案樣本，不應視為已驗證正期望策略。",
-        "黃金與美元／利率高度相關，重大數據前後波動劇烈。",
-        "訊號頻率偏低（品質優先），且目前不提供自動跟單 Bot，需手動執行。",
-        "實盤績效通常低於回測；保守年化僅供參考，非保證。"
+        "小盤幣流動性差、滑點與插針高於主流幣。",
+        "勝率約四成，連虧 5~8 筆屬常態。",
+        "最大回撤可逾 10%，倉位務必控制。",
+        "目前不開公開帶單號，以半自動跟單為主。"
       ],
-      follow: "https://t.me/c/3611242392/254",
-      followLabel: "查看訊號"
+      follow: "https://t.me/c/3611242392/250"
+    },
+    {
+      code: "BRKq",
+      name: "突破手·品質",
+      side: "long",
+      kind: "core",
+      fresh: true,
+      desc: "OI＋價＋主買突破，再加日線偏多濾網。本季期望／勝率／回撤最均衡。",
+      ann: 36, mdd: -10.8, oosR: 0.719, win: 60.3, n: 68, tradesM: 25, hold: "數小時~1天",
+      capUsd: 120000, capacity: "中（主流＋中型幣）", seed: 11,
+      logic: "OI 增加、價格突破、主動買盤確認，且日線已偏多才做多，減少假突破。",
+      fit: "想用測試帳慢慢跟、偏好較高勝率與較淺回撤的人。",
+      risk: [
+        "新選手訊號：90 天窗口幾乎只有本季，尚未過正式跨窗口門檻。",
+        "突破失敗會連續止損。",
+        "擂台本季勝率 60.3%、avgR +0.719、MDD -10.8%（n=68），實盤通常更低。"
+      ],
+      follow: "https://t.me/c/3611242392/250"
+    },
+    {
+      code: "TKUP",
+      name: "主買狂潮",
+      side: "long",
+      kind: "core",
+      fresh: true,
+      desc: "主買佔比暴衝後順勢做多。本季很猛，但 90 天視窗仍是負的。",
+      ann: 42, mdd: -10.8, oosR: 0.884, win: 64.5, n: 110, tradesM: 30, hold: "數小時~1天",
+      capUsd: 120000, capacity: "中（主流＋中型幣）", seed: 17,
+      logic: "主買佔比 ≥ 65% 的暴衝級買壓做多，比純主買更激進。",
+      fit: "測試帳願意跟「本季較猛」但不當聖杯的人。",
+      risk: [
+        "新選手訊號：90 天 avgR 為負，本季行情紅利偏大。",
+        "買壓退潮時會連續止損。",
+        "擂台本季勝率 64.5%、avgR +0.884、MDD -10.8%（n=110）。"
+      ],
+      follow: "https://t.me/c/3611242392/250"
+    },
+    {
+      code: "BTCR",
+      name: "BTC閘門動能",
+      side: "long",
+      kind: "core",
+      fresh: true,
+      desc: "BTC 偏多才放行山寨動能。本季勝率＋期望雙冠，資料幾乎只有本季。",
+      ann: 48, mdd: -17.3, oosR: 1.189, win: 65.5, n: 165, tradesM: 40, hold: "數小時~1天",
+      capUsd: 150000, capacity: "中（山寨，排除 BTC/ETH）", seed: 5,
+      logic: "BTC 24h 偏多 regime 才允許山寨動能做多（排除 BTC/ETH）。臨時選手標籤，爆與熄火都快。",
+      fit: "測試帳想賭本季最猛的人；不適合把全部本金押在這一支。",
+      risk: [
+        "新選手訊號：跨窗口不足（90 天幾乎只有本季）。",
+        "標成臨時選手，行情一變可能快速回吐。",
+        "擂台本季勝率 65.5%、avgR +1.189、MDD -17.3%（n=165）。"
+      ],
+      follow: "https://t.me/c/3611242392/250"
+    },
+    {
+      code: "WHAL",
+      name: "鯨魚雙吸",
+      side: "long",
+      kind: "core",
+      fresh: true,
+      desc: "現貨與永續同步淨流入＝大戶雙吸。本季綜合分最高，但 90 天期望是負的。",
+      ann: 45, mdd: -11.3, oosR: 1.132, win: 62.6, n: 147, tradesM: 35, hold: "約 1 天",
+      capUsd: 150000, capacity: "中（主流＋中型幣）", seed: 19,
+      logic: "現貨與永續同時淨流入，視為大戶同步吸籌做多。",
+      fit: "測試帳可旁觀或小倉跟；不當第一優先。",
+      risk: [
+        "新選手訊號：90 天 avgR -0.2，偏這波行情賺爆。",
+        "鯨魚停止吸籌或轉派發時會連續止損。",
+        "擂台本季勝率 62.6%、avgR +1.132、MDD -11.3%（n=147）。"
+      ],
+      follow: "https://t.me/c/3611242392/250"
     }
   ];
 
@@ -127,9 +174,11 @@
     var wsum = core.reduce(function (a, s) { return a + s.capUsd; }, 0) || 1;
     var wAnn = core.reduce(function (a, s) { return a + consAnn(s) * s.capUsd; }, 0) / wsum;
     var worstMdd = STRATEGIES.reduce(function (a, s) { return Math.min(a, s.mdd); }, 0);
+    var nObs = STRATEGIES.filter(function (s) { return s.kind === "observe"; }).length;
+    var nFresh = STRATEGIES.filter(function (s) { return s.fresh; }).length;
     box.innerHTML =
-      cardSum("可跟單策略", String(n), core.length + " 主力 · 1 觀察") +
-      cardSum("主力保守年化", pct(wAnn, 0), "僅 FRX+WHS，回測×0.5") +
+      cardSum("可跟單策略", String(n), core.length + " 主力 · " + nFresh + " 新選手" + (nObs ? " · " + nObs + " 觀察" : "")) +
+      cardSum("主力保守年化", pct(wAnn, 0), "影子本季×0.5，非保證") +
       cardSum("最深單策略回撤", pct(worstMdd, 1), "固定風險控制，已多抓") +
       cardSum("名目總容量", moneyShort(totalCap), "全池合計，非單人") ;
   }
@@ -148,9 +197,9 @@
       card.setAttribute("data-i", String(i));
       var observe = s.kind === "observe";
       var dirLong = s.side === "long";
-      var tagCls = observe ? "observe" : (dirLong ? "core" : "tac");
-      var tagTxt = observe ? "🥇 觀察中" : (dirLong ? "🟢 做多策略" : "🔴 做空策略");
-      var m1lab = observe ? "狀態" : "回測勝率";
+      var tagCls = observe ? "observe" : (s.fresh ? "observe" : (dirLong ? "core" : "tac"));
+      var tagTxt = observe ? "🥇 觀察中" : (s.flagship ? "🟢 頻道主力" : (s.fresh ? "🆕 新選手" : (dirLong ? "🟢 做多策略" : "🔴 做空策略")));
+      var m1lab = observe ? "狀態" : (s.fresh ? "本季勝率" : "勝率");
       var m1val = observe ? "樣本收集中" : (s.win + "%");
       var m1cls = observe ? "warn" : "good";
       var m2lab = observe ? "策略類型" : "平均R/筆";
@@ -186,8 +235,8 @@
     if (!s) return;
     current = i;
     var observe = s.kind === "observe";
-    var sideLabel = observe ? "🥇 觀察池 · XAU 雙向" : (s.side === "long" ? "🟢 做多策略" : "🔴 做空策略");
-    el("md-name").textContent = s.name + (observe ? " · 觀察" : "");
+    var sideLabel = observe ? "🥇 觀察池" : (s.flagship ? "🟢 頻道主力" : (s.fresh ? "🆕 新選手訊號" : (s.side === "long" ? "🟢 做多策略" : "🔴 做空策略")));
+    el("md-name").textContent = s.name + (observe ? " · 觀察" : (s.fresh ? " · 新選手" : ""));
     el("md-sub").textContent = s.code + " · " + sideLabel;
     el("md-lead").textContent = s.desc;
     el("md-curve").innerHTML = bigCurveSvg(s);
@@ -229,7 +278,7 @@
       li.textContent = r;
       ul.appendChild(li);
     });
-    el("md-follow").textContent = (s.followLabel || "一鍵跟單");
+    el("md-follow").textContent = (s.followLabel || "打開訊號頻道");
     el("ov").classList.add("on");
     document.body.style.overflow = "hidden";
   }

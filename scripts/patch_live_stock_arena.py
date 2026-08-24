@@ -311,6 +311,20 @@ def extra_data_targets(live: str) -> list[str]:
     return uniq
 
 
+def copy_fund_pool(live: str, staging_arena: str) -> list[str]:
+    """Overwrite live 實盤策略池 pages. Does not touch index.html."""
+    copied = []
+    for rel in ("fund.html", os.path.join("js", "fund.js")):
+        src = os.path.join(staging_arena, rel)
+        dest = os.path.join(live, rel)
+        if not os.path.isfile(src):
+            continue
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copy2(src, dest)
+        copied.append(rel.replace("\\", "/"))
+    return copied
+
+
 def apply_to_live(live: str, staging: str) -> dict:
     staging_arena = os.path.join(staging, "arena_web")
     bak = os.path.join(live, ".bak_stock_side")
@@ -329,6 +343,17 @@ def apply_to_live(live: str, staging: str) -> dict:
         report["copied"].append("stock.html")
     else:
         report["notes"].append("missing staging stock.html")
+
+    for rel in ("fund.html", os.path.join("js", "fund.js")):
+        src = os.path.join(staging_arena, rel)
+        dest = os.path.join(live, rel)
+        if not os.path.isfile(src):
+            report["notes"].append("missing staging " + rel.replace("\\", "/"))
+            continue
+        _backup(dest, bak)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copy2(src, dest)
+        report["copied"].append(rel.replace("\\", "/"))
 
     _backup(idx, bak)
     new_html = patch_index(html)

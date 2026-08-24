@@ -10,6 +10,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 from patch_live_stock_arena import (  # noqa: E402
+    copy_fund_pool,
     looks_live_s3,
     patch_app_js,
     patch_index,
@@ -153,6 +154,22 @@ class LiveStockPatchTests(unittest.TestCase):
         self.assertIn("第3季", out)
         self.assertIn("潛力訊號組", out)
         self.assertIn("第三季品質濾網", out)
+
+    def test_copy_fund_pool_overwrites_only_fund_pages(self):
+        """實盤策略池可以整頁覆蓋；不能順便動 index（會洗掉第3季）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = os.path.join(tmp, "staging")
+            live = os.path.join(tmp, "live")
+            os.makedirs(os.path.join(staging, "js"))
+            os.makedirs(os.path.join(live, "js"))
+            open(os.path.join(staging, "fund.html"), "w", encoding="utf-8").write("NEW FUND")
+            open(os.path.join(staging, "js", "fund.js"), "w", encoding="utf-8").write("SMCP BRKq")
+            open(os.path.join(live, "index.html"), "w", encoding="utf-8").write("KEEP INDEX")
+            open(os.path.join(live, "fund.html"), "w", encoding="utf-8").write("OLD")
+            copied = copy_fund_pool(live, staging)
+            self.assertEqual(sorted(copied), ["fund.html", "js/fund.js"])
+            self.assertEqual(open(os.path.join(live, "fund.html"), encoding="utf-8").read(), "NEW FUND")
+            self.assertEqual(open(os.path.join(live, "index.html"), encoding="utf-8").read(), "KEEP INDEX")
 
 
 if __name__ == "__main__":

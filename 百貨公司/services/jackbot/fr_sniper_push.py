@@ -1,15 +1,15 @@
 """
-狙擊訊號推播（取代舊持倉狙擊）— 圖文版（K 線卡片 + caption），推到 TG（區塊鏈船長 thread 250）+ DC。
+狙擊訊號推播 — 圖文版（K 線卡片 + caption），推到 TG（區塊鏈船長 thread 250）+ DC。
 
-兩支已驗證正期望的策略（多空雙向）：
+已推播：
   多｜資費反殺      sniper_snapshots：side=LONG & confirmed & aligned>=4 & 資費<=-0.04%
-                    回測 +0.32R / 勝率52.6% / n=344
-  空｜大戶純空      multilens_snapshots：strategy=whale_pure_short_opt & side=SHORT
-                    回測 +0.169R / 勝率58.2% / n=146（用 _opt 版；基礎版是虧的）
+  多｜四支新選手     multilens_snapshots：BRKq / TKUP / BTCR / WHAL（備註「新選手訊號」）
+小盤妖股 SMCP 仍走 collector HAS_PUSH，不在本腳本。
 
-停利停損：15m ATR×1.8 動態 SL（2.2%~5.5% 夾限）+ TP1=1.5R / TP2=2.5R（非固定 4%/6%）。
+大戶純空（whale_pure_short_opt）預設停推（實盤全期負期望）。設 FRS_WHALE_SHORT=1 才恢復。
 
-風控（對應交易心法）：同幣同向 6h 冷卻、每日上限防洗版、低流動/股票代幣過濾。
+停利停損：15m ATR×1.8 動態 SL（2.2%~5.5% 夾限）+ TP1=1.5R / TP2=2.5R。
+風控：同幣同策略 6h 冷卻、每日上限、低流動/股票代幣過濾。
 DRY_RUN=1 只印不發。
 """
 import json
@@ -35,9 +35,12 @@ TG_THREAD = int(os.environ.get("FRS_TG_THREAD", "250"))
 DC_CHANNEL = os.environ.get("FRS_DC_CHANNEL", "1493134120186941470")
 
 COOLDOWN_H = float(os.environ.get("FRS_COOLDOWN_H", "6"))
-DAILY_CAP = int(os.environ.get("FRS_DAILY_CAP", "10"))   # 每日推播上限，防洗版
+DAILY_CAP = int(os.environ.get("FRS_DAILY_CAP", "18"))   # 資費反殺 + 四支新選手
+PLAYER_DAILY_CAP = int(os.environ.get("FRS_PLAYER_DAILY_CAP", "2"))
 SNAP_MAX_AGE_S = 1800
 DRY = os.environ.get("DRY_RUN", "0") == "1"
+WHALE_SHORT_ON = os.environ.get("FRS_WHALE_SHORT", "0") == "1"
+PLAYERS_ON = os.environ.get("FRS_PLAYERS_ENABLED", "1") != "0"
 
 # 資費反殺（多）
 LONG_FR_FLOOR = -0.015
@@ -58,10 +61,39 @@ WHALE_MIN_TOP_LONG = 75.0
 SIGNALS_LOG = os.path.join(DIR, "frs_signals.jsonl")
 BREAKER = os.path.join(DIR, "frs_breaker.json")
 
+# 擂台第3季影子（2026-08-24）；推播文案用，實盤 jsonl 有結案後改走 format_live_winrate。
+PLAYER_STRATS = {
+    "oi_taker_breakout_q": {
+        "name": "突破手·品質", "code": "BRKq", "fresh": True,
+        "reason": "OI＋價＋主買突破，且日線已偏多（品質濾網）→ 順勢做多",
+        "wr": 60.3, "n": 68, "avg_R": 0.719, "mdd": -10.8,
+    },
+    "taker_surge_long": {
+        "name": "主買狂潮", "code": "TKUP", "fresh": True,
+        "reason": "主買佔比暴衝（≥65%）→ 順勢做多",
+        "wr": 64.5, "n": 110, "avg_R": 0.884, "mdd": -10.8,
+    },
+    "btc_regime_momo_long": {
+        "name": "BTC閘門動能", "code": "BTCR", "fresh": True,
+        "reason": "BTC 偏多 regime 才放行山寨動能做多（排除 BTC/ETH）",
+        "wr": 65.5, "n": 165, "avg_R": 1.189, "mdd": -17.3,
+    },
+    "whale_accum_long": {
+        "name": "鯨魚雙吸", "code": "WHAL", "fresh": True,
+        "reason": "現貨與永續同步淨流入＝大戶雙吸 → 順勢做多",
+        "wr": 62.6, "n": 147, "avg_R": 1.132, "mdd": -11.3,
+    },
+}
+
 BACKTEST_REF = {
     "資費反殺": {"wr": 52.6, "n": 344},
     "大戶純空": {"wr": 58.2, "n": 146},
 }
+for _meta in PLAYER_STRATS.values():
+    BACKTEST_REF[_meta["name"]] = {
+        "wr": _meta["wr"], "n": _meta["n"],
+        "avg_R": _meta["avg_R"], "mdd": _meta["mdd"],
+    }
 STATS_SINCE_TS = int(os.environ.get("FRS_STATS_SINCE_TS", "0"))  # 0=全部實盤 log
 
 
@@ -103,7 +135,7 @@ def strategy_live_stats(strategy_name):
 
 
 def format_live_winrate(strategy_name, exp=False):
-    """推播用勝率/樣本行（實盤累積，非寫死回測數字）。"""
+    """推播用勝率/樣本行（實盤累積；新選手附擂台本季勝率）。"""
     if exp:
         return "實驗中（小倉觀察）"
     st = strategy_live_stats(strategy_name)
@@ -114,13 +146,21 @@ def format_live_winrate(strategy_name, exp=False):
     ref_n = ref.get("n")
     ref_tail = ""
     if ref_wr and ref_n:
-        ref_tail = "；回測參考 %.1f%%（n=%d）" % (ref_wr, ref_n)
+        if ref.get("avg_R") is not None:
+            extra = "｜avgR %+.3f｜MDD %.1f%%" % (ref["avg_R"], ref.get("mdd") or 0)
+            ref_tail = "；擂台本季勝率 %.1f%%（n=%d%s）" % (ref_wr, ref_n, extra)
+        else:
+            ref_tail = "；回測參考 %.1f%%（n=%d）" % (ref_wr, ref_n)
     if settled >= 1:
         wr = st["win"] / settled * 100.0
         return "實盤累積：勝率 %.1f%%｜結案 %d 筆（勝 %d 敗 %d%s）｜進行中 %d%s" % (
             wr, settled, st["win"], st["loss"],
             " 逾時 %d" % st["timeout"] if st["timeout"] else "",
             open_n, ref_tail,
+        )
+    if ref_wr and ref_n and ref.get("avg_R") is not None:
+        return "擂台本季：勝率 %.1f%%（n=%d）｜avgR %+.3f｜MDD %.1f%%" % (
+            ref_wr, ref_n, ref["avg_R"], ref.get("mdd") or 0,
         )
     return "實盤累積：樣本收集中（進行中 %d%s）" % (open_n, ref_tail)
 
@@ -221,10 +261,80 @@ def classify_long(row):
     return None
 
 
-def whale_short_candidates():
-    """multilens snapshot → 大戶純空（空，whale_pure_short_opt）"""
-    snap = _last_line_json(MULTILENS_SNAP)
+def _row_vol_ok(row):
+    vol_m = fnum(row.get("vol24_m"))
+    if vol_m is None:
+        usd = fnum(row.get("vol24_usd"))
+        vol_m = (usd / 1_000_000.0) if usd else 0
+    return (vol_m or 0) >= MIN_VOL_M
+
+
+def _row_price(row, base):
+    for k in ("price", "mark", "last"):
+        p = fnum(row.get(k))
+        if p and p > 0:
+            return p
+    return gate_price(base)
+
+
+def player_sig_from_row(row):
+    """multilens row → 新選手訊號 dict；不合格回 None。"""
+    key = row.get("strategy")
+    meta = PLAYER_STRATS.get(key)
+    if not meta:
+        return None
+    if (row.get("side") or "").upper() != "LONG":
+        return None
+    base = base_of(row.get("sym"))
+    if not base or base in EXCLUDE_BASES:
+        return None
+    if not _row_vol_ok(row):
+        return None
+    return {
+        "side": "LONG",
+        "name": meta["name"],
+        "code": meta["code"],
+        "reason": meta["reason"],
+        "exp": False,
+        "fresh": True,
+        "key": key,
+    }
+
+
+def player_candidates_from_snap(snap, now=None, price_fn=None):
+    """Pure helper：從一份 multilens snapshot 抽出新選手候選。"""
     out = []
+    if not snap:
+        return out
+    now = time.time() if now is None else now
+    age = now - (fnum(snap.get("ts")) or 0)
+    if age > SNAP_MAX_AGE_S:
+        return out
+    get_px = price_fn or (lambda base, row: _row_price(row, base))
+    for row in snap.get("rows") or []:
+        sig = player_sig_from_row(row)
+        if not sig:
+            continue
+        base = base_of(row.get("sym"))
+        price = get_px(base, row)
+        if not price:
+            continue
+        out.append((row.get("sym"), price, sig))
+    return out
+
+
+def player_candidates():
+    if not PLAYERS_ON:
+        return []
+    return player_candidates_from_snap(_last_line_json(MULTILENS_SNAP))
+
+
+def whale_short_candidates():
+    """multilens snapshot → 大戶純空。預設關閉（實盤全期負期望）。"""
+    out = []
+    if not WHALE_SHORT_ON:
+        return out
+    snap = _last_line_json(MULTILENS_SNAP)
     if not snap:
         return out
     age = time.time() - (fnum(snap.get("ts")) or 0)
@@ -360,9 +470,12 @@ def fmt(sym, price, sig, sl=None, tp1=None, tp2=None):
 
     base = base_of(sym)
     exp_tag = " ⚗️實驗" if sig["exp"] else ""
+    title = "🎯 新訊號 ·「%s」%s" % (sig["name"], exp_tag)
+    lines = [title]
+    if sig.get("fresh"):
+        lines.append("🆕 新選手訊號")
     # 標的與點位用反引號＝等寬可複製模板（TG/DC 點一下即複製）
-    return "\n".join([
-        "🎯 新訊號 ·「%s」%s" % (sig["name"], exp_tag),
+    lines += [
         "%s  `%sUSDT`" % (arrow, base),
         "━━━━━━━━━━━━",
         "進場　`%s`" % p(price),
@@ -378,7 +491,8 @@ def fmt(sym, price, sig, sl=None, tp1=None, tp2=None):
         "🛡 系統自動追蹤，到價會再提醒",
         "",
         "⚠️ 合約有風險，請控制倉位，盈虧自負。",
-    ])
+    ]
+    return "\n".join(lines)
 
 
 # ── 發送 ────────────────────────────────────────────────────
@@ -477,7 +591,9 @@ def main():
             if sig:
                 candidates.append((sym, price, sig))
 
-    # 來源 2：multilens snapshot → 大戶純空（空）
+    # 來源 2：multilens → 四支新選手（BRKq / TKUP / BTCR / WHAL）
+    candidates += player_candidates()
+    # 來源 3：大戶純空 — 預設關閉
     candidates += whale_short_candidates()
 
     state = load_state()
@@ -494,9 +610,15 @@ def main():
         if is_paused(breaker, sig["name"]):
             print("[frs] %s 連虧熔斷暫停中，跳過 %s" % (sig["name"], sym))
             continue
-        key = "%s_%s" % (sym, sig["side"])
+        key = "%s_%s_%s" % (sym, sig["side"], sig["name"])
         if now - state.get(key, 0) < COOLDOWN_H * 3600:
             continue
+        if sig.get("fresh"):
+            pday = int(state.get("_pday_%s_%s" % (day, sig["name"]), 0))
+            if pday >= PLAYER_DAILY_CAP:
+                print("[frs] %s 今日已達每策略上限 %d，跳過 %s" % (
+                    sig["name"], PLAYER_DAILY_CAP, sym))
+                continue
         attach_live_winrate(sig)
         entry, sl, tp1, tp2, _ = levels(price, sig["side"], base=base_of(sym))
         text = fmt(sym, price, sig, sl, tp1, tp2)
@@ -513,6 +635,9 @@ def main():
             ok_tg = send_tg(text); ok_dc = send_dc(text)
         if ok_tg or ok_dc:
             state[key] = now; pushed += 1
+            if sig.get("fresh"):
+                pk = "_pday_%s_%s" % (day, sig["name"])
+                state[pk] = int(state.get(pk, 0)) + 1
             log_signal(sym, sig, entry, sl, tp1, tp2)
             print("[frs] pushed %s %s img=%s tg=%s dc=%s" % (sym, sig["side"], bool(card), ok_tg, ok_dc))
 
