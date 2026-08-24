@@ -122,19 +122,23 @@ class SettleNoticeTests(unittest.TestCase):
 
 
 class FundPoolTests(unittest.TestCase):
-    def test_fund_pool_is_five_player_signals(self):
-        """實盤策略池只掛五支選手；大戶純空必須消失。"""
+    def test_fund_pool_is_six_strategies(self):
+        """實盤策略池掛六組：小盤妖股＋資費反殺＋四新選手；大戶純空必須消失。"""
         js = open(os.path.join(ROOT, "arena_web", "js", "fund.js"), encoding="utf-8").read()
         html = open(os.path.join(ROOT, "arena_web", "fund.html"), encoding="utf-8").read()
-        for code in ("SMCP", "BRKq", "TKUP", "BTCR", "WHAL"):
+        for code in ("SMCP", "FRX", "BRKq", "TKUP", "BTCR", "WHAL"):
             self.assertIn('code: "%s"' % code, js)
-        self.assertLess(js.index('code: "SMCP"'), js.index('code: "BRKq"'))
+        self.assertLess(js.index('code: "SMCP"'), js.index('code: "FRX"'))
+        self.assertLess(js.index('code: "FRX"'), js.index('code: "BRKq"'))
+        self.assertIn('name: "資費反殺"', js)
         self.assertNotIn('name: "大戶純空"', js)
         self.assertNotIn('code: "WHS"', js)
         self.assertIn("已停推", html)
         self.assertIn("新選手", js)
         self.assertIn("小盤妖股", html)
+        self.assertIn("資費反殺", html)
         self.assertIn("大戶純空已停推", html)
+        self.assertIn("6 組", html)
         self.assertEqual(js.count("fresh: true"), 4)
 
 
