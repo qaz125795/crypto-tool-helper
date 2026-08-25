@@ -3365,31 +3365,9 @@ async def _dispatch_signal_to_accounts(signal: TGSignalPayload) -> dict:
             except Exception:
                 pass
 
-            # 動態倉位：爆擊/狙擊走 OOS+品質濾網；分析師固定倉位（不縮放）
+            # 2026-08-25：固定虧損乾淨樣本——關閉分數/時段/黑名單/品質縮倉，一律用帳號 risk_*
             _base_risk = float(acct.risk_for_type(signal.signal_type))
-            _is_analyst_sig = (signal.signal_type or "").strip() == "分析師訊號"
-            if _is_analyst_sig:
-                _adj_risk = _base_risk
-            else:
-                _score_mult = _calc_score_multiplier(signal)
-                _filter_mult, _filter_bd = _calc_filter_multiplier(signal)
-                _quality_mult, _quality_bd = _calc_quality_multiplier(signal)
-                _raw_total = _score_mult * _filter_mult * _quality_mult
-                # bound [0.1, 1.0]：動態只縮不放大，硬上限 = 該類型 base risk
-                _total_mult = max(0.1, min(1.0, _raw_total))
-                _adj_risk = min(round(_base_risk * _total_mult, 2), _base_risk)
-                if abs(_total_mult - 1.0) > 1e-6:
-                    logger.info(
-                        "[dispatch-mult] %s %s %s score×%.2f filter×%.2f quality×%.2f "
-                        "raw=%.3f bounded=%.2f risk %.1f→%.2fU bl=%s sess=%s(hr%s) qtags=%s",
-                        acct.name, signal.signal_type, signal.symbol,
-                        _score_mult, _filter_mult, _quality_mult,
-                        _raw_total, _total_mult, _base_risk, _adj_risk,
-                        _filter_bd.get("blacklist_tag", "?"),
-                        _filter_bd.get("session_tag", "?"),
-                        _filter_bd.get("hour_taipei", "?"),
-                        _quality_bd.get("tags", []),
-                    )
+            _adj_risk = _base_risk
             sig_copy = signal.model_copy(update={"max_risk_usdt": _adj_risk})
             resp = await _process_tg_signal(sig_copy, gate_adapter=_adapter, account=acct)
             return {"slot": acct.slot, "name": acct.name, "ok": True, "raw": resp.raw}
@@ -3907,13 +3885,11 @@ async def audit_positions_tpsl(force_close: bool = True) -> dict:
                 tp_size_sign = -1 if is_long else 1
                 patch_notes: list[str] = []
 
-                # 補 SL
+                # 補 SL（禁止臆造 8% 應急價——會蓋掉策略原點位）
                 if not has_sl:
                     sl_price = float(sig["sl_price"]) if sig and sig.get("sl_price") else None
                     if sl_price is None:
-                        # 應急 SL：entry ± 8%
-                        entry_px = float(p.get("entry_price", 0) or 0)
-                        sl_price = entry_px * (0.92 if is_long else 1.08) if entry_px else None
+                        patch_notes.append("無訊號帳SL，跳過臆造補掛（需人工）")
                     if sl_price:
                         # ── 保護：SL 已被突破（現價已越過 SL 方向）→ 調整至現價 ±2% ──
                         # Gate 規則：多單 SL 觸發價必須 < 現價；空單 SL 觸發價必須 > 現價
@@ -3937,8 +3913,6 @@ async def audit_positions_tpsl(force_close: bool = True) -> dict:
                             patch_notes.append(f"補SL@{sl_str}")
                         except Exception as e:
                             patch_notes.append(f"SL補掛失敗:{e}")
-                    else:
-                        patch_notes.append("無法確定SL價格")
 
                 # 補 TP（只補不存在的，跳過已被突破的價格）
                 if not has_tp and sig:
