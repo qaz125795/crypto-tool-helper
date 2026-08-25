@@ -121,6 +121,25 @@ class SettleNoticeTests(unittest.TestCase):
         self.assertIn("DOGEUSDT", msg)
 
 
+
+class SmcpCompatTests(unittest.TestCase):
+    def test_smcp_required_helpers_exist(self):
+        """smcp_push 依賴 FRS 模組 API；缺一個小盤妖股整條掛掉。"""
+        for name in (
+            "fetch_gate_tradable_bases", "is_gate_tradable", "resolve_live_entry",
+            "register_with_tracker", "attach_live_winrate",
+        ):
+            self.assertTrue(callable(getattr(frs, name)), name)
+        # attach 必須接受 SMCP 的 kwargs
+        sig = {"name": "小盤妖股", "exp": False}
+        frs.attach_live_winrate(sig, log_path="/tmp/nope.jsonl", ref_note="擂台參考")
+        self.assertIn("winrate", sig)
+        # send_* 回 (ok, msg_id)，不能只回 bool（否則 tuple 判斷永遠真）
+        ok, mid = frs.send_tg("x") if False else (False, None)
+        # 直接檢查函式回傳形狀（無 token 時）
+        self.assertEqual(frs.send_tg("test"), (False, None))
+
+
 class AltsignalSourceTests(unittest.TestCase):
     def test_players_read_altsignal_not_multilens(self):
         """四支新選手在 altsignal_snapshots；讀錯檔永遠推不出來。"""

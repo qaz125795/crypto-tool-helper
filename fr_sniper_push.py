@@ -34,6 +34,9 @@ DC_TOKEN = os.environ.get("DC_TOKEN", "")
 TG_CHAT = os.environ.get("FRS_TG_CHAT", "-1003611242392")
 TG_THREAD = int(os.environ.get("FRS_TG_THREAD", "250"))
 DC_CHANNEL = os.environ.get("FRS_DC_CHANNEL", "1493134120186941470")
+TRACKER_URL = os.environ.get("SIGNAL_TRACKER_URL", "http://signal-tracker:8004").strip().rstrip("/")
+_GATE_BASES_CACHE = {"ts": 0.0, "bases": None, "url": ""}
+GATE_CONTRACTS_CACHE_TTL = float(os.environ.get("GATE_CONTRACTS_CACHE_TTL", "3600"))
 
 COOLDOWN_H = float(os.environ.get("FRS_COOLDOWN_H", "6"))
 DAILY_CAP = int(os.environ.get("FRS_DAILY_CAP", "18"))   # 資費反殺 + 四支新選手
@@ -135,18 +138,47 @@ def strategy_live_stats(strategy_name):
     return out
 
 
-def format_live_winrate(strategy_name, exp=False):
+def format_live_winrate(strategy_name, exp=False, log_path=None, ref_note=None):
     """推播用勝率/樣本行（實盤累積；新選手附擂台本季勝率）。"""
     if exp:
         return "實驗中（小倉觀察）"
-    st = strategy_live_stats(strategy_name)
+    # SMCP 可指定獨立 log；預設仍讀 FRS SIGNALS_LOG
+    if log_path:
+        recs = []
+        try:
+            with open(log_path, encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        recs.append(json.loads(ln))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            recs = []
+        out = {"win": 0, "loss": 0, "timeout": 0, "open": 0, "total": 0}
+        for rec in recs:
+            if rec.get("strategy") != strategy_name:
+                continue
+            st = (rec.get("status") or "open").lower()
+            if st in out:
+                out[st] += 1
+            else:
+                out[st] = out.get(st, 0) + 1
+            out["total"] += 1
+        st = out
+    else:
+        st = strategy_live_stats(strategy_name)
     settled = st["win"] + st["loss"]
     open_n = st["open"]
     ref = BACKTEST_REF.get(strategy_name, {})
     ref_wr = ref.get("wr")
     ref_n = ref.get("n")
     ref_tail = ""
-    if ref_wr and ref_n:
+    if ref_note:
+        ref_tail = "；" + ref_note
+    elif ref_wr and ref_n:
         if ref.get("avg_R") is not None:
             extra = "｜avgR %+.3f｜MDD %.1f%%" % (ref["avg_R"], ref.get("mdd") or 0)
             ref_tail = "；擂台本季勝率 %.1f%%（n=%d%s）" % (ref_wr, ref_n, extra)
@@ -159,16 +191,19 @@ def format_live_winrate(strategy_name, exp=False):
             " 逾時 %d" % st["timeout"] if st["timeout"] else "",
             open_n, ref_tail,
         )
-    if ref_wr and ref_n and ref.get("avg_R") is not None:
+    if ref_wr and ref_n and ref.get("avg_R") is not None and not ref_note:
         return "擂台本季：勝率 %.1f%%（n=%d）｜avgR %+.3f｜MDD %.1f%%" % (
             ref_wr, ref_n, ref["avg_R"], ref.get("mdd") or 0,
         )
     return "實盤累積：樣本收集中（進行中 %d%s）" % (open_n, ref_tail)
 
 
-def attach_live_winrate(sig):
-    sig["winrate"] = format_live_winrate(sig.get("name", ""), sig.get("exp", False))
+def attach_live_winrate(sig, log_path=None, ref_note=None):
+    sig["winrate"] = format_live_winrate(
+        sig.get("name", ""), sig.get("exp", False), log_path=log_path, ref_note=ref_note
+    )
     return sig
+
 
 
 EXCLUDE_BASES = {
@@ -177,6 +212,9 @@ EXCLUDE_BASES = {
     "COIN", "MSTR", "NFLX", "BABA", "SKHX", "SKHYNIX", "DRAM", "HOOD", "PLTR",
     "XAU", "XAG", "XAUT", "PAXG", "XTI", "XBR", "NG", "GOLD", "SILVER", "OIL", "WTI",
     "EUR", "GBP", "JPY", "USD", "USDJPY", "EURUSD",
+    "SP500", "USOIL", "BRENTOIL", "XYZ100",
+    "SAMSUNG", "SAMSUNGEM", "SKHY", "SKHYNIX", "SOXL", "SNDK", "SNXX",
+    "NBIS", "MRVL", "KORU",
 }
 
 
@@ -238,6 +276,88 @@ def gate_price(base):
             continue
     return None
 
+
+def _gate_contracts_url():
+    """推播用合約白名單 URL。
+
+    2026-07-20：預設 **mainnet**（~800+）。
+    勿再吃 GATE_BASE_URL／GATE_TESTNET——那是 gate-quant 交易端設定，
+    容器若跑 testnet 會把頻道推播鎖死在 ~63 幣（INJ/BZ/小盤全 skip）。
+    覆寫：GATE_CONTRACTS_URL=... 或 FRS_GATE_CONTRACTS=testnet
+    """
+    explicit = (os.environ.get("GATE_CONTRACTS_URL") or "").strip()
+    if explicit:
+        return explicit
+    mode = (os.environ.get("FRS_GATE_CONTRACTS") or "mainnet").strip().lower()
+    if mode in ("testnet", "tn", "sim"):
+        return "https://api-testnet.gateapi.io/api/v4/futures/usdt/contracts"
+    return "https://api.gateio.ws/api/v4/futures/usdt/contracts"
+
+
+
+def fetch_gate_tradable_bases(force=False):
+    """回傳 Gate USDT 永續可交易 base 集合。失敗回空集合（呼叫端 fail-open）。"""
+    now = time.time()
+    url = _gate_contracts_url()
+    c = _GATE_BASES_CACHE
+    if (
+        not force
+        and c["bases"] is not None
+        and c.get("url") == url
+        and (now - float(c["ts"] or 0)) < GATE_CONTRACTS_CACHE_TTL
+    ):
+        return c["bases"]
+    bases = set()
+    try:
+        r = httpx.get(url, timeout=15)
+        if r.status_code != 200:
+            print("[frs] Gate contracts HTTP %s url=%s" % (r.status_code, url[:60]))
+            return bases
+        rows = r.json()
+        if not isinstance(rows, list):
+            return bases
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "")
+            status = str(row.get("status") or "").lower()
+            if not name.endswith("_USDT"):
+                continue
+            if status and status not in ("trading", "tradable", "online", ""):
+                continue
+            base = name[:-5].upper()
+            if base.startswith("1000") and len(base) > 4:
+                bases.add(base[4:])  # 1000PEPE → 也認 PEPE
+            if base:
+                bases.add(base)
+        print("[frs] Gate tradable bases=%d url=%s" % (len(bases), "testnet" if "testnet" in url else "main"))
+    except Exception as e:
+        print("[frs] Gate contracts err: %s" % str(e)[:80])
+    c["ts"], c["bases"], c["url"] = now, bases, url
+    return bases
+
+
+
+def is_gate_tradable(sym, bases=None):
+    """bases 空＝API 失敗 → fail-open（不擋推播，交給下游）。"""
+    if bases is None:
+        bases = fetch_gate_tradable_bases()
+    if not bases:
+        return True
+    b = base_of(sym)
+    return b in bases or ("1000" + b) in bases
+
+
+
+def resolve_live_entry(sym, price):
+    """SMCP 用：以 Gate 即時價校正進場；失敗則用 snapshot 價。"""
+    base = base_of(sym)
+    live = gate_price(base) if base else None
+    if live and live > 0:
+        return live, None
+    if price and float(price) > 0:
+        return float(price), None
+    return None, "no_live_price"
 
 # ── 訊號判定 ────────────────────────────────────────────────
 def classify_long(row):
@@ -531,57 +651,133 @@ def fmt(sym, price, sig, sl=None, tp1=None, tp2=None):
 
 
 # ── 發送 ────────────────────────────────────────────────────
+def _tg_msg_id(resp_json):
+    if not isinstance(resp_json, dict) or not resp_json.get("ok"):
+        return None
+    try:
+        return int(resp_json.get("result", {}).get("message_id"))
+    except (TypeError, ValueError):
+        return None
+
+
+
+
 def send_tg(text):
     if not TG_TOKEN:
-        return False
+        return False, None
     try:
         r = httpx.post("https://api.telegram.org/bot%s/sendMessage" % TG_TOKEN,
                        json={"chat_id": TG_CHAT, "message_thread_id": TG_THREAD,
                              "text": text, "parse_mode": "Markdown",
                              "disable_web_page_preview": True}, timeout=15)
-        return r.json().get("ok", False)
+        j = r.json()
+        return bool(j.get("ok")), _tg_msg_id(j)
     except Exception as e:
-        print("[frs] TG err", str(e)[:80]); return False
+        print("[frs] TG err", str(e)[:80]); return False, None
 
 
 def send_tg_photo(path, caption):
     if not TG_TOKEN:
-        return False
+        return False, None
     try:
         with open(path, "rb") as f:
             r = httpx.post("https://api.telegram.org/bot%s/sendPhoto" % TG_TOKEN,
                            data={"chat_id": str(TG_CHAT), "message_thread_id": str(TG_THREAD),
                                  "caption": caption[:1020], "parse_mode": "Markdown"},
                            files={"photo": ("card.png", f, "image/png")}, timeout=30)
-        return r.json().get("ok", False)
+        j = r.json()
+        return bool(j.get("ok")), _tg_msg_id(j)
     except Exception as e:
-        print("[frs] TG photo err", str(e)[:80]); return False
+        print("[frs] TG photo err", str(e)[:80]); return False, None
 
 
 def send_dc(text):
+    # 2026-08-04 用戶拍板：訊號只留 TG，停 Discord（設 DISCORD_MIRROR=1 可臨時重開）
+    if os.environ.get("DISCORD_MIRROR", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return False, None
     if not DC_TOKEN:
-        return False
+        return False, None
     try:
         r = httpx.post("https://discord.com/api/v10/channels/%s/messages" % DC_CHANNEL,
                        headers={"Authorization": "Bot %s" % DC_TOKEN},
                        json={"content": text}, timeout=15)
-        return r.status_code in (200, 201)
+        if r.status_code not in (200, 201):
+            return False, None
+        try:
+            return True, str(r.json().get("id"))
+        except Exception:
+            return True, None
     except Exception as e:
-        print("[frs] DC err", str(e)[:80]); return False
+        print("[frs] DC err", str(e)[:80]); return False, None
 
 
 def send_dc_photo(path, caption):
+    # 2026-08-04 用戶拍板：訊號只留 TG，停 Discord（設 DISCORD_MIRROR=1 可臨時重開）
+    if os.environ.get("DISCORD_MIRROR", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return False, None
     if not DC_TOKEN:
-        return False
+        return False, None
     try:
         with open(path, "rb") as f:
             r = httpx.post("https://discord.com/api/v10/channels/%s/messages" % DC_CHANNEL,
                            headers={"Authorization": "Bot %s" % DC_TOKEN},
                            data={"payload_json": json.dumps({"content": caption})},
                            files={"files[0]": ("card.png", f, "image/png")}, timeout=30)
-        return r.status_code in (200, 201)
+        if r.status_code not in (200, 201):
+            return False, None
+        try:
+            return True, str(r.json().get("id"))
+        except Exception:
+            return True, None
     except Exception as e:
-        print("[frs] DC photo err", str(e)[:80]); return False
+        print("[frs] DC photo err", str(e)[:80]); return False, None
+
+
+
+def _norm_symbol(sym):
+    s = (sym or "").upper().replace("_", "")
+    if not s.endswith("USDT"):
+        s += "USDT"
+    return s
+
+
+
+def register_with_tracker(sym, sig, entry, sl, tp1, tp2, tg_msg_id=None, dc_msg_id=None):
+    """推播成功後註冊 signal-tracker，啟用停損/停利追蹤推播。"""
+    if not TRACKER_URL:
+        return None
+    side = "long" if sig.get("side") == "LONG" else "short"
+    pl = {"strategy": sig.get("name"), "jackbot_pushed": True}
+    if dc_msg_id:
+        pl["dc_message_id"] = str(dc_msg_id)
+    payload = {
+        "source": "position_change",
+        "symbol": _norm_symbol(sym),
+        "side": side,
+        "entry_price": float(entry),
+        "sl_price": float(sl),
+        "tp1_price": float(tp1),
+        "tp2_price": float(tp2) if tp2 else None,
+        "leverage": 10,
+        "tg_chat_id": int(TG_CHAT),
+        "tg_message_id": tg_msg_id,
+        "payload": pl,
+    }
+    for attempt in range(3):
+        try:
+            r = httpx.post("%s/signals" % TRACKER_URL, json=payload, timeout=12)
+            if r.status_code == 200:
+                data = r.json()
+                tid = data.get("id")
+                print("[frs] tracker #%s %s %s" % (tid, data.get("action"), _norm_symbol(sym)))
+                return tid
+            print("[frs] tracker HTTP %s: %s" % (r.status_code, r.text[:120]))
+        except Exception as e:
+            print("[frs] tracker err (try %d): %s" % (attempt + 1, str(e)[:80]))
+        if attempt < 2:
+            time.sleep(1.0 * (2 ** attempt))
+    return None
+
 
 
 def _today_key():
@@ -665,16 +861,18 @@ def main():
             continue
         card = make_card(sym, sig, entry, sl, tp1, tp2)
         if card:
-            ok_tg = send_tg_photo(card, text); ok_dc = send_dc_photo(card, text)
+            ok_tg, tg_mid = send_tg_photo(card, text); ok_dc, dc_mid = send_dc_photo(card, text)
         else:
-            ok_tg = send_tg(text); ok_dc = send_dc(text)
+            ok_tg, tg_mid = send_tg(text); ok_dc, dc_mid = send_dc(text)
         if ok_tg or ok_dc:
             state[key] = now; pushed += 1
             if sig.get("fresh"):
                 pk = "_pday_%s_%s" % (day, sig["name"])
                 state[pk] = int(state.get(pk, 0)) + 1
+            tid = register_with_tracker(sym, sig, entry, sl, tp1, tp2, tg_mid, dc_mid)
             log_signal(sym, sig, entry, sl, tp1, tp2)
-            print("[frs] pushed %s %s img=%s tg=%s dc=%s" % (sym, sig["side"], bool(card), ok_tg, ok_dc))
+            print("[frs] pushed %s %s img=%s tg=%s dc=%s tracker=%s" % (
+                sym, sig["side"], bool(card), ok_tg, ok_dc, tid))
 
     if pushed and not DRY:
         state["_day_" + day] = day_cnt + pushed
