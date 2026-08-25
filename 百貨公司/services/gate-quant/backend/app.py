@@ -29,6 +29,11 @@ adapters = {"gate": gate}
 _APP_DIR = Path(__file__).parent.parent
 _STATE_FILE = _APP_DIR / "runtime_state.json"
 
+RISK_BREAKER_ENABLED = os.getenv("RISK_BREAKER_ENABLED", "1") == "1"
+DAILY_LOSS_CAP_USDT = float(os.getenv("DAILY_LOSS_CAP_USDT", "120"))
+MAX_DRAWDOWN_PCT = float(os.getenv("MAX_DRAWDOWN_PCT", "35"))
+MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "5"))
+
 def _to_float(x) -> float | None:
     try:
         return float(x)
@@ -2136,8 +2141,9 @@ async def _process_tg_signal(
     else:
         raise HTTPException(status_code=400, detail=f"未知方向: {signal.action}，請傳 做多/做空")
 
-    # 多帳號模式：強制全倉、真實下單
-    use_dry_run = False
+    # 多帳號模式：強制全倉。dry_run 只在訊號明確帶 true 時生效
+    # （signal-tracker 不帶此欄位 → 實盤行為不變；避免測試打成真單）
+    use_dry_run = bool(signal.dry_run)
     cross_margin = True
     leverage = 0  # cross margin
 
@@ -2260,6 +2266,12 @@ async def _process_tg_signal(
         "max_risk_usdt": signal.max_risk_usdt,
         "notional_value_usdt": round(notional_value_usdt, 4),
     }
+
+    if use_dry_run:
+        return OrderResponse(
+            exchange=signal.exchange,
+            raw={"dry_run": True, "calc": calc_preview},
+        )
 
     # 流動性／滑價過濾已停用：收到訊號即走標準進場（符號解析與風控張數仍生效）
 
@@ -3176,10 +3188,16 @@ async def _dispatch_signal_to_accounts(signal: TGSignalPayload) -> dict:
     active = [
         a for a in accts
         if a.enabled and a.has_credentials() and a.is_enabled_for(signal.signal_type)
+        and a.accepts_strategy(getattr(signal, "strategy_name", None))
     ]
 
     if not active:
         return {"dispatched": 0, "results": [], "note": "無啟用的帳號符合此訊號類型"}
+
+    _brk = await _risk_breaker_check(active)
+    if _brk["blocked"]:
+        logger.warning(f"[breaker] 擋下 {signal.symbol} 進場：{_brk['reason']}")
+        return {"dispatched": 0, "results": [], "note": f"風控熔斷：{_brk['reason']}"}
 
     direction_str = signal.action.strip()
     is_long = direction_str in ("做多", "LONG", "long")
@@ -3390,6 +3408,202 @@ async def _dispatch_signal_to_accounts(signal: TGSignalPayload) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════
+def _tpe_day_key() -> str:
+    from datetime import timedelta, timezone  # noqa: PLC0415
+
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+
+
+def _risk_breaker_state() -> dict:
+    st = getattr(app.state, "risk_breaker", None)
+    if st is None:
+        st = {
+            "day": "",
+            "day_start_equity": 0.0,
+            "peak_equity": 0.0,
+            "halted": False,
+            "halted_reason": "",
+            "halted_day": "",
+        }
+        app.state.risk_breaker = st
+    return st
+
+
+async def _risk_breaker_check(active: list[GateAccountConfig]) -> dict:
+    """
+    進場前的全域熔斷：日虧上限、淨值回撤、同時持倉數。
+
+    以交易所即時淨值為準，不依賴本地 PnL 記帳——記帳漏一筆就是假安全。
+    淨值查不到時擋單（fail-closed）：查不到就無法證明還沒觸及虧損上限。
+    """
+    if not RISK_BREAKER_ENABLED:
+        return {"blocked": False, "reason": ""}
+
+    from backend.exchanges.gate_perp import GatePerpAdapter as _Adapter  # noqa: PLC0415
+
+    st = _risk_breaker_state()
+    today = _tpe_day_key()
+
+    total_equity = 0.0
+    open_positions = 0
+    for acct in active:
+        _g = _Adapter(
+            api_key=acct.api_key,
+            api_secret=acct.api_secret,
+            base_url=settings.gate_base_url,
+            settle=settings.gate_futures_settle,
+        )
+        try:
+            total_equity += await _g.get_equity()
+            for p in (await _g.get_positions()) or []:
+                try:
+                    if int(float(p.get("size", 0) or 0)) != 0:
+                        open_positions += 1
+                except (TypeError, ValueError):
+                    continue
+        except Exception as e:
+            logger.error(f"[breaker] slot{acct.slot} 淨值/持倉查詢失敗，擋單：{e}")
+            return {"blocked": True, "reason": f"淨值查詢失敗，保守擋單：{e}"}
+        finally:
+            try:
+                await _g.aclose()
+            except Exception:
+                pass
+
+    # 跨日重置：新的一天重算當日基準，並解除「僅當日」的熔斷
+    if st["day"] != today:
+        st["day"] = today
+        st["day_start_equity"] = total_equity
+        if st["halted"] and st["halted_day"] == "daily":
+            st["halted"] = False
+            st["halted_reason"] = ""
+            st["halted_day"] = ""
+
+    st["peak_equity"] = max(float(st.get("peak_equity") or 0.0), total_equity)
+
+    if st["halted"]:
+        return {"blocked": True, "reason": st["halted_reason"]}
+
+    peak = float(st["peak_equity"])
+    if peak > 0 and total_equity <= peak * (1.0 - MAX_DRAWDOWN_PCT / 100.0):
+        st["halted"] = True
+        st["halted_day"] = "permanent"
+        st["halted_reason"] = (
+            f"淨值自高點 {peak:.2f}U 回撤至 {total_equity:.2f}U，"
+            f"超過 {MAX_DRAWDOWN_PCT:.0f}% 上限 → 全面停止，需人工解除"
+        )
+        await _breaker_alert(st["halted_reason"])
+        return {"blocked": True, "reason": st["halted_reason"]}
+
+    day_start = float(st["day_start_equity"] or 0.0)
+    if day_start > 0 and total_equity <= day_start - DAILY_LOSS_CAP_USDT:
+        st["halted"] = True
+        st["halted_day"] = "daily"
+        st["halted_reason"] = (
+            f"當日自 {day_start:.2f}U 虧至 {total_equity:.2f}U，"
+            f"達日虧上限 {DAILY_LOSS_CAP_USDT:.0f}U → 今日停止進場"
+        )
+        await _breaker_alert(st["halted_reason"])
+        return {"blocked": True, "reason": st["halted_reason"]}
+
+    if open_positions >= MAX_CONCURRENT_POSITIONS:
+        return {
+            "blocked": True,
+            "reason": f"同時持倉 {open_positions} 已達上限 {MAX_CONCURRENT_POSITIONS}",
+        }
+
+    return {"blocked": False, "reason": ""}
+
+
+async def _breaker_alert(reason: str) -> None:
+    logger.critical(f"[breaker] {reason}")
+    try:
+        nb = getattr(app.state, "notify_bot", None)
+        if nb:
+            await nb.send(f"⛔ <b>風控熔斷</b>\n{reason}")
+    except Exception:
+        pass
+
+
+@app.get("/risk/breaker", dependencies=[Depends(require_admin)])
+async def risk_breaker_status() -> dict:
+    return {
+        "enabled": RISK_BREAKER_ENABLED,
+        "daily_loss_cap_usdt": DAILY_LOSS_CAP_USDT,
+        "max_drawdown_pct": MAX_DRAWDOWN_PCT,
+        "max_concurrent_positions": MAX_CONCURRENT_POSITIONS,
+        "state": _risk_breaker_state(),
+    }
+
+
+@app.post("/risk/breaker/reset", dependencies=[Depends(require_admin)])
+async def risk_breaker_reset() -> dict:
+    """人工解除熔斷（含永久級）。解除後當日基準重新以下次查詢的淨值為準。"""
+    st = _risk_breaker_state()
+    st.update({"halted": False, "halted_reason": "", "halted_day": "", "day": ""})
+    return {"ok": True, "state": st}
+
+
+@app.post("/health/trade-checkup", dependencies=[Depends(require_admin)])
+async def health_trade_checkup(
+    send_tg: bool = True,
+    do_rebuild: bool = True,
+) -> dict:
+    """
+    每 4 小時級交易健診：SL/TP 覆蓋、條件單張數、固定虧損 R、名目上限、槓桿模式。
+    缺單時只依本地訊號帳重掛（不猜 ±N% 價）。報告推到 notify_bot。
+    """
+    from backend.exchanges.gate_perp import GatePerpAdapter as _Adp  # noqa: PLC0415
+    from backend.trade_checkup import build_latest_signal_map, run_trade_checkup  # noqa: PLC0415
+
+    tg: TGBotManager = app.state.tg_bot
+    latest = build_latest_signal_map(tg)
+    nb = getattr(app.state, "notify_bot", None)
+
+    async def _send(text: str) -> None:
+        if nb:
+            await nb.send(text)
+
+    result = await run_trade_checkup(
+        accounts=list(app.state.accounts),
+        adapter_factory=_Adp,
+        settings=settings,
+        latest_signals=latest,
+        breaker_snapshot={
+            "enabled": True,
+            "state": _risk_breaker_state(),
+        },
+        notify_send=_send if send_tg else None,
+        send_tg=send_tg,
+        do_rebuild=do_rebuild,
+    )
+    # 精簡對外回傳（避免超大）
+    return {
+        "ok": result.get("ok"),
+        "overall": result.get("overall"),
+        "checked_positions": result.get("checked_positions"),
+        "ok_positions": result.get("ok_positions"),
+        "issues": result.get("issues"),
+        "actions": result.get("actions"),
+        "tg_sent": result.get("tg_sent"),
+        "ts": result.get("ts"),
+        "accounts": [
+            {
+                "slot": a.get("slot"),
+                "name": a.get("name"),
+                "equity": a.get("equity"),
+                "error": a.get("error"),
+                "positions": a.get("positions"),
+            }
+            for a in (result.get("accounts") or [])
+        ],
+    }
+
+
+# 緊急操作 API（一鍵批量平倉 / 批量撤單）
+# ══════════════════════════════════════════════════════════════
+
+
 async def _dispatch_update_tpsl_to_accounts(signal: TGSignalPayload) -> dict:
     """
     重複訊號／校準訊號處理：每個帳號獨立判斷：
