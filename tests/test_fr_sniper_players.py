@@ -140,6 +140,32 @@ class SmcpCompatTests(unittest.TestCase):
         self.assertEqual(frs.send_tg("test"), (False, None))
 
 
+
+class QualityLabelTests(unittest.TestCase):
+    """quality 未標註時 gate-quant 會把固定虧損砍半，設定的 R 就不是真的 R。"""
+
+    def test_players_are_trend_follow(self):
+        for key in ("oi_taker_breakout_q", "taker_surge_long",
+                    "btc_regime_momo_long", "whale_accum_long"):
+            row = {"strategy": key, "side": "LONG", "sym": "SOLUSDT",
+                   "vol24_m": 80, "price": 150}
+            sig = frs.player_sig_from_row(row)
+            self.assertEqual(sig["quality"], "trend_follow", key)
+
+    def test_frx_is_counter_trend(self):
+        sig = frs.classify_long({
+            "side": "LONG", "confirmed": True, "aligned": 5,
+            "fr_raw": -0.0006, "vol24_m": 80, "sym": "SOLUSDT",
+        })
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig["quality"], "counter_trend")
+
+    def test_tracker_payload_carries_quality(self):
+        import inspect
+        src = inspect.getsource(frs.register_with_tracker)
+        self.assertIn('pl["quality"]', src)
+
+
 class AltsignalSourceTests(unittest.TestCase):
     def test_players_read_altsignal_not_multilens(self):
         """四支新選手在 altsignal_snapshots；讀錯檔永遠推不出來。"""

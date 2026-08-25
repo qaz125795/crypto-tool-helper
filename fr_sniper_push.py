@@ -68,21 +68,25 @@ BREAKER = os.path.join(DIR, "frs_breaker.json")
 # 擂台第3季影子（2026-08-24）；推播文案用，實盤 jsonl 有結案後改走 format_live_winrate。
 PLAYER_STRATS = {
     "oi_taker_breakout_q": {
+        "quality": "trend_follow",
         "name": "突破手·品質", "code": "BRKq", "fresh": True,
         "reason": "OI＋價＋主買突破，且日線已偏多（品質濾網）→ 順勢做多",
         "wr": 60.3, "n": 68, "avg_R": 0.719, "mdd": -10.8,
     },
     "taker_surge_long": {
+        "quality": "trend_follow",
         "name": "主買狂潮", "code": "TKUP", "fresh": True,
         "reason": "主買佔比暴衝（≥65%）→ 順勢做多",
         "wr": 64.5, "n": 110, "avg_R": 0.884, "mdd": -10.8,
     },
     "btc_regime_momo_long": {
+        "quality": "trend_follow",
         "name": "BTC閘門動能", "code": "BTCR", "fresh": True,
         "reason": "BTC 偏多 regime 才放行山寨動能做多（排除 BTC/ETH）",
         "wr": 65.5, "n": 165, "avg_R": 1.189, "mdd": -17.3,
     },
     "whale_accum_long": {
+        "quality": "trend_follow",
         "name": "鯨魚雙吸", "code": "WHAL", "fresh": True,
         "reason": "現貨與永續同步淨流入＝大戶雙吸 → 順勢做多",
         "wr": 62.6, "n": 147, "avg_R": 1.132, "mdd": -11.3,
@@ -373,7 +377,7 @@ def classify_long(row):
     if side == "LONG" and conf and aligned >= LONG_ALIGNED_MIN and LONG_FR_FLOOR <= fr <= LONG_FR:
         return {"side": "LONG", "name": "資費反殺",
                 "reason": "空頭擁擠（資費極負 %.3f%%）→ 軋空做多" % (fr * 100),
-                "exp": False}
+                "exp": False, "quality": "counter_trend"}
     short_on = os.environ.get("FRS_SHORT_ENABLED", "0") == "1"
     if short_on and side == "SHORT" and conf and aligned >= 4 and SHORT_FR <= fr <= SHORT_FR_CAP:
         return {"side": "SHORT", "name": "資費過熱",
@@ -419,6 +423,7 @@ def player_sig_from_row(row):
         "exp": False,
         "fresh": True,
         "key": key,
+        "quality": meta.get("quality"),
     }
 
 
@@ -748,6 +753,8 @@ def register_with_tracker(sym, sig, entry, sl, tp1, tp2, tg_msg_id=None, dc_msg_
         return None
     side = "long" if sig.get("side") == "LONG" else "short"
     pl = {"strategy": sig.get("name"), "jackbot_pushed": True}
+    if sig.get("quality"):
+        pl["quality"] = sig["quality"]
     if dc_msg_id:
         pl["dc_message_id"] = str(dc_msg_id)
     payload = {
