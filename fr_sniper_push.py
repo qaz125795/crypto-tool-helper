@@ -10,6 +10,7 @@
 
 停利停損：15m ATR×1.8 動態 SL（2.2%~5.5% 夾限）+ TP1=1.5R / TP2=2.5R。
 風控：同幣同策略 6h 冷卻、每日上限、低流動/股票代幣過濾。
+連虧熔斷：已關閉（乾淨樣本；訊號照常推／記，不因連虧暫停）。
 DRY_RUN=1 只印不發。
 """
 import json
@@ -800,8 +801,8 @@ def load_breaker():
 
 
 def is_paused(breaker, name):
-    info = breaker.get(name) or {}
-    return time.time() < (info.get("paused_until") or 0)
+    # 2026-08-25：乾淨樣本，連虧熔斷不再擋推播（與 SMCP 同政策）
+    return False
 
 
 def log_signal(sym, sig, entry, sl, tp1, tp2):
@@ -835,7 +836,6 @@ def main():
     candidates += whale_short_candidates()
 
     state = load_state()
-    breaker = load_breaker()
     now = time.time()
     day = _today_key()
     day_cnt = int(state.get("_day_" + day, 0))
@@ -845,9 +845,7 @@ def main():
         if day_cnt + pushed >= DAILY_CAP:
             print("[frs] 已達每日上限 %d，跳過其餘" % DAILY_CAP)
             break
-        if is_paused(breaker, sig["name"]):
-            print("[frs] %s 連虧熔斷暫停中，跳過 %s" % (sig["name"], sym))
-            continue
+        # 2026-08-25：拿掉連虧熔斷跳過，訊號自動出（乾淨樣本）
         key = "%s_%s_%s" % (sym, sig["side"], sig["name"])
         if now - state.get(key, 0) < COOLDOWN_H * 3600:
             continue

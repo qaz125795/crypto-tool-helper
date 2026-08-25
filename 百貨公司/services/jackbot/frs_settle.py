@@ -1,12 +1,12 @@
 """
-狙擊訊號結算 + 連虧熔斷（cron 每 15 分）。
+狙擊訊號結算（cron 每 15 分）。
 
 讀 frs_signals.jsonl 的 open 訊號 → 用 Gate 5m K 線判定 TP1/SL/逾時：
   LONG：先到 low<=SL → 止損(loss)；先到 high>=TP1 → 止盈(win)
   SHORT：先到 high>=SL → 止損(loss)；先到 low<=TP1 → 止盈(win)
-  逾 HORIZON_H 未觸發 → 逾時(timeout，不計入連虧)
+  逾 HORIZON_H 未觸發 → 逾時(timeout)
 
-連虧熔斷：每策略連續 LOSS_STREAK 筆止損 → 暫停推播 PAUSE_H 小時（寫 frs_breaker.json）。
+連虧熔斷：2026-08-25 起關閉（乾淨樣本；仍寫 counted，不再寫 paused_until）。
 """
 import json
 import os
@@ -191,21 +191,16 @@ def main():
                 print("[settle] notify %s %s %s tg=%s dc=%s" % (
                     rec.get("strategy"), rec.get("sym"), res, ok_tg, ok_dc))
 
-    # 依策略、時間序，從已結算且尚未計入熔斷的訊號更新連虧
+    # 標記已結算；2026-08-25 起不再寫熔斷暫停（乾淨樣本）
     for rec in sorted(recs, key=lambda r: r.get("ts", 0)):
         if rec.get("status") in ("win", "loss", "timeout") and not rec.get("counted"):
             strat = rec.get("strategy")
-            st = breaker.setdefault(strat, {"streak": 0, "paused_until": 0})
-            if rec["status"] == "loss":
-                st["streak"] = int(st.get("streak", 0)) + 1
-            else:
-                st["streak"] = 0
-            if st["streak"] >= LOSS_STREAK:
-                st["paused_until"] = time.time() + PAUSE_H * 3600
-                st["streak"] = 0
-                st["last_pause_at"] = int(time.time())
-                print("[settle] 🔴 %s 連虧%d → 熔斷暫停 %.0fh" % (strat, LOSS_STREAK, PAUSE_H))
+            breaker.setdefault(strat, {"streak": 0, "paused_until": 0})
             rec["counted"] = True
+    for st in breaker.values():
+        if isinstance(st, dict):
+            st["paused_until"] = 0
+            st["streak"] = 0
 
     with open(SIGNALS_LOG, "w", encoding="utf-8") as f:
         for rec in recs:
