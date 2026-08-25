@@ -23,7 +23,7 @@ class WhaleShortOffTests(unittest.TestCase):
 
 
 class PlayerClassifyTests(unittest.TestCase):
-    def test_four_new_players_from_multilens_row(self):
+    def test_four_new_players_from_altsignal_row(self):
         """只有四支指定選手、且必須做多，才會變成可推播訊號。"""
         row = {
             "strategy": "oi_taker_breakout_q",
@@ -119,6 +119,13 @@ class SettleNoticeTests(unittest.TestCase):
         self.assertIn("追蹤結案 ·「主買狂潮」", msg)
         self.assertIn("止盈", msg)
         self.assertIn("DOGEUSDT", msg)
+
+
+class AltsignalSourceTests(unittest.TestCase):
+    def test_players_read_altsignal_not_multilens(self):
+        """四支新選手在 altsignal_snapshots；讀錯檔永遠推不出來。"""
+        self.assertTrue(frs.ALTSIGNAL_SNAP.endswith("altsignal_snapshots.jsonl"))
+        self.assertNotEqual(frs.ALTSIGNAL_SNAP, frs.MULTILENS_SNAP)
 
 
 class FundPoolTests(unittest.TestCase):

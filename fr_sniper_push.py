@@ -3,7 +3,7 @@
 
 已推播：
   多｜資費反殺      sniper_snapshots：side=LONG & confirmed & aligned>=4 & 資費<=-0.04%
-  多｜四支新選手     multilens_snapshots：BRKq / TKUP / BTCR / WHAL（備註「新選手訊號」）
+  多｜四支新選手     altsignal_snapshots：BRKq / TKUP / BTCR / WHAL（備註「新選手訊號」）
 小盤妖股 SMCP 仍走 collector HAS_PUSH，不在本腳本。
 
 大戶純空（whale_pure_short_opt）預設停推（實盤全期負期望）。設 FRS_WHALE_SHORT=1 才恢復。
@@ -25,6 +25,7 @@ if not os.path.isdir(DIR):
     DIR = os.path.dirname(os.path.abspath(__file__))
 SNIPER_SNAP = os.path.join(DIR, "sniper_snapshots.jsonl")
 MULTILENS_SNAP = os.path.join(DIR, "multilens_snapshots.jsonl")
+ALTSIGNAL_SNAP = os.path.join(DIR, "altsignal_snapshots.jsonl")
 STATE = os.path.join(DIR, "fr_sniper_push_state.json")
 CJK_FONT = os.path.join(DIR, "fonts", "cjk.ttc")
 
@@ -278,7 +279,7 @@ def _row_price(row, base):
 
 
 def player_sig_from_row(row):
-    """multilens row → 新選手訊號 dict；不合格回 None。"""
+    """altsignal row → 新選手訊號 dict；不合格回 None。"""
     key = row.get("strategy")
     meta = PLAYER_STRATS.get(key)
     if not meta:
@@ -302,7 +303,7 @@ def player_sig_from_row(row):
 
 
 def player_candidates_from_snap(snap, now=None, price_fn=None):
-    """Pure helper：從一份 multilens snapshot 抽出新選手候選。"""
+    """Pure helper：從一份 altsignal snapshot 抽出新選手候選。"""
     out = []
     if not snap:
         return out
@@ -323,10 +324,44 @@ def player_candidates_from_snap(snap, now=None, price_fn=None):
     return out
 
 
+def _iter_recent_jsonl(path, max_lines=60):
+    """由檔尾往回讀最近幾行 JSON（altsignal 常寫空 rows 尾行，不能只看最後一行）。"""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()[-max_lines:]
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            out.append(json.loads(ln))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
 def player_candidates():
+    """altsignal_snapshots 新鮮窗內的四支新選手（去重）。"""
     if not PLAYERS_ON:
         return []
-    return player_candidates_from_snap(_last_line_json(MULTILENS_SNAP))
+    now = time.time()
+    seen = set()
+    out = []
+    # 由新到舊掃，同幣同策略只留最新一筆
+    for snap in reversed(_iter_recent_jsonl(ALTSIGNAL_SNAP)):
+        for item in player_candidates_from_snap(snap, now=now):
+            sym, _price, sig = item
+            key = "%s|%s" % (sym, sig.get("key") or sig.get("name"))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+    return out
 
 
 def whale_short_candidates():
@@ -591,7 +626,7 @@ def main():
             if sig:
                 candidates.append((sym, price, sig))
 
-    # 來源 2：multilens → 四支新選手（BRKq / TKUP / BTCR / WHAL）
+    # 來源 2：altsignal → 四支新選手（BRKq / TKUP / BTCR / WHAL）
     candidates += player_candidates()
     # 來源 3：大戶純空 — 預設關閉
     candidates += whale_short_candidates()
