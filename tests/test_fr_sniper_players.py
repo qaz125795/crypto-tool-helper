@@ -1,0 +1,223 @@
+"""新選手推播：大戶純空預設關閉、四支選手走 FRS 文案＋勝率。"""
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, ROOT)
+
+import fr_sniper_push as frs  # noqa: E402
+import frs_settle  # noqa: E402
+
+
+NOW = 1_700_000_000
+
+
+class WhaleShortOffTests(unittest.TestCase):
+    def test_whale_short_is_off_by_default(self):
+        """實盤全期負期望，不能再把大戶純空射進頻道。"""
+        self.assertFalse(frs.WHALE_SHORT_ON)
+        self.assertEqual(frs.whale_short_candidates(), [])
+
+
+class PlayerClassifyTests(unittest.TestCase):
+    def test_four_new_players_from_altsignal_row(self):
+        """只有四支指定選手、且必須做多，才會變成可推播訊號。"""
+        row = {
+            "strategy": "oi_taker_breakout_q",
+            "side": "LONG",
+            "sym": "SOLUSDT",
+            "vol24_m": 80,
+            "price": 150,
+        }
+        sig = frs.player_sig_from_row(row)
+        self.assertEqual(sig["name"], "突破手·品質")
+        self.assertTrue(sig["fresh"])
+        self.assertEqual(sig["side"], "LONG")
+
+    def test_rejects_short_and_unknown_and_thin_volume(self):
+        """空單、未知策略、流動性不足都不能混進新選手推播。"""
+        self.assertIsNone(frs.player_sig_from_row({
+            "strategy": "oi_taker_breakout_q", "side": "SHORT",
+            "sym": "SOLUSDT", "vol24_m": 80,
+        }))
+        self.assertIsNone(frs.player_sig_from_row({
+            "strategy": "whale_pure_short_opt", "side": "SHORT",
+            "sym": "SOLUSDT", "vol24_usd": 50_000_000,
+        }))
+        self.assertIsNone(frs.player_sig_from_row({
+            "strategy": "taker_surge_long", "side": "LONG",
+            "sym": "SOLUSDT", "vol24_m": 1,
+        }))
+        self.assertIsNone(frs.player_sig_from_row({
+            "strategy": "lowcap_momo_long", "side": "LONG",
+            "sym": "ACEUSDT", "vol24_m": 80,
+        }))
+
+    def test_snapshot_only_enabled_players_survive(self):
+        """一份混合 snapshot：只有仍啟用的選手會被抽出；過期 snapshot 整包丟棄。
+
+        2026-08-26：主買狂潮/BTC閘門動能/鯨魚雙吸實盤驗證後 0 勝，已暫停，
+        不能因為 snapshot 裡有這些 key 就又推出訊號。
+        """
+        rows = []
+        for key, sym in (
+            ("oi_taker_breakout_q", "SOLUSDT"),
+            ("taker_surge_long", "DOGEUSDT"),
+            ("btc_regime_momo_long", "SUIUSDT"),
+            ("whale_accum_long", "LINKUSDT"),
+        ):
+            rows.append({
+                "strategy": key, "side": "LONG", "sym": sym,
+                "vol24_m": 40, "price": 10,
+            })
+        snap = {"ts": NOW, "rows": rows}
+        got = frs.player_candidates_from_snap(snap, now=NOW, price_fn=lambda b, r: 10)
+        names = {c[2]["name"] for c in got}
+        self.assertEqual(names, {"突破手·品質"})
+        stale = dict(snap)
+        stale["ts"] = NOW - 4000
+        self.assertEqual(frs.player_candidates_from_snap(stale, now=NOW), [])
+
+
+class MessageFormatTests(unittest.TestCase):
+    def test_fresh_player_caption_matches_frs_spec(self):
+        """用戶要的規格：🎯 新訊號、新選手備註、勝率、追蹤器。"""
+        sig = {
+            "side": "LONG", "name": "突破手·品質", "fresh": True, "exp": False,
+            "reason": "品質濾網突破",
+            "winrate": "擂台本季：勝率 60.3%（n=68）｜avgR +0.719｜MDD -10.8%",
+        }
+        text = frs.fmt("SOLUSDT", 150, sig, sl=145, tp1=157.5, tp2=162.5)
+        self.assertIn("🎯 新訊號 ·「突破手·品質」", text)
+        self.assertIn("🆕 新選手訊號", text)
+        self.assertIn("🟢 做多", text)
+        self.assertIn("`SOLUSDT`", text)
+        self.assertIn("勝率 60.3%", text)
+        self.assertIn("🛡 系統自動追蹤，到價會再提醒", text)
+        self.assertNotIn("大戶純空", text)
+
+    def test_frs_long_caption_has_no_newcomer_badge(self):
+        """資費反殺維持原格式，不能被標成新選手。"""
+        sig = {"side": "LONG", "name": "資費反殺", "exp": False,
+               "reason": "空頭擁擠", "winrate": "實盤累積：勝率 52.0%｜結案 157 筆"}
+        text = frs.fmt("ETHUSDT", 3500, sig, sl=3400, tp1=3650, tp2=3750)
+        self.assertIn("🎯 新訊號 ·「資費反殺」", text)
+        self.assertNotIn("🆕 新選手訊號", text)
+
+    def test_arena_winrate_line_before_live_samples(self):
+        """還沒有實盤結案時，必須帶擂台勝率，不能空白。"""
+        line = frs.format_live_winrate("突破手·品質")
+        self.assertIn("勝率 60.3%", line)
+        self.assertIn("n=68", line)
+        self.assertIn("+0.719", line)
+
+
+class SettleNoticeTests(unittest.TestCase):
+    def test_tp_notice_names_strategy(self):
+        """結案提醒要讓半自動跟單知道哪一支出場。"""
+        rec = {"strategy": "主買狂潮", "sym": "DOGEUSDT", "side": "LONG"}
+        msg = frs_settle.settle_notice(rec, "win")
+        self.assertIn("追蹤結案 ·「主買狂潮」", msg)
+        self.assertIn("止盈", msg)
+        self.assertIn("DOGEUSDT", msg)
+
+
+
+class SmcpCompatTests(unittest.TestCase):
+    def test_smcp_required_helpers_exist(self):
+        """smcp_push 依賴 FRS 模組 API；缺一個小盤妖股整條掛掉。"""
+        for name in (
+            "fetch_gate_tradable_bases", "is_gate_tradable", "resolve_live_entry",
+            "register_with_tracker", "attach_live_winrate",
+        ):
+            self.assertTrue(callable(getattr(frs, name)), name)
+        # attach 必須接受 SMCP 的 kwargs
+        sig = {"name": "小盤妖股", "exp": False}
+        frs.attach_live_winrate(sig, log_path="/tmp/nope.jsonl", ref_note="擂台參考")
+        self.assertIn("winrate", sig)
+        # send_* 回 (ok, msg_id)，不能只回 bool（否則 tuple 判斷永遠真）
+        ok, mid = frs.send_tg("x") if False else (False, None)
+        # 直接檢查函式回傳形狀（無 token 時）
+        self.assertEqual(frs.send_tg("test"), (False, None))
+
+
+
+class QualityLabelTests(unittest.TestCase):
+    """quality 未標註時 gate-quant 會把固定虧損砍半，設定的 R 就不是真的 R。"""
+
+    def test_enabled_players_are_trend_follow(self):
+        for key in ("oi_taker_breakout_q",):
+            row = {"strategy": key, "side": "LONG", "sym": "SOLUSDT",
+                   "vol24_m": 80, "price": 150}
+            sig = frs.player_sig_from_row(row)
+            self.assertEqual(sig["quality"], "trend_follow", key)
+
+    def test_frx_is_counter_trend(self):
+        sig = frs.classify_long({
+            "side": "LONG", "confirmed": True, "aligned": 5,
+            "fr_raw": -0.0006, "vol24_m": 80, "sym": "SOLUSDT",
+        })
+        self.assertIsNotNone(sig)
+        self.assertEqual(sig["quality"], "counter_trend")
+
+    def test_tracker_payload_carries_quality(self):
+        import inspect
+        src = inspect.getsource(frs.register_with_tracker)
+        self.assertIn('pl["quality"]', src)
+
+
+class PlayerPauseTests(unittest.TestCase):
+    """2026-08-26：主買狂潮/BTC閘門動能/鯨魚雙吸實盤驗證 0 勝，暫停推播+量化；
+    突破手·品質與資費反殺保留（有正期望樣本）。"""
+
+    def test_underperforming_players_are_disabled_and_silent(self):
+        for key, name in (
+            ("taker_surge_long", "主買狂潮"),
+            ("btc_regime_momo_long", "BTC閘門動能"),
+            ("whale_accum_long", "鯨魚雙吸"),
+        ):
+            self.assertFalse(frs.PLAYER_STRATS[key].get("enabled"), name)
+            row = {"strategy": key, "side": "LONG", "sym": "SOLUSDT",
+                   "vol24_m": 80, "price": 150}
+            self.assertIsNone(frs.player_sig_from_row(row), name)
+
+    def test_kept_players_still_enabled(self):
+        self.assertTrue(frs.PLAYER_STRATS["oi_taker_breakout_q"].get("enabled"))
+        row = {"strategy": "oi_taker_breakout_q", "side": "LONG",
+               "sym": "SOLUSDT", "vol24_m": 80, "price": 150}
+        self.assertIsNotNone(frs.player_sig_from_row(row))
+
+
+class AltsignalSourceTests(unittest.TestCase):
+    def test_players_read_altsignal_not_multilens(self):
+        """四支新選手在 altsignal_snapshots；讀錯檔永遠推不出來。"""
+        self.assertTrue(frs.ALTSIGNAL_SNAP.endswith("altsignal_snapshots.jsonl"))
+        self.assertNotEqual(frs.ALTSIGNAL_SNAP, frs.MULTILENS_SNAP)
+
+
+class FundPoolTests(unittest.TestCase):
+    def test_fund_pool_is_six_strategies(self):
+        """實盤策略池掛六組：小盤妖股＋資費反殺＋四新選手；大戶純空必須消失。"""
+        js = open(os.path.join(ROOT, "arena_web", "js", "fund.js"), encoding="utf-8").read()
+        html = open(os.path.join(ROOT, "arena_web", "fund.html"), encoding="utf-8").read()
+        for code in ("SMCP", "FRX", "BRKq", "TKUP", "BTCR", "WHAL"):
+            self.assertIn('code: "%s"' % code, js)
+        self.assertLess(js.index('code: "SMCP"'), js.index('code: "FRX"'))
+        self.assertLess(js.index('code: "FRX"'), js.index('code: "BRKq"'))
+        self.assertIn('name: "資費反殺"', js)
+        self.assertNotIn('name: "大戶純空"', js)
+        self.assertNotIn('code: "WHS"', js)
+        self.assertIn("已停推", html)
+        self.assertIn("新選手", js)
+        self.assertIn("小盤妖股", html)
+        self.assertIn("資費反殺", html)
+        self.assertIn("大戶純空已停推", html)
+        self.assertIn("6 組", html)
+        self.assertEqual(js.count("fresh: true"), 4)
+
+
+if __name__ == "__main__":
+    unittest.main()
