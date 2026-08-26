@@ -67,30 +67,36 @@ SIGNALS_LOG = os.path.join(DIR, "frs_signals.jsonl")
 BREAKER = os.path.join(DIR, "frs_breaker.json")
 
 # 擂台第3季影子（2026-08-24）；推播文案用，實盤 jsonl 有結案後改走 format_live_winrate。
+# 2026-08-26：實盤驗證後 TKUP/BTCR/WHAL 實盤 0 勝（各 n=1~5），且自家風險揭露已寫
+# 90天 OOS 為負／資料幾乎只有本季 → 暫停推播＋暫停量化下單，只留 BRKq 與資費反殺。
 PLAYER_STRATS = {
     "oi_taker_breakout_q": {
         "quality": "trend_follow",
         "name": "突破手·品質", "code": "BRKq", "fresh": True,
         "reason": "OI＋價＋主買突破，且日線已偏多（品質濾網）→ 順勢做多",
         "wr": 60.3, "n": 68, "avg_R": 0.719, "mdd": -10.8,
+        "enabled": True,
     },
     "taker_surge_long": {
         "quality": "trend_follow",
         "name": "主買狂潮", "code": "TKUP", "fresh": True,
         "reason": "主買佔比暴衝（≥65%）→ 順勢做多",
         "wr": 64.5, "n": 110, "avg_R": 0.884, "mdd": -10.8,
+        "enabled": False,
     },
     "btc_regime_momo_long": {
         "quality": "trend_follow",
         "name": "BTC閘門動能", "code": "BTCR", "fresh": True,
         "reason": "BTC 偏多 regime 才放行山寨動能做多（排除 BTC/ETH）",
         "wr": 65.5, "n": 165, "avg_R": 1.189, "mdd": -17.3,
+        "enabled": False,
     },
     "whale_accum_long": {
         "quality": "trend_follow",
         "name": "鯨魚雙吸", "code": "WHAL", "fresh": True,
         "reason": "現貨與永續同步淨流入＝大戶雙吸 → 順勢做多",
         "wr": 62.6, "n": 147, "avg_R": 1.132, "mdd": -11.3,
+        "enabled": False,
     },
 }
 
@@ -407,7 +413,7 @@ def player_sig_from_row(row):
     """altsignal row → 新選手訊號 dict；不合格回 None。"""
     key = row.get("strategy")
     meta = PLAYER_STRATS.get(key)
-    if not meta:
+    if not meta or not meta.get("enabled", True):
         return None
     if (row.get("side") or "").upper() != "LONG":
         return None

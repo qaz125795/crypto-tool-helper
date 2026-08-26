@@ -56,8 +56,12 @@ class PlayerClassifyTests(unittest.TestCase):
             "sym": "ACEUSDT", "vol24_m": 80,
         }))
 
-    def test_snapshot_picks_all_four_and_skips_stale(self):
-        """一份新鮮 snapshot 抽出四支；過期 snapshot 整包丟棄。"""
+    def test_snapshot_only_enabled_players_survive(self):
+        """一份混合 snapshot：只有仍啟用的選手會被抽出；過期 snapshot 整包丟棄。
+
+        2026-08-26：主買狂潮/BTC閘門動能/鯨魚雙吸實盤驗證後 0 勝，已暫停，
+        不能因為 snapshot 裡有這些 key 就又推出訊號。
+        """
         rows = []
         for key, sym in (
             ("oi_taker_breakout_q", "SOLUSDT"),
@@ -72,7 +76,7 @@ class PlayerClassifyTests(unittest.TestCase):
         snap = {"ts": NOW, "rows": rows}
         got = frs.player_candidates_from_snap(snap, now=NOW, price_fn=lambda b, r: 10)
         names = {c[2]["name"] for c in got}
-        self.assertEqual(names, {"突破手·品質", "主買狂潮", "BTC閘門動能", "鯨魚雙吸"})
+        self.assertEqual(names, {"突破手·品質"})
         stale = dict(snap)
         stale["ts"] = NOW - 4000
         self.assertEqual(frs.player_candidates_from_snap(stale, now=NOW), [])
@@ -144,9 +148,8 @@ class SmcpCompatTests(unittest.TestCase):
 class QualityLabelTests(unittest.TestCase):
     """quality 未標註時 gate-quant 會把固定虧損砍半，設定的 R 就不是真的 R。"""
 
-    def test_players_are_trend_follow(self):
-        for key in ("oi_taker_breakout_q", "taker_surge_long",
-                    "btc_regime_momo_long", "whale_accum_long"):
+    def test_enabled_players_are_trend_follow(self):
+        for key in ("oi_taker_breakout_q",):
             row = {"strategy": key, "side": "LONG", "sym": "SOLUSDT",
                    "vol24_m": 80, "price": 150}
             sig = frs.player_sig_from_row(row)
@@ -164,6 +167,28 @@ class QualityLabelTests(unittest.TestCase):
         import inspect
         src = inspect.getsource(frs.register_with_tracker)
         self.assertIn('pl["quality"]', src)
+
+
+class PlayerPauseTests(unittest.TestCase):
+    """2026-08-26：主買狂潮/BTC閘門動能/鯨魚雙吸實盤驗證 0 勝，暫停推播+量化；
+    突破手·品質與資費反殺保留（有正期望樣本）。"""
+
+    def test_underperforming_players_are_disabled_and_silent(self):
+        for key, name in (
+            ("taker_surge_long", "主買狂潮"),
+            ("btc_regime_momo_long", "BTC閘門動能"),
+            ("whale_accum_long", "鯨魚雙吸"),
+        ):
+            self.assertFalse(frs.PLAYER_STRATS[key].get("enabled"), name)
+            row = {"strategy": key, "side": "LONG", "sym": "SOLUSDT",
+                   "vol24_m": 80, "price": 150}
+            self.assertIsNone(frs.player_sig_from_row(row), name)
+
+    def test_kept_players_still_enabled(self):
+        self.assertTrue(frs.PLAYER_STRATS["oi_taker_breakout_q"].get("enabled"))
+        row = {"strategy": "oi_taker_breakout_q", "side": "LONG",
+               "sym": "SOLUSDT", "vol24_m": 80, "price": 150}
+        self.assertIsNotNone(frs.player_sig_from_row(row))
 
 
 class AltsignalSourceTests(unittest.TestCase):
